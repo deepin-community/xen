@@ -1,0 +1,36 @@
+From: Ian Jackson <ian.jackson@citrix.com>
+Date: Thu, 21 Feb 2019 16:05:40 +0000
+Subject: hotplug-common: Do not adjust LD_LIBRARY_PATH
+
+This is in the upstream script because on non-Debian systems, the
+default install locations in /usr/local/lib might not be on the linker
+path, and as a result the hotplug scripts would break.
+
+A reason we might need it in Debian is our multiple version
+coinstallation scheme.  However, the hotplug scripts all call the
+utilities via the wrappers, and the binaries are configured to load
+from the right place anyway.
+
+This setting is an annoyance because it requires libdir, which is an
+arch-specific path but comes from a file we want to put in
+xen-utils-common, an arch:all package.
+
+So drop this setting.
+
+Signed-off-by: Ian Jackson <ian.jackson@citrix.com>
+---
+ tools/hotplug/Linux/xen-hotplug-common.sh.in | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/tools/hotplug/Linux/xen-hotplug-common.sh.in b/tools/hotplug/Linux/xen-hotplug-common.sh.in
+index 8c2cb9e..72cb7f6 100644
+--- a/tools/hotplug/Linux/xen-hotplug-common.sh.in
++++ b/tools/hotplug/Linux/xen-hotplug-common.sh.in
+@@ -23,7 +23,6 @@ dir=$(dirname "$0")
+ exec 2>>@XEN_LOG_DIR@/xen-hotplug.log
+ 
+ export PATH="${bindir}:${sbindir}:${LIBEXEC_BIN}:/sbin:/bin:/usr/bin:/usr/sbin:$PATH"
+-export LD_LIBRARY_PATH="${libdir}${LD_LIBRARY_PATH+:}$LD_LIBRARY_PATH"
+ export LANG="POSIX"
+ unset $(set | grep ^LC_ | cut -d= -f1)
+ 

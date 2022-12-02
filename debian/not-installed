@@ -1,0 +1,36 @@
+*.pyc
+
+# It is not clear why we have our own init scripts etc. in Debian.
+# We should probably transition to using the upstream ones and
+# fix any bugs we encounter.
+etc/init.d/xendriverdomain
+etc/init.d/xencommons
+etc/init.d/xen-watchdog
+etc/init.d/xendomains
+
+# The following two files are installed in xen-utils-common while
+# being renamed by dh-exec. However, dh-exec fails to register them
+# as installed. See bug #831786. Fool dh_missing by pretending
+# they're not installed at all, for now.
+etc/default/xencommons
+etc/bash_completion.d/xl.sh
+
+# This is all handled by debian/shuffle-boot-files,
+# which dh_missing does not know about.
+boot/*
+
+# This README explains what the various stuff in /etc/xen is.
+# It is not right for Debian because we have our own scripts etc.
+# (see above).  When we do maybe we should install it, or maybe
+# we should move it to /usr/share/doc/.
+etc/xen/README
+
+# This file seems like develoment documentation explaining
+# some of the code in the upstream init scripts.
+etc/xen/README.incompatibilities
+
+# When we build with ocaml support, do not try to ship development
+# libraries which we don't understand and are of limited use.
+# If someone wants this, suggestions from ocaml experts on what
+# to ship where would be welcome.
+usr/local/lib/ocaml

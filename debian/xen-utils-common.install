@@ -1,0 +1,31 @@
+#! /usr/bin/dh-exec --with=install
+
+# Note: dh-exec breaks dh_missing by failing to register the
+# installed files.  Also see comments in debian/not-installed.
+
+etc/xen/scripts
+etc/xen/xl*
+etc/bash_completion.d/xl.sh => usr/share/bash-completion/completions/xl
+
+etc/default/xendomains
+etc/default/xencommons => usr/share/xen-utils-common/default.xen
+etc/xen/oxenstored.conf
+
+usr/bin
+usr/sbin
+
+usr/share/man
+
+../scripts/xen			usr/sbin
+
+../scripts/xen-version			usr/lib/xen-common/bin
+../scripts/xen-dir			usr/lib/xen-common/bin
+../scripts/xen-utils-wrapper		usr/lib/xen-common/bin
+
+../scripts/xen-init-list	usr/lib/xen-common/bin
+../scripts/xen-init-name	usr/lib/xen-common/bin
+
+../scripts/qemu-ifup		etc/xen/scripts
+
+../scripts/xen-toolstack-wrapper	usr/lib/xen-common/bin
+../scripts/xen-toolstack		usr/lib/xen-common/bin

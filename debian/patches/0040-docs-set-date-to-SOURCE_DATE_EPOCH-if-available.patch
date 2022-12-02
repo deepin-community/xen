@@ -1,0 +1,39 @@
+From: Maximilian Engelhardt <maxi@daemonizer.de>
+Date: Fri, 18 Dec 2020 21:42:35 +0100
+Subject: docs: set date to SOURCE_DATE_EPOCH if available
+
+Use the solution described in [1] to replace the call to the 'date'
+command with a version that uses SOURCE_DATE_EPOCH if available. This
+is needed for reproducible builds.
+
+[1] https://reproducible-builds.org/docs/source-date-epoch/
+
+Signed-off-by: Maximilian Engelhardt <maxi@daemonizer.de>
+
+[Hans van Kranenburg]
+Note: this patch is submitted upstream but not committed yet. We
+expect that it gets in. Otherwise, we don't wait and already have it
+here because I want to have the reproducible build work completed.
+---
+ docs/Makefile | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/docs/Makefile b/docs/Makefile
+index 8de1efb..ac6792f 100644
+--- a/docs/Makefile
++++ b/docs/Makefile
+@@ -3,7 +3,13 @@ include $(XEN_ROOT)/Config.mk
+ -include $(XEN_ROOT)/config/Docs.mk
+ 
+ VERSION		:= $(shell $(MAKE) -C $(XEN_ROOT)/xen --no-print-directory xenversion)
+-DATE		:= $(shell date +%Y-%m-%d)
++
++DATE_FMT	:= +%Y-%m-%d
++ifdef SOURCE_DATE_EPOCH
++DATE		:= $(shell date -u -d "@$(SOURCE_DATE_EPOCH)" "$(DATE_FMT)" 2>/dev/null || date -u -r "$(SOURCE_DATE_EPOCH)" "$(DATE_FMT)" 2>/dev/null || date -u "$(DATE_FMT)")
++else
++DATE		:= $(shell date "$(DATE_FMT)")
++endif
+ 
+ DOC_ARCHES      := arm x86_32 x86_64
+ MAN_SECTIONS    := 1 5 7 8

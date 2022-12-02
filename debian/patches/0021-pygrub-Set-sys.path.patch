@@ -1,0 +1,35 @@
+From: Bastian Blank <waldi@debian.org>
+Date: Sat, 5 Jul 2014 11:47:01 +0200
+Subject: pygrub: Set sys.path
+
+We install libfsimage in a non-standard path for Reasons.
+(See debian/rules.)
+
+This patch was originally part of `tools-pygrub-prefix.diff'
+(eg commit 51657319be54) and included changes to the Makefile to
+change the installation arrangements (we do that part in the rules now
+since that is a lot less prone to conflicts when we update) and to
+shared library rpath (which is now done in a separate patch).
+
+(Commit message rewritten by Ian Jackson.)
+
+Signed-off-by: Ian Jackson <ian.jackson@citrix.com>
+
+squash! pygrub: Set sys.path and rpath
+---
+ tools/pygrub/src/pygrub | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/tools/pygrub/src/pygrub b/tools/pygrub/src/pygrub
+index 8d48cf4..46b394c 100755
+--- a/tools/pygrub/src/pygrub
++++ b/tools/pygrub/src/pygrub
+@@ -22,6 +22,8 @@ import platform
+ import curses, _curses, curses.textpad, curses.ascii
+ import getopt
+ 
++sys.path.insert(1, sys.path[0] + '/../lib/python')
++
+ import xenfsimage
+ import grub.GrubConf
+ import grub.LiloConf

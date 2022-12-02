@@ -1,0 +1,31 @@
+#!/bin/sh
+
+set -e
+
+case "$1" in
+    configure)
+        if [ -x "/etc/init.d/xen" ]; then
+            # Only call the init script when this xen-utils-@version@ package
+            # matches the currently running version of Xen. This means, doing
+            # in-place updates (e.g. a security update for same version).
+            #
+            # When installing a xen-utils package for any other Xen version,
+            # leave the running system alone.
+            if [ "$(/usr/lib/xen-common/bin/xen-version)" = "@version@" ]; then
+                invoke-rc.d xen start || exit $?
+            fi
+        fi
+    ;;
+
+    abort-upgrade|abort-remove|abort-deconfigure)
+    ;;
+
+    *)
+        echo "postinst called with unknown argument \`$1'" >&2
+        exit 1
+    ;;
+esac
+
+#DEBHELPER#
+
+exit 0

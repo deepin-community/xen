@@ -1,0 +1,17 @@
+Notes about security support for Xen in Debian
+==============================================
+
+Upstream security support for Xen 4.14 will end on Jul 7, 2023:
+
+---- >8 ----
+Xen-Version: 4.14
+Initial-Release: 2020-07-24
+Supported-Until: 2022-01-24
+Security-Support-Until: 2023-07-24
+---- >8 ----
+
+At the same moment, security support in Debian will also end.
+
+The document containing the above snippet of information can be found in the
+xen-doc package, at /usr/share/doc/xen/html/SUPPORT.html or online at
+https://xenbits.xen.org/docs/4.14-testing/SUPPORT.html#release-support

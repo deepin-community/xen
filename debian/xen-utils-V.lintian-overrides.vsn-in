@@ -1,0 +1,13 @@
+statically-linked-binary usr/lib/xen-@version@/boot/hvmloader
+statically-linked-binary usr/lib/xen-@version@/boot/xen-shim
+
+binary-has-unneeded-section usr/lib/xen-@version@/boot/xen-shim .note
+# ^ that section is certainly needed for the tools etc. to be able
+#   to load it!
+
+binary-from-other-architecture usr/lib/debug/xen-syms-@version@-shim/xen-shim-syms
+# ^ this is a symbols file for the shim
+
+binary-or-shlib-defines-rpath usr/lib/xen-@version@/lib/python/xenfsimage.*.so /usr/lib/xen-@version@/lib/x86_64-linux-gnu
+# ^ this module needs to load the libxenfsimage .so from within
+#   the xen-utils private directory.  less +/xenfsimage debian/rules

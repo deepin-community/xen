@@ -1,0 +1,28 @@
+---
+include:
+  - https://salsa.debian.org/salsa-ci-team/pipeline/raw/master/recipes/debian.yml
+
+extract-source:
+  before_script:
+    # convert into a gbp patches-unapplied branch using git-debrebase
+    - apt-get update
+    - apt-get --yes install git-debrebase
+    # git-debrebase needs git user setup
+    - git config user.email "salsa-ci@invalid.invalid"
+    - git config user.name "salsa-ci"
+    - git debrebase --force
+    - git debrebase convert-to-gbp
+    # work around gbp export-orig replacing variables in .gitarchive-info
+    - test -d .git/info || mkdir .git/info
+    - echo ".gitarchive-info -export-subst" >> .git/info/attributes
+
+variables:
+  # disable shallow cloning of git repository. This is needed for git-debrebase
+  GIT_DEPTH: 0
+
+  # xen currently does not enable hardening when building the hypervisor so
+  # disable blhc.
+  SALSA_CI_DISABLE_BLHC: 1
+
+  SALSA_CI_REPROTEST_ENABLE_DIFFOSCOPE: 1
+

@@ -1,0 +1,40 @@
+From: Elliott Mitchell <ehem+xen@m5p.com>
+Date: Fri, 17 Jul 2020 20:31:21 -0700
+Subject: tools: Partially revert "Cross-compilation fixes."
+
+This partially reverts commit 16504669c5cbb8b195d20412aadc838da5c428f7.
+
+Doesn't look like much of 16504669c5cbb8b195d20412aadc838da5c428f7
+actually remains due to passage of time.
+
+Of the 3, both Python and pygrub appear to mostly be building just fine
+cross-compiling.  The OCAML portion is being troublesome, this is going
+to cause bug reports elsewhere soon.  The OCAML portion though can
+already be disabled by setting OCAML_TOOLS=n and shouldn't have this
+extra form of disabling.
+
+Signed-off-by: Elliott Mitchell <ehem+xen@m5p.com>
+Acked-by: Christian Lindig <christian.lindig@citrix.com>
+Acked-by: Wei Liu <wl@xen.org>
+(cherry picked from commit 69953e2856382274749b617125cc98ce38198463)
+---
+ tools/Makefile | 3 ---
+ 1 file changed, 3 deletions(-)
+
+diff --git a/tools/Makefile b/tools/Makefile
+index c5a6f5c..e8d6022 100644
+--- a/tools/Makefile
++++ b/tools/Makefile
+@@ -38,12 +38,9 @@ SUBDIRS-$(CONFIG_X86) += debugger/gdbsx
+ SUBDIRS-$(CONFIG_X86) += debugger/kdd
+ SUBDIRS-$(CONFIG_TESTS) += tests
+ 
+-# These don't cross-compile
+-ifeq ($(XEN_COMPILE_ARCH),$(XEN_TARGET_ARCH))
+ SUBDIRS-y += python
+ SUBDIRS-y += pygrub
+ SUBDIRS-$(OCAML_TOOLS) += ocaml
+-endif
+ 
+ ifeq ($(CONFIG_RUMP),y)
+ SUBDIRS-y := libs libxc xenstore

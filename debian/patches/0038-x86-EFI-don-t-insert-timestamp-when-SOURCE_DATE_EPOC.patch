@@ -1,0 +1,39 @@
+From: Maximilian Engelhardt <maxi@daemonizer.de>
+Date: Tue, 22 Dec 2020 08:59:14 +0100
+Subject: x86/EFI: don't insert timestamp when SOURCE_DATE_EPOCH is defined
+
+By default a timestamp gets added to the xen efi binary. Unfortunately
+ld doesn't seem to provide a way to set a custom date, like from
+SOURCE_DATE_EPOCH, so set a zero value for the timestamp (option
+--no-insert-timestamp) if SOURCE_DATE_EPOCH is defined. This makes
+reproducible builds possible.
+
+This is an alternative to the patch suggested in [1]. This patch only
+omits the timestamp when SOURCE_DATE_EPOCH is defined.
+
+[1] https://lists.xenproject.org/archives/html/xen-devel/2020-10/msg02161.html
+
+Signed-off-by: Maximilian Engelhardt <maxi@daemonizer.de>
+Acked-by: Jan Beulich <jbeulich@suse.com>
+(cherry picked from commit ee41b5c450032ae7f2531e18cd0a73bf5fb48803)
+---
+ xen/arch/x86/Makefile | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/xen/arch/x86/Makefile b/xen/arch/x86/Makefile
+index bbd11a4..d5c7002 100644
+--- a/xen/arch/x86/Makefile
++++ b/xen/arch/x86/Makefile
+@@ -172,6 +172,12 @@ EFI_LDFLAGS += --major-image-version=$(XEN_VERSION)
+ EFI_LDFLAGS += --minor-image-version=$(XEN_SUBVERSION)
+ EFI_LDFLAGS += --major-os-version=2 --minor-os-version=0
+ EFI_LDFLAGS += --major-subsystem-version=2 --minor-subsystem-version=0
++# It seems ld unfortunately can't set a custom timestamp, so add a zero value
++# for the timestamp (option --no-insert-timestamp) if SOURCE_DATE_EPOCH is
++# defined to make reproducible builds possible.
++ifdef SOURCE_DATE_EPOCH
++EFI_LDFLAGS += --no-insert-timestamp
++endif
+ 
+ # Check if the compiler supports the MS ABI.
+ export XEN_BUILD_EFI := $(shell $(CC) $(XEN_CFLAGS) -c efi/check.c -o efi/check.o 2>/dev/null && echo y)

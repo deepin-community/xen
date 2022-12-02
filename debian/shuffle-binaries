@@ -1,0 +1,50 @@
+#!/bin/sh
+set -e
+
+version="$1"; shift
+
+# We wrap all of the programs in /usr/bin with a script
+# (xen-utils-wrapper) which chooses the version corresponding to the
+# currently-running version of Xen.  The actual binaries go
+# in xen-utils-$version:usr/lib/xen-$version/bin
+#
+# We first have to figure out what libraries the binary is linked
+# against.  We then match against the libraries listed for inclusion
+# here:
+list=debian/libxenmiscV.install.vsn-in
+
+t=debian/tmp
+vd="/usr/lib/xen-$version/bin"
+cd=/usr/lib/xen-common/bin
+
+mkdir -p "$t/$vd"
+
+find "$t"/usr/*bin -type f | while read binary; do
+	# filter for executables (ignore scripts)
+	file "$binary" | grep -q -eELF.\\+version.\\+interpreter || continue
+
+	reason=$(
+		strings "$binary" | grep -e^lib.\\+\\.so\\.\[.0-9\]\\+\$ | \
+		while read lib; do
+			lib=${lib%.so.*}
+			if grep -q -F "usr/lib/*/$lib.so.*" $list; then
+				printf " %s" "$lib"
+			fi
+		done
+	)
+
+	# if no reason, then skip
+	[ -n "$reason" ] || continue
+
+	echo "shuffling $binary$reason"
+
+	mv -v "$binary" "$t/$vd/"
+	ln -vs "$cd/xen-utils-wrapper" "$binary"
+
+	touch "$0.stamp"
+done
+
+if [ ! -e "$0.stamp" ]; then
+	echo "Failed to shuffle binaries!" 1>&2
+	exit 1
+fi

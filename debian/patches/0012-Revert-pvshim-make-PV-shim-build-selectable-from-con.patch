@@ -1,0 +1,70 @@
+From: Hans van Kranenburg <hans@knorrie.org>
+Date: Sun, 22 Nov 2020 00:40:58 +0100
+Subject: Revert "pvshim: make PV shim build selectable from configure"
+
+This reverts commit 8845155c831c59e867ee3dd31ee63e0cc6c7dcf2.
+
+This upstream change changes stuff that breaks our very fragile mess
+that builds the shim when it needs to, and doesn't when it should not.
+
+The result is that it's missing in the end for the i386 build... :|
+
+    dh_install: warning: Cannot find (any matches for)
+    "usr/lib/debug/usr/lib/xen-*/boot/*" (tried in ., debian/tmp)
+
+    dh_install: warning: xen-utils-4.14 missing files:
+    usr/lib/debug/usr/lib/xen-*/boot/*
+    dh_install: error: missing files, aborting
+---
+ config/Tools.mk.in      |  2 --
+ tools/configure.ac      | 13 -------------
+ tools/firmware/Makefile |  4 ++++
+ 3 files changed, 4 insertions(+), 15 deletions(-)
+
+diff --git a/config/Tools.mk.in b/config/Tools.mk.in
+index 23df47a..6408e42 100644
+--- a/config/Tools.mk.in
++++ b/config/Tools.mk.in
+@@ -75,5 +75,3 @@ TINFO_LIBS          := @TINFO_LIBS@
+ ARGP_LDFLAGS        := @argp_ldflags@
+ 
+ FILE_OFFSET_BITS    := @FILE_OFFSET_BITS@
+-
+-CONFIG_PV_SHIM      := @pvshim@
+diff --git a/tools/configure.ac b/tools/configure.ac
+index 9d126b7..88e66d1 100644
+--- a/tools/configure.ac
++++ b/tools/configure.ac
+@@ -503,17 +503,4 @@ AC_ARG_ENABLE([9pfs],
+ 
+ AC_SUBST(ninepfs)
+ 
+-AC_ARG_ENABLE([pvshim],
+-    AS_HELP_STRING([--disable-pvshim],
+-                   [Disable pvshim build (enabled by default on 64bit x86)]),
+-    [AS_IF([test "x$enable_pvshim" = "xno"], [pvshim=n], [pvshim=y])], [
+-    cpu=`test -z "$target_cpu" && echo "$host_cpu" || echo "$target_cpu"`
+-    case "${XEN_COMPILE_ARCH-${XEN_TARGET_ARCH-$cpu}}" in
+-        x86_64)
+-           pvshim="y";;
+-        *) pvshim="n";;
+-    esac
+-])
+-AC_SUBST(pvshim)
+-
+ AC_OUTPUT()
+diff --git a/tools/firmware/Makefile b/tools/firmware/Makefile
+index 809a5fd..cf304fc 100644
+--- a/tools/firmware/Makefile
++++ b/tools/firmware/Makefile
+@@ -1,6 +1,10 @@
+ XEN_ROOT = $(CURDIR)/../..
+ include $(XEN_ROOT)/tools/Rules.mk
+ 
++ifneq ($(XEN_TARGET_ARCH),x86_32)
++CONFIG_PV_SHIM := y
++endif
++
+ # hvmloader is a 32-bit protected mode binary.
+ TARGET      := hvmloader/hvmloader
+ INST_DIR := $(DESTDIR)$(XENFIRMWAREDIR)

@@ -1,0 +1,41 @@
+#!/bin/sh
+
+# This portion is fast-path, avoid external programs, NOTE: NOT -e HERE!
+
+COMMAND="${0##*/}"
+
+DIR=/sys/hypervisor/version
+# these return non-zero if hypervisor is absent, this is detected below
+read major 2> /dev/null < $DIR/major
+read minor 2> /dev/null < $DIR/minor
+VERSION="$major.$minor"
+
+DIR="/usr/lib/xen-$VERSION/bin"
+
+[ -x "$DIR/$COMMAND" ] && exec "$DIR/$COMMAND" "$@"
+
+
+# Certainly didn't work, now report failures, slower-path
+set -e
+
+error() {
+	err="$1"
+	shift
+	echo "ERROR: " "$@" >&2
+	exit $err
+}
+
+[ -e "/sys/hypervisor/type" ] || error 1 "Can't find hypervisor information in sysfs!"
+
+read type < /sys/hypervisor/type
+if [ "$type" != xen ]; then
+	[ -n "$type" ] || error 1 "Can't read hypervisor type from sysfs!"
+	error 1 "Hypervisor is not xen but '$type'!"
+fi
+
+if [ ! -d "/usr/lib/xen-$VERSION" ]; then
+	error 127 "Can't find version $VERSION of xen utils (maybe xen-utils-$VERSION was already removed before rebooting out of Xen $VERSION), bailing out!"
+fi
+
+error 127 "Unable to execute $DIR/$COMMAND"
+

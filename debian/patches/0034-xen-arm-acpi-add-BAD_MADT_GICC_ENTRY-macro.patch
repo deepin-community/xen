@@ -1,0 +1,60 @@
+From: Julien Grall <julien.grall@arm.com>
+Date: Wed, 30 Sep 2020 12:25:04 +0100
+Subject: xen/arm: acpi: add BAD_MADT_GICC_ENTRY() macro
+
+Imported from Linux commit b6cfb277378ef831c0fa84bcff5049307294adc6:
+
+    The BAD_MADT_ENTRY() macro is designed to work for all of the subtables
+    of the MADT.  In the ACPI 5.1 version of the spec, the struct for the
+    GICC subtable (struct acpi_madt_generic_interrupt) is 76 bytes long; in
+    ACPI 6.0, the struct is 80 bytes long.  But, there is only one definition
+    in ACPICA for this struct -- and that is the 6.0 version.  Hence, when
+    BAD_MADT_ENTRY() compares the struct size to the length in the GICC
+    subtable, it fails if 5.1 structs are in use, and there are systems in
+    the wild that have them.
+
+    This patch adds the BAD_MADT_GICC_ENTRY() that checks the GICC subtable
+    only, accounting for the difference in specification versions that are
+    possible.  The BAD_MADT_ENTRY() will continue to work as is for all other
+    MADT subtables.
+
+    This code is being added to an arm64 header file since that is currently
+    the only architecture using the GICC subtable of the MADT.  As a GIC is
+    specific to ARM, it is also unlikely the subtable will be used elsewhere.
+
+    Fixes: aeb823bbacc2 ("ACPICA: ACPI 6.0: Add changes for FADT table.")
+    Signed-off-by: Al Stone <al.stone@linaro.org>
+    Acked-by: Will Deacon <will.deacon@arm.com>
+    Acked-by: "Rafael J. Wysocki" <rjw@rjwysocki.net>
+    [catalin.marinas@arm.com: extra brackets around macro arguments]
+    Signed-off-by: Catalin Marinas <catalin.marinas@arm.com>
+
+Signed-off-by: Julien Grall <julien.grall@arm.com>
+Signed-off-by: Andre Przywara <andre.przywara@arm.com>
+Signed-off-by: Julien Grall <jgrall@amazon.com>
+Acked-by: Stefano Stabellini <sstabellini@kernel.org>
+Tested-by: Elliott Mitchell <ehem+xen@m5p.com>
+(cherry picked from commit 7056f2f89f03f2f804ac7e776c7b2b000cd716cd)
+---
+ xen/include/asm-arm/acpi.h | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/xen/include/asm-arm/acpi.h b/xen/include/asm-arm/acpi.h
+index 5034028..b52ae2d 100644
+--- a/xen/include/asm-arm/acpi.h
++++ b/xen/include/asm-arm/acpi.h
+@@ -54,6 +54,14 @@ void acpi_smp_init_cpus(void);
+  */
+ paddr_t acpi_get_table_offset(struct membank tbl_add[], EFI_MEM_RES index);
+ 
++/* Macros for consistency checks of the GICC subtable of MADT */
++#define ACPI_MADT_GICC_LENGTH	\
++    (acpi_gbl_FADT.header.revision < 6 ? 76 : 80)
++
++#define BAD_MADT_GICC_ENTRY(entry, end)						\
++    (!(entry) || (unsigned long)(entry) + sizeof(*(entry)) > (end) ||	\
++     (entry)->header.length != ACPI_MADT_GICC_LENGTH)
++
+ #ifdef CONFIG_ACPI
+ extern bool acpi_disabled;
+ /* Basic configuration for ACPI */

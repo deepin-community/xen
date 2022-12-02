@@ -1,0 +1,118 @@
+From: Hans van Kranenburg <hans@knorrie.org>
+Date: Sat, 9 Feb 2019 17:27:26 +0100
+Subject: sysconfig.xencommons.in: Strip and debianize
+
+Strip all options that are for stuff we don't ship, which is 1)
+xenstored as stubdom and 2) xenbackendd, which seems to be dead code
+anyway. [1]
+
+It seems useful to give the user the option to revert to xenstored
+instead of the default oxenstored if they really want.
+
+[1] https://lists.xen.org/archives/html/xen-devel/2015-07/msg04427.html
+
+Signed-off-by: Hans van Kranenburg <hans@knorrie.org>
+Acked-by: Ian Jackson <ijackson@chiark.greenend.org.uk>
+---
+ tools/hotplug/Linux/init.d/sysconfig.xencommons.in | 73 +---------------------
+ 1 file changed, 3 insertions(+), 70 deletions(-)
+
+diff --git a/tools/hotplug/Linux/init.d/sysconfig.xencommons.in b/tools/hotplug/Linux/init.d/sysconfig.xencommons.in
+index 0fc6557..e948543 100644
+--- a/tools/hotplug/Linux/init.d/sysconfig.xencommons.in
++++ b/tools/hotplug/Linux/init.d/sysconfig.xencommons.in
+@@ -6,26 +6,9 @@
+ #XENCONSOLED_TRACE=[none|guest|hv|all]
+ 
+ ## Type: string
+-## Default: daemon
++## Default: oxenstored
+ #
+-# Select type of xentore service.
+-#
+-# This can be either of:
+-#  * daemon
+-#  * domain
+-#
+-# Changing this requires a reboot to take effect.
+-#
+-#XENSTORETYPE=daemon
+-
+-## Type: string
+-## Default: xenstored
+-#
+-# Select xenstore implementation, this can be either
+-# of these below.
+-# Only evaluated if XENSTORETYPE is "daemon".
+-#
+-# This can be either of:
++# Select xenstore implementation. This can be either of:
+ #  * @sbindir@/oxenstored
+ #  * @sbindir@/xenstored
+ #
+@@ -37,64 +20,14 @@
+ #
+ # Additional commandline arguments to start xenstored,
+ # like "--trace-file @XEN_LOG_DIR@/xenstored-trace.log"
+-# See "@sbindir@/xenstored --help" for possible options.
+-# Only evaluated if XENSTORETYPE is "daemon".
++# See "@sbindir@/oxenstored --help" for possible options.
+ XENSTORED_ARGS=
+ 
+ ## Type: string
+ ## Default: Not defined, tracing off
+ #
+ # Log xenstored messages
+-# Only evaluated if XENSTORETYPE is "daemon".
+ #XENSTORED_TRACE=[yes|on|1]
+ 
+-## Type: string
+-## Default: "@XEN_LIB_STORED@"
+-#
+-# Running xenstored on XENSTORED_ROOTDIR
+-# Only evaluated if XENSTORETYPE is "daemon".
+-#XENSTORED_ROOTDIR=@XEN_LIB_STORED@
+-
+-## Type: string
+-## Default: @LIBEXEC@/boot/xenstore-stubdom.gz
+-#
+-# xenstore domain kernel.
+-# Only evaluated if XENSTORETYPE is "domain".
+-#XENSTORE_DOMAIN_KERNEL=@LIBEXEC@/boot/xenstore-stubdom.gz
+-
+-## Type: integer
+-## Default: 8
+-#
+-# xenstore domain memory size in MiB.
+-# Only evaluated if XENSTORETYPE is "domain".
+-#XENSTORE_DOMAIN_SIZE=8
+-
+-## Type: string
+-## Default: not set, no autoballooning of xenstore domain
+-#
+-# Maximum xenstore domain memory size. Can be specified as:
+-# - plain integer value for max size in MiB
+-# - fraction of host memory, e.g. 1/100
+-# - combination of both in form of <val>:<frac> (e.g. 8:1/100), resulting
+-#   value will be the higher of both specifications
+-# Only evaluated if XENSTORETYPE is "domain".
+-#XENSTORE_MAX_DOMAIN_SIZE=
+-
+-## Type: string
+-## Default: ""
+-#
+-# Additional arguments for starting the xenstore domain.
+-# Only evaluated if XENSTORETYPE is "domain".
+-XENSTORE_DOMAIN_ARGS=
+-
+-## Type: string
+-## Default: Not defined, xenbackendd debug mode off
+-#
+-# Running xenbackendd in debug mode
+-#XENBACKENDD_DEBUG=[yes|on|1]
+-
+-# qemu path
+-#QEMU_XEN=@qemu_xen_path@
+-
+ # Dom0 UUID
+ #XEN_DOM0_UUID=00000000-0000-0000-0000-000000000000

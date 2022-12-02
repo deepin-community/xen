@@ -1,0 +1,41 @@
+#!/bin/sh
+
+set -e
+
+version="$1"; shift
+flavour="$1"; shift
+t=debian/tmp
+
+hv="xen-hypervisor-$version-$flavour"
+dest="debian/$hv/boot"
+mkdir -p "$dest"
+
+# The upstream build system puts a pile of needless symlinks in /boot,
+# like 'xen-4.14.gz', 'xen-4.gz' and 'xen.gz' or even just 'xen'.
+#
+# Conversely it gives the actual hypervisor binary an
+# unhelpfully-varying name, like 'xen-4.14.1-pre.gz'. The symlinks to
+# this binary have more stable names, which we can use to our advantage.
+#
+# First of all, we figure out the version string that is used in the
+# upstream build result. So, for xen-4.14.1-pre.gz that would be
+# 4.14.1-pre
+verstring="$(readlink debian/tmp/boot/xen.gz ||
+            readlink debian/tmp/boot/xen)"
+verstring="${verstring##*xen-}"
+verstring="${verstring%.gz}"
+
+# Next we substitute this upstream version string with our own format.
+# For our part, we have been in the habit of putting the flavour in the
+# name and want to continue to do so for continuity.  (This was more
+# useful when the -i386 flavour existed and was coinstallable with the
+# -amd64 flavour.)
+#
+# So, e.g. debian/tmp/boot/xen-4.14.1-pre.gz will end up in our package
+# as debian/xen-hypervisor-4.14-amd64/boot/xen-4.14-amd64.gz
+find "$t/boot" -type f -print | while read f; do
+	basename="${f#$t/boot/}"
+	head="${basename%$verstring*}"
+	tail="${basename#*$verstring}"
+	cp -v "$f" "${dest}/${head}${version}-${flavour}${tail}"
+done

@@ -1,0 +1,211 @@
+From: Diederik de Haas <didi.debian@cknow.org>
+Date: Fri, 4 Dec 2020 08:28:21 +0100
+Subject: fix spelling errors
+
+Only spelling errors; no functional changes.
+
+In docs/misc/dump-core-format.txt there are a few more instances of
+'informations'. I'll leave that up to someone who can properly determine
+how those sentences should be constructed.
+
+Signed-off-by: Diederik de Haas <didi.debian@cknow.org>
+Reviewed-by: Stefano Stabellini <sstabellini@kernel.org>
+Acked-by: Jan Beulich <jbeulich@suse.com>
+(cherry picked from commit ba6e78f0db820fbeea4df41fde4655020ca05928)
+---
+ docs/man/xl.1.pod.in                   | 2 +-
+ docs/man/xl.cfg.5.pod.in               | 2 +-
+ docs/man/xlcpupool.cfg.5.pod           | 2 +-
+ tools/firmware/rombios/rombios.c       | 2 +-
+ tools/libxl/libxl_stream_read.c        | 2 +-
+ tools/xl/xl_cmdtable.c                 | 2 +-
+ xen/arch/x86/boot/video.S              | 2 +-
+ xen/arch/x86/cpu/vpmu.c                | 2 +-
+ xen/arch/x86/mpparse.c                 | 2 +-
+ xen/arch/x86/x86_emulate/x86_emulate.c | 2 +-
+ xen/common/libelf/libelf-dominfo.c     | 2 +-
+ xen/drivers/passthrough/arm/smmu.c     | 2 +-
+ xen/tools/gen-cpuid.py                 | 2 +-
+ xen/xsm/flask/policy/access_vectors    | 2 +-
+ 14 files changed, 14 insertions(+), 14 deletions(-)
+
+diff --git a/docs/man/xl.1.pod.in b/docs/man/xl.1.pod.in
+index 52a47a6..3480707 100644
+--- a/docs/man/xl.1.pod.in
++++ b/docs/man/xl.1.pod.in
+@@ -1578,7 +1578,7 @@ List vsnd devices for a domain.
+ Creates a new keyboard device in the domain specified by I<domain-id>.
+ I<vkb-device> describes the device to attach, using the same format as the
+ B<VKB_SPEC_STRING> string in the domain config file. See L<xl.cfg(5)>
+-for more informations.
++for more information.
+ 
+ =item B<vkb-detach> I<domain-id> I<devid>
+ 
+diff --git a/docs/man/xl.cfg.5.pod.in b/docs/man/xl.cfg.5.pod.in
+index 0532739..b4625f5 100644
+--- a/docs/man/xl.cfg.5.pod.in
++++ b/docs/man/xl.cfg.5.pod.in
+@@ -2385,7 +2385,7 @@ If B<videoram> is set less than 128MB, an error will be triggered.
+ 
+ =item B<stdvga=BOOLEAN>
+ 
+-Speficies a standard VGA card with VBE (VESA BIOS Extensions) as the
++Specifies a standard VGA card with VBE (VESA BIOS Extensions) as the
+ emulated graphics device. If your guest supports VBE 2.0 or
+ later (e.g. Windows XP onwards) then you should enable this.
+ stdvga supports more video ram and bigger resolutions than Cirrus.
+diff --git a/docs/man/xlcpupool.cfg.5.pod b/docs/man/xlcpupool.cfg.5.pod
+index 3c9ddf7..c577c7c 100644
+--- a/docs/man/xlcpupool.cfg.5.pod
++++ b/docs/man/xlcpupool.cfg.5.pod
+@@ -106,7 +106,7 @@ means that cpus 2,3,5 will be member of the cpupool.
+ means that cpus 0,2,3 and 5 will be member of the cpupool. A "node:" or
+ "nodes:" modifier can be used. E.g., "0,node:1,nodes:2-3,^10-13" means
+ that pcpus 0, plus all the cpus of NUMA nodes 1,2,3 with the exception
+-of cpus 10,11,12,13 will be memeber of the cpupool.
++of cpus 10,11,12,13 will be members of the cpupool.
+ 
+ =back
+ 
+diff --git a/tools/firmware/rombios/rombios.c b/tools/firmware/rombios/rombios.c
+index 51558ee..5cda227 100644
+--- a/tools/firmware/rombios/rombios.c
++++ b/tools/firmware/rombios/rombios.c
+@@ -2607,7 +2607,7 @@ void ata_detect( )
+   write_byte(ebda_seg,&EbdaData->ata.channels[3].irq,11);
+ #endif
+ #if BX_MAX_ATA_INTERFACES > 4
+-#error Please fill the ATA interface informations
++#error Please fill the ATA interface information
+ #endif
+ 
+   // Device detection
+diff --git a/tools/libxl/libxl_stream_read.c b/tools/libxl/libxl_stream_read.c
+index 514f6d9..99a6714 100644
+--- a/tools/libxl/libxl_stream_read.c
++++ b/tools/libxl/libxl_stream_read.c
+@@ -459,7 +459,7 @@ static void stream_continue(libxl__egc *egc,
+         while (process_record(egc, stream))
+             ; /*
+                * Nothing! process_record() helpfully tells us if no specific
+-               * futher actions have been set up, in which case we want to go
++               * further actions have been set up, in which case we want to go
+                * ahead and process the next record.
+                */
+         break;
+diff --git a/tools/xl/xl_cmdtable.c b/tools/xl/xl_cmdtable.c
+index 0833539..9ad31a6 100644
+--- a/tools/xl/xl_cmdtable.c
++++ b/tools/xl/xl_cmdtable.c
+@@ -154,7 +154,7 @@ struct cmd_spec cmd_table[] = {
+       "-h  Print this help.\n"
+       "-c  Leave domain running after creating the snapshot.\n"
+       "-p  Leave domain paused after creating the snapshot.\n"
+-      "-D  Store the domain id in the configration."
++      "-D  Store the domain id in the configuration."
+     },
+     { "migrate",
+       &main_migrate, 0, 1,
+diff --git a/xen/arch/x86/boot/video.S b/xen/arch/x86/boot/video.S
+index a485779..0efbe8d 100644
+--- a/xen/arch/x86/boot/video.S
++++ b/xen/arch/x86/boot/video.S
+@@ -177,7 +177,7 @@ dac_set:
+         movb    $0, _param(PARAM_LFB_COLORS+7)
+ 
+ dac_done:
+-# get protected mode interface informations
++# get protected mode interface information
+         movw    $0x4f0a, %ax
+         xorw    %bx, %bx
+         xorw    %di, %di
+diff --git a/xen/arch/x86/cpu/vpmu.c b/xen/arch/x86/cpu/vpmu.c
+index 0c3f378..fb1b296 100644
+--- a/xen/arch/x86/cpu/vpmu.c
++++ b/xen/arch/x86/cpu/vpmu.c
+@@ -680,7 +680,7 @@ static void pvpmu_finish(struct domain *d, xen_pmu_params_t *params)
+         vcpu_unpause(v);
+ }
+ 
+-/* Dump some vpmu informations on console. Used in keyhandler dump_domains(). */
++/* Dump some vpmu information to console. Used in keyhandler dump_domains(). */
+ void vpmu_dump(struct vcpu *v)
+ {
+     struct vpmu_struct *vpmu = vcpu_vpmu(v);
+diff --git a/xen/arch/x86/mpparse.c b/xen/arch/x86/mpparse.c
+index d532575..dff02b1 100644
+--- a/xen/arch/x86/mpparse.c
++++ b/xen/arch/x86/mpparse.c
+@@ -170,7 +170,7 @@ static int MP_processor_info_x(struct mpc_config_processor *m,
+ 	if (num_processors >= 8 && hotplug
+ 	    && genapic.name == apic_default.name) {
+ 		printk_once(XENLOG_WARNING
+-			    "WARNING: CPUs limit of 8 reached - ignoring futher processors\n");
++			    "WARNING: CPUs limit of 8 reached - ignoring further processors\n");
+ 		unaccounted_cpus = true;
+ 		return -ENOSPC;
+ 	}
+diff --git a/xen/arch/x86/x86_emulate/x86_emulate.c b/xen/arch/x86/x86_emulate/x86_emulate.c
+index f186ae6..bf17208 100644
+--- a/xen/arch/x86/x86_emulate/x86_emulate.c
++++ b/xen/arch/x86/x86_emulate/x86_emulate.c
+@@ -3244,7 +3244,7 @@ x86_decode(
+             case 0x23: /* mov reg,dr */
+                 /*
+                  * Mov to/from cr/dr ignore the encoding of Mod, and behave as
+-                 * if they were encoded as reg/reg instructions.  No futher
++                 * if they were encoded as reg/reg instructions.  No further
+                  * disp/SIB bytes are fetched.
+                  */
+                 modrm_mod = 3;
+diff --git a/xen/common/libelf/libelf-dominfo.c b/xen/common/libelf/libelf-dominfo.c
+index 508f08d..69c94b6 100644
+--- a/xen/common/libelf/libelf-dominfo.c
++++ b/xen/common/libelf/libelf-dominfo.c
+@@ -1,5 +1,5 @@
+ /*
+- * parse xen-specific informations out of elf kernel binaries.
++ * parse xen-specific information out of elf kernel binaries.
+  *
+  * This library is free software; you can redistribute it and/or
+  * modify it under the terms of the GNU Lesser General Public
+diff --git a/xen/drivers/passthrough/arm/smmu.c b/xen/drivers/passthrough/arm/smmu.c
+index 4ba6d3a..5c95131 100644
+--- a/xen/drivers/passthrough/arm/smmu.c
++++ b/xen/drivers/passthrough/arm/smmu.c
+@@ -214,7 +214,7 @@ struct iommu_domain
+ 	struct list_head		list;
+ };
+ 
+-/* Xen: Describes informations required for a Xen domain */
++/* Xen: Describes information required for a Xen domain */
+ struct arm_smmu_xen_domain {
+ 	spinlock_t			lock;
+ 	/* List of context (i.e iommu_domain) associated to this domain */
+diff --git a/xen/tools/gen-cpuid.py b/xen/tools/gen-cpuid.py
+index ffd9529..14f56df 100755
+--- a/xen/tools/gen-cpuid.py
++++ b/xen/tools/gen-cpuid.py
+@@ -192,7 +192,7 @@ def crunch_numbers(state):
+         FXSR: [FFXSR, SSE],
+ 
+         # SSE is taken to mean support for the %XMM registers as well as the
+-        # instructions.  Several futher instruction sets are built on core
++        # instructions.  Several further instruction sets are built on core
+         # %XMM support, without specific inter-dependencies.  Additionally
+         # AMD has a special mis-alignment sub-mode.
+         SSE: [SSE2, MISALIGNSSE],
+diff --git a/xen/xsm/flask/policy/access_vectors b/xen/xsm/flask/policy/access_vectors
+index b87c99e..5371196 100644
+--- a/xen/xsm/flask/policy/access_vectors
++++ b/xen/xsm/flask/policy/access_vectors
+@@ -509,7 +509,7 @@ class security
+ #
+ class version
+ {
+-# Extra informations (-unstable).
++# Extra information (-unstable).
+     xen_extraversion
+ # Compile information of the hypervisor.
+     xen_compile_info

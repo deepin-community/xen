@@ -1,0 +1,29 @@
+From: Julien Grall <jgrall@amazon.com>
+Date: Thu, 5 Nov 2020 22:31:06 +0000
+Subject: xen/arm: traps: Don't panic when receiving an unknown debug trap
+
+Even if debug trap are only meant for debugging purpose, it is quite
+harsh to crash Xen if one of the trap sent by the guest is not handled.
+
+So switch from a panic() to a printk().
+
+Signed-off-by: Julien Grall <jgrall@amazon.com>
+Reviewed-by: Stefano Stabellini <sstabellini@kernel.org>
+(cherry picked from commit 957708c2d1ae25d7375abd5e5e70c3043d64f1f1)
+---
+ xen/arch/arm/traps.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/xen/arch/arm/traps.c b/xen/arch/arm/traps.c
+index 2197df2..22bd1bd 100644
+--- a/xen/arch/arm/traps.c
++++ b/xen/arch/arm/traps.c
+@@ -1411,7 +1411,7 @@ static void do_debug_trap(struct cpu_user_regs *regs, unsigned int code)
+         show_execution_state(regs);
+         break;
+     default:
+-        panic("DOM%d: Unhandled debug trap %#x\n", domid, code);
++        printk("DOM%d: Unhandled debug trap %#x\n", domid, code);
+         break;
+     }
+ }

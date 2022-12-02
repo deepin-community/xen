@@ -1,0 +1,31 @@
+#!/bin/bash
+
+set -e
+
+case "$1" in
+    remove|upgrade)
+        if [ -x "/etc/init.d/xen" ]; then
+            # Only call the init script when removing or while upgrading for
+            # the currently running version of Xen.
+            #
+            # Otherwise, for example after a Xen version upgrade, autoremoval
+            # of an obsolete xen-utils-V package would inadvertently stop
+            # running daemons like xenconsoled.
+            if [ "$(/usr/lib/xen-common/bin/xen-version)" = "@version@" ]; then
+                invoke-rc.d xen stop || exit $?
+            fi
+        fi
+    ;;
+
+    deconfigure|failed-upgrade)
+    ;;
+
+    *)
+        echo "prerm called with unknown argument \`$1'" >&2
+        exit 1
+    ;;
+esac
+
+#DEBHELPER#
+
+exit 0

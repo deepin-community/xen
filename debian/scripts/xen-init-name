@@ -1,0 +1,21 @@
+#!/usr/bin/python3
+
+import json
+import subprocess
+import sys
+
+"""
+This little script is used by the xendomains init script. It gets a filename of
+a domU guest config file as argument and uses xen create --dryrun to parse the
+config file and extract the domU name from it.
+
+Note that there is no proper error handling. So, if a user symlinks something
+else than a correctly formatted domU config file into /etc/xen/auto (or a
+different path configured to use, of course) then this will just do ugly things
+and explode.
+"""
+
+cmd = ('xen', 'create', '--quiet', '--dryrun', '--defconfig', sys.argv[1])
+domU_json = subprocess.check_output(cmd)
+name = json.loads(domU_json)['c_info']['name']
+print(name)

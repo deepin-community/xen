@@ -1,0 +1,27 @@
+From: Hans van Kranenburg <hans@knorrie.org>
+Date: Sun, 10 Feb 2019 18:26:45 +0100
+Subject: tools/xl/bash-completion: also complete 'xen'
+
+We have the `xen` alias for xl in Debian, since in the past it was a
+command that could execute either xl or xm.
+
+Now, it always does xl, so, complete the same stuff for it as we have
+for xl.
+
+Signed-off-by: Hans van Kranenburg <hans@knorrie.org>
+
+[git-debrebase split: mixed commit: upstream part]
+---
+ tools/xl/bash-completion | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/tools/xl/bash-completion b/tools/xl/bash-completion
+index b7cd6b3..a520b07 100644
+--- a/tools/xl/bash-completion
++++ b/tools/xl/bash-completion
+@@ -17,4 +17,4 @@ _xl()
+ 	return 0
+ }
+ 
+-complete -F _xl -o nospace -o default xl
++complete -F _xl -o nospace -o default xl xen

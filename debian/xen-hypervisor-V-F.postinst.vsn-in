@@ -1,0 +1,37 @@
+#!/bin/bash
+
+set -e
+
+case "$1" in
+    configure)
+        if command -v update-grub > /dev/null && [ -d /boot/grub ]; then
+            update-grub || :
+        fi
+
+    # create or update /run/reboot-required{,.pkgs} if xen hypervisor is
+    # running
+    if [ -e "/sys/hypervisor/type" ]; then
+        type="$(cat /sys/hypervisor/type)"
+        if [ "$type" = xen ]; then
+            if [ -d /run ]; then
+                touch /run/reboot-required
+                if ! grep -q "^$DPKG_MAINTSCRIPT_PACKAGE$" /run/reboot-required.pkgs 2> /dev/null ; then
+                    echo "$DPKG_MAINTSCRIPT_PACKAGE" >> /run/reboot-required.pkgs
+                fi
+            fi
+        fi
+    fi
+    ;;
+
+    abort-upgrade|abort-remove|abort-deconfigure)
+    ;;
+
+    *)
+	echo "postinst called with unknown argument \`$1'" >&2
+	exit 1
+    ;;
+esac
+
+#DEBHELPER#
+
+exit 0
