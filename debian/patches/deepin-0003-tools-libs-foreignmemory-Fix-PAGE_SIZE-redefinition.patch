@@ -1,0 +1,280 @@
+From 0dbb4be739c50b8018aeeb285ef290bf7962a28e Mon Sep 17 00:00:00 2001
+From: Costin Lupu <costin.lupu@cs.pub.ro>
+Date: Tue, 8 Jun 2021 15:35:27 +0300
+Subject: [PATCH 3/5] tools/libs/foreignmemory: Fix PAGE_SIZE redefinition
+ error
+
+If PAGE_SIZE is already defined in the system (e.g. in /usr/include/limits.h
+header) then gcc will trigger a redefinition error because of -Werror. This
+patch replaces usage of PAGE_* macros with XC_PAGE_* macros in order to avoid
+confusion between control domain page granularity (PAGE_* definitions) and
+guest domain page granularity.
+
+The exception is in osdep_xenforeignmemory_map() where we need the system page
+size to check whether the PFN array should be allocated with mmap() or with
+dynamic allocation.
+
+Signed-off-by: Costin Lupu <costin.lupu@cs.pub.ro>
+Reviewed-by: Julien Grall <jgrall@amazon.com>
+Acked-by: Ian Jackson <iwj@xenproject.org>
+---
+ tools/libs/foreignmemory/core.c    |  2 +-
+ tools/libs/foreignmemory/freebsd.c | 10 +++++-----
+ tools/libs/foreignmemory/linux.c   | 23 ++++++++++++-----------
+ tools/libs/foreignmemory/minios.c  |  2 +-
+ tools/libs/foreignmemory/netbsd.c  | 10 +++++-----
+ tools/libs/foreignmemory/private.h |  9 +--------
+ 6 files changed, 25 insertions(+), 31 deletions(-)
+
+diff --git a/tools/libs/foreignmemory/core.c b/tools/libs/foreignmemory/core.c
+index 28ec311af1..7edc6f0dbf 100644
+--- a/tools/libs/foreignmemory/core.c
++++ b/tools/libs/foreignmemory/core.c
+@@ -202,7 +202,7 @@ int xenforeignmemory_resource_size(
+     if ( rc )
+         return rc;
+ 
+-    *size = fres.nr_frames << PAGE_SHIFT;
++    *size = fres.nr_frames << XC_PAGE_SHIFT;
+     return 0;
+ }
+ 
+diff --git a/tools/libs/foreignmemory/freebsd.c b/tools/libs/foreignmemory/freebsd.c
+index d94ea07862..2cf0fa1c38 100644
+--- a/tools/libs/foreignmemory/freebsd.c
++++ b/tools/libs/foreignmemory/freebsd.c
+@@ -63,7 +63,7 @@ void *osdep_xenforeignmemory_map(xenforeignmemory_handle *fmem,
+     privcmd_mmapbatch_t ioctlx;
+     int rc;
+ 
+-    addr = mmap(addr, num << PAGE_SHIFT, prot, flags | MAP_SHARED, fd, 0);
++    addr = mmap(addr, num << XC_PAGE_SHIFT, prot, flags | MAP_SHARED, fd, 0);
+     if ( addr == MAP_FAILED )
+         return NULL;
+ 
+@@ -78,7 +78,7 @@ void *osdep_xenforeignmemory_map(xenforeignmemory_handle *fmem,
+     {
+         int saved_errno = errno;
+ 
+-        (void)munmap(addr, num << PAGE_SHIFT);
++        (void)munmap(addr, num << XC_PAGE_SHIFT);
+         errno = saved_errno;
+         return NULL;
+     }
+@@ -89,7 +89,7 @@ void *osdep_xenforeignmemory_map(xenforeignmemory_handle *fmem,
+ int osdep_xenforeignmemory_unmap(xenforeignmemory_handle *fmem,
+                                  void *addr, size_t num)
+ {
+-    return munmap(addr, num << PAGE_SHIFT);
++    return munmap(addr, num << XC_PAGE_SHIFT);
+ }
+ 
+ int osdep_xenforeignmemory_restrict(xenforeignmemory_handle *fmem,
+@@ -101,7 +101,7 @@ int osdep_xenforeignmemory_restrict(xenforeignmemory_handle *fmem,
+ int osdep_xenforeignmemory_unmap_resource(xenforeignmemory_handle *fmem,
+                                         xenforeignmemory_resource_handle *fres)
+ {
+-    return fres ? munmap(fres->addr, fres->nr_frames << PAGE_SHIFT) : 0;
++    return fres ? munmap(fres->addr, fres->nr_frames << XC_PAGE_SHIFT) : 0;
+ }
+ 
+ int osdep_xenforeignmemory_map_resource(xenforeignmemory_handle *fmem,
+@@ -120,7 +120,7 @@ int osdep_xenforeignmemory_map_resource(xenforeignmemory_handle *fmem,
+         /* Request for resource size.  Skip mmap(). */
+         goto skip_mmap;
+ 
+-    fres->addr = mmap(fres->addr, fres->nr_frames << PAGE_SHIFT,
++    fres->addr = mmap(fres->addr, fres->nr_frames << XC_PAGE_SHIFT,
+                       fres->prot, fres->flags | MAP_SHARED, fmem->fd, 0);
+     if ( fres->addr == MAP_FAILED )
+         return -1;
+diff --git a/tools/libs/foreignmemory/linux.c b/tools/libs/foreignmemory/linux.c
+index c1f35e2db7..9062117407 100644
+--- a/tools/libs/foreignmemory/linux.c
++++ b/tools/libs/foreignmemory/linux.c
+@@ -134,7 +134,7 @@ static int retry_paged(int fd, uint32_t dom, void *addr,
+         /* At least one gfn is still in paging state */
+         ioctlx.num = 1;
+         ioctlx.dom = dom;
+-        ioctlx.addr = (unsigned long)addr + (i<<PAGE_SHIFT);
++        ioctlx.addr = (unsigned long)addr + (i<<XC_PAGE_SHIFT);
+         ioctlx.arr = arr + i;
+         ioctlx.err = err + i;
+ 
+@@ -168,7 +168,7 @@ void *osdep_xenforeignmemory_map(xenforeignmemory_handle *fmem,
+     size_t i;
+     int rc;
+ 
+-    addr = mmap(addr, num << PAGE_SHIFT, prot, flags | MAP_SHARED,
++    addr = mmap(addr, num << XC_PAGE_SHIFT, prot, flags | MAP_SHARED,
+                 fd, 0);
+     if ( addr == MAP_FAILED )
+         return NULL;
+@@ -198,9 +198,10 @@ void *osdep_xenforeignmemory_map(xenforeignmemory_handle *fmem,
+          */
+         privcmd_mmapbatch_t ioctlx;
+         xen_pfn_t *pfn;
+-        unsigned int pfn_arr_size = ROUNDUP((num * sizeof(*pfn)), PAGE_SHIFT);
++        unsigned int pfn_arr_size = ROUNDUP((num * sizeof(*pfn)), XC_PAGE_SHIFT);
++        int os_page_size = sysconf(_SC_PAGESIZE);
+ 
+-        if ( pfn_arr_size <= PAGE_SIZE )
++        if ( pfn_arr_size <= os_page_size )
+             pfn = alloca(num * sizeof(*pfn));
+         else
+         {
+@@ -209,7 +210,7 @@ void *osdep_xenforeignmemory_map(xenforeignmemory_handle *fmem,
+             if ( pfn == MAP_FAILED )
+             {
+                 PERROR("mmap of pfn array failed");
+-                (void)munmap(addr, num << PAGE_SHIFT);
++                (void)munmap(addr, num << XC_PAGE_SHIFT);
+                 return NULL;
+             }
+         }
+@@ -242,7 +243,7 @@ void *osdep_xenforeignmemory_map(xenforeignmemory_handle *fmem,
+                     continue;
+                 }
+                 rc = map_foreign_batch_single(fd, dom, pfn + i,
+-                        (unsigned long)addr + (i<<PAGE_SHIFT));
++                        (unsigned long)addr + (i<<XC_PAGE_SHIFT));
+                 if ( rc < 0 )
+                 {
+                     rc = -errno;
+@@ -254,7 +255,7 @@ void *osdep_xenforeignmemory_map(xenforeignmemory_handle *fmem,
+             break;
+         }
+ 
+-        if ( pfn_arr_size > PAGE_SIZE )
++        if ( pfn_arr_size > os_page_size )
+             munmap(pfn, pfn_arr_size);
+ 
+         if ( rc == -ENOENT && i == num )
+@@ -270,7 +271,7 @@ void *osdep_xenforeignmemory_map(xenforeignmemory_handle *fmem,
+     {
+         int saved_errno = errno;
+ 
+-        (void)munmap(addr, num << PAGE_SHIFT);
++        (void)munmap(addr, num << XC_PAGE_SHIFT);
+         errno = saved_errno;
+         return NULL;
+     }
+@@ -281,7 +282,7 @@ void *osdep_xenforeignmemory_map(xenforeignmemory_handle *fmem,
+ int osdep_xenforeignmemory_unmap(xenforeignmemory_handle *fmem,
+                                  void *addr, size_t num)
+ {
+-    return munmap(addr, num << PAGE_SHIFT);
++    return munmap(addr, num << XC_PAGE_SHIFT);
+ }
+ 
+ int osdep_xenforeignmemory_restrict(xenforeignmemory_handle *fmem,
+@@ -293,7 +294,7 @@ int osdep_xenforeignmemory_restrict(xenforeignmemory_handle *fmem,
+ int osdep_xenforeignmemory_unmap_resource(
+     xenforeignmemory_handle *fmem, xenforeignmemory_resource_handle *fres)
+ {
+-    return fres ? munmap(fres->addr, fres->nr_frames << PAGE_SHIFT) : 0;
++    return fres ? munmap(fres->addr, fres->nr_frames << XC_PAGE_SHIFT) : 0;
+ }
+ 
+ int osdep_xenforeignmemory_map_resource(
+@@ -312,7 +313,7 @@ int osdep_xenforeignmemory_map_resource(
+         /* Request for resource size.  Skip mmap(). */
+         goto skip_mmap;
+ 
+-    fres->addr = mmap(fres->addr, fres->nr_frames << PAGE_SHIFT,
++    fres->addr = mmap(fres->addr, fres->nr_frames << XC_PAGE_SHIFT,
+                       fres->prot, fres->flags | MAP_SHARED, fmem->fd, 0);
+     if ( fres->addr == MAP_FAILED )
+         return -1;
+diff --git a/tools/libs/foreignmemory/minios.c b/tools/libs/foreignmemory/minios.c
+index 43341ca301..c5453736d5 100644
+--- a/tools/libs/foreignmemory/minios.c
++++ b/tools/libs/foreignmemory/minios.c
+@@ -55,7 +55,7 @@ void *osdep_xenforeignmemory_map(xenforeignmemory_handle *fmem,
+ int osdep_xenforeignmemory_unmap(xenforeignmemory_handle *fmem,
+                                  void *addr, size_t num)
+ {
+-    return munmap(addr, num << PAGE_SHIFT);
++    return munmap(addr, num << XC_PAGE_SHIFT);
+ }
+ 
+ /*
+diff --git a/tools/libs/foreignmemory/netbsd.c b/tools/libs/foreignmemory/netbsd.c
+index c0b1b8f79d..597db775d7 100644
+--- a/tools/libs/foreignmemory/netbsd.c
++++ b/tools/libs/foreignmemory/netbsd.c
+@@ -76,7 +76,7 @@ void *osdep_xenforeignmemory_map(xenforeignmemory_handle *fmem,
+ {
+     int fd = fmem->fd;
+     privcmd_mmapbatch_v2_t ioctlx;
+-    addr = mmap(addr, num * PAGE_SIZE, prot,
++    addr = mmap(addr, num * XC_PAGE_SIZE, prot,
+                 flags | MAP_ANON | MAP_SHARED, -1, 0);
+     if ( addr == MAP_FAILED ) {
+         PERROR("osdep_xenforeignmemory_map: mmap failed");
+@@ -93,7 +93,7 @@ void *osdep_xenforeignmemory_map(xenforeignmemory_handle *fmem,
+     {
+         int saved_errno = errno;
+         PERROR("osdep_xenforeignmemory_map: ioctl failed");
+-        munmap(addr, num * PAGE_SIZE);
++        munmap(addr, num * XC_PAGE_SIZE);
+         errno = saved_errno;
+         return NULL;
+     }
+@@ -104,7 +104,7 @@ void *osdep_xenforeignmemory_map(xenforeignmemory_handle *fmem,
+ int osdep_xenforeignmemory_unmap(xenforeignmemory_handle *fmem,
+                                  void *addr, size_t num)
+ {
+-    return munmap(addr, num * PAGE_SIZE);
++    return munmap(addr, num * XC_PAGE_SIZE);
+ }
+ 
+ int osdep_xenforeignmemory_restrict(xenforeignmemory_handle *fmem,
+@@ -117,7 +117,7 @@ int osdep_xenforeignmemory_restrict(xenforeignmemory_handle *fmem,
+ int osdep_xenforeignmemory_unmap_resource(
+     xenforeignmemory_handle *fmem, xenforeignmemory_resource_handle *fres)
+ {
+-    return fres ? munmap(fres->addr, fres->nr_frames << PAGE_SHIFT) : 0;
++    return fres ? munmap(fres->addr, fres->nr_frames << XC_PAGE_SHIFT) : 0;
+ }
+ 
+ int osdep_xenforeignmemory_map_resource(
+@@ -136,7 +136,7 @@ int osdep_xenforeignmemory_map_resource(
+         /* Request for resource size.  Skip mmap(). */
+         goto skip_mmap;
+ 
+-    fres->addr = mmap(fres->addr, fres->nr_frames << PAGE_SHIFT,
++    fres->addr = mmap(fres->addr, fres->nr_frames << XC_PAGE_SHIFT,
+                       fres->prot, fres->flags | MAP_ANON | MAP_SHARED, -1, 0);
+     if ( fres->addr == MAP_FAILED )
+         return -1;
+diff --git a/tools/libs/foreignmemory/private.h b/tools/libs/foreignmemory/private.h
+index 5bb0cefb09..8540303adc 100644
+--- a/tools/libs/foreignmemory/private.h
++++ b/tools/libs/foreignmemory/private.h
+@@ -1,6 +1,7 @@
+ #ifndef XENFOREIGNMEMORY_PRIVATE_H
+ #define XENFOREIGNMEMORY_PRIVATE_H
+ 
++#include <xenctrl.h>
+ #include <xentoollog.h>
+ 
+ #include <xenforeignmemory.h>
+@@ -10,14 +11,6 @@
+ #include <xen/xen.h>
+ #include <xen/sys/privcmd.h>
+ 
+-#ifndef PAGE_SHIFT /* Mini-os, Yukk */
+-#define PAGE_SHIFT           12
+-#endif
+-#ifndef __MINIOS__ /* Yukk */
+-#define PAGE_SIZE            (1UL << PAGE_SHIFT)
+-#define PAGE_MASK            (~(PAGE_SIZE-1))
+-#endif
+-
+ struct xenforeignmemory_handle {
+     xentoollog_logger *logger, *logger_tofree;
+     unsigned flags;
+-- 
+2.20.1
+
