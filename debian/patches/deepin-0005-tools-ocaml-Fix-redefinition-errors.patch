@@ -23,11 +23,9 @@ Tested-by: Dario Faggioli <dfaggioli@suse.com>
  tools/ocaml/libs/xl/xenlight_stubs.c           |  4 ++++
  3 files changed, 12 insertions(+), 6 deletions(-)
 
-diff --git a/tools/ocaml/libs/xc/xenctrl_stubs.c b/tools/ocaml/libs/xc/xenctrl_stubs.c
-index 6e4bc567f5..a6756c4a8c 100644
 --- a/tools/ocaml/libs/xc/xenctrl_stubs.c
 +++ b/tools/ocaml/libs/xc/xenctrl_stubs.c
-@@ -37,14 +37,12 @@
+@@ -36,14 +36,12 @@
  
  #include "mmap_stubs.h"
  
@@ -44,7 +42,7 @@ index 6e4bc567f5..a6756c4a8c 100644
  
  #define string_of_option_array(array, index) \
  	((Field(array, index) == Val_none) ? NULL : String_val(Field(Field(array, index), 0)))
-@@ -819,7 +817,7 @@ CAMLprim value stub_xc_domain_memory_increase_reservation(value xch,
+@@ -809,7 +807,7 @@
  	CAMLparam3(xch, domid, mem_kb);
  	int retval;
  
@@ -53,7 +51,7 @@ index 6e4bc567f5..a6756c4a8c 100644
  
  	uint32_t c_domid = _D(domid);
  	caml_enter_blocking_section();
-@@ -925,7 +923,7 @@ CAMLprim value stub_pages_to_kib(value pages)
+@@ -915,7 +913,7 @@
  {
  	CAMLparam1(pages);
  
@@ -62,11 +60,9 @@ index 6e4bc567f5..a6756c4a8c 100644
  }
  
  
-diff --git a/tools/ocaml/libs/xentoollog/xentoollog_stubs.c b/tools/ocaml/libs/xentoollog/xentoollog_stubs.c
-index bf64b211c2..e4306a0c2f 100644
 --- a/tools/ocaml/libs/xentoollog/xentoollog_stubs.c
 +++ b/tools/ocaml/libs/xentoollog/xentoollog_stubs.c
-@@ -53,8 +53,12 @@ static char * dup_String_val(value s)
+@@ -53,8 +53,12 @@
  #include "_xtl_levels.inc"
  
  /* Option type support as per http://www.linux-nantes.org/~fmonnier/ocaml/ocaml-wrapping-c.php */
@@ -79,11 +75,9 @@ index bf64b211c2..e4306a0c2f 100644
  
  static value Val_some(value v)
  {
-diff --git a/tools/ocaml/libs/xl/xenlight_stubs.c b/tools/ocaml/libs/xl/xenlight_stubs.c
-index 352a00134d..45b8af61c7 100644
 --- a/tools/ocaml/libs/xl/xenlight_stubs.c
 +++ b/tools/ocaml/libs/xl/xenlight_stubs.c
-@@ -227,8 +227,12 @@ static value Val_string_list(libxl_string_list *c_val)
+@@ -227,8 +227,12 @@
  }
  
  /* Option type support as per http://www.linux-nantes.org/~fmonnier/ocaml/ocaml-wrapping-c.php */
@@ -96,6 +90,3 @@ index 352a00134d..45b8af61c7 100644
  
  static value Val_some(value v)
  {
--- 
-2.20.1
-
