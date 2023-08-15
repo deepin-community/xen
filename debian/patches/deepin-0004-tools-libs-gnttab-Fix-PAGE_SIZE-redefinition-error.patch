@@ -19,30 +19,25 @@ Acked-by: Ian Jackson <iwj@xenproject.org>
 ---
  tools/libs/gnttab/freebsd.c | 28 +++++++++++++---------------
  tools/libs/gnttab/linux.c   | 28 +++++++++++++---------------
- tools/libs/gnttab/netbsd.c  | 23 ++++++++++-------------
  3 files changed, 36 insertions(+), 43 deletions(-)
 
-diff --git a/tools/libs/gnttab/freebsd.c b/tools/libs/gnttab/freebsd.c
-index 768af701c6..e42ac3fbf3 100644
 --- a/tools/libs/gnttab/freebsd.c
 +++ b/tools/libs/gnttab/freebsd.c
-@@ -30,14 +30,11 @@
+@@ -30,11 +30,9 @@
  
  #include <xen/sys/gntdev.h>
  
+-#include "private.h"
 +#include <xenctrl.h>
- #include <xen-tools/libs.h>
- 
- #include "private.h"
  
 -#define PAGE_SHIFT           12
 -#define PAGE_SIZE            (1UL << PAGE_SHIFT)
 -#define PAGE_MASK            (~(PAGE_SIZE-1))
--
++#include "private.h"
+ 
  #define DEVXEN "/dev/xen/gntdev"
  
- int osdep_gnttab_open(xengnttab_handle *xgt)
-@@ -77,10 +74,11 @@ void *osdep_gnttab_grant_map(xengnttab_handle *xgt,
+@@ -75,10 +73,11 @@
      int domids_stride;
      unsigned int refs_size = ROUNDUP(count *
                                       sizeof(struct ioctl_gntdev_grant_ref),
@@ -56,7 +51,7 @@ index 768af701c6..e42ac3fbf3 100644
          map.refs = malloc(refs_size);
      else
      {
-@@ -107,7 +105,7 @@ void *osdep_gnttab_grant_map(xengnttab_handle *xgt,
+@@ -105,7 +104,7 @@
          goto out;
      }
  
@@ -65,7 +60,7 @@ index 768af701c6..e42ac3fbf3 100644
                  map.index);
      if ( addr != MAP_FAILED )
      {
-@@ -116,7 +114,7 @@ void *osdep_gnttab_grant_map(xengnttab_handle *xgt,
+@@ -114,7 +113,7 @@
  
          notify.index = map.index;
          notify.action = 0;
@@ -74,7 +69,7 @@ index 768af701c6..e42ac3fbf3 100644
          {
              notify.index += notify_offset;
              notify.action |= UNMAP_NOTIFY_CLEAR_BYTE;
-@@ -131,7 +129,7 @@ void *osdep_gnttab_grant_map(xengnttab_handle *xgt,
+@@ -129,7 +128,7 @@
          if ( rv )
          {
              GTERROR(xgt->logger, "ioctl SET_UNMAP_NOTIFY failed");
@@ -83,7 +78,7 @@ index 768af701c6..e42ac3fbf3 100644
              addr = MAP_FAILED;
          }
      }
-@@ -150,7 +148,7 @@ void *osdep_gnttab_grant_map(xengnttab_handle *xgt,
+@@ -148,7 +147,7 @@
      }
  
   out:
@@ -92,7 +87,7 @@ index 768af701c6..e42ac3fbf3 100644
          munmap(map.refs, refs_size);
      else
          free(map.refs);
-@@ -189,7 +187,7 @@ int osdep_gnttab_unmap(xengnttab_handle *xgt,
+@@ -187,7 +186,7 @@
      }
  
      /* Next, unmap the memory. */
@@ -101,7 +96,7 @@ index 768af701c6..e42ac3fbf3 100644
          return rc;
  
      /* Finally, unmap the driver slots used to store the grant information. */
-@@ -256,7 +254,7 @@ void *osdep_gntshr_share_pages(xengntshr_handle *xgs,
+@@ -254,7 +253,7 @@
          goto out;
      }
  
@@ -110,7 +105,7 @@ index 768af701c6..e42ac3fbf3 100644
                  fd, gref_info.index);
  
      if ( area == MAP_FAILED )
-@@ -268,7 +266,7 @@ void *osdep_gntshr_share_pages(xengntshr_handle *xgs,
+@@ -266,7 +265,7 @@
  
      notify.index = gref_info.index;
      notify.action = 0;
@@ -119,7 +114,7 @@ index 768af701c6..e42ac3fbf3 100644
      {
          notify.index += notify_offset;
          notify.action |= UNMAP_NOTIFY_CLEAR_BYTE;
-@@ -283,7 +281,7 @@ void *osdep_gntshr_share_pages(xengntshr_handle *xgs,
+@@ -281,7 +280,7 @@
      if ( err )
      {
          GSERROR(xgs->logger, "ioctl SET_UNMAP_NOTIFY failed");
@@ -128,7 +123,7 @@ index 768af701c6..e42ac3fbf3 100644
          area = NULL;
      }
  
-@@ -306,7 +304,7 @@ void *osdep_gntshr_share_pages(xengntshr_handle *xgs,
+@@ -304,7 +303,7 @@
  int osdep_gntshr_unshare(xengntshr_handle *xgs,
                           void *start_address, uint32_t count)
  {
@@ -137,8 +132,6 @@ index 768af701c6..e42ac3fbf3 100644
  }
  
  /*
-diff --git a/tools/libs/gnttab/linux.c b/tools/libs/gnttab/linux.c
-index 74331a4c7b..5628fd5719 100644
 --- a/tools/libs/gnttab/linux.c
 +++ b/tools/libs/gnttab/linux.c
 @@ -32,14 +32,11 @@
@@ -157,7 +150,7 @@ index 74331a4c7b..5628fd5719 100644
  #define DEVXEN "/dev/xen/"
  
  #ifndef O_CLOEXEC
-@@ -92,6 +89,7 @@ void *osdep_gnttab_grant_map(xengnttab_handle *xgt,
+@@ -92,6 +89,7 @@
      int fd = xgt->fd;
      struct ioctl_gntdev_map_grant_ref *map;
      unsigned int map_size = sizeof(*map) + (count - 1) * sizeof(map->refs[0]);
@@ -165,7 +158,7 @@ index 74331a4c7b..5628fd5719 100644
      void *addr = NULL;
      int domids_stride = 1;
      int i;
-@@ -99,11 +97,11 @@ void *osdep_gnttab_grant_map(xengnttab_handle *xgt,
+@@ -99,11 +97,11 @@
      if (flags & XENGNTTAB_GRANT_MAP_SINGLE_DOMAIN)
          domids_stride = 0;
  
@@ -179,7 +172,7 @@ index 74331a4c7b..5628fd5719 100644
          map = mmap(NULL, map_size, PROT_READ | PROT_WRITE,
                     MAP_PRIVATE | MAP_ANON | MAP_POPULATE, -1, 0);
          if ( map == MAP_FAILED )
-@@ -127,7 +125,7 @@ void *osdep_gnttab_grant_map(xengnttab_handle *xgt,
+@@ -127,7 +125,7 @@
      }
  
   retry:
@@ -188,7 +181,7 @@ index 74331a4c7b..5628fd5719 100644
                  map->index);
  
      if (addr == MAP_FAILED && errno == EAGAIN)
-@@ -152,7 +150,7 @@ void *osdep_gnttab_grant_map(xengnttab_handle *xgt,
+@@ -152,7 +150,7 @@
          struct ioctl_gntdev_unmap_notify notify;
          notify.index = map->index;
          notify.action = 0;
@@ -197,7 +190,7 @@ index 74331a4c7b..5628fd5719 100644
              notify.index += notify_offset;
              notify.action |= UNMAP_NOTIFY_CLEAR_BYTE;
          }
-@@ -164,7 +162,7 @@ void *osdep_gnttab_grant_map(xengnttab_handle *xgt,
+@@ -164,7 +162,7 @@
              rv = ioctl(fd, IOCTL_GNTDEV_SET_UNMAP_NOTIFY, &notify);
          if (rv) {
              GTERROR(xgt->logger, "ioctl SET_UNMAP_NOTIFY failed");
@@ -206,7 +199,7 @@ index 74331a4c7b..5628fd5719 100644
              addr = MAP_FAILED;
          }
      }
-@@ -184,7 +182,7 @@ void *osdep_gnttab_grant_map(xengnttab_handle *xgt,
+@@ -184,7 +182,7 @@
      }
  
   out:
@@ -215,7 +208,7 @@ index 74331a4c7b..5628fd5719 100644
          munmap(map, map_size);
  
      return addr;
-@@ -220,7 +218,7 @@ int osdep_gnttab_unmap(xengnttab_handle *xgt,
+@@ -220,7 +218,7 @@
      }
  
      /* Next, unmap the memory. */
@@ -224,7 +217,7 @@ index 74331a4c7b..5628fd5719 100644
          return rc;
  
      /* Finally, unmap the driver slots used to store the grant information. */
-@@ -466,7 +464,7 @@ void *osdep_gntshr_share_pages(xengntshr_handle *xgs,
+@@ -466,7 +464,7 @@
          goto out;
      }
  
@@ -233,7 +226,7 @@ index 74331a4c7b..5628fd5719 100644
          MAP_SHARED, fd, gref_info->index);
  
      if (area == MAP_FAILED) {
-@@ -477,7 +475,7 @@ void *osdep_gntshr_share_pages(xengntshr_handle *xgs,
+@@ -477,7 +475,7 @@
  
      notify.index = gref_info->index;
      notify.action = 0;
@@ -242,7 +235,7 @@ index 74331a4c7b..5628fd5719 100644
          notify.index += notify_offset;
          notify.action |= UNMAP_NOTIFY_CLEAR_BYTE;
      }
-@@ -489,7 +487,7 @@ void *osdep_gntshr_share_pages(xengntshr_handle *xgs,
+@@ -489,7 +487,7 @@
          err = ioctl(fd, IOCTL_GNTALLOC_SET_UNMAP_NOTIFY, &notify);
      if (err) {
          GSERROR(xgs->logger, "ioctl SET_UNMAP_NOTIFY failed");
@@ -251,7 +244,7 @@ index 74331a4c7b..5628fd5719 100644
          area = NULL;
      }
  
-@@ -510,7 +508,7 @@ void *osdep_gntshr_share_pages(xengntshr_handle *xgs,
+@@ -510,7 +508,7 @@
  int osdep_gntshr_unshare(xengntshr_handle *xgs,
                           void *start_address, uint32_t count)
  {
@@ -260,104 +253,3 @@ index 74331a4c7b..5628fd5719 100644
  }
  
  /*
-diff --git a/tools/libs/gnttab/netbsd.c b/tools/libs/gnttab/netbsd.c
-index f8d7c356eb..a4ad624b54 100644
---- a/tools/libs/gnttab/netbsd.c
-+++ b/tools/libs/gnttab/netbsd.c
-@@ -28,15 +28,12 @@
- #include <sys/ioctl.h>
- #include <sys/mman.h>
- 
-+#include <xenctrl.h>
- #include <xen/xen.h>
- #include <xen/xenio.h>
- 
- #include "private.h"
- 
--#define PAGE_SHIFT           12
--#define PAGE_SIZE            (1UL << PAGE_SHIFT)
--#define PAGE_MASK            (~(PAGE_SIZE-1))
--
- #define DEVXEN "/kern/xen/privcmd"
- 
- int osdep_gnttab_open(xengnttab_handle *xgt)
-@@ -87,19 +84,19 @@ void *osdep_gnttab_grant_map(xengnttab_handle *xgt,
-     }
- 
-     map.count = count;
--    addr = mmap(NULL, count * PAGE_SIZE,
-+    addr = mmap(NULL, count * XC_PAGE_SIZE,
-                 prot, flags | MAP_ANON | MAP_SHARED, -1, 0);
-     if ( map.va == MAP_FAILED )
-     {
-         GTERROR(xgt->logger, "osdep_gnttab_grant_map: mmap failed");
--        munmap((void *)map.va, count * PAGE_SIZE);
-+        munmap((void *)map.va, count * XC_PAGE_SIZE);
-         addr = MAP_FAILED;
-     }
-     map.va = addr;
- 
-     map.notify.offset = 0;
-     map.notify.action = 0;
--    if ( notify_offset < PAGE_SIZE * count )
-+    if ( notify_offset < XC_PAGE_SIZE * count )
-     {
-         map.notify.offset = notify_offset;
-         map.notify.action |= UNMAP_NOTIFY_CLEAR_BYTE;
-@@ -115,7 +112,7 @@ void *osdep_gnttab_grant_map(xengnttab_handle *xgt,
-     {
-         GTERROR(xgt->logger,
-             "ioctl IOCTL_GNTDEV_MMAP_GRANT_REF failed: %d", rv);
--        munmap(addr, count * PAGE_SIZE);
-+        munmap(addr, count * XC_PAGE_SIZE);
-         addr = MAP_FAILED;
-     }
- 
-@@ -136,7 +133,7 @@ int osdep_gnttab_unmap(xengnttab_handle *xgt,
-     }
- 
-     /* Next, unmap the memory. */
--    rc = munmap(start_address, count * PAGE_SIZE);
-+    rc = munmap(start_address, count * XC_PAGE_SIZE);
- 
-     return rc;
- }
-@@ -187,7 +184,7 @@ void *osdep_gntshr_share_pages(xengntshr_handle *xgs,
-     alloc.domid = domid;
-     alloc.flags = writable ? GNTDEV_ALLOC_FLAG_WRITABLE : 0;
-     alloc.count = count;
--    area = mmap(NULL, count * PAGE_SIZE,
-+    area = mmap(NULL, count * XC_PAGE_SIZE,
-                 PROT_READ | PROT_WRITE, MAP_ANON | MAP_SHARED, -1, 0);
- 
-     if ( area == MAP_FAILED )
-@@ -200,7 +197,7 @@ void *osdep_gntshr_share_pages(xengntshr_handle *xgs,
- 
-     alloc.notify.offset = 0;
-     alloc.notify.action = 0;
--    if ( notify_offset < PAGE_SIZE * count )
-+    if ( notify_offset < XC_PAGE_SIZE * count )
-     {
-         alloc.notify.offset = notify_offset;
-         alloc.notify.action |= UNMAP_NOTIFY_CLEAR_BYTE;
-@@ -215,7 +212,7 @@ void *osdep_gntshr_share_pages(xengntshr_handle *xgs,
-     if ( err )
-     {
-         GSERROR(xgs->logger, "IOCTL_GNTDEV_ALLOC_GRANT_REF failed");
--        munmap(area, count * PAGE_SIZE);
-+        munmap(area, count * XC_PAGE_SIZE);
-         area = MAP_FAILED;
-         goto out;
-     }
-@@ -230,7 +227,7 @@ void *osdep_gntshr_share_pages(xengntshr_handle *xgs,
- int osdep_gntshr_unshare(xengntshr_handle *xgs,
-                          void *start_address, uint32_t count)
- {
--    return munmap(start_address, count * PAGE_SIZE);
-+    return munmap(start_address, count * XC_PAGE_SIZE);
- }
- 
- /*
--- 
-2.20.1
-

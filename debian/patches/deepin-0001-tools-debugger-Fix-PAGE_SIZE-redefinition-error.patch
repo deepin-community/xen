@@ -22,8 +22,6 @@ Acked-by: Ian Jackson <iwj@xenproject.org>
  tools/debugger/kdd/kdd.h     |  7 +++++++
  3 files changed, 21 insertions(+), 20 deletions(-)
 
-diff --git a/tools/debugger/kdd/kdd-xen.c b/tools/debugger/kdd/kdd-xen.c
-index f3f9529f9f..e78c9311c4 100644
 --- a/tools/debugger/kdd/kdd-xen.c
 +++ b/tools/debugger/kdd/kdd-xen.c
 @@ -48,9 +48,6 @@
@@ -36,7 +34,7 @@ index f3f9529f9f..e78c9311c4 100644
  struct kdd_guest {
      struct xentoollog_logger xc_log; /* Must be first for xc log callbacks */
      xc_interface *xc_handle;
-@@ -72,7 +69,7 @@ static void flush_maps(kdd_guest *g)
+@@ -72,7 +69,7 @@
      int i;
      for (i = 0; i < MAPSIZE; i++) {
          if (g->maps[i] != NULL)
@@ -45,7 +43,7 @@ index f3f9529f9f..e78c9311c4 100644
          g->maps[i] = NULL;
      }
  }
-@@ -490,13 +487,13 @@ static uint32_t kdd_access_physical_page(kdd_guest *g, uint64_t addr,
+@@ -490,13 +487,13 @@
      uint32_t map_pfn, map_offset;
      uint8_t *map;
  
@@ -62,7 +60,7 @@ index f3f9529f9f..e78c9311c4 100644
          g->maps[map_pfn % MAPSIZE] = NULL;
      }
      g->pfns[map_pfn % MAPSIZE] = map_pfn;
-@@ -507,7 +504,7 @@ static uint32_t kdd_access_physical_page(kdd_guest *g, uint64_t addr,
+@@ -507,7 +504,7 @@
      else {
          map = xc_map_foreign_range(g->xc_handle,
                                     g->domid,
@@ -71,7 +69,7 @@ index f3f9529f9f..e78c9311c4 100644
                                     PROT_READ|PROT_WRITE,
                                     map_pfn);
  
-@@ -533,7 +530,7 @@ uint32_t kdd_access_physical(kdd_guest *g, uint64_t addr,
+@@ -533,7 +530,7 @@
  {
      uint32_t chunk, rv, done = 0;
      while (len > 0) {
@@ -80,11 +78,9 @@ index f3f9529f9f..e78c9311c4 100644
          if (chunk > len) 
              chunk = len;
          rv = kdd_access_physical_page(g, addr, chunk, buf, write);
-diff --git a/tools/debugger/kdd/kdd.c b/tools/debugger/kdd/kdd.c
-index 17513c2650..320c623eda 100644
 --- a/tools/debugger/kdd/kdd.c
 +++ b/tools/debugger/kdd/kdd.c
-@@ -288,9 +288,6 @@ static void kdd_log_pkt(kdd_state *s, const char *name, kdd_pkt *p)
+@@ -288,9 +288,6 @@
   *  Memory access: virtual addresses and syntactic sugar.
   */
  
@@ -94,7 +90,7 @@ index 17513c2650..320c623eda 100644
  static uint32_t kdd_read_physical(kdd_state *s, uint64_t addr, 
                                    uint32_t len, void *buf)
  {
-@@ -352,7 +349,7 @@ static uint64_t v2p(kdd_state *s, int cpuid, uint64_t va)
+@@ -352,7 +349,7 @@
  
      /* Walk the appropriate number of levels */
      for (i = levels; i > 0; i--) {
@@ -103,7 +99,7 @@ index 17513c2650..320c623eda 100644
          mask = ((1ULL << bits) - 1) << shift;
          offset = ((va & mask) >> shift) * width;
          KDD_DEBUG(s, "level %i: mask 0x%16.16"PRIx64" pa 0x%16.16"PRIx64
-@@ -364,12 +361,12 @@ static uint64_t v2p(kdd_state *s, int cpuid, uint64_t va)
+@@ -364,12 +361,12 @@
              return -1ULL; // Not present
          pa = entry & 0x000ffffffffff000ULL;
          if (pse && (i == 2) && (entry & 0x80)) { // Superpage
@@ -118,7 +114,7 @@ index 17513c2650..320c623eda 100644
  }
  
  static uint32_t kdd_access_virtual(kdd_state *s, int cpuid, uint64_t addr,
-@@ -380,7 +377,7 @@ static uint32_t kdd_access_virtual(kdd_state *s, int cpuid, uint64_t addr,
+@@ -380,7 +377,7 @@
      
      /* Process one page at a time */
      while (len > 0) {
@@ -127,7 +123,7 @@ index 17513c2650..320c623eda 100644
          if (chunk > len) 
              chunk = len;
          pa = v2p(s, cpuid, addr);
-@@ -591,7 +588,7 @@ static void get_os_info_64(kdd_state *s)
+@@ -591,7 +588,7 @@
      uint64_t dbgkd_addr;
      DBGKD_GET_VERSION64 dbgkd_get_version64;
      /* Maybe 1GB is too big for the limit to search? */
@@ -136,7 +132,7 @@ index 17513c2650..320c623eda 100644
      uint64_t efer;
  
      /* if we are not in 64-bit mode, fail */
-@@ -620,7 +617,7 @@ static void get_os_info_64(kdd_state *s)
+@@ -620,7 +617,7 @@
       * in 1GB range above the current page base address
       */
  
@@ -145,7 +141,7 @@ index 17513c2650..320c623eda 100644
  
      while (search_limit) {
          uint16_t val;
-@@ -633,7 +630,7 @@ static void get_os_info_64(kdd_state *s)
+@@ -633,7 +630,7 @@
          if (val == MZ_HEADER) // MZ
              break;
  
@@ -154,7 +150,7 @@ index 17513c2650..320c623eda 100644
          search_limit -= 1;
      }
  
-@@ -720,7 +717,7 @@ static void find_os(kdd_state *s)
+@@ -720,7 +717,7 @@
          /* Try each page in the potential range of kernel load addresses */
          for (limit = s->os.base + s->os.range;
               s->os.base <= limit;
@@ -163,8 +159,6 @@ index 17513c2650..320c623eda 100644
              if (check_os(s))
                  return;
      }
-diff --git a/tools/debugger/kdd/kdd.h b/tools/debugger/kdd/kdd.h
-index b9a17440df..b476a76d93 100644
 --- a/tools/debugger/kdd/kdd.h
 +++ b/tools/debugger/kdd/kdd.h
 @@ -39,6 +39,13 @@
@@ -181,6 +175,3 @@ index b9a17440df..b476a76d93 100644
  /*****************************************************************************
   * Serial line protocol: Sender sends a 16-byte header with an optional
   * payload following it.  Receiver responds to each packet with an
--- 
-2.20.1
-

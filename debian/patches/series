@@ -40,6 +40,6 @@ misc/toolstestsx86_emulator-pass--no-pie--fno.patch
 0040-docs-set-date-to-SOURCE_DATE_EPOCH-if-available.patch
 deepin-0001-tools-debugger-Fix-PAGE_SIZE-redefinition-error.patch
 deepin-0002-tools-libfsimage-Fix-PATH_MAX-redefinition-error.patch
-deepin-0003-tools-libs-foreignmemory-Fix-PAGE_SIZE-redefinition-.patch
+deepin-0003-tools-libs-foreignmemory-Fix-PAGE_SIZE-redefinition.patch
 deepin-0004-tools-libs-gnttab-Fix-PAGE_SIZE-redefinition-error.patch
 deepin-0005-tools-ocaml-Fix-redefinition-errors.patch
