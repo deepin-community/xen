@@ -10,7 +10,6 @@
  * Slimmed with Xen specific support.
  */
 
-#include <asm/io.h>
 #include <xen/acpi.h>
 #include <xen/errno.h>
 #include <xen/iocap.h>
@@ -36,7 +35,7 @@
 
 uint32_t system_reset_counter = 1;
 
-static int __init parse_acpi_sleep(const char *s)
+static int __init cf_check parse_acpi_sleep(const char *s)
 {
     const char *ss;
     unsigned int flag = 0;
@@ -160,10 +159,7 @@ static void thaw_domains(void)
 
     rcu_read_lock(&domlist_read_lock);
     for_each_domain ( d )
-    {
-        restore_vcpu_affinity(d);
         domain_unpause(d);
-    }
     rcu_read_unlock(&domlist_read_lock);
 }
 
@@ -174,17 +170,20 @@ static void acpi_sleep_prepare(u32 state)
     if ( state != ACPI_STATE_S3 )
         return;
 
-    wakeup_vector_va = __acpi_map_table(
-        acpi_sinfo.wakeup_vector, sizeof(uint64_t));
-
     /* TBoot will set resume vector itself (when it is safe to do so). */
     if ( tboot_in_measured_env() )
         return;
+
+    set_fixmap(FIX_ACPI_END, acpi_sinfo.wakeup_vector);
+    wakeup_vector_va = fix_to_virt(FIX_ACPI_END) +
+                       PAGE_OFFSET(acpi_sinfo.wakeup_vector);
 
     if ( acpi_sinfo.vector_width == 32 )
         *(uint32_t *)wakeup_vector_va = bootsym_phys(wakeup_start);
     else
         *(uint64_t *)wakeup_vector_va = bootsym_phys(wakeup_start);
+
+    clear_fixmap(FIX_ACPI_END);
 }
 
 static void acpi_sleep_post(u32 state) {}
@@ -246,9 +245,8 @@ static int enter_state(u32 state)
         error = 0;
 
     ci = get_cpu_info();
-    spec_ctrl_enter_idle(ci);
-    /* Avoid NMI/#MC using MSR_SPEC_CTRL until we've reloaded microcode. */
-    ci->spec_ctrl_flags &= ~SCF_ist_wrmsr;
+    /* Avoid NMI/#MC using unsafe MSRs until we've reloaded microcode. */
+    ci->spec_ctrl_flags &= ~SCF_IST_MASK;
 
     ACPI_FLUSH_CPU_CACHE();
 
@@ -291,12 +289,16 @@ static int enter_state(u32 state)
     if ( !recheck_cpu_features(0) )
         panic("Missing previously available feature(s)\n");
 
-    /* Re-enabled default NMI/#MC use of MSR_SPEC_CTRL. */
-    ci->spec_ctrl_flags |= (default_spec_ctrl_flags & SCF_ist_wrmsr);
-    spec_ctrl_exit_idle(ci);
+    /* Re-enabled default NMI/#MC use of MSRs now microcode is loaded. */
+    ci->spec_ctrl_flags |= (default_spec_ctrl_flags & SCF_IST_MASK);
 
-    if ( boot_cpu_has(X86_FEATURE_SRBDS_CTRL) )
-        wrmsrl(MSR_MCU_OPT_CTRL, default_xen_mcu_opt_ctrl);
+    if ( boot_cpu_has(X86_FEATURE_IBRSB) || boot_cpu_has(X86_FEATURE_IBRS) )
+    {
+        wrmsrl(MSR_SPEC_CTRL, default_xen_spec_ctrl);
+        ci->last_spec_ctrl = default_xen_spec_ctrl;
+    }
+
+    update_mcu_opt_ctrl();
 
     /* (re)initialise SYSCALL/SYSENTER state, amongst other things. */
     percpu_traps_init();
@@ -321,7 +323,7 @@ static int enter_state(u32 state)
     return error;
 }
 
-static long enter_state_helper(void *data)
+static long cf_check enter_state_helper(void *data)
 {
     struct acpi_sleep_info *sinfo = (struct acpi_sleep_info *)data;
     return enter_state(sinfo->sleep_state);
@@ -333,6 +335,12 @@ static long enter_state_helper(void *data)
  */
 int acpi_enter_sleep(struct xenpf_enter_acpi_sleep *sleep)
 {
+    if ( sleep->sleep_state == ACPI_STATE_S3 &&
+         (!acpi_sinfo.wakeup_vector || !acpi_sinfo.vector_width ||
+          (PAGE_OFFSET(acpi_sinfo.wakeup_vector) >
+           PAGE_SIZE - acpi_sinfo.vector_width / 8)) )
+        return -EOPNOTSUPP;
+
     if ( sleep->flags & XENPF_ACPI_SLEEP_EXTENDED )
     {
         if ( !acpi_sinfo.sleep_control.address ||

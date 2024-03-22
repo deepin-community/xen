@@ -38,7 +38,7 @@ static bool debugtrace_buf_empty = true;
 static bool debugtrace_used;
 static DEFINE_SPINLOCK(debugtrace_lock);
 
-static int __init debugtrace_parse_param(const char *s)
+static int __init cf_check debugtrace_parse_param(const char *s)
 {
     unsigned long bytes;
 
@@ -233,7 +233,7 @@ void debugtrace_printk(const char *fmt, ...)
     spin_unlock_irqrestore(&debugtrace_lock, flags);
 }
 
-static void debugtrace_key(unsigned char key)
+static void cf_check debugtrace_key(unsigned char key)
 {
     debugtrace_toggle();
 }
@@ -263,8 +263,8 @@ static void debugtrace_alloc_buffer(struct debugtrace_data **ptr,
     *ptr = data;
 }
 
-static int debugtrace_cpu_callback(struct notifier_block *nfb,
-                                   unsigned long action, void *hcpu)
+static int cf_check debugtrace_cpu_callback(
+    struct notifier_block *nfb, unsigned long action, void *hcpu)
 {
     unsigned int cpu = (unsigned long)hcpu;
 
@@ -279,7 +279,7 @@ static struct notifier_block debugtrace_nfb = {
     .notifier_call = debugtrace_cpu_callback
 };
 
-static int __init debugtrace_init(void)
+static int __init cf_check debugtrace_init(void)
 {
     unsigned int cpu;
 

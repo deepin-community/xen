@@ -45,7 +45,7 @@ struct free_info {
 };
 static DEFINE_PER_CPU(struct free_info, free_info);
 
-static void _free_percpu_area(struct rcu_head *head)
+static void cf_check _free_percpu_area(struct rcu_head *head)
 {
     struct free_info *info = container_of(head, struct free_info, rcu);
     unsigned int cpu = info->cpu;
@@ -63,7 +63,7 @@ static void free_percpu_area(unsigned int cpu)
     call_rcu(&info->rcu, _free_percpu_area);
 }
 
-static int cpu_percpu_callback(
+static int cf_check cpu_percpu_callback(
     struct notifier_block *nfb, unsigned long action, void *hcpu)
 {
     unsigned int cpu = (unsigned long)hcpu;
@@ -94,7 +94,7 @@ static struct notifier_block cpu_percpu_nfb = {
     .priority = 100 /* highest priority */
 };
 
-static int __init percpu_presmp_init(void)
+static int __init cf_check percpu_presmp_init(void)
 {
     register_cpu_notifier(&cpu_percpu_nfb);
 

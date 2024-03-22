@@ -197,14 +197,11 @@ static int fuzz_read_io(
 }
 
 static int fuzz_insn_fetch(
-    enum x86_segment seg,
     unsigned long offset,
     void *p_data,
     unsigned int bytes,
     struct x86_emulate_ctxt *ctxt)
 {
-    assert(seg == x86_seg_cs);
-
     /* Minimal segment limit checking, until full one is being put in place. */
     if ( ctxt->addr_size < 64 && (offset >> 32) )
     {
@@ -222,7 +219,7 @@ static int fuzz_insn_fetch(
         return maybe_fail(ctxt, "insn_fetch", true);
     }
 
-    return data_read(ctxt, seg, "insn_fetch", p_data, bytes);
+    return data_read(ctxt, x86_seg_cs, "insn_fetch", p_data, bytes);
 }
 
 static int _fuzz_rep_read(struct x86_emulate_ctxt *ctxt,
@@ -896,11 +893,13 @@ int LLVMFuzzerTestOneInput(const uint8_t *data_p, size_t size)
     struct x86_emulate_ctxt ctxt = {
         .data = &state,
         .regs = &input.regs,
-        .cpuid = &cp,
         .addr_size = 8 * sizeof(void *),
         .sp_size = 8 * sizeof(void *),
     };
     int rc;
+
+    /* Not part of the initializer, for old gcc to cope. */
+    ctxt.cpu_policy = &cp;
 
     /* Reset all global state variables */
     memset(&input, 0, sizeof(input));

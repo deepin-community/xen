@@ -302,7 +302,7 @@ static void read_symbol_table(const char *symtab)
 
 #if defined(__i386__) || defined(__x86_64__)
 #define CR0_PE  0x1
-char *flag_values[22][2] =
+const char *flag_values[22][2] =
 {/*  clear,     set,       bit# */
     { NULL,     "c"    }, // 0        Carry
     { NULL,     NULL   }, // 1
@@ -334,7 +334,7 @@ static void print_flags(uint64_t flags)
 
     printf("\nflags: %08" PRIx64, flags);
     for (i = 21; i >= 0; i--) {
-        char *s = flag_values[i][(flags >> i) & 1];
+        const char *s = flag_values[i][(flags >> i) & 1];
         if (s != NULL)
             printf(" %s", s);
     }
@@ -556,7 +556,7 @@ static void print_ctx_32(vcpu_guest_context_t *ctx)
     printf("PC:       %08"PRIx32, regs->pc32);
     print_symbol(regs->pc32, KERNEL_TEXT_ADDR);
     printf("\n");
-    printf("CPSR:     %08"PRIx32"\n", regs->cpsr);
+    printf("CPSR:     %08"PRIx64"\n", regs->cpsr);
     printf("USR:               SP:%08"PRIx32" LR:%08"PRIx32"\n",
            regs->sp_usr, regs->lr_usr);
     printf("SVC: SPSR:%08"PRIx32" SP:%08"PRIx32" LR:%08"PRIx32"\n",
@@ -614,8 +614,8 @@ static void print_ctx_64(vcpu_guest_context_t *ctx)
     printf("LR:       %016"PRIx64"\n", regs->x30);
     printf("ELR_EL1:  %016"PRIx64"\n", regs->elr_el1);
 
-    printf("CPSR:     %08"PRIx32"\n", regs->cpsr);
-    printf("SPSR_EL1: %08"PRIx32"\n", regs->spsr_el1);
+    printf("CPSR:     %08"PRIx64"\n", regs->cpsr);
+    printf("SPSR_EL1: %08"PRIx64"\n", regs->spsr_el1);
 
     printf("SP_EL0:   %016"PRIx64"\n", regs->sp_el0);
     printf("SP_EL1:   %016"PRIx64"\n", regs->sp_el1);

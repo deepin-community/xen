@@ -56,7 +56,7 @@ static int reboot_mode;
  */
 static enum reboot_type reboot_type = BOOT_INVALID;
 
-static int __init set_reboot_type(const char *str)
+static int __init cf_check set_reboot_type(const char *str)
 {
     int rc = 0;
 
@@ -118,7 +118,7 @@ static inline void kb_wait(void)
             break;
 }
 
-static void noreturn __machine_halt(void *unused)
+static void noreturn cf_check __machine_halt(void *unused)
 {
     local_irq_disable();
 
@@ -158,7 +158,7 @@ static void default_reboot_type(void)
         reboot_type = BOOT_ACPI;
 }
 
-static int __init override_reboot(const struct dmi_system_id *d)
+static int __init cf_check override_reboot(const struct dmi_system_id *d)
 {
     enum reboot_type type = (long)d->driver_data;
 
@@ -533,7 +533,7 @@ static const struct dmi_system_id __initconstrel reboot_dmi_table[] = {
     { }
 };
 
-static int __init reboot_init(void)
+static int __init cf_check reboot_init(void)
 {
     /*
      * Only do the DMI check if reboot_type hasn't been overridden
@@ -548,7 +548,7 @@ static int __init reboot_init(void)
 }
 __initcall(reboot_init);
 
-static void noreturn __machine_restart(void *pdelay)
+static void cf_check noreturn __machine_restart(void *pdelay)
 {
     machine_restart(*(unsigned int *)pdelay);
 }

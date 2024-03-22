@@ -198,7 +198,7 @@ int dt_property_read_string(const struct dt_device_node *np,
 
     if ( !pp )
         return -EINVAL;
-    if ( !pp->value )
+    if ( !pp->length )
         return -ENODATA;
     if ( strnlen(pp->value, pp->length) >= pp->length )
         return -EILSEQ;
@@ -206,6 +206,94 @@ int dt_property_read_string(const struct dt_device_node *np,
     *out_string = pp->value;
 
     return 0;
+}
+
+/**
+ * dt_find_property_value_of_size
+ *
+ * @np:     device node from which the property value is to be read.
+ * @propname:   name of the property to be searched.
+ * @min:    minimum allowed length of property value
+ * @max:    maximum allowed length of property value (0 means unlimited)
+ * @len:    if !=NULL, actual length is written to here
+ *
+ * Search for a property in a device node and valid the requested size.
+ *
+ * Return: The property value on success, -EINVAL if the property does not
+ * exist, -ENODATA if property does not have a value, and -EOVERFLOW if the
+ * property data is too small or too large.
+ */
+static void *dt_find_property_value_of_size(const struct dt_device_node *np,
+                                            const char *propname, u32 min,
+                                            u32 max, size_t *len)
+{
+    const struct dt_property *prop = dt_find_property(np, propname, NULL);
+
+    if ( !prop )
+        return ERR_PTR(-EINVAL);
+    if ( !prop->value )
+        return ERR_PTR(-ENODATA);
+    if ( prop->length < min )
+        return ERR_PTR(-EOVERFLOW);
+    if ( max && prop->length > max )
+        return ERR_PTR(-EOVERFLOW);
+
+    if ( len )
+        *len = prop->length;
+
+    return prop->value;
+}
+
+int dt_property_read_variable_u32_array(const struct dt_device_node *np,
+                                        const char *propname, u32 *out_values,
+                                        size_t sz_min, size_t sz_max)
+{
+    size_t sz, count;
+    const __be32 *val = dt_find_property_value_of_size(np, propname,
+                        (sz_min * sizeof(*out_values)),
+                        (sz_max * sizeof(*out_values)),
+                        &sz);
+
+    if ( IS_ERR(val) )
+        return PTR_ERR(val);
+
+    if ( !sz_max )
+        sz = sz_min;
+    else
+        sz /= sizeof(*out_values);
+
+    count = sz;
+    while ( count-- )
+        *out_values++ = be32_to_cpup(val++);
+
+    return sz;
+}
+
+int dt_property_match_string(const struct dt_device_node *np,
+                             const char *propname, const char *string)
+{
+    const struct dt_property *dtprop = dt_find_property(np, propname, NULL);
+    size_t l;
+    int i;
+    const char *p, *end;
+
+    if ( !dtprop )
+        return -EINVAL;
+    if ( !dtprop->value )
+        return -ENODATA;
+
+    p = dtprop->value;
+    end = p + dtprop->length;
+
+    for ( i = 0; p < end; i++, p += l )
+    {
+        l = strnlen(p, end - p) + 1;
+        if ( p + l > end )
+            return -EILSEQ;
+        if ( strcmp(string, p) == 0 )
+            return i; /* Found it; return index */
+    }
+    return -ENODATA;
 }
 
 bool_t dt_device_is_compatible(const struct dt_device_node *device,
@@ -408,7 +496,7 @@ static int __dt_n_addr_cells(const struct dt_device_node *np, bool_t parent)
     return DT_ROOT_NODE_ADDR_CELLS_DEFAULT;
 }
 
-int __dt_n_size_cells(const struct dt_device_node *np, bool_t parent)
+static int __dt_n_size_cells(const struct dt_device_node *np, bool_t parent)
 {
     const __be32 *ip;
 
@@ -536,14 +624,28 @@ static unsigned int dt_bus_default_get_flags(const __be32 *addr)
  * PCI bus specific translator
  */
 
+static bool dt_node_is_pci(const struct dt_device_node *np)
+{
+    bool is_pci = !strcmp(np->name, "pcie") || !strcmp(np->name, "pci");
+
+    if ( is_pci )
+        printk(XENLOG_WARNING "%s: Missing device_type\n", np->full_name);
+
+    return is_pci;
+}
+
 static bool_t dt_bus_pci_match(const struct dt_device_node *np)
 {
     /*
      * "pciex" is PCI Express "vci" is for the /chaos bridge on 1st-gen PCI
      * powermacs "ht" is hypertransport
+     *
+     * If none of the device_type match, and that the node name is
+     * "pcie" or "pci", accept the device as PCI (with a warning).
      */
     return !strcmp(np->type, "pci") || !strcmp(np->type, "pciex") ||
-        !strcmp(np->type, "vci") || !strcmp(np->type, "ht");
+        !strcmp(np->type, "vci") || !strcmp(np->type, "ht") ||
+        dt_node_is_pci(np);
 }
 
 static void dt_bus_pci_count_cells(const struct dt_device_node *np,
@@ -945,7 +1047,7 @@ int dt_for_each_range(const struct dt_device_node *dev,
  *
  * Returns a node pointer.
  */
-static struct dt_device_node *dt_find_node_by_phandle(dt_phandle handle)
+struct dt_device_node *dt_find_node_by_phandle(dt_phandle handle)
 {
     struct dt_device_node *np;
 
@@ -2079,6 +2181,18 @@ void __init dt_unflatten_host_device_tree(void)
 {
     __unflatten_device_tree(device_tree_flattened, &dt_host);
     dt_alias_scan();
+}
+
+int dt_get_pci_domain_nr(struct dt_device_node *node)
+{
+    u32 domain;
+    int error;
+
+    error = dt_property_read_u32(node, "linux,pci-domain", &domain);
+    if ( !error )
+        return -EINVAL;
+
+    return (u16)domain;
 }
 
 /*

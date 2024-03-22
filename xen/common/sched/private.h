@@ -8,8 +8,9 @@
 #ifndef __XEN_SCHED_IF_H__
 #define __XEN_SCHED_IF_H__
 
-#include <xen/percpu.h>
 #include <xen/err.h>
+#include <xen/list.h>
+#include <xen/percpu.h>
 #include <xen/rcupdate.h>
 
 /* cpus currently in no cpupool */
@@ -271,8 +272,8 @@ static inline spinlock_t *pcpu_schedule_trylock(unsigned int cpu)
 }
 
 struct scheduler {
-    char *name;             /* full name for this scheduler      */
-    char *opt_name;         /* option name for this scheduler    */
+    const char *name;       /* full name for this scheduler      */
+    const char *opt_name;   /* option name for this scheduler    */
     unsigned int sched_id;  /* ID for this scheduler             */
     void *sched_data;       /* global data pointer               */
     struct cpupool *cpupool;/* points to this scheduler's pool   */
@@ -330,6 +331,8 @@ struct scheduler {
                                     struct xen_sysctl_scheduler_op *);
     void         (*dump_settings)  (const struct scheduler *);
     void         (*dump_cpu_state) (const struct scheduler *, int);
+    void         (*move_timers)    (const struct scheduler *,
+                                    struct sched_resource *);
 };
 
 static inline int sched_init(struct scheduler *s)
@@ -484,6 +487,13 @@ static inline int sched_adjust_cpupool(const struct scheduler *s,
     return s->adjust_global ? s->adjust_global(s, op) : 0;
 }
 
+static inline void sched_move_timers(const struct scheduler *s,
+                                     struct sched_resource *sr)
+{
+    if ( s->move_timers )
+        s->move_timers(s, sr);
+}
+
 static inline void sched_unit_pause_nosync(const struct sched_unit *unit)
 {
     struct vcpu *v;
@@ -505,15 +515,17 @@ static inline void sched_unit_unpause(const struct sched_unit *unit)
 
 struct cpupool
 {
-    int              cpupool_id;
-#define CPUPOOLID_NONE    (-1)
+    unsigned int     cpupool_id;
+#define CPUPOOLID_NONE    (~0U)
     unsigned int     n_dom;
     cpumask_var_t    cpu_valid;      /* all cpus assigned to pool */
     cpumask_var_t    res_valid;      /* all scheduling resources of pool */
+    struct list_head list;
     struct cpupool   *next;
     struct scheduler *sched;
     atomic_t         refcnt;
     enum sched_gran  gran;
+    unsigned int     sched_gran;     /* Number of cpus per sched-item. */
 };
 
 static inline cpumask_t *cpupool_domain_master_cpumask(const struct domain *d)
@@ -590,19 +602,39 @@ affinity_balance_cpumask(const struct sched_unit *unit, int step,
         cpumask_copy(mask, unit->cpu_hard_affinity);
 }
 
+struct affinity_masks {
+    cpumask_var_t hard;
+    cpumask_var_t soft;
+};
+
+bool alloc_affinity_masks(struct affinity_masks *affinity);
+void free_affinity_masks(struct affinity_masks *affinity);
+
+/* Memory allocation related data for schedule_cpu_rm(). */
+struct cpu_rm_data {
+    struct affinity_masks affinity;
+    const struct scheduler *old_ops;
+    void *ppriv_old;
+    void *vpriv_old;
+    struct sched_resource *sr[];
+};
+
 void sched_rm_cpu(unsigned int cpu);
 const cpumask_t *sched_get_opt_cpumask(enum sched_gran opt, unsigned int cpu);
 void schedule_dump(struct cpupool *c);
 struct scheduler *scheduler_get_default(void);
-struct scheduler *scheduler_alloc(unsigned int sched_id, int *perr);
+struct scheduler *scheduler_alloc(unsigned int sched_id);
 void scheduler_free(struct scheduler *sched);
 int cpu_disable_scheduler(unsigned int cpu);
 int schedule_cpu_add(unsigned int cpu, struct cpupool *c);
-int schedule_cpu_rm(unsigned int cpu);
+struct cpu_rm_data *alloc_cpu_rm_data(unsigned int cpu, bool aff_alloc);
+void free_cpu_rm_data(struct cpu_rm_data *mem, unsigned int cpu);
+int schedule_cpu_rm(unsigned int cpu, struct cpu_rm_data *mem);
 int sched_move_domain(struct domain *d, struct cpupool *c);
-struct cpupool *cpupool_get_by_id(int poolid);
+void sched_migrate_timers(unsigned int cpu);
+struct cpupool *cpupool_get_by_id(unsigned int poolid);
 void cpupool_put(struct cpupool *pool);
-int cpupool_add_domain(struct domain *d, int poolid);
+int cpupool_add_domain(struct domain *d, unsigned int poolid);
 void cpupool_rm_domain(struct domain *d);
 
 #endif /* __XEN_SCHED_IF_H__ */

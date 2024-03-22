@@ -19,10 +19,11 @@
  *
  */
 
+#include <xen/ioreq.h>
+
 #include <asm/types.h>
 #include <asm/mtrr.h>
 #include <asm/p2m.h>
-#include <asm/hvm/ioreq.h>
 #include <asm/hvm/vmx/vmx.h>
 #include <asm/hvm/vmx/vvmx.h>
 #include <asm/hvm/nestedhvm.h>
@@ -61,7 +62,7 @@ void nvmx_cpu_dead(unsigned int cpu)
     XFREE(per_cpu(vvmcs_buf, cpu));
 }
 
-int nvmx_vcpu_initialise(struct vcpu *v)
+int cf_check nvmx_vcpu_initialise(struct vcpu *v)
 {
     struct domain *d = v->domain;
     struct nestedvmx *nvmx = &vcpu_2_nvmx(v);
@@ -149,7 +150,7 @@ int nvmx_vcpu_initialise(struct vcpu *v)
     return 0;
 }
  
-void nvmx_vcpu_destroy(struct vcpu *v)
+void cf_check nvmx_vcpu_destroy(struct vcpu *v)
 {
     struct nestedvmx *nvmx = &vcpu_2_nvmx(v);
     struct nestedvcpu *nvcpu = &vcpu_nestedhvm(v);
@@ -198,7 +199,7 @@ static void vcpu_relinquish_resources(struct vcpu *v)
     FREE_XENHEAP_PAGE(nvmx->msr_merged);
 }
 
-void nvmx_domain_relinquish_resources(struct domain *d)
+void cf_check nvmx_domain_relinquish_resources(struct domain *d)
 {
     struct vcpu *v;
 
@@ -209,17 +210,17 @@ void nvmx_domain_relinquish_resources(struct domain *d)
     }
 }
 
-int nvmx_vcpu_reset(struct vcpu *v)
+int cf_check nvmx_vcpu_reset(struct vcpu *v)
 {
     return 0;
 }
 
-uint64_t nvmx_vcpu_eptp_base(struct vcpu *v)
+uint64_t cf_check nvmx_vcpu_eptp_base(struct vcpu *v)
 {
     return get_vvmcs(v, EPT_POINTER) & PAGE_MASK;
 }
 
-bool_t nvmx_ept_enabled(struct vcpu *v)
+bool cf_check nvmx_ept_enabled(struct vcpu *v)
 {
     struct nestedvmx *nvmx = &vcpu_2_nvmx(v);
 
@@ -513,7 +514,7 @@ static void vmfail(struct cpu_user_regs *regs, enum vmx_insn_errno errno)
         vmfail_invalid(regs);
 }
 
-bool_t nvmx_intercepts_exception(
+bool cf_check nvmx_intercepts_exception(
     struct vcpu *v, unsigned int vector, int error_code)
 {
     u32 exception_bitmap, pfec_match=0, pfec_mask=0;
@@ -909,7 +910,10 @@ static const u16 vmcs_gstate_field[] = {
     GUEST_LDTR_AR_BYTES,
     GUEST_TR_AR_BYTES,
     GUEST_INTERRUPTIBILITY_INFO,
+    /*
+     * ACTIVITY_STATE is handled specially.
     GUEST_ACTIVITY_STATE,
+     */
     GUEST_SYSENTER_CS,
     GUEST_PREEMPTION_TIMER,
     /* natural */
@@ -1210,6 +1214,8 @@ static void virtual_vmentry(struct cpu_user_regs *regs)
     nvcpu->nv_vmentry_pending = 0;
     nvcpu->nv_vmswitch_in_progress = 1;
 
+    /* TODO: Fail VMentry for GUEST_ACTIVITY_STATE != 0 */
+
     /*
      * EFER handling:
      * hvm_set_efer won't work if CR0.PG = 1, so we change the value
@@ -1234,7 +1240,7 @@ static void virtual_vmentry(struct cpu_user_regs *regs)
         paging_update_paging_modes(v);
 
     if ( nvmx_ept_enabled(v) && hvm_pae_enabled(v) &&
-         !(v->arch.hvm.guest_efer & EFER_LMA) )
+         !hvm_long_mode_active(v) )
         vvmcs_to_shadow_bulk(v, ARRAY_SIZE(gpdpte_fields), gpdpte_fields);
 
     regs->rip = get_vvmcs(v, GUEST_RIP);
@@ -1437,7 +1443,7 @@ static void virtual_vmexit(struct cpu_user_regs *regs)
     sync_exception_state(v);
 
     if ( nvmx_ept_enabled(v) && hvm_pae_enabled(v) &&
-         !(v->arch.hvm.guest_efer & EFER_LMA) )
+         !hvm_long_mode_active(v) )
         shadow_to_vvmcs_bulk(v, ARRAY_SIZE(gpdpte_fields), gpdpte_fields);
 
     /* This will clear current pCPU bit in p2m->dirty_cpumask */
@@ -1516,7 +1522,7 @@ void nvmx_switch_guest(void)
      * don't want to continue as this setup is not implemented nor supported
      * as of right now.
      */
-    if ( hvm_io_pending(v) )
+    if ( vcpu_ioreq_pending(v) )
         return;
     /*
      * a softirq may interrupt us between a virtual vmentry is
@@ -2323,11 +2329,11 @@ int nvmx_msr_read_intercept(unsigned int msr, u64 *msr_content)
         data = X86_CR4_VMXE;
         break;
     case MSR_IA32_VMX_CR4_FIXED1:
-        data = hvm_cr4_guest_valid_bits(d, false);
+        data = hvm_cr4_guest_valid_bits(d);
         break;
     case MSR_IA32_VMX_MISC:
-        /* Do not support CR3-target feature now */
-        data = host_data & ~VMX_MISC_CR3_TARGET;
+        /* Do not support CR3-targets or activity states. */
+        data = host_data & ~(VMX_MISC_CR3_TARGET | VMX_MISC_ACTIVITY_MASK);
         break;
     case MSR_IA32_VMX_EPT_VPID_CAP:
         data = nept_get_ept_vpid_cap();
@@ -2345,16 +2351,16 @@ int nvmx_msr_read_intercept(unsigned int msr, u64 *msr_content)
  * walk is successful, the translated value is returned in
  * L1_gpa. The result value tells what to do next.
  */
-int
-nvmx_hap_walk_L1_p2m(struct vcpu *v, paddr_t L2_gpa, paddr_t *L1_gpa,
-                     unsigned int *page_order, uint8_t *p2m_acc,
-                     bool_t access_r, bool_t access_w, bool_t access_x)
+int cf_check nvmx_hap_walk_L1_p2m(
+    struct vcpu *v, paddr_t L2_gpa, paddr_t *L1_gpa, unsigned int *page_order,
+    uint8_t *p2m_acc, struct npfec npfec)
 {
     int rc;
     unsigned long gfn;
     uint64_t exit_qual;
     uint32_t exit_reason = EXIT_REASON_EPT_VIOLATION;
-    uint32_t rwx_rights = (access_x << 2) | (access_w << 1) | access_r;
+    uint32_t rwx_rights =
+        (npfec.insn_fetch << 2) | (npfec.write_access << 1) | npfec.read_access;
     struct nestedvmx *nvmx = &vcpu_2_nvmx(v);
 
     vmx_vmcs_enter(v);
@@ -2404,7 +2410,7 @@ void nvmx_idtv_handling(void)
      * be reinjected, otherwise, pass to L1.
      */
     __vmread(VM_EXIT_REASON, &reason);
-    if ( reason != EXIT_REASON_EPT_VIOLATION ?
+    if ( (uint16_t)reason != EXIT_REASON_EPT_VIOLATION ?
          !(nvmx->intr.intr_info & INTR_INFO_VALID_MASK) :
          !nvcpu->nv_vmexit_pending )
     {
@@ -2485,6 +2491,8 @@ int nvmx_n2_vmexit_handler(struct cpu_user_regs *regs,
     case EXIT_REASON_EPT_VIOLATION:
     case EXIT_REASON_EPT_MISCONFIG:
     case EXIT_REASON_EXTERNAL_INTERRUPT:
+    case EXIT_REASON_BUS_LOCK:
+    case EXIT_REASON_NOTIFY:
         /* pass to L0 handler */
         break;
     case VMX_EXIT_REASONS_FAILED_VMENTRY:

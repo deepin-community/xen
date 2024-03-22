@@ -1,3 +1,4 @@
+#include <xen/efi.h>
 #include <xen/init.h>
 #include <xen/types.h>
 #include <xen/lib.h>
@@ -25,8 +26,6 @@ tboot_shared_t *g_tboot_shared;
 static vmac_t domain_mac;     /* MAC for all domains during S3 */
 static vmac_t xenheap_mac;    /* MAC for xen heap during S3 */
 static vmac_t frametable_mac; /* MAC for frame table during S3 */
-
-static const uuid_t tboot_shared_uuid = TBOOT_SHARED_UUID;
 
 /* used by tboot_protect_mem_regions() and/or tboot_parse_dmar_table() */
 static uint64_t __initdata txt_heap_base, __initdata txt_heap_size;
@@ -92,6 +91,7 @@ static void __init tboot_copy_memory(unsigned char *va, uint32_t size,
 void __init tboot_probe(void)
 {
     tboot_shared_t *tboot_shared;
+    static const uuid_t __initconst tboot_shared_uuid = TBOOT_SHARED_UUID;
 
     /* Look for valid page-aligned address for shared page. */
     if ( !opt_tboot_pa || (opt_tboot_pa & ~PAGE_MASK) )
@@ -100,9 +100,7 @@ void __init tboot_probe(void)
     /* Map and check for tboot UUID. */
     set_fixmap(FIX_TBOOT_SHARED_BASE, opt_tboot_pa);
     tboot_shared = fix_to_virt(FIX_TBOOT_SHARED_BASE);
-    if ( tboot_shared == NULL )
-        return;
-    if ( memcmp(&tboot_shared_uuid, (uuid_t *)tboot_shared, sizeof(uuid_t)) )
+    if ( memcmp(&tboot_shared_uuid, &tboot_shared->uuid, sizeof(uuid_t)) )
         return;
 
     /* new tboot_shared (w/ GAS support, integrity, etc.) is not backwards
@@ -230,8 +228,8 @@ static void tboot_gen_domain_integrity(const uint8_t key[TB_KEY_SIZE],
         {
             const struct domain_iommu *dio = dom_iommu(d);
 
-            update_iommu_mac(&ctx, dio->arch.pgd_maddr,
-                             agaw_to_level(dio->arch.agaw));
+            update_iommu_mac(&ctx, dio->arch.vtd.pgd_maddr,
+                             agaw_to_level(dio->arch.vtd.agaw));
         }
     }
 
@@ -322,12 +320,12 @@ static void tboot_gen_frametable_integrity(const uint8_t key[TB_KEY_SIZE],
         if ( nidx >= max_idx )
             break;
         vmac_update((uint8_t *)pdx_to_page(sidx * PDX_GROUP_COUNT),
-                       pdx_to_page(eidx * PDX_GROUP_COUNT)
-                       - pdx_to_page(sidx * PDX_GROUP_COUNT), &ctx);
+                    (eidx - sidx) * PDX_GROUP_COUNT * sizeof(*frame_table),
+                    &ctx);
     }
     vmac_update((uint8_t *)pdx_to_page(sidx * PDX_GROUP_COUNT),
-                   pdx_to_page(max_pdx - 1) + 1
-                   - pdx_to_page(sidx * PDX_GROUP_COUNT), &ctx);
+                (max_pdx - sidx * PDX_GROUP_COUNT) * sizeof(*frame_table),
+                &ctx);
 
     *mac = vmac(NULL, 0, nonce, NULL, &ctx);
 
@@ -364,6 +362,8 @@ void tboot_shutdown(uint32_t shutdown_type)
     /* if this is S3 then set regions to MAC */
     if ( shutdown_type == TB_SHUTDOWN_S3 )
     {
+        unsigned long s, e;
+
         /*
          * Xen regions for tboot to MAC. This needs to remain in sync with
          * xen_in_range().
@@ -378,6 +378,15 @@ void tboot_shutdown(uint32_t shutdown_type)
         /* hypervisor .data + .bss */
         g_tboot_shared->mac_regions[2].start = (uint64_t)__pa(&__2M_rwdata_start);
         g_tboot_shared->mac_regions[2].size = __2M_rwdata_end - __2M_rwdata_start;
+        if ( efi_boot_mem_unused(&s, &e) )
+        {
+            g_tboot_shared->mac_regions[2].size =
+                s - (unsigned long)__2M_rwdata_start;
+            g_tboot_shared->mac_regions[3].start = __pa(e);
+            g_tboot_shared->mac_regions[3].size =
+                (unsigned long)__2M_rwdata_end - e;
+            g_tboot_shared->num_mac_regions = 4;
+        }
 
         /*
          * MAC domains and other Xen memory
@@ -387,6 +396,16 @@ void tboot_shutdown(uint32_t shutdown_type)
         tboot_gen_domain_integrity(g_tboot_shared->s3_key, &domain_mac);
         tboot_gen_frametable_integrity(g_tboot_shared->s3_key, &frametable_mac);
         tboot_gen_xenheap_integrity(g_tboot_shared->s3_key, &xenheap_mac);
+    }
+
+    /*
+     * Disable CET - tboot may not be built with endbr, and it doesn't support
+     * shadow stacks.
+     */
+    if ( read_cr4() & X86_CR4_CET )
+    {
+        wrmsrl(MSR_S_CET, 0);
+        write_cr4(read_cr4() & ~X86_CR4_CET);
     }
 
     /*
@@ -441,7 +460,7 @@ int __init tboot_protect_mem_regions(void)
     return 1;
 }
 
-int __init tboot_parse_dmar_table(acpi_table_handler dmar_handler)
+int __init cf_check tboot_parse_dmar_table(acpi_table_handler dmar_handler)
 {
     int rc;
     uint64_t size;

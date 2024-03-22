@@ -36,6 +36,8 @@
 
 #define ACPI_MAX_TABLES		128
 
+bool __initdata opt_acpi_verbose;
+
 static const char *__initdata
 mps_inti_flags_polarity[] = { "dfl", "high", "res", "low" };
 static const char *__initdata
@@ -51,9 +53,11 @@ void __init acpi_table_print_madt_entry(struct acpi_subtable_header *header)
 	switch (header->type) {
 
 	case ACPI_MADT_TYPE_LOCAL_APIC:
+		if (opt_acpi_verbose)
 		{
-			struct acpi_madt_local_apic *p =
-			    (struct acpi_madt_local_apic *)header;
+			const struct acpi_madt_local_apic *p =
+			    container_of(header, const struct acpi_madt_local_apic, header);
+
 			printk(KERN_INFO PREFIX
 			       "LAPIC (acpi_id[0x%02x] lapic_id[0x%02x] %s)\n",
 			       p->processor_id, p->id,
@@ -62,9 +66,11 @@ void __init acpi_table_print_madt_entry(struct acpi_subtable_header *header)
 		break;
 
 	case ACPI_MADT_TYPE_LOCAL_X2APIC:
+		if (opt_acpi_verbose)
 		{
-			struct acpi_madt_local_x2apic *p =
-			    (struct acpi_madt_local_x2apic *)header;
+			const struct acpi_madt_local_x2apic *p =
+			    container_of(header, const struct acpi_madt_local_x2apic, header);
+
 			printk(KERN_INFO PREFIX
 			       "X2APIC (apic_id[0x%02x] uid[0x%02x] %s)\n",
 			       p->local_apic_id, p->uid,
@@ -75,8 +81,9 @@ void __init acpi_table_print_madt_entry(struct acpi_subtable_header *header)
 
 	case ACPI_MADT_TYPE_IO_APIC:
 		{
-			struct acpi_madt_io_apic *p =
-			    (struct acpi_madt_io_apic *)header;
+			const struct acpi_madt_io_apic *p =
+			    container_of(header, const struct acpi_madt_io_apic, header);
+
 			printk(KERN_INFO PREFIX
 			       "IOAPIC (id[0x%02x] address[0x%08x] gsi_base[%d])\n",
 			       p->id, p->address, p->global_irq_base);
@@ -85,8 +92,9 @@ void __init acpi_table_print_madt_entry(struct acpi_subtable_header *header)
 
 	case ACPI_MADT_TYPE_INTERRUPT_OVERRIDE:
 		{
-			struct acpi_madt_interrupt_override *p =
-			    (struct acpi_madt_interrupt_override *)header;
+			const struct acpi_madt_interrupt_override *p =
+			    container_of(header, const struct acpi_madt_interrupt_override, header);
+
 			printk(KERN_INFO PREFIX
 			       "INT_SRC_OVR (bus %d bus_irq %d global_irq %d %s %s)\n",
 			       p->bus, p->source_irq, p->global_irq,
@@ -104,8 +112,9 @@ void __init acpi_table_print_madt_entry(struct acpi_subtable_header *header)
 
 	case ACPI_MADT_TYPE_NMI_SOURCE:
 		{
-			struct acpi_madt_nmi_source *p =
-			    (struct acpi_madt_nmi_source *)header;
+			const struct acpi_madt_nmi_source *p =
+			    container_of(header, const struct acpi_madt_nmi_source, header);
+
 			printk(KERN_INFO PREFIX
 			       "NMI_SRC (%s %s global_irq %d)\n",
 			       mps_inti_flags_polarity[p->inti_flags & ACPI_MADT_POLARITY_MASK],
@@ -115,9 +124,11 @@ void __init acpi_table_print_madt_entry(struct acpi_subtable_header *header)
 		break;
 
 	case ACPI_MADT_TYPE_LOCAL_APIC_NMI:
+		if (opt_acpi_verbose)
 		{
-			struct acpi_madt_local_apic_nmi *p =
-			    (struct acpi_madt_local_apic_nmi *)header;
+			const struct acpi_madt_local_apic_nmi *p =
+			    container_of(header, const struct acpi_madt_local_apic_nmi, header);
+
 			printk(KERN_INFO PREFIX
 			       "LAPIC_NMI (acpi_id[0x%02x] %s %s lint[%#x])\n",
 			       p->processor_id,
@@ -128,13 +139,12 @@ void __init acpi_table_print_madt_entry(struct acpi_subtable_header *header)
 		break;
 
 	case ACPI_MADT_TYPE_LOCAL_X2APIC_NMI:
+		if (opt_acpi_verbose)
 		{
-			u16 polarity, trigger;
-			struct acpi_madt_local_x2apic_nmi *p =
-			    (struct acpi_madt_local_x2apic_nmi *)header;
-
-			polarity = p->inti_flags & ACPI_MADT_POLARITY_MASK;
-			trigger = (p->inti_flags & ACPI_MADT_TRIGGER_MASK) >> 2;
+			const struct acpi_madt_local_x2apic_nmi *p =
+			    container_of(header, const struct acpi_madt_local_x2apic_nmi, header);
+			unsigned int polarity = MASK_EXTR(p->inti_flags, ACPI_MADT_POLARITY_MASK);
+			unsigned int trigger = MASK_EXTR(p->inti_flags, ACPI_MADT_TRIGGER_MASK);
 
 			printk(KERN_INFO PREFIX
 			       "X2APIC_NMI (uid[0x%02x] %s %s lint[%#x])\n",
@@ -147,8 +157,9 @@ void __init acpi_table_print_madt_entry(struct acpi_subtable_header *header)
 
 	case ACPI_MADT_TYPE_LOCAL_APIC_OVERRIDE:
 		{
-			struct acpi_madt_local_apic_override *p =
-			    (struct acpi_madt_local_apic_override *)header;
+			const struct acpi_madt_local_apic_override *p =
+			    container_of(header, const struct acpi_madt_local_apic_override, header);
+
 			printk(KERN_INFO PREFIX
 			       "LAPIC_ADDR_OVR (address[%p])\n",
 			       (void *)(unsigned long)p->address);
@@ -157,8 +168,9 @@ void __init acpi_table_print_madt_entry(struct acpi_subtable_header *header)
 
 	case ACPI_MADT_TYPE_IO_SAPIC:
 		{
-			struct acpi_madt_io_sapic *p =
-			    (struct acpi_madt_io_sapic *)header;
+			const struct acpi_madt_io_sapic *p =
+			    container_of(header, const struct acpi_madt_io_sapic, header);
+
 			printk(KERN_INFO PREFIX
 			       "IOSAPIC (id[%#x] address[%p] gsi_base[%d])\n",
 			       p->id, (void *)(unsigned long)p->address,
@@ -167,9 +179,11 @@ void __init acpi_table_print_madt_entry(struct acpi_subtable_header *header)
 		break;
 
 	case ACPI_MADT_TYPE_LOCAL_SAPIC:
+		if (opt_acpi_verbose)
 		{
-			struct acpi_madt_local_sapic *p =
-			    (struct acpi_madt_local_sapic *)header;
+			const struct acpi_madt_local_sapic *p =
+			    container_of(header, const struct acpi_madt_local_sapic, header);
+
 			printk(KERN_INFO PREFIX
 			       "LSAPIC (acpi_id[0x%02x] lsapic_id[0x%02x] lsapic_eid[0x%02x] %s)\n",
 			       p->processor_id, p->id, p->eid,
@@ -179,8 +193,9 @@ void __init acpi_table_print_madt_entry(struct acpi_subtable_header *header)
 
 	case ACPI_MADT_TYPE_INTERRUPT_SOURCE:
 		{
-			struct acpi_madt_interrupt_source *p =
-			    (struct acpi_madt_interrupt_source *)header;
+			const struct acpi_madt_interrupt_source *p =
+			    container_of(header, const struct acpi_madt_interrupt_source, header);
+
 			printk(KERN_INFO PREFIX
 			       "PLAT_INT_SRC (%s %s type[%#x] id[0x%04x] eid[%#x] iosapic_vector[%#x] global_irq[%#x]\n",
 			       mps_inti_flags_polarity[p->inti_flags & ACPI_MADT_POLARITY_MASK],
@@ -457,7 +472,7 @@ int __init acpi_table_init(void)
 	return 0;
 }
 
-static int __init acpi_parse_apic_instance(const char *str)
+static int __init cf_check acpi_parse_apic_instance(const char *str)
 {
 	const char *q;
 

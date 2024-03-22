@@ -73,7 +73,7 @@
 
 /* This is what we know about each Huffman coding group */
 struct group_data {
-	/* We have an extra slot at the end of limit[] for a sentinal value. */
+	/* We have an extra slot at the end of limit[] for a sentinel value. */
 	int limit[MAX_HUFCODE_BITS+1];
 	int base[MAX_HUFCODE_BITS];
 	int permute[MAX_SYMBOLS];
@@ -104,7 +104,7 @@ struct bunzip_data {
 
 /* Return the next nnn bits of input.  All reads from the compressed input
    are done through this function.  All reads are big endian */
-static unsigned int INIT get_bits(struct bunzip_data *bd, char bits_wanted)
+static unsigned int __init get_bits(struct bunzip_data *bd, char bits_wanted)
 {
 	unsigned int bits = 0;
 
@@ -144,7 +144,7 @@ static unsigned int INIT get_bits(struct bunzip_data *bd, char bits_wanted)
 
 /* Unpacks the next block and sets up for the inverse burrows-wheeler step. */
 
-static int INIT get_next_block(struct bunzip_data *bd)
+static int __init get_next_block(struct bunzip_data *bd)
 {
 	struct group_data *hufGroup = NULL;
 	int *base = NULL;
@@ -233,6 +233,11 @@ static int INIT get_next_block(struct bunzip_data *bd)
 		   becomes negative, so an unsigned inequality catches
 		   it.) */
 		t = get_bits(bd, 5)-1;
+		/* GCC 13 has apparently improved use-before-set detection, but
+		   it can't figure out that length[0] is always intialized by
+		   virtue of symCount always being positive when making it here.
+		   See https://gcc.gnu.org/bugzilla/show_bug.cgi?id=106511. */
+		length[0] = 0;
 		for (i = 0; i < symCount; i++) {
 			for (;;) {
 				if (((unsigned)t) > (MAX_HUFCODE_BITS-1))
@@ -326,7 +331,7 @@ static int INIT get_next_block(struct bunzip_data *bd)
 			pp <<= 1;
 			base[i+1] = pp-(t += temp[i]);
 		}
-		limit[maxLen+1] = INT_MAX; /* Sentinal value for
+		limit[maxLen+1] = INT_MAX; /* Sentinel value for
 					    * reading next sym. */
 		limit[maxLen] = pp+temp[maxLen]-1;
 		base[minLen] = 0;
@@ -509,7 +514,7 @@ got_huff_bits:
    are ignored, data is written to out_fd and return is RETVAL_OK or error.
 */
 
-static int INIT read_bunzip(struct bunzip_data *bd, unsigned char *outbuf, int len)
+static int __init read_bunzip(struct bunzip_data *bd, unsigned char *outbuf, int len)
 {
 	const unsigned int *dbuf;
 	int pos, xcurrent, previous, gotcount;
@@ -607,7 +612,7 @@ decode_next_byte:
 	goto decode_next_byte;
 }
 
-static int INIT nofill(void *buf, unsigned int len)
+static int __init cf_check nofill(void *buf, unsigned int len)
 {
 	return -1;
 }
@@ -615,8 +620,8 @@ static int INIT nofill(void *buf, unsigned int len)
 /* Allocate the structure, read file header.  If in_fd ==-1, inbuf must contain
    a complete bunzip file (len bytes long).  If in_fd!=-1, inbuf and len are
    ignored, and data is read from file handle into temporary buffer. */
-static int INIT start_bunzip(struct bunzip_data **bdp, void *inbuf, int len,
-			     int (*fill)(void*, unsigned int))
+static int __init start_bunzip(struct bunzip_data **bdp, void *inbuf, int len,
+			       int (*fill)(void*, unsigned int))
 {
 	struct bunzip_data *bd;
 	unsigned int i, j, c;
@@ -665,12 +670,11 @@ static int INIT start_bunzip(struct bunzip_data **bdp, void *inbuf, int len,
 
 /* Example usage: decompress src_fd to dst_fd.  (Stops at end of bzip2 data,
    not end of file.) */
-STATIC int INIT bunzip2(unsigned char *buf, unsigned int len,
-			int(*fill)(void*, unsigned int),
-			int(*flush)(void*, unsigned int),
-			unsigned char *outbuf,
-			unsigned int *pos,
-			void(*error)(const char *x))
+int __init bunzip2(unsigned char *buf, unsigned int len,
+		   int(*fill)(void*, unsigned int),
+		   int(*flush)(void*, unsigned int),
+		   unsigned char *outbuf, unsigned int *pos,
+		   void(*error)(const char *x))
 {
 	struct bunzip_data *bd;
 	int i = -1;

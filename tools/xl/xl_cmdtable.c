@@ -15,24 +15,25 @@
 #include <string.h>
 
 #include <libxl.h>
+#include <xen-tools/libs.h>
 
 #include "xl.h"
 
-struct cmd_spec cmd_table[] = {
+const struct cmd_spec cmd_table[] = {
     { "create",
       &main_create, 1, 1,
       "Create a domain from config file <filename>",
       "<ConfigFile> [options] [vars]",
-      "-h                      Print this help.\n"
-      "-p                      Leave the domain paused after it is created.\n"
       "-c                      Connect to the console after the domain is created.\n"
+      "-d                      Enable debug messages.\n"
+      "-e                      Do not wait in the background for the death of the domain.\n"
+      "-F                      Run in foreground until death of the domain.\n"
       "-f FILE, --defconfig=FILE\n                     Use the given configuration file.\n"
-      "-q, --quiet             Quiet.\n"
+      "-h                      Print this help.\n"
       "-n, --dryrun            Dry run - prints the resulting configuration\n"
       "                         (deprecated in favour of global -N option).\n"
-      "-d                      Enable debug messages.\n"
-      "-F                      Run in foreground until death of the domain.\n"
-      "-e                      Do not wait in the background for the death of the domain.\n"
+      "-p                      Leave the domain paused after it is created.\n"
+      "-q, --quiet             Quiet.\n"
       "-V, --vncviewer         Connect to the VNC display after the domain is created.\n"
       "-A, --vncviewer-autopass\n"
       "                        Pass VNC password to viewer via stdin.\n"
@@ -90,12 +91,12 @@ struct cmd_spec cmd_table[] = {
     { "pci-attach",
       &main_pciattach, 0, 1,
       "Insert a new pass-through pci device",
-      "<Domain> <BDF> [Virtual Slot]",
+      "<Domain> <PCI_SPEC_STRING>",
     },
     { "pci-detach",
       &main_pcidetach, 0, 1,
       "Remove a domain's pass-through pci device",
-      "<Domain> <BDF>",
+      "<Domain> <PCI_SPEC_STRING>",
     },
     { "pci-list",
       &main_pcilist, 0, 0,
@@ -105,21 +106,25 @@ struct cmd_spec cmd_table[] = {
     { "pci-assignable-add",
       &main_pciassignable_add, 0, 1,
       "Make a device assignable for pci-passthru",
-      "<BDF>",
+      "[options] <BDF>",
+      "-n NAME, --name=NAME    Name the assignable device.\n"
       "-h                      Print this help.\n"
     },
     { "pci-assignable-remove",
       &main_pciassignable_remove, 0, 1,
       "Remove a device from being assignable",
-      "[options] <BDF>",
+      "[options] <BDF>|NAME",
       "-h                      Print this help.\n"
       "-r                      Attempt to re-assign the device to the\n"
-      "                        original driver"
+      "                        original driver."
     },
     { "pci-assignable-list",
       &main_pciassignable_list, 0, 0,
       "List all the assignable pci devices",
-      "",
+      "[options]",
+      "-h                      Print this help.\n"
+      "-n, --show-names        Display assignable device names where\n"
+      "                        supplied.\n"
     },
     { "pause",
       &main_pause, 0, 1,
@@ -154,7 +159,7 @@ struct cmd_spec cmd_table[] = {
       "-h  Print this help.\n"
       "-c  Leave domain running after creating the snapshot.\n"
       "-p  Leave domain paused after creating the snapshot.\n"
-      "-D  Store the domain id in the configration."
+      "-D  Store the domain id in the configuration."
     },
     { "migrate",
       &main_migrate, 0, 1,
@@ -338,7 +343,7 @@ struct cmd_spec cmd_table[] = {
       "Create a new virtual network device",
       "<Domain> [type=<type>] [mac=<mac>] [bridge=<bridge>] "
       "[ip=<ip>] [script=<script>] [backend=<BackDomain>] [vifname=<name>] "
-      "[rate=<rate>] [model=<model>] [accel=<accel>]",
+      "[rate=<rate>] [model=<model>] [accel=<accel>] [mtu=<mtu>]",
     },
     { "network-list",
       &main_networklist, 0, 0,
@@ -368,7 +373,8 @@ struct cmd_spec cmd_table[] = {
     { "block-detach",
       &main_blockdetach, 0, 1,
       "Destroy a domain's virtual block device",
-      "<Domain> <DevId>",
+      "[option] <Domain> <DevId>",
+      "-f, --force        do not wait for the domain to release the device"
     },
     { "vtpm-attach",
       &main_vtpmattach, 1, 1,
@@ -520,7 +526,7 @@ struct cmd_spec cmd_table[] = {
       "-e                      Do not wait in the background (on <host>) for the death\n"
       "                        of the domain.\n"
       "-N <netbufscript>       Use netbufscript to setup network buffering instead of the\n"
-      "                        default script (/etc/xen/scripts/remus-netbuf-setup).\n"
+      "                        default script (" XEN_SCRIPT_DIR "/remus-netbuf-setup).\n"
       "-F                      Enable unsafe configurations [-b|-n|-d flags]. Use this option\n"
       "                        with caution as failover may not work as intended.\n"
       "-b                      Replicate memory checkpoints to /dev/null (blackhole).\n"
@@ -626,12 +632,12 @@ struct cmd_spec cmd_table[] = {
     },
 };
 
-int cmdtable_len = sizeof(cmd_table)/sizeof(struct cmd_spec);
+const int cmdtable_len = ARRAY_SIZE(cmd_table);
 
 /* Look up a command in the table, allowing unambiguous truncation */
-struct cmd_spec *cmdtable_lookup(const char *s)
+const struct cmd_spec *cmdtable_lookup(const char *s)
 {
-    struct cmd_spec *cmd = NULL;
+    const struct cmd_spec *cmd = NULL;
     size_t len;
     int i, count = 0;
 

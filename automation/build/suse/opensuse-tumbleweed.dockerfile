@@ -7,7 +7,7 @@ ENV USER root
 RUN mkdir /build
 WORKDIR /build
 
-RUN zypper ref && zypper up -y --no-recommends
+RUN zypper ref && zypper dup -y --no-recommends
 RUN zypper install -y --no-recommends \
         acpica \
         bc \
@@ -22,14 +22,15 @@ RUN zypper install -y --no-recommends \
         flex \
         gcc \
         gcc-c++ \
+        # gettext-tools for Xen < 4.13
         gettext-tools \
         git \
         glib2-devel \
         glibc-devel \
+        # glibc-devel-32bit for Xen < 4.15
         glibc-devel-32bit \
         gzip \
         hostname \
-        libSDL2-devel \
         libaio-devel \
         libbz2-devel \
         libext2fs-devel \
@@ -43,10 +44,13 @@ RUN zypper install -y --no-recommends \
         libtasn1-devel \
         libuuid-devel \
         libyajl-devel \
+        libzstd-devel \
         lzo-devel \
         make \
+        meson \
         nasm \
         ncurses-devel \
+        ninja \
         ocaml \
         ocaml-findlib-devel \
         ocaml-ocamlbuild \
@@ -54,9 +58,10 @@ RUN zypper install -y --no-recommends \
         pandoc \
         patch \
         pkg-config \
-        python \
+        'pkgconfig(libpci)' \
+        'pkgconfig(sdl)' \
+        'pkgconfig(sdl2)' \
         python-devel \
-        python3 \
         python3-devel \
         systemd-devel \
         tar \

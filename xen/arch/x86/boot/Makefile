@@ -1,20 +1,35 @@
 obj-bin-y += head.o
 
-DEFS_H_DEPS = defs.h $(BASEDIR)/include/xen/stdbool.h
+head-bin-objs := cmdline.o reloc.o
 
-CMDLINE_DEPS = $(DEFS_H_DEPS) video.h
+nocov-y   += $(head-bin-objs)
+noubsan-y += $(head-bin-objs)
+targets   += $(head-bin-objs)
 
-RELOC_DEPS = $(DEFS_H_DEPS) \
-	     $(BASEDIR)/include/generated/autoconf.h \
-	     $(BASEDIR)/include/xen/kconfig.h \
-	     $(BASEDIR)/include/xen/multiboot.h \
-	     $(BASEDIR)/include/xen/multiboot2.h \
-	     $(BASEDIR)/include/public/arch-x86/hvm/start_info.h
+head-bin-objs := $(addprefix $(obj)/,$(head-bin-objs))
 
-head.o: cmdline.S reloc.S
+$(obj)/head.o: AFLAGS-y += -Wa$(comma)-I$(obj)
+$(obj)/head.o: $(head-bin-objs:.o=.bin)
 
-cmdline.S: cmdline.c $(CMDLINE_DEPS)
-	$(MAKE) -f build32.mk $@ CMDLINE_DEPS="$(CMDLINE_DEPS)"
+CFLAGS_x86_32 := $(subst -m64,-m32 -march=i686,$(XEN_TREEWIDE_CFLAGS))
+$(call cc-options-add,CFLAGS_x86_32,CC,$(EMBEDDED_EXTRA_CFLAGS))
+CFLAGS_x86_32 += -Werror -fno-builtin -g0 -msoft-float
+ifdef building_out_of_srctree
+CFLAGS_x86_32 += -I$(objtree)/include
+endif
+CFLAGS_x86_32 += -I$(srctree)/include
 
-reloc.S: reloc.c $(RELOC_DEPS)
-	$(MAKE) -f build32.mk $@ RELOC_DEPS="$(RELOC_DEPS)"
+# override for 32bit binaries
+$(head-bin-objs): CFLAGS_stack_boundary :=
+$(head-bin-objs): XEN_CFLAGS := $(CFLAGS_x86_32) -fpic
+
+LDFLAGS_DIRECT-$(call ld-option,--warn-rwx-segments) := --no-warn-rwx-segments
+LDFLAGS_DIRECT += $(LDFLAGS_DIRECT-y)
+
+%.bin: %.lnk
+	$(OBJCOPY) -j .text -O binary $< $@
+
+%.lnk: %.o $(src)/build32.lds
+	$(LD) $(subst x86_64,i386,$(LDFLAGS_DIRECT)) -N -T $(filter %.lds,$^) -o $@ $<
+
+clean-files := *.lnk *.bin

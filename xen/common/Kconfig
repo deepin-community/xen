@@ -10,6 +10,7 @@ config COMPAT
 
 config CORE_PARKING
 	bool
+	depends on NR_CPUS > 1
 
 config GRANT_TABLE
 	bool "Grant table support" if EXPERT
@@ -22,10 +23,22 @@ config GRANT_TABLE
 
 	  If unsure, say Y.
 
+config ALTERNATIVE_CALL
+	bool
+
+config ARCH_MAP_DOMAIN_PAGE
+	bool
+
 config HAS_ALTERNATIVE
 	bool
 
+config HAS_COMPAT
+	bool
+
 config HAS_DEVICE_TREE
+	bool
+
+config HAS_DIT # Data Independent Timing
 	bool
 
 config HAS_EX_TABLE
@@ -34,42 +47,70 @@ config HAS_EX_TABLE
 config HAS_FAST_MULTIPLY
 	bool
 
+config HAS_IOPORTS
+	bool
+
+config HAS_KEXEC
+	bool
+
+config HAS_PDX
+	bool
+
+config HAS_PMAP
+	bool
+
+config HAS_SCHED_GRANULARITY
+	bool
+
+config HAS_UBSAN
+	bool
+
 config MEM_ACCESS_ALWAYS_ON
 	bool
 
 config MEM_ACCESS
 	def_bool MEM_ACCESS_ALWAYS_ON
 	prompt "Memory Access and VM events" if !MEM_ACCESS_ALWAYS_ON
+	depends on HVM
 	---help---
 
 	  Framework to configure memory access types for guests and receive
 	  related events in userspace.
 
-config HAS_MEM_PAGING
-	bool
-
-config HAS_PDX
-	bool
-
-config HAS_UBSAN
-	bool
-
-config HAS_KEXEC
-	bool
-
-config HAS_IOPORTS
-	bool
-
-config HAS_SCHED_GRANULARITY
-	bool
-
 config NEEDS_LIBELF
 	bool
 
-config NEEDS_LIST_SORT
+config NUMA
 	bool
 
+config STATIC_MEMORY
+	bool "Static Allocation Support (UNSUPPORTED)" if UNSUPPORTED
+	depends on ARM
+	help
+	  Static Allocation refers to system or sub-system(domains) for
+	  which memory areas are pre-defined by configuration using physical
+	  address ranges.
+
+	  When enabled, memory can be statically allocated to a domain using
+	  the property "xen,static-mem" defined in the domain configuration.
+
+	  If unsure, say N.
+
 menu "Speculative hardening"
+
+config INDIRECT_THUNK
+	bool "Speculative Branch Target Injection Protection"
+	depends on CC_HAS_INDIRECT_THUNK
+	default y
+	help
+	  Contemporary processors may use speculative execution as a
+	  performance optimisation, but this can potentially be abused by an
+	  attacker to leak data via speculative sidechannels.
+
+	  One source of data leakage is via branch target injection.
+
+	  When enabled, indirect branches are implemented using a new construct
+	  called "retpoline" that prevents speculation.
 
 config SPECULATIVE_HARDEN_ARRAY
 	bool "Speculative Array Hardening"
@@ -114,7 +155,40 @@ config SPECULATIVE_HARDEN_BRANCH
 
 	  If unsure, say Y.
 
+config SPECULATIVE_HARDEN_GUEST_ACCESS
+	bool "Speculative PV Guest Memory Access Hardening"
+	default y
+	depends on PV
+	help
+	  Contemporary processors may use speculative execution as a
+	  performance optimisation, but this can potentially be abused by an
+	  attacker to leak data via speculative sidechannels.
+
+	  One source of data leakage is via speculative accesses to hypervisor
+	  memory through guest controlled values used to access guest memory.
+
+	  When enabled, code paths accessing PV guest memory will have guest
+	  controlled addresses massaged such that memory accesses through them
+	  won't touch hypervisor address space.
+
+	  If unsure, say Y.
+
 endmenu
+
+config DIT_DEFAULT
+	bool "Data Independent Timing default"
+	depends on HAS_DIT
+	help
+	  Hardware often surfaces instructions the timing of which is dependent
+	  on the data they process.  Some of these instructions may be used in
+	  timing sensitive environments, e.g. cryptography.  When such
+	  instructions exist, hardware may further surface a control allowing
+	  to make the behavior of such instructions independent of the data
+	  they act upon.  Note the build time value can be overridden at runtime
+	  using the "dit" command line option.
+
+	  NB: Intel calls the feature DOITM (Data Operand Independent Timing
+	      Mode).
 
 config HYPFS
 	bool "Hypervisor file system support"
@@ -138,6 +212,15 @@ config HYPFS_CONFIG
 
 	  Disable this option in case you want to spare some memory or you
 	  want to hide the .config contents from dom0.
+
+config IOREQ_SERVER
+	bool "IOREQ support (EXPERT)" if EXPERT && !X86
+	default X86
+	depends on HVM
+	---help---
+	  Enables generic mechanism for providing emulated devices to the guests.
+
+	  If unsure, say N.
 
 config KEXEC
 	bool "kexec support"
@@ -272,7 +355,7 @@ config LATE_HWDOM
 	  If unsure, say N.
 
 config ARGO
-	bool "Argo: hypervisor-mediated interdomain communication" if EXPERT
+	bool "Argo: hypervisor-mediated interdomain communication (UNSUPPORTED)" if UNSUPPORTED
 	---help---
 	  Enables a hypercall for domains to ask the hypervisor to perform
 	  data transfer of messages between domains.
@@ -299,6 +382,7 @@ config LIVEPATCH
 	bool "Live patching support"
 	default X86
 	depends on "$(XEN_HAS_BUILD_ID)" = "y"
+	select CC_SPLIT_SECTIONS
 	---help---
 	  Allows a running Xen hypervisor to be dynamically patched using
 	  binary patches without rebooting. This is primarily used to binarily
@@ -375,6 +459,16 @@ config DOM0_MEM
 	  See docs/misc/xen-command-line.markdown for the supported syntax.
 
 	  Leave empty if you are not sure what to specify.
+
+config DTB_FILE
+	string "Absolute path to device tree blob"
+	depends on HAS_DEVICE_TREE
+	help
+	  When using a bootloader that has no device tree support or when there
+	  is no bootloader at all, use this option to specify the absolute path
+	  to a device tree that will be linked directly inside Xen binary.
+
+	  This is an optional config. Leave empty if not needed.
 
 config TRACEBUFFER
 	bool "Enable tracing infrastructure" if EXPERT

@@ -9,28 +9,27 @@
 #include <xen/param.h>
 #include <xen/xmalloc.h>
 #include <xen/kernel.h>
+#include <xen/mm.h>
 #include <xen/vga.h>
 #include <asm/io.h>
-#include <asm/page.h>
 #include "font.h"
 #include "lfb.h"
 
 #define vlfb_info    vga_console_info.u.vesa_lfb
 
-static void lfb_flush(void);
+static void cf_check lfb_flush(void);
 
-static unsigned char *lfb;
-static const struct font_desc *font;
-static bool_t vga_compat;
+static unsigned char *__read_mostly lfb;
+static const struct font_desc *__initdata font;
+static bool __initdata vga_compat;
 
-static unsigned int vram_total;
+static unsigned int __initdata vram_total;
 integer_param("vesa-ram", vram_total);
 
-static unsigned int vram_remap;
-integer_param("vesa-map", vram_remap);
+static unsigned int __initdata vram_remap;
 
-static int font_height;
-static int __init parse_font_height(const char *s)
+static unsigned int __initdata font_height;
+static int __init cf_check parse_font_height(const char *s)
 {
     if ( simple_strtoul(s, &s, 10) == 8 && (*s++ == 'x') )
         font_height = simple_strtoul(s, &s, 10);
@@ -79,12 +78,8 @@ void __init vesa_early_init(void)
      *                 use for vesafb.  With modern cards it is no
      *                 option to simply use vram_total as that
      *                 wastes plenty of kernel address space. */
-    vram_remap = (vram_remap ?
-                  (vram_remap << 20) :
-                  ((vram_vmode + (1 << L2_PAGETABLE_SHIFT) - 1) &
-                   ~((1 << L2_PAGETABLE_SHIFT) - 1)));
-    vram_remap = max_t(unsigned int, vram_remap, vram_vmode);
-    vram_remap = min_t(unsigned int, vram_remap, vram_total);
+    vram_remap = ROUNDUP(vram_vmode, 1 << L2_PAGETABLE_SHIFT);
+    vram_remap = min(vram_remap, vram_total);
 }
 
 void __init vesa_init(void)
@@ -103,7 +98,7 @@ void __init vesa_init(void)
     lfbp.text_columns = vlfb_info.width / font->width;
     lfbp.text_rows = vlfb_info.height / font->height;
 
-    lfbp.lfb = lfb = ioremap(lfb_base(), vram_remap);
+    lfbp.lfb = lfb = ioremap_wc(lfb_base(), vram_remap);
     if ( !lfb )
         return;
 
@@ -145,42 +140,9 @@ void __init vesa_init(void)
     video_puts = lfb_redraw_puts;
 }
 
-#include <asm/mtrr.h>
-
-static unsigned int vesa_mtrr;
-integer_param("vesa-mtrr", vesa_mtrr);
-
-void __init vesa_mtrr_init(void)
+static void cf_check lfb_flush(void)
 {
-    static const int mtrr_types[] = {
-        0, MTRR_TYPE_UNCACHABLE, MTRR_TYPE_WRBACK,
-        MTRR_TYPE_WRCOMB, MTRR_TYPE_WRTHROUGH };
-    unsigned int size_total;
-    int rc, type;
-
-    if ( !lfb || (vesa_mtrr == 0) || (vesa_mtrr >= ARRAY_SIZE(mtrr_types)) )
-        return;
-
-    type = mtrr_types[vesa_mtrr];
-    if ( !type )
-        return;
-
-    /* Find the largest power-of-two */
-    size_total = vram_total;
-    while ( size_total & (size_total - 1) )
-        size_total &= size_total - 1;
-
-    /* Try and find a power of two to add */
-    do {
-        rc = mtrr_add(lfb_base(), size_total, type, 1);
-        size_total >>= 1;
-    } while ( (size_total >= PAGE_SIZE) && (rc == -EINVAL) );
-}
-
-static void lfb_flush(void)
-{
-    if ( vesa_mtrr == 3 )
-        __asm__ __volatile__ ("sfence" : : : "memory");
+    __asm__ __volatile__ ("sfence" : : : "memory");
 }
 
 void __init vesa_endboot(bool_t keep)
@@ -198,5 +160,7 @@ void __init vesa_endboot(bool_t keep)
                    vlfb_info.width * bpp);
         lfb_flush();
         lfb_free();
+        iounmap(lfb);
+        lfb = ZERO_BLOCK_PTR;
     }
 }

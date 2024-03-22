@@ -4,9 +4,10 @@
 AC_PREREQ([2.67])
 AC_INIT([Xen Hypervisor Tools], m4_esyscmd([../version.sh ../xen/Makefile]),
     [xen-devel@lists.xen.org], [xen], [https://www.xen.org/])
-AC_CONFIG_SRCDIR([libxl/libxl.c])
+AC_CONFIG_SRCDIR([libs/light/libxl.c])
 AC_CONFIG_FILES([
 ../config/Tools.mk
+hotplug/common/hotplugpath.sh
 hotplug/FreeBSD/rc.d/xencommons
 hotplug/FreeBSD/rc.d/xendriverdomain
 hotplug/Linux/init.d/sysconfig.xencommons
@@ -21,6 +22,8 @@ hotplug/Linux/xen-hotplug-common.sh
 hotplug/Linux/xendomains
 hotplug/NetBSD/rc.d/xencommons
 hotplug/NetBSD/rc.d/xendriverdomain
+ocaml/libs/xs/paths.ml
+ocaml/xenstored/paths.ml
 ocaml/xenstored/oxenstored.conf
 ])
 AC_CONFIG_HEADERS([config.h])
@@ -67,17 +70,18 @@ m4_include([../m4/uuid.m4])
 m4_include([../m4/pkg.m4])
 m4_include([../m4/curses.m4])
 m4_include([../m4/pthread.m4])
-m4_include([../m4/ptyfuncs.m4])
 m4_include([../m4/extfs.m4])
 m4_include([../m4/fetcher.m4])
 m4_include([../m4/ax_compare_version.m4])
 m4_include([../m4/paths.m4])
 m4_include([../m4/systemd.m4])
 m4_include([../m4/golang.m4])
+m4_include([../m4/header.m4])
 
 AX_XEN_EXPAND_CONFIG()
 
 # Enable/disable options
+AX_ARG_DEFAULT_ENABLE([werror], [Build tools without -Werror])
 AX_ARG_DEFAULT_DISABLE([rpath], [Build tools with -Wl,-rpath,LIBDIR])
 AX_ARG_DEFAULT_DISABLE([githttp], [Download GIT repositories via HTTP])
 AX_ARG_DEFAULT_ENABLE([monitors], [Disable xenstat and xentop monitoring tools])
@@ -119,18 +123,7 @@ AC_SUBST(LINUX_BACKEND_MODULES)
 
 AC_ARG_ENABLE([qemu-traditional],
     AS_HELP_STRING([--enable-qemu-traditional],
-                   [Enable qemu traditional device model, (DEFAULT is on for Linux or NetBSD x86, otherwise off)]),,[
-    case "$host_cpu" in
-        i[[3456]]86|x86_64)
-           enable_qemu_traditional="yes";;
-        *) enable_qemu_traditional="no";;
-    esac
-    case "$host_os" in
-        freebsd*)
-           enable_qemu_traditional="no";;
-    esac
-
-])
+                   [Enable qemu traditional device model, (DEFAULT is off)]))
 AS_IF([test "x$enable_qemu_traditional" = "xyes"], [
 AC_DEFINE([HAVE_QEMU_TRADITIONAL], [1], [Qemu traditional enabled])
     qemu_traditional=y],[
@@ -138,10 +131,40 @@ AC_DEFINE([HAVE_QEMU_TRADITIONAL], [1], [Qemu traditional enabled])
 ])
 AC_SUBST(qemu_traditional)
 
+AC_ARG_ENABLE([ipxe],
+    AS_HELP_STRING([--enable-ipxe],
+                   [Enable in-tree IPXE,
+                    (DEFAULT is off, see also --with-system-ipxe)]),,[
+    AS_IF([test "x$enable_qemu_traditional" = "xyes"], [
+        enable_ipxe="yes"
+    ], [
+        enable_ipxe="no"
+    ])
+])
+AS_IF([test "x$enable_ipxe" = "xno"], [ipxe=n], [ipxe=y])
+AC_ARG_WITH([system-ipxe],
+    AS_HELP_STRING([--with-system-ipxe@<:@=PATH@:>@],
+       [Use system supplied IPXE PATH instead of building and installing
+        our own version, it takes precedence over --{en,dis}able-ipxe,
+        --without-system-ipxe is an error]),[
+    case $withval in
+        no) AC_MSG_ERROR([--without-system-ipxe has no effect]) ;;
+        /*)  ipxe_path=$withval; ipxe=n ;;
+        *) AC_MSG_ERROR([IPXE specified, but is not an absolute path]) ;;
+    esac
+],[])
+AS_IF([test "x$ipxe" = "xy" -o -n "$ipxe_path" ], [
+    AC_DEFINE_UNQUOTED([IPXE_PATH],
+                       ["${ipxe_path:-$XENFIRMWAREDIR/ipxe.bin}"],
+                       [IPXE path])
+])
+AC_SUBST(ipxe)
+
 AC_ARG_ENABLE([rombios],
     AS_HELP_STRING([--enable-rombios],
-                   [Enable ROMBIOS, (DEFAULT is on if qemu-traditional is enabled, otherwise off)]),,[
-    AS_IF([test "x$enable_qemu_traditional" = "xyes"], [
+                   [Enable ROMBIOS, (DEFAULT is on if qemu-traditional or ipxe is enabled,
+                    otherwise off)]),,[
+    AS_IF([test "x$enable_qemu_traditional" = "xyes" -o "x$enable_ipxe" = "xyes"], [
         enable_rombios="yes"
     ], [
         enable_rombios="no"
@@ -195,7 +218,7 @@ AC_SUBST(qemu_xen_path)
 AC_SUBST(qemu_xen_systemd)
 
 AC_ARG_WITH([stubdom-qmp-proxy],
-    AC_HELP_STRING([--stubdom-qmp-proxy@<:@=PATH@:>@],
+    AS_HELP_STRING([--stubdom-qmp-proxy@<:@=PATH@:>@],
         [Use supplied binary PATH as a QMP proxy into stubdomain]),[
     stubdom_qmp_proxy="$withval"
 ],[
@@ -239,39 +262,6 @@ AS_IF([test "x$ovmf" = "xy" -o -n "$ovmf_path" ], [
                        [OVMF path])
 ])
 
-AC_ARG_ENABLE([ipxe],
-    AS_HELP_STRING([--disable-ipxe],
-                   [Enable in-tree IPXE, (DEFAULT is on if rombios is enabled,
-                    otherwise off, see also --with-system-ipxe)]),
-    [
-     AS_IF([test "x$enable_ipxe" = "xno"], [ipxe=n], [ipxe=y])
-    ],
-    [
-    AS_IF([test "x$enable_rombios" = "xno"], [ipxe=n], [ipxe=y])
-])
-AC_ARG_WITH([system-ipxe],
-    AS_HELP_STRING([--with-system-ipxe@<:@=PATH@:>@],
-       [Use system supplied IPXE PATH instead of building and installing
-        our own version, it takes precedence over --{en,dis}able-ipxe and is
-        bound by the presence of rombios, --without-system-ipxe is an error]),[
-    case $withval in
-        no) AC_MSG_ERROR([--without-system-ipxe has no effect]) ;;
-        /*)  ipxe_path=$withval; ipxe=n ;;
-        *) AC_MSG_ERROR([IPXE specified, but is not an absolute path]) ;;
-    esac
-],[])
-AS_IF([test "x$ipxe" = "xy" -o -n "$ipxe_path" ], [
-
-    AS_IF([test "x$enable_rombios" = "xno"], [
-        AC_MSG_ERROR([Rombios is required to use IPXE])
-    ], [])
-
-    AC_DEFINE_UNQUOTED([IPXE_PATH],
-                       ["${ipxe_path:-$XENFIRMWAREDIR/ipxe.bin}"],
-                       [IPXE path])
-])
-AC_SUBST(ipxe)
-
 AC_ARG_WITH([extra-qemuu-configure-args],
     AS_HELP_STRING([--with-extra-qemuu-configure-args@<:@="--ARG1 ..."@:>@],
        [List of additional configure options for upstream qemu]),[
@@ -297,8 +287,6 @@ AC_ARG_VAR([PYTHON], [Path to the Python parser])
 AC_ARG_VAR([PERL], [Path to Perl parser])
 AC_ARG_VAR([BISON], [Path to Bison parser generator])
 AC_ARG_VAR([FLEX], [Path to Flex lexical analyser generator])
-AC_ARG_VAR([BASH], [Path to bash shell])
-AC_ARG_VAR([XGETTEXT], [Path to xgetttext tool])
 AC_ARG_VAR([AS86], [Path to as86 tool])
 AC_ARG_VAR([LD86], [Path to ld86 tool])
 AC_ARG_VAR([BCC], [Path to bcc tool])
@@ -309,8 +297,8 @@ AC_ARG_VAR([AWK], [Path to awk tool])
 AC_PROG_CC
 AC_PROG_MAKE_SET
 AC_PROG_INSTALL
-AC_PATH_PROG([BISON], [bison])
 AC_PATH_PROG([FLEX], [flex])
+AC_PATH_PROG([ABI_DUMPER], [abi-dumper])
 AX_PATH_PROG_OR_FAIL([PERL], [perl])
 AX_PATH_PROG_OR_FAIL([AWK], [awk])
 
@@ -381,7 +369,6 @@ AS_IF([test "$cross_compiling" != yes], [
 
 if ! $rump; then
 
-AX_PATH_PROG_OR_FAIL([XGETTEXT], [xgettext])
 dnl as86, ld86, bcc and iasl are only required when the host system is x86*.
 dnl "host" here means the platform on which the hypervisor and tools is
 dnl going to run, not the platform on which we are building (known as
@@ -407,19 +394,28 @@ AX_CHECK_FETCHER
 
 # Checks for libraries.
 AC_CHECK_HEADER([bzlib.h], [
-AC_CHECK_LIB([bz2], [BZ2_bzDecompressInit], [zlib="$zlib -DHAVE_BZLIB -lbz2"])
+    AC_CHECK_LIB([bz2], [BZ2_bzDecompressInit],
+        [ZLIB_CFLAGS="$ZLIB_CFLAGS -DHAVE_BZLIB"
+         ZLIB_LIBS="$ZLIB_LIBS -lbz2"])
 ])
 AC_CHECK_HEADER([lzma.h], [
-AC_CHECK_LIB([lzma], [lzma_stream_decoder], [zlib="$zlib -DHAVE_LZMA -llzma"])
+    AC_CHECK_LIB([lzma], [lzma_stream_decoder],
+        [ZLIB_CFLAGS="$ZLIB_CFLAGS -DHAVE_LZMA"
+         ZLIB_LIBS="$ZLIB_LIBS -llzma"])
 ])
 AC_CHECK_HEADER([lzo/lzo1x.h], [
-AC_CHECK_LIB([lzo2], [lzo1x_decompress], [zlib="$zlib -DHAVE_LZO1X -llzo2"])
+    AC_CHECK_LIB([lzo2], [lzo1x_decompress],
+        [ZLIB_CFLAGS="$ZLIB_CFLAGS -DHAVE_LZO1X"
+         ZLIB_LIBS="$ZLIB_LIBS -llzo2"])
 ])
-AC_SUBST(zlib)
-AC_SUBST(system_aio)
+PKG_CHECK_MODULES([libzstd], [libzstd],
+    [ZLIB_CFLAGS="$ZLIB_CFLAGS -DHAVE_ZSTD $libzstd_CFLAGS"
+     ZLIB_LIBS="$ZLIB_LIBS $libzstd_LIBS"],
+    [true])
+AC_SUBST([ZLIB_CFLAGS])
+AC_SUBST([ZLIB_LIBS])
 AX_CHECK_EXTFS
 AX_CHECK_PTHREAD
-AX_CHECK_PTYFUNCS
 AC_CHECK_LIB([yajl], [yajl_alloc], [],
     [AC_MSG_ERROR([Could not find yajl])])
 AC_CHECK_LIB([z], [deflateCopy], [], [AC_MSG_ERROR([Could not find zlib])])
@@ -484,7 +480,6 @@ AX_AVAILABLE_SYSTEMD()
 AS_IF([test "x$systemd" = "xy"], [
     AC_CONFIG_FILES([
     hotplug/Linux/systemd/proc-xen.mount
-    hotplug/Linux/systemd/var-lib-xenstored.mount
     hotplug/Linux/systemd/xen-init-dom0.service
     hotplug/Linux/systemd/xen-qemu-dom0-disk-backend.service
     hotplug/Linux/systemd/xen-watchdog.service
@@ -515,5 +510,12 @@ AC_ARG_ENABLE([pvshim],
     esac
 ])
 AC_SUBST(pvshim)
+AS_IF([test "x$pvshim" = "xy"], [
+    AX_PATH_PROG_OR_FAIL([BISON], [bison])
+], [
+    AC_PATH_PROG([BISON], [bison])
+])
+
+AX_FIND_HEADER([INCLUDE_ENDIAN_H], [endian.h sys/endian.h])
 
 AC_OUTPUT()

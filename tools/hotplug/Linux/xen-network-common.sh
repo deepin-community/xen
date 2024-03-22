@@ -64,18 +64,18 @@ first_file()
 
 find_dhcpd_conf_file()
 {
-  first_file -f /etc/dhcp3/dhcpd.conf /etc/dhcpd.conf
+  first_file -f /etc/dhcp/dhcpd.conf /etc/dhcp3/dhcpd.conf /etc/dhcpd.conf
 }
 
 
 find_dhcpd_init_file()
 {
-  first_file -x /etc/init.d/{dhcp3-server,dhcp,dhcpd}
+  first_file -x /etc/init.d/{isc-dhcp-server,dhcp-server,dhcp3-server,dhcp,dhcpd}
 }
 
 find_dhcpd_arg_file()
 {
-  first_file -f /etc/sysconfig/dhcpd /etc/defaults/dhcp /etc/default/dhcp3-server
+  first_file -f /etc/sysconfig/dhcpd /etc/defaults/dhcp /etc/default/dhcp-server /etc/default/dhcp3-server
 }
 
 # configure interfaces which act as pure bridge ports:
@@ -126,26 +126,71 @@ add_to_bridge () {
     local bridge=$1
     local dev=$2
 
-    # Don't add $dev to $bridge if it's already on a bridge.
-    if [ -e "/sys/class/net/${bridge}/brif/${dev}" ]; then
-	ip link set dev ${dev} up || true
-	return
-    fi
-    if which brctl >&/dev/null; then
-        brctl addif ${bridge} ${dev}
+    # Don't add $dev to $bridge if it's already on the bridge.
+    if [ ! -e "/sys/class/net/${bridge}/brif/${dev}" ]; then
+        log debug "adding $dev to bridge $bridge"
+        if which brctl >&/dev/null; then
+            brctl addif ${bridge} ${dev}
+        else
+            ip link set ${dev} master ${bridge}
+        fi
     else
-        ip link set ${dev} master ${bridge}
+        log debug "$dev already on bridge $bridge"
     fi
+
     ip link set dev ${dev} up
+}
+
+remove_from_bridge () {
+    local bridge=$1
+    local dev=$2
+
+    do_without_error ip link set dev ${dev} down
+
+    # Don't remove $dev from $bridge if it's not on the bridge.
+    if [ -e "/sys/class/net/${bridge}/brif/${dev}" ]; then
+        log debug "removing $dev from bridge $bridge"
+        if which brctl >&/dev/null; then
+            do_without_error brctl delif ${bridge} ${dev}
+        else
+            do_without_error ip link set ${dev} nomaster
+        fi
+    else
+        log debug "$dev not on bridge $bridge"
+    fi
 }
 
 # Usage: set_mtu bridge dev
 set_mtu () {
     local bridge=$1
     local dev=$2
-    mtu="`ip link show dev ${bridge}| awk '/mtu/ { print $5 }'`"
+    local type_if=$3
+
+    XENBUS_PATH="${XENBUS_PATH:?}"
+
+    local mtu=$(xenstore_read_default "$XENBUS_PATH/mtu" "")
+    if [ -z "$mtu" ]
+    then
+        mtu="`ip link show dev ${bridge}| awk '/mtu/ { print $5 }'`"
+        if [ -n "$mtu" ]
+        then
+            log debug "$bridge MTU is $mtu"
+        fi
+    fi
     if [ -n "$mtu" ] && [ "$mtu" -gt 0 ]
     then
-            ip link set dev ${dev} mtu $mtu || :
+        log debug "setting $dev MTU to $mtu"
+        ip link set dev ${dev} mtu ${mtu} || :
+
+        if [ ${type_if} = vif ]
+        then
+            local dev_=${dev#vif}
+            local domid=${dev_%.*}
+            local devid=${dev_#*.}
+
+            local FRONTEND_PATH="/local/domain/$domid/device/vif/$devid"
+
+            xenstore_write "$FRONTEND_PATH/mtu" ${mtu}
+        fi
     fi
 }

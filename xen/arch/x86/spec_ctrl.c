@@ -22,6 +22,8 @@
 #include <xen/param.h>
 #include <xen/warning.h>
 
+#include <asm/amd.h>
+#include <asm/hvm/svm/svm.h>
 #include <asm/microcode.h>
 #include <asm/msr.h>
 #include <asm/pv/domain.h>
@@ -33,10 +35,14 @@
 /* Cmdline controls for Xen's alternative blocks. */
 static bool __initdata opt_msr_sc_pv = true;
 static bool __initdata opt_msr_sc_hvm = true;
-static bool __initdata opt_rsb_pv = true;
+static int8_t __initdata opt_rsb_pv = -1;
 static bool __initdata opt_rsb_hvm = true;
-static int8_t __initdata opt_md_clear_pv = -1;
-static int8_t __initdata opt_md_clear_hvm = -1;
+static int8_t __ro_after_init opt_md_clear_pv = -1;
+static int8_t __ro_after_init opt_md_clear_hvm = -1;
+
+static int8_t __ro_after_init opt_ibpb_entry_pv = -1;
+static int8_t __ro_after_init opt_ibpb_entry_hvm = -1;
+static bool __ro_after_init opt_ibpb_entry_dom0;
 
 /* Cmdline controls for Xen's speculative settings. */
 static enum ind_thunk {
@@ -47,28 +53,35 @@ static enum ind_thunk {
     THUNK_LFENCE,
     THUNK_JMP,
 } opt_thunk __initdata = THUNK_DEFAULT;
+
 static int8_t __initdata opt_ibrs = -1;
-bool __read_mostly opt_ibpb = true;
-bool __read_mostly opt_ssbd = false;
+int8_t __initdata opt_stibp = -1;
+bool __ro_after_init opt_ssbd;
+int8_t __initdata opt_psfd = -1;
+
+int8_t __ro_after_init opt_ibpb_ctxt_switch = -1;
 int8_t __read_mostly opt_eager_fpu = -1;
 int8_t __read_mostly opt_l1d_flush = -1;
-bool __read_mostly opt_branch_harden = true;
+static bool __initdata opt_branch_harden = true;
 
 bool __initdata bsp_delay_spec_ctrl;
 uint8_t __read_mostly default_xen_spec_ctrl;
 uint8_t __read_mostly default_spec_ctrl_flags;
 
 paddr_t __read_mostly l1tf_addr_mask, __read_mostly l1tf_safe_maddr;
-static bool __initdata cpu_has_bug_l1tf;
+bool __read_mostly cpu_has_bug_l1tf;
 static unsigned int __initdata l1d_maxphysaddr;
 
 static bool __initdata cpu_has_bug_msbds_only; /* => minimal HT impact. */
 static bool __initdata cpu_has_bug_mds; /* Any other M{LP,SB,FB}DS combination. */
 
 static int8_t __initdata opt_srb_lock = -1;
-uint64_t __read_mostly default_xen_mcu_opt_ctrl;
+static bool __initdata opt_unpriv_mmio;
+static bool __ro_after_init opt_fb_clear_mmio;
+static int8_t __initdata opt_gds_mit = -1;
+static int8_t __initdata opt_div_scrub = -1;
 
-static int __init parse_spec_ctrl(const char *s)
+static int __init cf_check parse_spec_ctrl(const char *s)
 {
     const char *ss;
     int val, rc = 0;
@@ -108,14 +121,20 @@ static int __init parse_spec_ctrl(const char *s)
             opt_rsb_hvm = false;
             opt_md_clear_pv = 0;
             opt_md_clear_hvm = 0;
+            opt_ibpb_entry_pv = 0;
+            opt_ibpb_entry_hvm = 0;
+            opt_ibpb_entry_dom0 = false;
 
             opt_thunk = THUNK_JMP;
             opt_ibrs = 0;
-            opt_ibpb = false;
+            opt_ibpb_ctxt_switch = false;
             opt_ssbd = false;
             opt_l1d_flush = 0;
             opt_branch_harden = false;
             opt_srb_lock = 0;
+            opt_unpriv_mmio = false;
+            opt_gds_mit = 0;
+            opt_div_scrub = 0;
         }
         else if ( val > 0 )
             rc = -EINVAL;
@@ -133,27 +152,99 @@ static int __init parse_spec_ctrl(const char *s)
             opt_msr_sc_pv = val;
             opt_rsb_pv = val;
             opt_md_clear_pv = val;
+            opt_ibpb_entry_pv = val;
         }
         else if ( (val = parse_boolean("hvm", s, ss)) >= 0 )
         {
             opt_msr_sc_hvm = val;
             opt_rsb_hvm = val;
             opt_md_clear_hvm = val;
+            opt_ibpb_entry_hvm = val;
         }
-        else if ( (val = parse_boolean("msr-sc", s, ss)) >= 0 )
+        else if ( (val = parse_boolean("msr-sc", s, ss)) != -1 )
         {
-            opt_msr_sc_pv = val;
-            opt_msr_sc_hvm = val;
+            switch ( val )
+            {
+            case 0:
+            case 1:
+                opt_msr_sc_pv = opt_msr_sc_hvm = val;
+                break;
+
+            case -2:
+                s += strlen("msr-sc=");
+                if ( (val = parse_boolean("pv", s, ss)) >= 0 )
+                    opt_msr_sc_pv = val;
+                else if ( (val = parse_boolean("hvm", s, ss)) >= 0 )
+                    opt_msr_sc_hvm = val;
+                else
+            default:
+                    rc = -EINVAL;
+                break;
+            }
         }
-        else if ( (val = parse_boolean("rsb", s, ss)) >= 0 )
+        else if ( (val = parse_boolean("rsb", s, ss)) != -1 )
         {
-            opt_rsb_pv = val;
-            opt_rsb_hvm = val;
+            switch ( val )
+            {
+            case 0:
+            case 1:
+                opt_rsb_pv = opt_rsb_hvm = val;
+                break;
+
+            case -2:
+                s += strlen("rsb=");
+                if ( (val = parse_boolean("pv", s, ss)) >= 0 )
+                    opt_rsb_pv = val;
+                else if ( (val = parse_boolean("hvm", s, ss)) >= 0 )
+                    opt_rsb_hvm = val;
+                else
+            default:
+                    rc = -EINVAL;
+                break;
+            }
         }
-        else if ( (val = parse_boolean("md-clear", s, ss)) >= 0 )
+        else if ( (val = parse_boolean("md-clear", s, ss)) != -1 )
         {
-            opt_md_clear_pv = val;
-            opt_md_clear_hvm = val;
+            switch ( val )
+            {
+            case 0:
+            case 1:
+                opt_md_clear_pv = opt_md_clear_hvm = val;
+                break;
+
+            case -2:
+                s += strlen("md-clear=");
+                if ( (val = parse_boolean("pv", s, ss)) >= 0 )
+                    opt_md_clear_pv = val;
+                else if ( (val = parse_boolean("hvm", s, ss)) >= 0 )
+                    opt_md_clear_hvm = val;
+                else
+            default:
+                    rc = -EINVAL;
+                break;
+            }
+        }
+        else if ( (val = parse_boolean("ibpb-entry", s, ss)) != -1 )
+        {
+            switch ( val )
+            {
+            case 0:
+            case 1:
+                opt_ibpb_entry_pv = opt_ibpb_entry_hvm =
+                    opt_ibpb_entry_dom0 = val;
+                break;
+
+            case -2:
+                s += strlen("ibpb-entry=");
+                if ( (val = parse_boolean("pv", s, ss)) >= 0 )
+                    opt_ibpb_entry_pv = val;
+                else if ( (val = parse_boolean("hvm", s, ss)) >= 0 )
+                    opt_ibpb_entry_hvm = val;
+                else
+            default:
+                    rc = -EINVAL;
+                break;
+            }
         }
 
         /* Xen's speculative sidechannel mitigation settings. */
@@ -170,12 +261,20 @@ static int __init parse_spec_ctrl(const char *s)
             else
                 rc = -EINVAL;
         }
+
+        /* Bits in MSR_SPEC_CTRL. */
         else if ( (val = parse_boolean("ibrs", s, ss)) >= 0 )
             opt_ibrs = val;
-        else if ( (val = parse_boolean("ibpb", s, ss)) >= 0 )
-            opt_ibpb = val;
+        else if ( (val = parse_boolean("stibp", s, ss)) >= 0 )
+            opt_stibp = val;
         else if ( (val = parse_boolean("ssbd", s, ss)) >= 0 )
             opt_ssbd = val;
+        else if ( (val = parse_boolean("psfd", s, ss)) >= 0 )
+            opt_psfd = val;
+
+        /* Misc settings. */
+        else if ( (val = parse_boolean("ibpb", s, ss)) >= 0 )
+            opt_ibpb_ctxt_switch = val;
         else if ( (val = parse_boolean("eager-fpu", s, ss)) >= 0 )
             opt_eager_fpu = val;
         else if ( (val = parse_boolean("l1d-flush", s, ss)) >= 0 )
@@ -184,6 +283,12 @@ static int __init parse_spec_ctrl(const char *s)
             opt_branch_harden = val;
         else if ( (val = parse_boolean("srb-lock", s, ss)) >= 0 )
             opt_srb_lock = val;
+        else if ( (val = parse_boolean("unpriv-mmio", s, ss)) >= 0 )
+            opt_unpriv_mmio = val;
+        else if ( (val = parse_boolean("gds-mit", s, ss)) >= 0 )
+            opt_gds_mit = val;
+        else if ( (val = parse_boolean("div-scrub", s, ss)) >= 0 )
+            opt_div_scrub = val;
         else
             rc = -EINVAL;
 
@@ -197,12 +302,10 @@ custom_param("spec-ctrl", parse_spec_ctrl);
 int8_t __read_mostly opt_xpti_hwdom = -1;
 int8_t __read_mostly opt_xpti_domu = -1;
 
-static __init void xpti_init_default(uint64_t caps)
+static __init void xpti_init_default(void)
 {
-    if ( boot_cpu_data.x86_vendor & (X86_VENDOR_AMD | X86_VENDOR_HYGON) )
-        caps = ARCH_CAPS_RDCL_NO;
-
-    if ( caps & ARCH_CAPS_RDCL_NO )
+    if ( (boot_cpu_data.x86_vendor & (X86_VENDOR_AMD | X86_VENDOR_HYGON)) ||
+         cpu_has_rdcl_no )
     {
         if ( opt_xpti_hwdom < 0 )
             opt_xpti_hwdom = 0;
@@ -218,7 +321,7 @@ static __init void xpti_init_default(uint64_t caps)
     }
 }
 
-static __init int parse_xpti(const char *s)
+static int __init cf_check parse_xpti(const char *s)
 {
     const char *ss;
     int val, rc = 0;
@@ -264,7 +367,7 @@ custom_param("xpti", parse_xpti);
 int8_t __read_mostly opt_pv_l1tf_hwdom = -1;
 int8_t __read_mostly opt_pv_l1tf_domu = -1;
 
-static __init int parse_pv_l1tf(const char *s)
+static int __init cf_check parse_pv_l1tf(const char *s)
 {
     const char *ss;
     int val, rc = 0;
@@ -305,35 +408,74 @@ static __init int parse_pv_l1tf(const char *s)
 }
 custom_param("pv-l1tf", parse_pv_l1tf);
 
-static void __init print_details(enum ind_thunk thunk, uint64_t caps)
+static void __init print_details(enum ind_thunk thunk)
 {
-    unsigned int _7d0 = 0, e8b = 0, tmp;
+    unsigned int _7d0 = 0, _7d2 = 0, e8b = 0, e21a = 0, max = 0, tmp;
+    uint64_t caps = 0;
 
     /* Collect diagnostics about available mitigations. */
     if ( boot_cpu_data.cpuid_level >= 7 )
-        cpuid_count(7, 0, &tmp, &tmp, &tmp, &_7d0);
+        cpuid_count(7, 0, &max, &tmp, &tmp, &_7d0);
+    if ( max >= 2 )
+        cpuid_count(7, 2, &tmp, &tmp, &tmp, &_7d2);
     if ( boot_cpu_data.extended_cpuid_level >= 0x80000008 )
         cpuid(0x80000008, &tmp, &e8b, &tmp, &tmp);
+    if ( boot_cpu_data.extended_cpuid_level >= 0x80000021 )
+        cpuid(0x80000021, &e21a, &tmp, &tmp, &tmp);
+    if ( cpu_has_arch_caps )
+        rdmsrl(MSR_ARCH_CAPABILITIES, caps);
 
     printk("Speculative mitigation facilities:\n");
 
-    /* Hardware features which pertain to speculative mitigations. */
-    printk("  Hardware features:%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s\n",
-           (_7d0 & cpufeat_mask(X86_FEATURE_IBRSB)) ? " IBRS/IBPB" : "",
-           (_7d0 & cpufeat_mask(X86_FEATURE_STIBP)) ? " STIBP"     : "",
-           (_7d0 & cpufeat_mask(X86_FEATURE_L1D_FLUSH)) ? " L1D_FLUSH" : "",
-           (_7d0 & cpufeat_mask(X86_FEATURE_SSBD))  ? " SSBD"      : "",
-           (_7d0 & cpufeat_mask(X86_FEATURE_MD_CLEAR)) ? " MD_CLEAR" : "",
-           (_7d0 & cpufeat_mask(X86_FEATURE_SRBDS_CTRL)) ? " SRBDS_CTRL" : "",
-           (e8b  & cpufeat_mask(X86_FEATURE_IBPB))  ? " IBPB"      : "",
-           (caps & ARCH_CAPS_IBRS_ALL)              ? " IBRS_ALL"  : "",
-           (caps & ARCH_CAPS_RDCL_NO)               ? " RDCL_NO"   : "",
-           (caps & ARCH_CAPS_RSBA)                  ? " RSBA"      : "",
-           (caps & ARCH_CAPS_SKIP_L1DFL)            ? " SKIP_L1DFL": "",
-           (caps & ARCH_CAPS_SSB_NO)                ? " SSB_NO"    : "",
-           (caps & ARCH_CAPS_MDS_NO)                ? " MDS_NO"    : "",
-           (caps & ARCH_CAPS_TSX_CTRL)              ? " TSX_CTRL"  : "",
-           (caps & ARCH_CAPS_TAA_NO)                ? " TAA_NO"    : "");
+    /*
+     * Hardware read-only information, stating immunity to certain issues, or
+     * suggestions of which mitigation to use.
+     */
+    printk("  Hardware hints:%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s\n",
+           (caps & ARCH_CAPS_RDCL_NO)                        ? " RDCL_NO"        : "",
+           (caps & ARCH_CAPS_EIBRS)                          ? " EIBRS"          : "",
+           (caps & ARCH_CAPS_RSBA)                           ? " RSBA"           : "",
+           (caps & ARCH_CAPS_RRSBA)                          ? " RRSBA"          : "",
+           (caps & ARCH_CAPS_SKIP_L1DFL)                     ? " SKIP_L1DFL"     : "",
+           (e8b  & cpufeat_mask(X86_FEATURE_SSB_NO)) ||
+           (caps & ARCH_CAPS_SSB_NO)                         ? " SSB_NO"         : "",
+           (caps & ARCH_CAPS_MDS_NO)                         ? " MDS_NO"         : "",
+           (caps & ARCH_CAPS_TAA_NO)                         ? " TAA_NO"         : "",
+           (caps & ARCH_CAPS_SBDR_SSDP_NO)                   ? " SBDR_SSDP_NO"   : "",
+           (caps & ARCH_CAPS_FBSDP_NO)                       ? " FBSDP_NO"       : "",
+           (caps & ARCH_CAPS_PSDP_NO)                        ? " PSDP_NO"        : "",
+           (caps & ARCH_CAPS_FB_CLEAR)                       ? " FB_CLEAR"       : "",
+           (caps & ARCH_CAPS_PBRSB_NO)                       ? " PBRSB_NO"       : "",
+           (caps & ARCH_CAPS_GDS_NO)                         ? " GDS_NO"         : "",
+           (e8b  & cpufeat_mask(X86_FEATURE_IBRS_ALWAYS))    ? " IBRS_ALWAYS"    : "",
+           (e8b  & cpufeat_mask(X86_FEATURE_STIBP_ALWAYS))   ? " STIBP_ALWAYS"   : "",
+           (e8b  & cpufeat_mask(X86_FEATURE_IBRS_FAST))      ? " IBRS_FAST"      : "",
+           (e8b  & cpufeat_mask(X86_FEATURE_IBRS_SAME_MODE)) ? " IBRS_SAME_MODE" : "",
+           (e8b  & cpufeat_mask(X86_FEATURE_BTC_NO))         ? " BTC_NO"         : "",
+           (e8b  & cpufeat_mask(X86_FEATURE_IBPB_RET))       ? " IBPB_RET"       : "",
+           (e21a & cpufeat_mask(X86_FEATURE_IBPB_BRTYPE))    ? " IBPB_BRTYPE"    : "",
+           (e21a & cpufeat_mask(X86_FEATURE_SRSO_NO))        ? " SRSO_NO"        : "");
+
+    /* Hardware features which need driving to mitigate issues. */
+    printk("  Hardware features:%s%s%s%s%s%s%s%s%s%s%s%s%s\n",
+           (e8b  & cpufeat_mask(X86_FEATURE_IBPB)) ||
+           (_7d0 & cpufeat_mask(X86_FEATURE_IBRSB))          ? " IBPB"           : "",
+           (e8b  & cpufeat_mask(X86_FEATURE_IBRS)) ||
+           (_7d0 & cpufeat_mask(X86_FEATURE_IBRSB))          ? " IBRS"           : "",
+           (e8b  & cpufeat_mask(X86_FEATURE_AMD_STIBP)) ||
+           (_7d0 & cpufeat_mask(X86_FEATURE_STIBP))          ? " STIBP"          : "",
+           (e8b  & cpufeat_mask(X86_FEATURE_AMD_SSBD)) ||
+           (_7d0 & cpufeat_mask(X86_FEATURE_SSBD))           ? " SSBD"           : "",
+           (_7d2 & cpufeat_mask(X86_FEATURE_INTEL_PSFD)) ||
+           (e8b  & cpufeat_mask(X86_FEATURE_PSFD))           ? " PSFD"           : "",
+           (_7d0 & cpufeat_mask(X86_FEATURE_L1D_FLUSH))      ? " L1D_FLUSH"      : "",
+           (_7d0 & cpufeat_mask(X86_FEATURE_MD_CLEAR))       ? " MD_CLEAR"       : "",
+           (_7d0 & cpufeat_mask(X86_FEATURE_SRBDS_CTRL))     ? " SRBDS_CTRL"     : "",
+           (e8b  & cpufeat_mask(X86_FEATURE_VIRT_SSBD))      ? " VIRT_SSBD"      : "",
+           (caps & ARCH_CAPS_TSX_CTRL)                       ? " TSX_CTRL"       : "",
+           (caps & ARCH_CAPS_FB_CLEAR_CTRL)                  ? " FB_CLEAR_CTRL"  : "",
+           (caps & ARCH_CAPS_GDS_CTRL)                       ? " GDS_CTRL"       : "",
+           (e21a & cpufeat_mask(X86_FEATURE_SBPB))           ? " SBPB"           : "");
 
     /* Compiled-in support which pertains to mitigations. */
     if ( IS_ENABLED(CONFIG_INDIRECT_THUNK) || IS_ENABLED(CONFIG_SHADOW_PAGING) )
@@ -347,22 +489,32 @@ static void __init print_details(enum ind_thunk thunk, uint64_t caps)
                "\n");
 
     /* Settings for Xen's protection, irrespective of guests. */
-    printk("  Xen settings: BTI-Thunk %s, SPEC_CTRL: %s%s%s, Other:%s%s%s%s%s\n",
+    printk("  Xen settings: BTI-Thunk %s, SPEC_CTRL: %s%s%s%s%s, Other:%s%s%s%s%s%s\n",
            thunk == THUNK_NONE      ? "N/A" :
            thunk == THUNK_RETPOLINE ? "RETPOLINE" :
            thunk == THUNK_LFENCE    ? "LFENCE" :
            thunk == THUNK_JMP       ? "JMP" : "?",
-           !boot_cpu_has(X86_FEATURE_IBRSB)          ? "No" :
+           (!boot_cpu_has(X86_FEATURE_IBRSB) &&
+            !boot_cpu_has(X86_FEATURE_IBRS))         ? "No" :
            (default_xen_spec_ctrl & SPEC_CTRL_IBRS)  ? "IBRS+" :  "IBRS-",
-           !boot_cpu_has(X86_FEATURE_SSBD)           ? "" :
+           (!boot_cpu_has(X86_FEATURE_STIBP) &&
+            !boot_cpu_has(X86_FEATURE_AMD_STIBP))    ? "" :
+           (default_xen_spec_ctrl & SPEC_CTRL_STIBP) ? " STIBP+" : " STIBP-",
+           (!boot_cpu_has(X86_FEATURE_SSBD) &&
+            !boot_cpu_has(X86_FEATURE_AMD_SSBD))     ? "" :
            (default_xen_spec_ctrl & SPEC_CTRL_SSBD)  ? " SSBD+" : " SSBD-",
+           (!boot_cpu_has(X86_FEATURE_PSFD) &&
+            !boot_cpu_has(X86_FEATURE_INTEL_PSFD))   ? "" :
+           (default_xen_spec_ctrl & SPEC_CTRL_PSFD)  ? " PSFD+" : " PSFD-",
            !(caps & ARCH_CAPS_TSX_CTRL)              ? "" :
            (opt_tsx & 1)                             ? " TSX+" : " TSX-",
-           !boot_cpu_has(X86_FEATURE_SRBDS_CTRL)     ? "" :
+           !cpu_has_srbds_ctrl                       ? "" :
            opt_srb_lock                              ? " SRB_LOCK+" : " SRB_LOCK-",
-           opt_ibpb                                  ? " IBPB"  : "",
+           opt_ibpb_ctxt_switch                      ? " IBPB-ctxt" : "",
            opt_l1d_flush                             ? " L1D_FLUSH" : "",
-           opt_md_clear_pv || opt_md_clear_hvm       ? " VERW"  : "",
+           opt_md_clear_pv || opt_md_clear_hvm ||
+           opt_fb_clear_mmio                         ? " VERW"  : "",
+           opt_div_scrub                             ? " DIV" : "",
            opt_branch_harden                         ? " BRANCH_HARDEN" : "");
 
     /* L1TF diagnostics, printed if vulnerable or PV shadowing is in use. */
@@ -377,27 +529,32 @@ static void __init print_details(enum ind_thunk thunk, uint64_t caps)
      * mitigation support for guests.
      */
 #ifdef CONFIG_HVM
-    printk("  Support for HVM VMs:%s%s%s%s%s\n",
+    printk("  Support for HVM VMs:%s%s%s%s%s%s%s\n",
            (boot_cpu_has(X86_FEATURE_SC_MSR_HVM) ||
             boot_cpu_has(X86_FEATURE_SC_RSB_HVM) ||
-            boot_cpu_has(X86_FEATURE_MD_CLEAR)   ||
-            opt_eager_fpu)                           ? ""               : " None",
+            boot_cpu_has(X86_FEATURE_IBPB_ENTRY_HVM) ||
+            amd_virt_spec_ctrl ||
+            opt_eager_fpu || opt_md_clear_hvm)       ? ""               : " None",
            boot_cpu_has(X86_FEATURE_SC_MSR_HVM)      ? " MSR_SPEC_CTRL" : "",
+           (boot_cpu_has(X86_FEATURE_SC_MSR_HVM) ||
+            amd_virt_spec_ctrl)                      ? " MSR_VIRT_SPEC_CTRL" : "",
            boot_cpu_has(X86_FEATURE_SC_RSB_HVM)      ? " RSB"           : "",
            opt_eager_fpu                             ? " EAGER_FPU"     : "",
-           boot_cpu_has(X86_FEATURE_MD_CLEAR)        ? " MD_CLEAR"      : "");
+           opt_md_clear_hvm                          ? " MD_CLEAR"      : "",
+           boot_cpu_has(X86_FEATURE_IBPB_ENTRY_HVM)  ? " IBPB-entry"    : "");
 
 #endif
 #ifdef CONFIG_PV
-    printk("  Support for PV VMs:%s%s%s%s%s\n",
+    printk("  Support for PV VMs:%s%s%s%s%s%s\n",
            (boot_cpu_has(X86_FEATURE_SC_MSR_PV) ||
             boot_cpu_has(X86_FEATURE_SC_RSB_PV) ||
-            boot_cpu_has(X86_FEATURE_MD_CLEAR)  ||
-            opt_eager_fpu)                           ? ""               : " None",
+            boot_cpu_has(X86_FEATURE_IBPB_ENTRY_PV) ||
+            opt_eager_fpu || opt_md_clear_pv)        ? ""               : " None",
            boot_cpu_has(X86_FEATURE_SC_MSR_PV)       ? " MSR_SPEC_CTRL" : "",
            boot_cpu_has(X86_FEATURE_SC_RSB_PV)       ? " RSB"           : "",
            opt_eager_fpu                             ? " EAGER_FPU"     : "",
-           boot_cpu_has(X86_FEATURE_MD_CLEAR)        ? " MD_CLEAR"      : "");
+           opt_md_clear_pv                           ? " MD_CLEAR"      : "",
+           boot_cpu_has(X86_FEATURE_IBPB_ENTRY_PV)   ? " IBPB-entry"    : "");
 
     printk("  XPTI (64-bit PV only): Dom0 %s, DomU %s (with%s PCID)\n",
            opt_xpti_hwdom ? "enabled" : "disabled",
@@ -433,7 +590,8 @@ static bool __init check_smt_enabled(void)
      * At the time of writing, it is almost completely undocumented, so isn't
      * virtualised reliably.
      */
-    if ( boot_cpu_data.x86_vendor == X86_VENDOR_INTEL && !cpu_has_hypervisor &&
+    if ( boot_cpu_data.x86_vendor == X86_VENDOR_INTEL &&
+         boot_cpu_data.x86 != 0xf && !cpu_has_hypervisor &&
          !rdmsr_safe(MSR_INTEL_CORE_THREAD_COUNT, val) )
         return (MASK_EXTR(val, MSR_CTC_CORE_MASK) !=
                 MASK_EXTR(val, MSR_CTC_THREAD_MASK));
@@ -449,10 +607,14 @@ static bool __init check_smt_enabled(void)
     return false;
 }
 
-/* Calculate whether Retpoline is known-safe on this CPU. */
-static bool __init retpoline_safe(uint64_t caps)
+/*
+ * Calculate whether Retpoline is known-safe on this CPU.  Fix up the
+ * RSBA/RRSBA bits as necessary.
+ */
+static bool __init retpoline_calculations(void)
 {
     unsigned int ucode_rev = this_cpu(cpu_sig).rev;
+    bool safe = false;
 
     if ( boot_cpu_data.x86_vendor & (X86_VENDOR_AMD | X86_VENDOR_HYGON) )
         return true;
@@ -462,14 +624,92 @@ static bool __init retpoline_safe(uint64_t caps)
         return false;
 
     /*
-     * RSBA may be set by a hypervisor to indicate that we may move to a
-     * processor which isn't retpoline-safe.
+     * The meaning of the RSBA and RRSBA bits have evolved over time.  The
+     * agreed upon meaning at the time of writing (May 2023) is thus:
      *
+     * - RSBA (RSB Alternative) means that an RSB may fall back to an
+     *   alternative predictor on underflow.  Skylake uarch and later all have
+     *   this property.  Broadwell too, when running microcode versions prior
+     *   to Jan 2018.
+     *
+     * - All eIBRS-capable processors suffer RSBA, but eIBRS also introduces
+     *   tagging of predictions with the mode in which they were learned.  So
+     *   when eIBRS is active, RSBA becomes RRSBA (Restricted RSBA).
+     *
+     * - CPUs are not expected to enumerate both RSBA and RRSBA.
+     *
+     * Some parts (Broadwell) are not expected to ever enumerate this
+     * behaviour directly.  Other parts have differing enumeration with
+     * microcode version.  Fix up Xen's idea, so we can advertise them safely
+     * to guests, and so toolstacks can level a VM safety for migration.
+     *
+     * The following states exist:
+     *
+     * |   | RSBA | EIBRS | RRSBA | Notes              | Action (in principle) |
+     * |---+------+-------+-------+--------------------+-----------------------|
+     * | 1 |    0 |     0 |     0 | OK (older parts)   | Maybe +RSBA           |
+     * | 2 |    0 |     0 |     1 | Broken             | (+RSBA, -RRSBA)       |
+     * | 3 |    0 |     1 |     0 | OK (pre-Aug ucode) | +RRSBA                |
+     * | 4 |    0 |     1 |     1 | OK                 |                       |
+     * | 5 |    1 |     0 |     0 | OK                 |                       |
+     * | 6 |    1 |     0 |     1 | Broken             | (-RRSBA)              |
+     * | 7 |    1 |     1 |     0 | Broken             | (-RSBA, +RRSBA)       |
+     * | 8 |    1 |     1 |     1 | Broken             | (-RSBA)               |
+     *
+     * However, we don't need perfect adherence to the spec.  We only need
+     * RSBA || RRSBA to indicate "alternative predictors potentially in use".
+     * Rows 1 & 3 are fixed up by later logic, as they're known configurations
+     * which exist in the world.
+     *
+     * Complain loudly at the broken cases. They're safe for Xen to use (so we
+     * don't attempt to correct), and may or may not exist in reality, but if
+     * we ever encounter them in practice, something is wrong and needs
+     * further investigation.
+     */
+    if ( cpu_has_eibrs ? cpu_has_rsba  /* Rows 7, 8 */
+                       : cpu_has_rrsba /* Rows 2, 6 */ )
+    {
+        printk(XENLOG_ERR
+               "FIRMWARE BUG: CPU %02x-%02x-%02x, ucode 0x%08x: RSBA %u, EIBRS %u, RRSBA %u\n",
+               boot_cpu_data.x86, boot_cpu_data.x86_model,
+               boot_cpu_data.x86_mask, ucode_rev,
+               cpu_has_rsba, cpu_has_eibrs, cpu_has_rrsba);
+        add_taint(TAINT_CPU_OUT_OF_SPEC);
+    }
+
+    /*
      * Processors offering Enhanced IBRS are not guarenteed to be
      * repoline-safe.
      */
-    if ( caps & (ARCH_CAPS_RSBA | ARCH_CAPS_IBRS_ALL) )
+    if ( cpu_has_eibrs )
+    {
+        /*
+         * Prior to the August 2023 microcode, many eIBRS-capable parts did
+         * not enumerate RRSBA.
+         */
+        if ( !cpu_has_rrsba )
+            setup_force_cpu_cap(X86_FEATURE_RRSBA);
+
         return false;
+    }
+
+    /*
+     * RSBA is explicitly enumerated in some cases, but may also be set by a
+     * hypervisor to indicate that we may move to a processor which isn't
+     * retpoline-safe.
+     */
+    if ( cpu_has_rsba )
+        return false;
+
+    /*
+     * At this point, we've filtered all the legal RSBA || RRSBA cases (or the
+     * known non-ideal cases).  If ARCH_CAPS is visible, trust the absence of
+     * RSBA || RRSBA.  There's no known microcode which advertises ARCH_CAPS
+     * without RSBA or EIBRS, and if we're virtualised we can't rely the model
+     * check anyway.
+     */
+    if ( cpu_has_arch_caps )
+        return true;
 
     switch ( boot_cpu_data.x86_model )
     {
@@ -490,29 +730,31 @@ static bool __init retpoline_safe(uint64_t caps)
     case 0x3f: /* Haswell EX/EP */
     case 0x45: /* Haswell D */
     case 0x46: /* Haswell H */
-        return true;
+        safe = true;
+        break;
 
         /*
          * Broadwell processors are retpoline-safe after specific microcode
          * versions.
          */
     case 0x3d: /* Broadwell */
-        return ucode_rev >= 0x2a;
+        safe = ucode_rev >= 0x2a;      break;
     case 0x47: /* Broadwell H */
-        return ucode_rev >= 0x1d;
+        safe = ucode_rev >= 0x1d;      break;
     case 0x4f: /* Broadwell EP/EX */
-        return ucode_rev >= 0xb000021;
+        safe = ucode_rev >= 0xb000021; break;
     case 0x56: /* Broadwell D */
         switch ( boot_cpu_data.x86_mask )
         {
-        case 2:  return ucode_rev >= 0x15;
-        case 3:  return ucode_rev >= 0x7000012;
-        case 4:  return ucode_rev >= 0xf000011;
-        case 5:  return ucode_rev >= 0xe000009;
+        case 2:  safe = ucode_rev >= 0x15;      break;
+        case 3:  safe = ucode_rev >= 0x7000012; break;
+        case 4:  safe = ucode_rev >= 0xf000011; break;
+        case 5:  safe = ucode_rev >= 0xe000009; break;
         default:
             printk("Unrecognised CPU stepping %#x - assuming not reptpoline safe\n",
                    boot_cpu_data.x86_mask);
-            return false;
+            safe = false;
+            break;
         }
         break;
 
@@ -526,7 +768,8 @@ static bool __init retpoline_safe(uint64_t caps)
     case 0x67: /* Cannonlake? */
     case 0x8e: /* Kabylake M */
     case 0x9e: /* Kabylake D */
-        return false;
+        safe = false;
+        break;
 
         /*
          * Atom processors before Goldmont Plus/Gemini Lake are retpoline-safe.
@@ -545,13 +788,55 @@ static bool __init retpoline_safe(uint64_t caps)
     case 0x5c: /* Goldmont */
     case 0x5f: /* Denverton */
     case 0x85: /* Knights Mill */
-        return true;
+        safe = true;
+        break;
 
     default:
         printk("Unrecognised CPU model %#x - assuming not reptpoline safe\n",
                boot_cpu_data.x86_model);
+        safe = false;
+        break;
+    }
+
+    if ( !safe )
+    {
+        /*
+         * Note: the eIBRS-capable parts are filtered out earlier, so the
+         * remainder here are the ones which suffer RSBA behaviour.
+         */
+        setup_force_cpu_cap(X86_FEATURE_RSBA);
+    }
+
+    return safe;
+}
+
+/*
+ * https://software.intel.com/content/www/us/en/develop/articles/software-security-guidance/technical-documentation/retpoline-branch-target-injection-mitigation.html
+ *
+ * Silvermont and Airmont based cores are 64bit but only have a 32bit wide
+ * RSB, which impacts the safety of using SMEP to avoid RSB-overwriting.
+ */
+static bool __init rsb_is_full_width(void)
+{
+    if ( boot_cpu_data.x86_vendor != X86_VENDOR_INTEL ||
+         boot_cpu_data.x86 != 6 )
+        return true;
+
+    switch ( boot_cpu_data.x86_model )
+    {
+    case 0x37: /* Baytrail / Valleyview (Silvermont) */
+    case 0x4a: /* Merrifield */
+    case 0x4c: /* Cherrytrail / Brasswell */
+    case 0x4d: /* Avaton / Rangely (Silvermont) */
+    case 0x5a: /* Moorefield */
+    case 0x5d: /* SoFIA 3G Granite/ES2.1 */
+    case 0x65: /* SoFIA LTE AOSP */
+    case 0x6e: /* Cougar Mountain */
+    case 0x75: /* Lightning Mountain */
         return false;
     }
+
+    return true;
 }
 
 /* Calculate whether this CPU speculates past #NM */
@@ -630,8 +915,175 @@ static bool __init should_use_eager_fpu(void)
     }
 }
 
+/*
+ * https://www.amd.com/content/dam/amd/en/documents/corporate/cr/speculative-return-stack-overflow-whitepaper.pdf
+ */
+static void __init srso_calculations(bool hw_smt_enabled)
+{
+    if ( !(boot_cpu_data.x86_vendor &
+           (X86_VENDOR_AMD | X86_VENDOR_HYGON)) )
+        return;
+
+    /*
+     * If virtualised, none of these heuristics are safe.  Trust the
+     * hypervisor completely.
+     */
+    if ( cpu_has_hypervisor )
+        return;
+
+    if ( boot_cpu_data.x86 == 0x19 )
+    {
+        /*
+         * We could have a table of models/microcode revisions.  ...or we
+         * could just look for the new feature added.
+         */
+        if ( wrmsr_safe(MSR_PRED_CMD, PRED_CMD_SBPB) == 0 )
+        {
+            setup_force_cpu_cap(X86_FEATURE_IBPB_BRTYPE);
+            setup_force_cpu_cap(X86_FEATURE_SBPB);
+        }
+        else
+            printk(XENLOG_WARNING
+                   "Vulnerable to SRSO, without suitable microcode to mitigate\n");
+    }
+    else if ( boot_cpu_data.x86 < 0x19 )
+    {
+        /*
+         * Zen1/2 (which have the IBPB microcode) have IBPB_BRTYPE behaviour
+         * already.
+         *
+         * Older CPUs are unknown, but their IBPB likely does flush branch
+         * types too.  As we're synthesising for the benefit of guests, go
+         * with the likely option - this avoids VMs running on e.g. a Zen3
+         * thinking there's no SRSO mitigation available because it may
+         * migrate to e.g. a Bulldozer.
+         */
+        if ( boot_cpu_has(X86_FEATURE_IBPB) )
+            setup_force_cpu_cap(X86_FEATURE_IBPB_BRTYPE);
+    }
+
+    /*
+     * In single-thread mode on Zen1/2, microarchitectural limits prevent SRSO
+     * attacks from being effective.  Synthesise SRSO_NO if SMT is disabled in
+     * hardware.
+     *
+     * Booting with smt=0, or using xen-hptool should be effective too, but
+     * they can be altered at runtime so it's not safe to presume SRSO_NO.
+     */
+    if ( !hw_smt_enabled &&
+         (boot_cpu_data.x86 == 0x17 || boot_cpu_data.x86 == 0x18) )
+        setup_force_cpu_cap(X86_FEATURE_SRSO_NO);
+}
+
+/*
+ * The Div leakage issue is specific to the AMD Zen1 microarchitecure.
+ *
+ * However, there's no $FOO_NO bit defined, so if we're virtualised we have no
+ * hope of spotting the case where we might move to vulnerable hardware.  We
+ * also can't make any useful conclusion about SMT-ness.
+ *
+ * Don't check the hypervisor bit, so at least we do the safe thing when
+ * booting on something that looks like a Zen1 CPU.
+ */
+static bool __init has_div_vuln(void)
+{
+    if ( !(boot_cpu_data.x86_vendor &
+           (X86_VENDOR_AMD | X86_VENDOR_HYGON)) )
+        return false;
+
+    if ( boot_cpu_data.x86 != 0x17 && boot_cpu_data.x86 != 0x18 )
+        return false;
+
+    return is_zen1_uarch();
+}
+
+static void __init div_calculations(bool hw_smt_enabled)
+{
+    bool cpu_bug_div = has_div_vuln();
+
+    if ( opt_div_scrub == -1 )
+        opt_div_scrub = cpu_bug_div;
+
+    if ( opt_div_scrub )
+        setup_force_cpu_cap(X86_FEATURE_SC_DIV);
+
+    if ( opt_smt == -1 && !cpu_has_hypervisor && cpu_bug_div && hw_smt_enabled )
+        warning_add(
+            "Booted on leaky-DIV hardware with SMT/Hyperthreading\n"
+            "enabled.  Please assess your configuration and choose an\n"
+            "explicit 'smt=<bool>' setting.  See XSA-439.\n");
+}
+
+static void __init ibpb_calculations(void)
+{
+    bool def_ibpb_entry = false;
+
+    /* Check we have hardware IBPB support before using it... */
+    if ( !boot_cpu_has(X86_FEATURE_IBRSB) && !boot_cpu_has(X86_FEATURE_IBPB) )
+    {
+        opt_ibpb_entry_hvm = opt_ibpb_entry_pv = opt_ibpb_ctxt_switch = 0;
+        opt_ibpb_entry_dom0 = false;
+        return;
+    }
+
+    if ( boot_cpu_data.x86_vendor & (X86_VENDOR_AMD | X86_VENDOR_HYGON) )
+    {
+        /*
+         * AMD/Hygon CPUs to date (June 2022) don't flush the RAS.  Future
+         * CPUs are expected to enumerate IBPB_RET when this has been fixed.
+         * Until then, cover the difference with the software sequence.
+         */
+        if ( !boot_cpu_has(X86_FEATURE_IBPB_RET) )
+            setup_force_cpu_cap(X86_BUG_IBPB_NO_RET);
+
+        /*
+         * AMD/Hygon CPUs up to and including Zen2 suffer from Branch Type
+         * Confusion.  Mitigate with IBPB-on-entry.
+         */
+        if ( !boot_cpu_has(X86_FEATURE_BTC_NO) )
+            def_ibpb_entry = true;
+
+        /*
+         * Further to BTC, Zen3/4 CPUs suffer from Speculative Return Stack
+         * Overflow in most configurations.  Mitigate with IBPB-on-entry if we
+         * have the microcode that makes this an effective option.
+         */
+        if ( !boot_cpu_has(X86_FEATURE_SRSO_NO) &&
+             boot_cpu_has(X86_FEATURE_IBPB_BRTYPE) )
+            def_ibpb_entry = true;
+    }
+
+    if ( opt_ibpb_entry_pv == -1 )
+        opt_ibpb_entry_pv = IS_ENABLED(CONFIG_PV) && def_ibpb_entry;
+    if ( opt_ibpb_entry_hvm == -1 )
+        opt_ibpb_entry_hvm = IS_ENABLED(CONFIG_HVM) && def_ibpb_entry;
+
+    if ( opt_ibpb_entry_pv )
+    {
+        setup_force_cpu_cap(X86_FEATURE_IBPB_ENTRY_PV);
+
+        /*
+         * We only need to flush in IST context if we're protecting against PV
+         * guests.  HVM IBPB-on-entry protections are both atomic with
+         * NMI/#MC, so can't interrupt Xen ahead of having already flushed the
+         * BTB.
+         */
+        default_spec_ctrl_flags |= SCF_ist_ibpb;
+    }
+    if ( opt_ibpb_entry_hvm )
+        setup_force_cpu_cap(X86_FEATURE_IBPB_ENTRY_HVM);
+
+    /*
+     * If we're using IBPB-on-entry to protect against PV and HVM guests
+     * (ignoring dom0 if trusted), then there's no need to also issue IBPB on
+     * context switch too.
+     */
+    if ( opt_ibpb_ctxt_switch == -1 )
+        opt_ibpb_ctxt_switch = !(opt_ibpb_entry_hvm && opt_ibpb_entry_pv);
+}
+
 /* Calculate whether this CPU is vulnerable to L1TF. */
-static __init void l1tf_calculations(uint64_t caps)
+static __init void l1tf_calculations(void)
 {
     bool hit_default = false;
 
@@ -719,7 +1171,7 @@ static __init void l1tf_calculations(uint64_t caps)
     }
 
     /* Any processor advertising RDCL_NO should be not vulnerable to L1TF. */
-    if ( caps & ARCH_CAPS_RDCL_NO )
+    if ( cpu_has_rdcl_no )
         cpu_has_bug_l1tf = false;
 
     if ( cpu_has_bug_l1tf && hit_default )
@@ -778,7 +1230,7 @@ static __init void l1tf_calculations(uint64_t caps)
 }
 
 /* Calculate whether this CPU is vulnerable to MDS. */
-static __init void mds_calculations(uint64_t caps)
+static __init void mds_calculations(void)
 {
     /* MDS is only known to affect Intel Family 6 processors at this time. */
     if ( boot_cpu_data.x86_vendor != X86_VENDOR_INTEL ||
@@ -786,7 +1238,7 @@ static __init void mds_calculations(uint64_t caps)
         return;
 
     /* Any processor advertising MDS_NO should be not vulnerable to MDS. */
-    if ( caps & ARCH_CAPS_MDS_NO )
+    if ( cpu_has_mds_no )
         return;
 
     switch ( boot_cpu_data.x86_model )
@@ -878,25 +1330,209 @@ static __init void mds_calculations(uint64_t caps)
     }
 }
 
+static bool __init cpu_has_gds(void)
+{
+    /*
+     * Any part advertising GDS_NO should be not vulnerable to GDS.  This
+     * includes cases where the hypervisor is mitigating behind our backs, or
+     * has synthesized GDS_NO on older parts for levelling purposes.
+     */
+    if ( cpu_has_gds_no )
+        return false;
+
+    /*
+     * On real hardware the GDS_CTRL control only exists on parts vulnerable
+     * to GDS and with up-to-date microcode.  It might also be virtualised by
+     * an aware hypervisor, meaning "somewhere you might migrate to is
+     * vulnerable".
+     */
+    if ( cpu_has_gds_ctrl )
+        return true;
+
+    /*
+     * An attacker requires the use of the AVX2 GATHER instructions to leak
+     * data with GDS.  However, the only way to block those instructions is to
+     * prevent XCR0[2] from being set, which is original AVX.  A hypervisor
+     * might do this as a stopgap mitigation.
+     */
+    if ( !cpu_has_avx )
+        return false;
+
+    /*
+     * GDS affects the Core line from Skylake up to but not including Golden
+     * Cove (Alder Lake, Sapphire Rapids).  Broadwell and older, and the Atom
+     * line, and all hybrid parts are unaffected.
+     */
+    switch ( boot_cpu_data.x86_model )
+    {
+    case 0x55: /* Skylake/Cascade Lake/Cooper Lake SP */
+    case 0x6a: /* Ice Lake SP */
+    case 0x6c: /* Ice Lake D */
+    case 0x7e: /* Ice Lake U/Y */
+    case 0x8c: /* Tiger Lake U */
+    case 0x8d: /* Tiger Lake H */
+    case 0x8e: /* Amber/Kaby/Coffee/Whiskey/Comet lake U/Y */
+    case 0x9e: /* Kaby/Coffee lake H/S/Xeon */
+    case 0xa5: /* Comet Lake H/S */
+    case 0xa6: /* Comet Lake U */
+    case 0xa7: /* Rocket Lake */
+        return true;
+
+    default:
+        /*
+         * If we've got here and are virtualised, we're most likely under a
+         * hypervisor unaware of GDS at which point we've lost.  Err on the
+         * safe side.
+         */
+        return cpu_has_hypervisor;
+    }
+}
+
+static void __init gds_calculations(void)
+{
+    bool cpu_has_bug_gds, mitigated = false;
+
+    /* GDS is only known to affect Intel Family 6 processors at this time. */
+    if ( boot_cpu_data.x86_vendor != X86_VENDOR_INTEL ||
+         boot_cpu_data.x86 != 6 )
+        return;
+
+    cpu_has_bug_gds = cpu_has_gds();
+
+    /*
+     * If we've got GDS_CTRL, we're either native with up-to-date microcode on
+     * a GDS-vulnerable part, or virtualised under a GDS-aware hypervisor.
+     */
+    if ( cpu_has_gds_ctrl )
+    {
+        bool locked;
+        uint64_t opt_ctrl;
+
+        if ( cpu_has_gds_no )
+        {
+            /*
+             * We don't expect to ever see GDS_CTL and GDS_NO set together.
+             * Complain loudly, and forgo playing with other features.
+             */
+            printk(XENLOG_ERR
+                   "FIRMWARE BUG: CPU %02x-%02x-%02x, ucode 0x%08x: GDS_CTRL && GDS_NO\n",
+                   boot_cpu_data.x86, boot_cpu_data.x86_model,
+                   boot_cpu_data.x86_mask, this_cpu(cpu_sig).rev);
+            return add_taint(TAINT_CPU_OUT_OF_SPEC);
+        }
+
+        rdmsrl(MSR_MCU_OPT_CTRL, opt_ctrl);
+
+        mitigated = !(opt_ctrl & MCU_OPT_CTRL_GDS_MIT_DIS);
+        locked    =   opt_ctrl & MCU_OPT_CTRL_GDS_MIT_LOCK;
+
+        /*
+         * Firmware will lock the GDS mitigation if e.g. SGX is active.
+         * Alternatively, a hypervisor might virtualise GDS_CTRL as locked.
+         * Warn if the mitigiation is locked and the user requested the
+         * opposite configuration.
+         */
+        if ( locked )
+        {
+            if ( opt_gds_mit >= 0 && opt_gds_mit != mitigated )
+                printk(XENLOG_WARNING
+                       "GDS_MIT locked by firwmare - ignoring spec-ctrl=gds-mit setting\n");
+            opt_gds_mit = mitigated;
+        }
+        else if ( opt_gds_mit == -1 )
+            opt_gds_mit = cpu_has_bug_gds; /* Mitigate GDS by default */
+
+        /*
+         * Latch our choice of GDS_MIT for all CPUs to pick up.  If LOCK is
+         * set, we latch the same value as it currently holds.
+         */
+        set_in_mcu_opt_ctrl(MCU_OPT_CTRL_GDS_MIT_DIS,
+                            opt_gds_mit ? 0 : MCU_OPT_CTRL_GDS_MIT_DIS);
+        mitigated = opt_gds_mit;
+    }
+    else if ( opt_gds_mit == -1 )
+        opt_gds_mit = cpu_has_bug_gds; /* Mitigate GDS by default */
+
+    /*
+     * If we think we're not on vulnerable hardware, or we've mitigated GDS,
+     * synthesize GDS_NO.  This is mostly for the benefit of guests, to inform
+     * them not to panic.
+     */
+    if ( !cpu_has_bug_gds || mitigated )
+        return setup_force_cpu_cap(X86_FEATURE_GDS_NO);
+
+    /*
+     * If all else has failed, mitigate by disabling AVX.  This prevents
+     * guests from enabling %xcr0.ymm, thereby blocking the use of VGATHER
+     * instructions.
+     *
+     * There's at least one affected CPU not expected to recieve a microcode
+     * update, and this is the only remaining mitigation.
+     *
+     * If we're virtualised, this prevents our guests attacking each other,
+     * but it doesn't stop the outer hypervisor's guests attacking us.  Leave
+     * a note to this effect.
+     */
+    if ( cpu_has_avx && opt_gds_mit )
+    {
+        setup_clear_cpu_cap(X86_FEATURE_AVX);
+        printk(XENLOG_WARNING "Mitigating GDS by disabling AVX%s\n",
+               cpu_has_hypervisor ?
+               " while virtualised - protections are best-effort" : "");
+    }
+}
+
+void spec_ctrl_init_domain(struct domain *d)
+{
+    bool pv = is_pv_domain(d);
+
+    bool verw = ((pv ? opt_md_clear_pv : opt_md_clear_hvm) ||
+                 (opt_fb_clear_mmio && is_iommu_enabled(d)));
+
+    bool ibpb = ((pv ? opt_ibpb_entry_pv : opt_ibpb_entry_hvm) &&
+                 (d->domain_id != 0 || opt_ibpb_entry_dom0));
+
+    d->arch.spec_ctrl_flags =
+        (verw   ? SCF_verw         : 0) |
+        (ibpb   ? SCF_entry_ibpb   : 0) |
+        0;
+}
+
 void __init init_speculation_mitigations(void)
 {
     enum ind_thunk thunk = THUNK_DEFAULT;
-    bool use_spec_ctrl = false, ibrs = false, hw_smt_enabled;
-    bool cpu_has_bug_taa;
-    uint64_t caps = 0;
-
-    if ( cpu_has_arch_caps )
-        rdmsrl(MSR_ARCH_CAPABILITIES, caps);
+    bool has_spec_ctrl, ibrs = false, hw_smt_enabled;
+    bool cpu_has_bug_taa, retpoline_safe;
 
     hw_smt_enabled = check_smt_enabled();
 
+    has_spec_ctrl = (boot_cpu_has(X86_FEATURE_IBRSB) ||
+                     boot_cpu_has(X86_FEATURE_IBRS));
+
     /*
-     * First, disable the use of retpolines if Xen is using shadow stacks, as
-     * they are incompatible.
+     * First, disable the use of retpolines if Xen is using CET.  Retpolines
+     * are a ROP gadget so incompatbile with Shadow Stacks, while IBT depends
+     * on executing indirect branches for the safety properties to apply.
+     *
+     * In the absence of retpolines, IBRS needs to be used for speculative
+     * safety.  All CET-capable hardware has efficient IBRS.
      */
-    if ( cpu_has_xen_shstk &&
-         (opt_thunk == THUNK_DEFAULT || opt_thunk == THUNK_RETPOLINE) )
-        thunk = THUNK_JMP;
+    if ( read_cr4() & X86_CR4_CET )
+    {
+        if ( !has_spec_ctrl )
+        {
+            printk(XENLOG_WARNING "?!? CET active, but no MSR_SPEC_CTRL?\n");
+            add_taint(TAINT_CPU_OUT_OF_SPEC);
+        }
+        else if ( opt_ibrs == -1 )
+            opt_ibrs = ibrs = true;
+
+        if ( opt_thunk == THUNK_DEFAULT || opt_thunk == THUNK_RETPOLINE )
+            thunk = THUNK_JMP;
+    }
+
+    /* Determine if retpoline is safe on this CPU.  Fix up RSBA/RRSBA enumerations. */
+    retpoline_safe = retpoline_calculations();
 
     /*
      * Has the user specified any custom BTI mitigations?  If so, follow their
@@ -916,22 +1552,16 @@ void __init init_speculation_mitigations(void)
         if ( IS_ENABLED(CONFIG_INDIRECT_THUNK) )
         {
             /*
-             * AMD's recommended mitigation is to set lfence as being dispatch
-             * serialising, and to use IND_THUNK_LFENCE.
-             */
-            if ( cpu_has_lfence_dispatch )
-                thunk = THUNK_LFENCE;
-            /*
-             * On Intel hardware, we'd like to use retpoline in preference to
+             * On all hardware, we'd like to use retpoline in preference to
              * IBRS, but only if it is safe on this hardware.
              */
-            else if ( retpoline_safe(caps) )
+            if ( retpoline_safe )
                 thunk = THUNK_RETPOLINE;
-            else if ( boot_cpu_has(X86_FEATURE_IBRSB) )
+            else if ( has_spec_ctrl )
                 ibrs = true;
         }
         /* Without compiler thunk support, use IBRS if available. */
-        else if ( boot_cpu_has(X86_FEATURE_IBRSB) )
+        else if ( has_spec_ctrl )
             ibrs = true;
     }
 
@@ -962,48 +1592,154 @@ void __init init_speculation_mitigations(void)
     else if ( thunk == THUNK_JMP )
         setup_force_cpu_cap(X86_FEATURE_IND_THUNK_JMP);
 
-    /*
-     * If we are on hardware supporting MSR_SPEC_CTRL, see about setting up
-     * the alternatives blocks so we can virtualise support for guests.
-     */
+    /* Intel hardware: MSR_SPEC_CTRL alternatives setup. */
     if ( boot_cpu_has(X86_FEATURE_IBRSB) )
     {
         if ( opt_msr_sc_pv )
         {
-            use_spec_ctrl = true;
+            default_spec_ctrl_flags |= SCF_ist_sc_msr;
             setup_force_cpu_cap(X86_FEATURE_SC_MSR_PV);
         }
 
         if ( opt_msr_sc_hvm )
         {
-            use_spec_ctrl = true;
+            /*
+             * While the guest MSR_SPEC_CTRL value is loaded/saved atomically,
+             * Xen's value is not restored atomically.  An early NMI hitting
+             * the VMExit path needs to restore Xen's value for safety.
+             */
+            default_spec_ctrl_flags |= SCF_ist_sc_msr;
             setup_force_cpu_cap(X86_FEATURE_SC_MSR_HVM);
         }
-
-        if ( use_spec_ctrl )
-            default_spec_ctrl_flags |= SCF_ist_wrmsr;
-
-        if ( ibrs )
-            default_xen_spec_ctrl |= SPEC_CTRL_IBRS;
     }
 
-    /* If we have SSBD available, see whether we should use it. */
-    if ( boot_cpu_has(X86_FEATURE_SSBD) && opt_ssbd )
-        default_xen_spec_ctrl |= SPEC_CTRL_SSBD;
+    /* AMD hardware: MSR_SPEC_CTRL alternatives setup. */
+    if ( boot_cpu_has(X86_FEATURE_IBRS) )
+    {
+        /*
+         * Virtualising MSR_SPEC_CTRL for guests depends on SVM support, which
+         * on real hardware matches the availability of MSR_SPEC_CTRL in the
+         * first place.
+         *
+         * No need for SCF_ist_sc_msr because Xen's value is restored
+         * atomically WRT NMIs in the VMExit path.
+         *
+         * TODO: Adjust cpu_has_svm_spec_ctrl to be usable earlier on boot.
+         */
+        if ( opt_msr_sc_hvm &&
+             (boot_cpu_data.extended_cpuid_level >= 0x8000000a) &&
+             (cpuid_edx(0x8000000a) & (1u << SVM_FEATURE_SPEC_CTRL)) )
+            setup_force_cpu_cap(X86_FEATURE_SC_MSR_HVM);
+    }
+
+    /* Support VIRT_SPEC_CTRL.SSBD if AMD_SSBD is not available. */
+    if ( opt_msr_sc_hvm && !cpu_has_amd_ssbd &&
+         (cpu_has_virt_ssbd || (amd_legacy_ssbd && amd_setup_legacy_ssbd())) )
+        amd_virt_spec_ctrl = true;
+
+    /* Figure out default_xen_spec_ctrl. */
+    if ( has_spec_ctrl && ibrs )
+    {
+        /* IBRS implies STIBP.  */
+        if ( opt_stibp == -1 )
+            opt_stibp = 1;
+
+        default_xen_spec_ctrl |= SPEC_CTRL_IBRS;
+    }
 
     /*
-     * PV guests can poison the RSB to any virtual address from which
-     * they can execute a call instruction.  This is necessarily outside
-     * of the Xen supervisor mappings.
+     * Use STIBP by default on all AMD systems.  Zen3 and later enumerate
+     * STIBP_ALWAYS, but STIBP is needed on Zen2 as part of the mitigations
+     * for Branch Type Confusion.
      *
-     * With SMEP enabled, the processor won't speculate into user mappings.
-     * Therefore, in this case, we don't need to worry about poisoned entries
-     * from 64bit PV guests.
-     *
-     * 32bit PV guest kernels run in ring 1, so use supervisor mappings.
-     * If a processors speculates to 32bit PV guest kernel mappings, it is
-     * speculating in 64bit supervisor mode, and can leak data.
+     * Leave STIBP off by default on Intel.  Pre-eIBRS systems suffer a
+     * substantial perf hit when it was implemented in microcode.
      */
+    if ( opt_stibp == -1 )
+        opt_stibp = !!boot_cpu_has(X86_FEATURE_AMD_STIBP);
+
+    if ( opt_stibp && (boot_cpu_has(X86_FEATURE_STIBP) ||
+                       boot_cpu_has(X86_FEATURE_AMD_STIBP)) )
+        default_xen_spec_ctrl |= SPEC_CTRL_STIBP;
+
+    if ( opt_ssbd && (boot_cpu_has(X86_FEATURE_SSBD) ||
+                      boot_cpu_has(X86_FEATURE_AMD_SSBD)) )
+    {
+        /* SSBD implies PSFD */
+        if ( opt_psfd == -1 )
+            opt_psfd = 1;
+
+        default_xen_spec_ctrl |= SPEC_CTRL_SSBD;
+    }
+
+    /*
+     * Don't use PSFD by default.  AMD designed the predictor to
+     * auto-clear on privilege change.  PSFD is implied by SSBD, which is
+     * off by default.
+     */
+    if ( opt_psfd == -1 )
+        opt_psfd = 0;
+
+    if ( opt_psfd && (boot_cpu_has(X86_FEATURE_PSFD) ||
+                      boot_cpu_has(X86_FEATURE_INTEL_PSFD)) )
+        default_xen_spec_ctrl |= SPEC_CTRL_PSFD;
+
+    /*
+     * PV guests can create RSB entries for any linear address they control,
+     * which are outside of Xen's mappings.
+     *
+     * SMEP inhibits speculation to any user mappings, so in principle it is
+     * safe to not overwrite the RSB when SMEP is active.
+     *
+     * However, some caveats apply:
+     *
+     * 1) CALL instructions push the next sequential linear address into the
+     *    RSB, meaning that there is a boundary case at the user=>supervisor
+     *    split.  This can be compensated for by having an unmapped or NX
+     *    page, or an instruction which halts speculation.
+     *
+     *    For Xen, the next sequential linear address is the start of M2P
+     *    (mapped NX), or a zapped hole (unmapped).
+     *
+     * 2) 32bit PV kernels execute in Ring 1 and use supervisor mappings.
+     *    SMEP offers no protection in this case.
+     *
+     * 3) Some CPUs have RSBs which are not full width, which allow the
+     *    attacker's entries to alias Xen addresses.
+     *
+     * 4) Some CPUs have RSBs which are re-partitioned based on thread
+     *    idleness, which allows an attacker to inject entries into the other
+     *    thread.  We still active the optimisation in this case, and mitigate
+     *    in the idle path which has lower overhead.
+     *
+     * It is safe to turn off RSB stuffing when Xen is using SMEP itself, and
+     * 32bit PV guests are disabled, and when the RSB is full width.
+     */
+    BUILD_BUG_ON(RO_MPT_VIRT_START != PML4_ADDR(256));
+    if ( opt_rsb_pv == -1 )
+    {
+        opt_rsb_pv = (opt_pv32 || !boot_cpu_has(X86_FEATURE_XEN_SMEP) ||
+                      !rsb_is_full_width());
+
+        /*
+         * Cross-Thread Return Address Predictions.
+         *
+         * Vulnerable systems are Zen1/Zen2 uarch, which is AMD Fam17 / Hygon
+         * Fam18, when SMT is active.
+         *
+         * To mitigate, we must flush the RSB/RAS/RAP once between entering
+         * Xen and going idle.
+         *
+         * Most cases flush on entry to Xen anyway.  The one case where we
+         * don't is when using the SMEP optimisation for PV guests.  Flushing
+         * before going idle is less overhead than flushing on PV entry.
+         */
+        if ( !opt_rsb_pv && hw_smt_enabled &&
+             (boot_cpu_data.x86_vendor & (X86_VENDOR_AMD|X86_VENDOR_HYGON)) &&
+             (boot_cpu_data.x86 == 0x17 || boot_cpu_data.x86 == 0x18) )
+            setup_force_cpu_cap(X86_FEATURE_SC_RSB_IDLE);
+    }
+
     if ( opt_rsb_pv )
     {
         setup_force_cpu_cap(X86_FEATURE_SC_RSB_PV);
@@ -1015,11 +1751,29 @@ void __init init_speculation_mitigations(void)
      * mappings.
      */
     if ( opt_rsb_hvm )
+    {
         setup_force_cpu_cap(X86_FEATURE_SC_RSB_HVM);
 
-    /* Check we have hardware IBPB support before using it... */
-    if ( !boot_cpu_has(X86_FEATURE_IBRSB) && !boot_cpu_has(X86_FEATURE_IBPB) )
-        opt_ibpb = false;
+        /*
+         * For SVM, Xen's RSB safety actions are performed before STGI, so
+         * behave atomically with respect to IST sources.
+         *
+         * For VT-x, NMIs are atomic with VMExit (the NMI gets queued but not
+         * delivered) whereas other IST sources are not atomic.  Specifically,
+         * #MC can hit ahead the RSB safety action in the vmexit path.
+         *
+         * Therefore, it is necessary for the IST logic to protect Xen against
+         * possible rogue RSB speculation.
+         */
+        if ( !cpu_has_svm )
+            default_spec_ctrl_flags |= SCF_ist_rsb;
+    }
+
+    srso_calculations(hw_smt_enabled);
+
+    ibpb_calculations();
+
+    div_calculations(hw_smt_enabled);
 
     /* Check whether Eager FPU should be enabled by default. */
     if ( opt_eager_fpu == -1 )
@@ -1028,13 +1782,19 @@ void __init init_speculation_mitigations(void)
     /* (Re)init BSP state now that default_spec_ctrl_flags has been calculated. */
     init_shadow_spec_ctrl_state();
 
-    /* If Xen is using any MSR_SPEC_CTRL settings, adjust the idle path. */
-    if ( default_xen_spec_ctrl )
+    /*
+     * For microcoded IBRS only (i.e. Intel, pre eIBRS), it is recommended to
+     * clear MSR_SPEC_CTRL before going idle, to avoid impacting sibling
+     * threads.  Activate this if SMT is enabled, and Xen is using a non-zero
+     * MSR_SPEC_CTRL setting.
+     */
+    if ( boot_cpu_has(X86_FEATURE_IBRSB) && !cpu_has_eibrs &&
+         hw_smt_enabled && default_xen_spec_ctrl )
         setup_force_cpu_cap(X86_FEATURE_SC_MSR_IDLE);
 
-    xpti_init_default(caps);
+    xpti_init_default();
 
-    l1tf_calculations(caps);
+    l1tf_calculations();
 
     /*
      * By default, enable PV domU L1TF mitigations on all L1TF-vulnerable
@@ -1055,10 +1815,11 @@ void __init init_speculation_mitigations(void)
     if ( !boot_cpu_has(X86_FEATURE_L1D_FLUSH) )
         opt_l1d_flush = 0;
     else if ( opt_l1d_flush == -1 )
-        opt_l1d_flush = cpu_has_bug_l1tf && !(caps & ARCH_CAPS_SKIP_L1DFL);
+        opt_l1d_flush = cpu_has_bug_l1tf && !cpu_has_skip_l1dfl;
 
-    if ( opt_branch_harden )
-        setup_force_cpu_cap(X86_FEATURE_SC_BRANCH_HARDEN);
+    /* We compile lfence's in by default, and nop them out if requested. */
+    if ( !opt_branch_harden )
+        setup_force_cpu_cap(X86_FEATURE_SC_NO_BRANCH_HARDEN);
 
     /*
      * We do not disable HT by default on affected hardware.
@@ -1077,7 +1838,19 @@ void __init init_speculation_mitigations(void)
             "enabled.  Please assess your configuration and choose an\n"
             "explicit 'smt=<bool>' setting.  See XSA-273.\n");
 
-    mds_calculations(caps);
+    mds_calculations();
+
+    /*
+     * Parts which enumerate FB_CLEAR are those which are post-MDS_NO and have
+     * reintroduced the VERW fill buffer flushing side effect because of a
+     * susceptibility to FBSDP.
+     *
+     * If unprivileged guests have (or will have) MMIO mappings, we can
+     * mitigate cross-domain leakage of fill buffer data by issuing VERW on
+     * the return-to-guest path.
+     */
+    if ( opt_unpriv_mmio )
+        opt_fb_clear_mmio = cpu_has_fb_clear;
 
     /*
      * By default, enable PV and HVM mitigations on MDS-vulnerable hardware.
@@ -1092,21 +1865,22 @@ void __init init_speculation_mitigations(void)
                             boot_cpu_has(X86_FEATURE_MD_CLEAR));
 
     /*
-     * Enable MDS defences as applicable.  The PV blocks need using all the
-     * time, and the Idle blocks need using if either PV or HVM defences are
-     * used.
+     * Enable MDS/MMIO defences as applicable.  The Idle blocks need using if
+     * either the PV or HVM MDS defences are used, or if we may give MMIO
+     * access to untrusted guests.
      *
      * HVM is more complicated.  The MD_CLEAR microcode extends L1D_FLUSH with
-     * equivelent semantics to avoid needing to perform both flushes on the
-     * HVM path.  The HVM blocks don't need activating if our hypervisor told
-     * us it was handling L1D_FLUSH, or we are using L1D_FLUSH ourselves.
+     * equivalent semantics to avoid needing to perform both flushes on the
+     * HVM path.  Therefore, we don't need VERW in addition to L1D_FLUSH (for
+     * MDS mitigations.  L1D_FLUSH is not safe for MMIO mitigations.)
+     *
+     * After calculating the appropriate idle setting, simplify
+     * opt_md_clear_hvm to mean just "should we VERW on the way into HVM
+     * guests", so spec_ctrl_init_domain() can calculate suitable settings.
      */
-    if ( opt_md_clear_pv )
-        setup_force_cpu_cap(X86_FEATURE_SC_VERW_PV);
-    if ( opt_md_clear_pv || opt_md_clear_hvm )
+    if ( opt_md_clear_pv || opt_md_clear_hvm || opt_fb_clear_mmio )
         setup_force_cpu_cap(X86_FEATURE_SC_VERW_IDLE);
-    if ( opt_md_clear_hvm && !(caps & ARCH_CAPS_SKIP_L1DFL) && !opt_l1d_flush )
-        setup_force_cpu_cap(X86_FEATURE_SC_VERW_HVM);
+    opt_md_clear_hvm &= !cpu_has_skip_l1dfl && !opt_l1d_flush;
 
     /*
      * Warn the user if they are on MLPDS/MFBDS-vulnerable hardware with HT
@@ -1137,24 +1911,26 @@ void __init init_speculation_mitigations(void)
      *       we check both to spot TSX in a microcode/cmdline independent way.
      */
     cpu_has_bug_taa =
-        (cpu_has_rtm || (caps & ARCH_CAPS_TSX_CTRL)) &&
-        (caps & (ARCH_CAPS_MDS_NO | ARCH_CAPS_TAA_NO)) == ARCH_CAPS_MDS_NO;
+        (cpu_has_rtm || cpu_has_tsx_ctrl) && cpu_has_mds_no && !cpu_has_taa_no;
 
     /*
      * On TAA-affected hardware, disabling TSX is the preferred mitigation, vs
      * the MDS mitigation of disabling HT and using VERW flushing.
      *
      * On CPUs which advertise MDS_NO, VERW has no flushing side effect until
-     * the TSX_CTRL microcode is loaded, despite the MD_CLEAR CPUID bit being
+     * the TSX_CTRL microcode (Nov 2019), despite the MD_CLEAR CPUID bit being
      * advertised, and there isn't a MD_CLEAR_2 flag to use...
      *
+     * Furthermore, the VERW flushing side effect is removed again on client
+     * parts with the Feb 2022 microcode.
+     *
      * If we're on affected hardware, able to do something about it (which
-     * implies that VERW now works), no explicit TSX choice and traditional
+     * implies that VERW might work), no explicit TSX choice and traditional
      * MDS mitigations (no-SMT, VERW) not obviosuly in use (someone might
      * plausibly value TSX higher than Hyperthreading...), disable TSX to
      * mitigate TAA.
      */
-    if ( opt_tsx == -1 && cpu_has_bug_taa && (caps & ARCH_CAPS_TSX_CTRL) &&
+    if ( opt_tsx == -1 && cpu_has_bug_taa && cpu_has_tsx_ctrl &&
          ((hw_smt_enabled && opt_smt) ||
           !boot_cpu_has(X86_FEATURE_SC_VERW_IDLE)) )
     {
@@ -1162,35 +1938,34 @@ void __init init_speculation_mitigations(void)
         tsx_init();
     }
 
-    /* Calculate suitable defaults for MSR_MCU_OPT_CTRL */
-    if ( boot_cpu_has(X86_FEATURE_SRBDS_CTRL) )
+    /*
+     * On some SRBDS-affected hardware, it may be safe to relax srb-lock by
+     * default.
+     *
+     * All parts with SRBDS_CTRL suffer SSDP, the mechanism by which stale RNG
+     * data becomes available to other contexts.  To recover the data, an
+     * attacker needs to use:
+     *  - SBDS (MDS or TAA to sample the cores fill buffer)
+     *  - SBDR (Architecturally retrieve stale transaction buffer contents)
+     *  - DRPW (Architecturally latch stale fill buffer data)
+     *
+     * On MDS_NO parts, and with TAA_NO or TSX unavailable/disabled, and there
+     * is no unprivileged MMIO access, the RNG data doesn't need protecting.
+     */
+    if ( cpu_has_srbds_ctrl )
     {
-        uint64_t val;
-
-        rdmsrl(MSR_MCU_OPT_CTRL, val);
-
-        /*
-         * On some SRBDS-affected hardware, it may be safe to relax srb-lock
-         * by default.
-         *
-         * On parts which enumerate MDS_NO and not TAA_NO, TSX is the only way
-         * to access the Fill Buffer.  If TSX isn't available (inc. SKU
-         * reasons on some models), or TSX is explicitly disabled, then there
-         * is no need for the extra overhead to protect RDRAND/RDSEED.
-         */
-        if ( opt_srb_lock == -1 &&
-             (caps & (ARCH_CAPS_MDS_NO|ARCH_CAPS_TAA_NO)) == ARCH_CAPS_MDS_NO &&
-             (!cpu_has_hle || ((caps & ARCH_CAPS_TSX_CTRL) && opt_tsx == 0)) )
+        if ( opt_srb_lock == -1 && !opt_unpriv_mmio &&
+             cpu_has_mds_no && !cpu_has_taa_no &&
+             (!cpu_has_hle || (cpu_has_tsx_ctrl && rtm_disabled)) )
             opt_srb_lock = 0;
 
-        val &= ~MCU_OPT_CTRL_RNGDS_MITG_DIS;
-        if ( !opt_srb_lock )
-            val |= MCU_OPT_CTRL_RNGDS_MITG_DIS;
-
-        default_xen_mcu_opt_ctrl = val;
+        set_in_mcu_opt_ctrl(MCU_OPT_CTRL_RNGDS_MITG_DIS,
+                            opt_srb_lock ? 0 : MCU_OPT_CTRL_RNGDS_MITG_DIS);
     }
 
-    print_details(thunk, caps);
+    gds_calculations();
+
+    print_details(thunk);
 
     /*
      * If MSR_SPEC_CTRL is available, apply Xen's default setting and discard
@@ -1201,8 +1976,11 @@ void __init init_speculation_mitigations(void)
      * boot won't have any other code running in a position to mount an
      * attack.
      */
-    if ( boot_cpu_has(X86_FEATURE_IBRSB) )
+    if ( has_spec_ctrl )
     {
+        struct cpu_info *info = get_cpu_info();
+        unsigned int val;
+
         bsp_delay_spec_ctrl = !cpu_has_hypervisor && default_xen_spec_ctrl;
 
         /*
@@ -1211,19 +1989,17 @@ void __init init_speculation_mitigations(void)
          */
         if ( bsp_delay_spec_ctrl )
         {
-            struct cpu_info *info = get_cpu_info();
-
             info->shadow_spec_ctrl = 0;
             barrier();
             info->spec_ctrl_flags |= SCF_use_shadow;
             barrier();
         }
 
-        wrmsrl(MSR_SPEC_CTRL, bsp_delay_spec_ctrl ? 0 : default_xen_spec_ctrl);
-    }
+        val = bsp_delay_spec_ctrl ? 0 : default_xen_spec_ctrl;
 
-    if ( boot_cpu_has(X86_FEATURE_SRBDS_CTRL) )
-        wrmsrl(MSR_MCU_OPT_CTRL, default_xen_mcu_opt_ctrl);
+        wrmsrl(MSR_SPEC_CTRL, val);
+        info->last_spec_ctrl = val;
+    }
 }
 
 static void __init __maybe_unused build_assertions(void)

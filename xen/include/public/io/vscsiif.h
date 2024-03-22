@@ -1,25 +1,8 @@
+/* SPDX-License-Identifier: MIT */
 /******************************************************************************
  * vscsiif.h
  *
  * Based on the blkif.h code.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to
- * deal in the Software without restriction, including without limitation the
- * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
- * sell copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in
- * all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
  *
  * Copyright(c) FUJITSU Limited 2008.
  */
@@ -314,6 +297,57 @@ struct vscsiif_response {
     uint32_t reserved[36];
 };
 typedef struct vscsiif_response vscsiif_response_t;
+
+/* SCSI I/O status from vscsiif_response->rslt */
+#define XEN_VSCSIIF_RSLT_STATUS(x)  ((x) & 0x00ff)
+
+/* Host I/O status from vscsiif_response->rslt */
+#define XEN_VSCSIIF_RSLT_HOST(x)    (((x) & 0x00ff0000) >> 16)
+#define XEN_VSCSIIF_RSLT_HOST_OK                   0
+/* Couldn't connect before timeout */
+#define XEN_VSCSIIF_RSLT_HOST_NO_CONNECT           1
+/* Bus busy through timeout */
+#define XEN_VSCSIIF_RSLT_HOST_BUS_BUSY             2
+/* Timed out for other reason */
+#define XEN_VSCSIIF_RSLT_HOST_TIME_OUT             3
+/* Bad target */
+#define XEN_VSCSIIF_RSLT_HOST_BAD_TARGET           4
+/* Abort for some other reason */
+#define XEN_VSCSIIF_RSLT_HOST_ABORT                5
+/* Parity error */
+#define XEN_VSCSIIF_RSLT_HOST_PARITY               6
+/* Internal error */
+#define XEN_VSCSIIF_RSLT_HOST_ERROR                7
+/* Reset by somebody */
+#define XEN_VSCSIIF_RSLT_HOST_RESET                8
+/* Unexpected interrupt */
+#define XEN_VSCSIIF_RSLT_HOST_BAD_INTR             9
+/* Force command past mid-layer */
+#define XEN_VSCSIIF_RSLT_HOST_PASSTHROUGH         10
+/* Retry requested */
+#define XEN_VSCSIIF_RSLT_HOST_SOFT_ERROR          11
+/* Hidden retry requested */
+#define XEN_VSCSIIF_RSLT_HOST_IMM_RETRY           12
+/* Requeue command requested */
+#define XEN_VSCSIIF_RSLT_HOST_REQUEUE             13
+/* Transport error disrupted I/O */
+#define XEN_VSCSIIF_RSLT_HOST_TRANSPORT_DISRUPTED 14
+/* Transport class fastfailed */
+#define XEN_VSCSIIF_RSLT_HOST_TRANSPORT_FAILFAST  15
+/* Permanent target failure */
+#define XEN_VSCSIIF_RSLT_HOST_TARGET_FAILURE      16
+/* Permanent nexus failure on path */
+#define XEN_VSCSIIF_RSLT_HOST_NEXUS_FAILURE       17
+/* Space allocation on device failed */
+#define XEN_VSCSIIF_RSLT_HOST_ALLOC_FAILURE       18
+/* Medium error */
+#define XEN_VSCSIIF_RSLT_HOST_MEDIUM_ERROR        19
+/* Transport marginal errors */
+#define XEN_VSCSIIF_RSLT_HOST_TRANSPORT_MARGINAL  20
+
+/* Result values of reset operations */
+#define XEN_VSCSIIF_RSLT_RESET_SUCCESS  0x2002
+#define XEN_VSCSIIF_RSLT_RESET_FAILED   0x2003
 
 DEFINE_RING_TYPES(vscsiif, struct vscsiif_request, struct vscsiif_response);
 

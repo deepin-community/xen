@@ -20,60 +20,7 @@
  */
 
 #include <xen/hypercall.h>
-
-#define ARGS(x, n)                              \
-    [ __HYPERVISOR_ ## x ] = { n, n }
-#define COMP(x, n, c)                           \
-    [ __HYPERVISOR_ ## x ] = { n, c }
-
-const hypercall_args_t hypercall_args_table[NR_hypercalls] =
-{
-    ARGS(set_trap_table, 1),
-    ARGS(mmu_update, 4),
-    ARGS(set_gdt, 2),
-    ARGS(stack_switch, 2),
-    COMP(set_callbacks, 3, 4),
-    ARGS(fpu_taskswitch, 1),
-    ARGS(sched_op_compat, 2),
-    ARGS(platform_op, 1),
-    ARGS(set_debugreg, 2),
-    ARGS(get_debugreg, 1),
-    COMP(update_descriptor, 2, 4),
-    ARGS(memory_op, 2),
-    ARGS(multicall, 2),
-    COMP(update_va_mapping, 3, 4),
-    COMP(set_timer_op, 1, 2),
-    ARGS(event_channel_op_compat, 1),
-    ARGS(xen_version, 2),
-    ARGS(console_io, 3),
-    ARGS(physdev_op_compat, 1),
-    ARGS(grant_table_op, 3),
-    ARGS(vm_assist, 2),
-    COMP(update_va_mapping_otherdomain, 4, 5),
-    ARGS(vcpu_op, 3),
-    COMP(set_segment_base, 2, 0),
-    ARGS(mmuext_op, 4),
-    ARGS(xsm_op, 1),
-    ARGS(nmi_op, 2),
-    ARGS(sched_op, 2),
-    ARGS(callback_op, 2),
-    ARGS(xenoprof_op, 2),
-    ARGS(event_channel_op, 2),
-    ARGS(physdev_op, 2),
-    ARGS(sysctl, 1),
-    ARGS(domctl, 1),
-    ARGS(kexec_op, 2),
-    ARGS(argo_op, 5),
-    ARGS(xenpmu_op, 2),
-    ARGS(hvm_op, 2),
-    ARGS(dm_op, 3),
-    ARGS(hypfs_op, 5),
-    ARGS(mca, 1),
-    ARGS(arch_1, 1),
-};
-
-#undef COMP
-#undef ARGS
+#include <asm/multicall.h>
 
 #define NEXT_ARG(fmt, args)                                                 \
 ({                                                                          \
@@ -113,7 +60,11 @@ unsigned long hypercall_create_continuation(
 
         regs->rax = op;
 
+#ifdef CONFIG_COMPAT
         if ( !curr->hcall_compat )
+#else
+        if ( true )
+#endif
         {
             for ( i = 0; *p != '\0'; i++ )
             {
@@ -264,13 +215,18 @@ int hypercall_xlat_continuation(unsigned int *id, unsigned int nr,
     return rc;
 }
 
-#ifndef CONFIG_PV
-/* Stub for arch_do_multicall_call */
-enum mc_disposition arch_do_multicall_call(struct mc_state *mc)
+enum mc_disposition arch_do_multicall_call(struct mc_state *state)
 {
+    const struct domain *currd = current->domain;
+
+    if ( is_pv_domain(currd) )
+        return pv_do_multicall_call(state);
+
+    if ( is_hvm_domain(currd) )
+        return hvm_do_multicall_call(state);
+
     return mc_exit;
 }
-#endif
 
 /*
  * Local variables:

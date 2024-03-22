@@ -3,7 +3,7 @@
 #include <xen/string.h>
 #include <xen/decompress.h>
 
-static void __init error(const char *msg)
+static void __init cf_check error(const char *msg)
 {
     printk("%s\n", msg);
 }
@@ -30,6 +30,9 @@ int __init decompress(void *inbuf, unsigned int len, void *outbuf)
 
     if ( len >= 2 && !memcmp(inbuf, "\x02\x21", 2) )
 	return unlz4(inbuf, len, NULL, NULL, outbuf, NULL, error);
+
+    if ( len >= 4 && !memcmp(inbuf, "\x28\xb5\x2f\xfd", 4) )
+	return unzstd(inbuf, len, NULL, NULL, outbuf, NULL, error);
 
     return 1;
 }

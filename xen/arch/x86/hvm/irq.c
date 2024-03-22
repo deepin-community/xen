@@ -321,11 +321,12 @@ void hvm_assert_evtchn_irq(struct vcpu *v)
 
     if ( v->arch.hvm.evtchn_upcall_vector != 0 )
     {
-        uint8_t vector = v->arch.hvm.evtchn_upcall_vector;
+        struct vlapic *vlapic = vcpu_vlapic(v);
 
-        vlapic_set_irq(vcpu_vlapic(v), vector, 0);
+        if ( vlapic_enabled(vlapic) )
+           vlapic_set_irq(vlapic, v->arch.hvm.evtchn_upcall_vector, 0);
     }
-    else if ( is_hvm_pv_evtchn_vcpu(v) )
+    else if ( is_hvm_pv_evtchn_domain(v->domain) )
         vcpu_kick(v);
     else if ( v->vcpu_id == 0 )
         hvm_set_callback_irq_level(v);
@@ -404,9 +405,9 @@ int hvm_inject_msi(struct domain *d, uint64_t addr, uint32_t data)
             {
                 int rc;
 
-                spin_lock(&d->event_lock);
+                write_lock(&d->event_lock);
                 rc = map_domain_emuirq_pirq(d, pirq, IRQ_MSI_EMU);
-                spin_unlock(&d->event_lock);
+                write_unlock(&d->event_lock);
                 if ( rc )
                     return rc;
                 info = pirq_info(d, pirq);
@@ -635,7 +636,7 @@ static void irq_dump(struct domain *d)
            hvm_irq->callback_via_asserted ? "" : " not");
 }
 
-static void dump_irq_info(unsigned char key)
+static void cf_check dump_irq_info(unsigned char key)
 {
     struct domain *d;
 
@@ -650,14 +651,14 @@ static void dump_irq_info(unsigned char key)
     rcu_read_unlock(&domlist_read_lock);
 }
 
-static int __init dump_irq_info_key_init(void)
+static int __init cf_check dump_irq_info_key_init(void)
 {
     register_keyhandler('I', dump_irq_info, "dump HVM irq info", 1);
     return 0;
 }
 __initcall(dump_irq_info_key_init);
 
-static int irq_save_pci(struct vcpu *v, hvm_domain_context_t *h)
+static int cf_check irq_save_pci(struct vcpu *v, hvm_domain_context_t *h)
 {
     struct domain *d = v->domain;
     struct hvm_irq *hvm_irq = hvm_domain_irq(d);
@@ -690,7 +691,7 @@ static int irq_save_pci(struct vcpu *v, hvm_domain_context_t *h)
     return rc;
 }
 
-static int irq_save_isa(struct vcpu *v, hvm_domain_context_t *h)
+static int cf_check irq_save_isa(struct vcpu *v, hvm_domain_context_t *h)
 {
     const struct domain *d = v->domain;
     struct hvm_irq *hvm_irq = hvm_domain_irq(d);
@@ -699,7 +700,7 @@ static int irq_save_isa(struct vcpu *v, hvm_domain_context_t *h)
     return hvm_save_entry(ISA_IRQ, 0, h, &hvm_irq->isa_irq);
 }
 
-static int irq_save_link(struct vcpu *v, hvm_domain_context_t *h)
+static int cf_check irq_save_link(struct vcpu *v, hvm_domain_context_t *h)
 {
     const struct domain *d = v->domain;
     struct hvm_irq *hvm_irq = hvm_domain_irq(d);
@@ -708,7 +709,7 @@ static int irq_save_link(struct vcpu *v, hvm_domain_context_t *h)
     return hvm_save_entry(PCI_LINK, 0, h, &hvm_irq->pci_link);
 }
 
-static int irq_load_pci(struct domain *d, hvm_domain_context_t *h)
+static int cf_check irq_load_pci(struct domain *d, hvm_domain_context_t *h)
 {
     struct hvm_irq *hvm_irq = hvm_domain_irq(d);
     int link, dev, intx, gsi;
@@ -741,7 +742,7 @@ static int irq_load_pci(struct domain *d, hvm_domain_context_t *h)
     return 0;
 }
 
-static int irq_load_isa(struct domain *d, hvm_domain_context_t *h)
+static int cf_check irq_load_isa(struct domain *d, hvm_domain_context_t *h)
 {
     struct hvm_irq *hvm_irq = hvm_domain_irq(d);
     int irq;
@@ -760,7 +761,7 @@ static int irq_load_isa(struct domain *d, hvm_domain_context_t *h)
 }
 
 
-static int irq_load_link(struct domain *d, hvm_domain_context_t *h)
+static int cf_check irq_load_link(struct domain *d, hvm_domain_context_t *h)
 {
     struct hvm_irq *hvm_irq = hvm_domain_irq(d);
     int link, gsi;

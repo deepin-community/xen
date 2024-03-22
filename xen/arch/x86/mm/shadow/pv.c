@@ -26,43 +26,35 @@
 
 /*
  * Write a new value into the guest pagetable, and update the shadows
- * appropriately.  Returns false if we page-faulted, true for success.
+ * appropriately.
  */
-bool
+void cf_check
 sh_write_guest_entry(struct vcpu *v, intpte_t *p, intpte_t new, mfn_t gmfn)
 {
-    unsigned int failed;
-
     paging_lock(v->domain);
-    failed = __copy_to_user(p, &new, sizeof(new));
-    if ( failed != sizeof(new) )
-        sh_validate_guest_entry(v, gmfn, p, sizeof(new));
+    write_atomic(p, new);
+    sh_validate_guest_entry(v, gmfn, p, sizeof(new));
     paging_unlock(v->domain);
-
-    return !failed;
 }
 
 /*
  * Cmpxchg a new value into the guest pagetable, and update the shadows
- * appropriately. Returns false if we page-faulted, true if not.
- * N.B. caller should check the value of "old" to see if the cmpxchg itself
- * was successful.
+ * appropriately.  Returns the previous entry found, which the caller is
+ * expected to check to see if the cmpxchg was successful.
  */
-bool
-sh_cmpxchg_guest_entry(struct vcpu *v, intpte_t *p, intpte_t *old,
+intpte_t cf_check
+sh_cmpxchg_guest_entry(struct vcpu *v, intpte_t *p, intpte_t old,
                        intpte_t new, mfn_t gmfn)
 {
-    bool failed;
-    intpte_t t = *old;
+    intpte_t t;
 
     paging_lock(v->domain);
-    failed = cmpxchg_user(p, t, new);
-    if ( t == *old )
+    t = cmpxchg(p, old, new);
+    if ( t == old )
         sh_validate_guest_entry(v, gmfn, p, sizeof(new));
-    *old = t;
     paging_unlock(v->domain);
 
-    return !failed;
+    return t;
 }
 
 /*

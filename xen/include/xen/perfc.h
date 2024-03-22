@@ -49,7 +49,7 @@ enum perfcounter {
 #undef PERFSTATUS
 #undef PERFSTATUS_ARRAY
 
-typedef unsigned perfc_t;
+typedef unsigned int perfc_t;
 #define PRIperfc ""
 
 DECLARE_PER_CPU(perfc_t[NUM_PERFCOUNTERS], perfcounters);
@@ -96,8 +96,8 @@ DECLARE_PER_CPU(perfc_t[NUM_PERFCOUNTERS], perfcounters);
 struct xen_sysctl_perfc_op;
 int perfc_control(struct xen_sysctl_perfc_op *);
 
-extern void perfc_printall(unsigned char key);
-extern void perfc_reset(unsigned char key);
+extern void cf_check perfc_printall(unsigned char key);
+extern void cf_check perfc_reset(unsigned char key);
 
     
 #else /* CONFIG_PERF_COUNTERS */

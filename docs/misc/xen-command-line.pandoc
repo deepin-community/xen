@@ -75,12 +75,9 @@ of Boolean and String.  These are noted in the relevant sections.
 ## Parameter details
 
 ### acpi
-> `= force | ht | noirq | <boolean>`
+> `= force | ht | noirq | <boolean> | verbose`
 
 **String**, or **Boolean** to disable.
-
-The **acpi** option is used to control a set of four related boolean
-flags; `acpi_force`, `acpi_ht`, `acpi_noirq` and `acpi_disabled`.
 
 By default, Xen will scan the DMI data and blacklist certain systems
 which are known to have broken ACPI setups.  Providing `acpi=force`
@@ -97,12 +94,15 @@ which requires this option to function should be blacklisted.
 Additionally, this will not prevent Xen from finding IO-APIC entries
 from the MP tables.
 
-Finally, any of the boolean false options can be used to disable ACPI
+Further, any of the boolean false options can be used to disable ACPI
 usage entirely.
 
 Because responsibility for ACPI processing is shared between Xen and
 the domain 0 kernel this option is automatically propagated to the
-domain 0 command line
+domain 0 command line.
+
+Finally, `acpi=verbose` will enable per-processor information logging
+which may otherwise be too noisy in particular on large systems.
 
 ### acpi_apic_instance
 > `= <integer>`
@@ -271,7 +271,7 @@ enough. Setting this to a high value may cause boot failure, particularly if
 the NMI watchdog is also enabled.
 
 ### cet
-    = List of [ shstk=<bool> ]
+    = List of [ shstk=<bool>, ibt=<bool> ]
 
     Applicability: x86
 
@@ -279,17 +279,30 @@ Controls for the use of Control-flow Enforcement Technology.  CET is group a
 of hardware features designed to combat Return-oriented Programming (ROP, also
 call/jmp COP/JOP) attacks.
 
+CET is incompatible with 32bit PV guests.  If any CET sub-options are active,
+they will override the `pv=32` boolean to `false`.  Backwards compatibility
+can be maintained with the pv-shim mechanism.
+
 *   The `shstk=` boolean controls whether Xen uses Shadow Stacks for its own
     protection.
 
     The option is available when `CONFIG_XEN_SHSTK` is compiled in, and
-    defaults to `true` on hardware supporting CET-SS.  Specifying
+    generally defaults to `true` on hardware supporting CET-SS.  Specifying
     `cet=no-shstk` will cause Xen not to use Shadow Stacks even when support
     is available in hardware.
 
-    Shadow Stacks are incompatible with 32bit PV guests.  This option will
-    override the `pv=32` boolean to false.  Backwards compatibility can be
-    maintained with the `pv-shim` mechanism.
+    Some hardware suffers from an issue known as Supervisor Shadow Stack
+    Fracturing.  On such hardware, Xen will default to not using Shadow Stacks
+    when virtualised.  Specifying `cet=shstk` will override this heuristic and
+    enable Shadow Stacks unilaterally.
+
+*   The `ibt=` boolean controls whether Xen uses Indirect Branch Tracking for
+    its own protection.
+
+    The option is available when `CONFIG_XEN_IBT` is compiled in, and defaults
+    to `true` on hardware supporting CET-IBT.  Specifying `cet=no-ibt` will
+    cause Xen not to use Indirect Branch Tracking even when support is
+    available in hardware.
 
 ### clocksource (x86)
 > `= pit | hpet | acpi | tsc`
@@ -318,8 +331,8 @@ Interrupts.  Specifying zero disables CMCI handling.
 Flag to indicate whether to probe for a CMOS Real Time Clock irrespective of
 ACPI indicating none to be there.
 
-### com1
-### com2
+### com1 (x86)
+### com2 (x86)
 > `= <baud>[/<base-baud>][,[DPS][,[<io-base>|pci|amt][,[<irq>|msi][,[<port-bdf>][,[<bridge-bdf>]]]]]]`
 
 Both option `com1` and `com2` follow the same format.
@@ -401,7 +414,7 @@ The following are examples of correct specifications:
 Specify the size of the console ring buffer.
 
 ### console
-> `= List of [ vga | com1[H,L] | com2[H,L] | pv | dbgp | none ]`
+> `= List of [ vga | com1[H,L] | com2[H,L] | pv | dbgp | ehci | xhci | none ]`
 
 > Default: `console=com1,vga`
 
@@ -420,7 +433,9 @@ cleared.  This allows a single port to be shared by two subsystems
 `pv` indicates that Xen should use Xen's PV console. This option is
 only available when used together with `pv-in-pvh`.
 
-`dbgp` indicates that Xen should use a USB debug port.
+`dbgp` or `ehci` indicates that Xen should use a USB2 debug port.
+
+`xhci` indicates that Xen should use a USB3 debug port.
 
 `none` indicates that Xen should not use a console.  This option only
 makes sense on its own.
@@ -574,6 +589,47 @@ reduction of features at Xen's disposal to manage guests.
 ### cpuinfo (x86)
 > `= <boolean>`
 
+### crash-debug-debugkey
+### crash-debug-hwdom
+### crash-debug-kexeccmd
+### crash-debug-panic
+### crash-debug-watchdog
+> `= <string>`
+
+> Can be modified at runtime
+
+Specify debug-key actions in cases of crashes. Each of the parameters applies
+to a different crash reason. The `<string>` is a sequence of debug key
+characters, with `+` having the special meaning of a 10 millisecond pause.
+
+`crash-debug-debugkey` will be used for crashes induced by the `C` debug
+key (i.e. manually induced crash).
+
+`crash-debug-hwdom` denotes a crash of dom0.
+
+`crash-debug-kexeccmd` is an explicit request of dom0 to continue with the
+kdump kernel via kexec. Only available on hypervisors built with CONFIG_KEXEC.
+
+`crash-debug-panic` is a crash of the hypervisor.
+
+`crash-debug-watchdog` is a crash due to the watchdog timer expiring.
+
+It should be noted that dumping diagnosis data to the console can fail in
+multiple ways (missing data, hanging system, ...) depending on the reason
+of the crash, which might have left the hypervisor in a bad state. In case
+a debug-key action leads to another crash recursion will be avoided, so no
+additional debug-key actions will be performed in this case. A crash in the
+early boot phase will not result in any debug-key action, as the system
+might not yet be in a state where the handlers can work.
+
+So e.g. `crash-debug-watchdog=0+0r` would dump dom0 state twice with 10
+milliseconds between the two state dumps, followed by the run queues of the
+hypervisor, if the system crashes due to a watchdog timeout.
+
+Depending on the reason of the system crash it might happen that triggering
+some debug key action will result in a hang instead of dumping data and then
+doing a reboot or crash dump.
+
 ### crashinfo_maxaddr
 > `= <size>`
 
@@ -670,11 +726,33 @@ Available alternatives, with their meaning, are:
 * `all`: just one runqueue shared by all the logical pCPUs of
          the host
 
+Regardless of the above choice, Xen attempts to respect
+`sched_credit2_max_cpus_runqueue` limit, which may mean more than one runqueue
+for the `all` value. If that isn't intended, raise
+the `sched_credit2_max_cpus_runqueue` value.
+
 ### dbgp
 > `= ehci[ <integer> | @pci<bus>:<slot>.<func> ]`
+> `= xhci[ <integer> | @pci<bus>:<slot>.<func> ][,share=<bool>|hwdom]`
 
 Specify the USB controller to use, either by instance number (when going
 over the PCI busses sequentially) or by PCI device (must be on segment 0).
+
+Use `ehci` for EHCI debug port, use `xhci` for XHCI debug capability.
+XHCI driver will wait indefinitely for the debug host to connect - make sure
+the cable is connected.
+The `share` option for xhci controls who else can use the controller:
+* `no`: use the controller exclusively for console, even hardware domain
+  (dom0) cannot use it
+* `hwdom`: hardware domain may use the controller too, ports not used for debug
+  console will be available for normal devices; this is the default
+* `yes`: the controller can be assigned to any domain; it is not safe to assign
+  the controller to untrusted domain
+
+Choosing `share=hwdom` (the default) or `share=yes` allows a domain to reset the
+controller, which may cause small portion of the console output to be lost.
+
+The `share=yes` configuration is not security supported.
 
 ### debug_stack_lines
 > `= <integer>`
@@ -692,6 +770,17 @@ Specify the size of the console debug trace buffer. By specifying `cpu:`
 additionally a trace buffer of the specified size is allocated per cpu.
 The debug trace feature is only enabled in debugging builds of Xen.
 
+### dit (x86/Intel)
+> `= <boolean>`
+
+> Default: `CONFIG_DIT_DEFAULT`
+
+Specify whether Xen and guests should operate in Data Independent Timing
+mode (Intel calls this DOITM, Data Operand Independent Timing Mode). Note
+that enabling this option cannot guarantee anything beyond what underlying
+hardware guarantees (with, where available and known to Xen, respective
+tweaks applied).
+
 ### dma_bits
 > `= <integer>`
 
@@ -699,7 +788,7 @@ Specify the bit width of the DMA heap.
 
 ### dom0
     = List of [ pv | pvh, shadow=<bool>, verbose=<bool>,
-                cpuid-faulting=<bool> ]
+                cpuid-faulting=<bool>, msr-relaxed=<bool> ]
 
     Applicability: x86
 
@@ -748,6 +837,34 @@ Controls for how dom0 is constructed on x86 systems.
     restore the pre-4.13 behaviour.  If specifying `no-cpuid-faulting` fixes
     an issue in dom0, please report a bug.
 
+*   The `msr-relaxed` boolean is an interim option, and defaults to false.
+
+    In Xen 4.15, the default behaviour for unhandled MSRs has been changed,
+    to avoid leaking host data into guests, and to avoid breaking guest
+    logic which uses \#GP probing to identify the availability of MSRs.
+
+    However, this new stricter behaviour has the possibility to break
+    guests, and a more 4.14-like behaviour can be selected by specifying
+    `dom0=msr-relaxed`.
+
+    If using this option is necessary to fix an issue, please report a bug.
+
+### dom0-cpuid
+    = List of comma separated booleans
+
+    Applicability: x86
+
+This option allows for fine tuning of the facilities dom0 will use, after
+accounting for hardware capabilities and Xen settings as enumerated via CPUID.
+
+Options are accepted in positive and negative form, to enable or disable
+specific features.  All selections via this mechanism are subject to normal
+CPU Policy safety and dependency logic.
+
+This option is intended for developers to opt dom0 into non-default features,
+and is not intended for use in production circumstances.  If using this option
+is necessary to fix an issue, please report a bug.
+
 ### dom0-iommu
     = List of [ passthrough=<bool>, strict=<bool>, map-inclusive=<bool>,
                 map-reserved=<bool>, none ]
@@ -783,12 +900,12 @@ Controls for the dom0 IOMMU setup.
 
     Typically, some devices in a system use bits of RAM for communication, and
     these areas should be listed as reserved in the E820 table and identified
-    via RMRR or IVMD entries in the APCI tables, so Xen can ensure that they
+    via RMRR or IVMD entries in the ACPI tables, so Xen can ensure that they
     are identity-mapped in the IOMMU.  However, some firmware makes mistakes,
     and this option is a coarse-grain workaround for those errors.
 
     Where possible, finer grain corrections should be made with the `rmrr=`,
-    `ivrs_hpet=` or `ivrs_ioapic=` command line options.
+    `ivmd=`, `ivrs_hpet[]=`, or `ivrs_ioapic[]=` command line options.
 
     This option is disabled by default, and deprecated and intended for
     removal in future versions of Xen.  If specifying `map-inclusive` is the
@@ -1028,6 +1145,18 @@ hardware domain is architecture dependent.
 Note that specifying zero as domU value means zero, while for dom0 it means
 to use the default.
 
+### ext_regions (Arm)
+> `= <boolean>`
+
+> Default : `true`
+
+Flag to enable or disable support for extended regions for Dom0 and
+Dom0less DomUs.
+
+Extended regions are ranges of unused address space exposed to the guest
+as "safe to use" for special memory mappings. Disable if your board
+device tree is incomplete.
+
 ### flask
 > `= permissive | enforcing | late | disabled`
 
@@ -1087,9 +1216,11 @@ does not provide `VM_ENTRY_LOAD_GUEST_PAT`.
 Specify which console gdbstub should use. See **console**.
 
 ### gnttab
-> `= List of [ max-ver:<integer>, transitive=<bool> ]`
+> `= List of [ max-ver:<integer>, transitive=<bool>, transfer=<bool> ]`
 
-> Default: `gnttab=max-ver:2,transitive`
+> Default (Arm): `gnttab=max-ver:1`
+> Default (x86,PV): `gnttab=max-ver:2,transitive,transfer`
+> Default (x86,HVM): `gnttab=max-ver:2,transitive`
 
 Control various aspects of the grant table behaviour available to guests.
 
@@ -1098,6 +1229,10 @@ version are 1 and 2.
 * `transitive` Permit or disallow the use of transitive grants.  Note that the
 use of grant table v2 without transitive grants is an ABI breakage from the
 guests point of view.
+* `transfer` Permit or disallow the GNTTABOP_transfer operation of the
+grant table hypercall.  Note that disallowing GNTTABOP_transfer is an ABI
+breakage from the guests point of view.  This option is only available on
+hypervisors configured to support PV guests.
 
 The usage of gnttab v2 is not security supported on ARM platforms.
 
@@ -1124,8 +1259,6 @@ Dom0 is using this value for sizing its grant table.
 Specify the maximum number of frames to use as part of a domains
 maptrack array. This value is an upper boundary of the per-domain
 value settable via Xen tools.
-
-Dom0 is using this value for sizing its maptrack table.
 
 ### global-pages
     = <boolean>
@@ -1311,8 +1444,9 @@ detection of systems known to misbehave upon accesses to that port.
 > Default: `new` unless directed-EOI is supported
 
 ### iommu
-    = List of [ <bool>, verbose, debug, force, required, quarantine,
-                sharept, intremap, intpost, crash-disable,
+    = List of [ <bool>, verbose, debug, force, required,
+                quarantine=<bool>|scratch-page,
+                sharept, superpages, intremap, intpost, crash-disable,
                 snoop, qinval, igfx, amd-iommu-perdev-intremap,
                 dom0-{passthrough,strict} ]
 
@@ -1349,11 +1483,32 @@ boolean (e.g. `iommu=no`) can override this and leave the IOMMUs disabled.
     will prevent Xen from booting if IOMMUs aren't discovered and enabled
     successfully.
 
-*   The `quarantine` boolean can be used to control Xen's behavior when
-    de-assigning devices from guests.  If enabled (the default), Xen always
+*   The `quarantine` option can be used to control Xen's behavior when
+    de-assigning devices from guests.  The default behaviour is chosen at
+    compile time, and is one of `CONFIG_IOMMU_QUARANTINE_{NONE,BASIC,SCRATCH_PAGE}`.
+
+    When a PCI device is assigned to an untrusted domain, it is possible
+    for that domain to program the device to DMA to an arbitrary address.
+    The IOMMU is used to protect the host from malicious DMA by making
+    sure that the device addresses can only target memory assigned to the
+    guest.  However, when the guest domain is torn down, assigning the
+    device back to the hardware domain would allow any in-flight DMA to
+    potentially target critical host data.  To avoid this, quarantining
+    should be enabled.  Quarantining can be done in two ways: In its basic
+    form, all in-flight DMA will simply be forced to encounter IOMMU
+    faults.  Since there are systems where doing so can cause host lockup,
+    an alternative form is available where accesses to memory will be directed
+    to a scratch page. The implication here is that such accesses will go
+    unnoticed, i.e. an admin may not become aware of the underlying problem.
+
+    Therefore, if this option is set to true (the default), Xen always
     quarantines such devices; they must be explicitly assigned back to Dom0
-    before they can be used there again.  If disabled, Xen will only
-    quarantine devices the toolstack hass arranged for getting quarantined.
+    before they can be used there again.  If set to "scratch-page", still
+    active DMA operations will additionally be directed to a "scratch" page.  If
+    set to false, Xen will only quarantine devices the toolstack has arranged
+    for getting quarantined, and only in the "basic" form.
+
+    This option is only valid on builds supporting PCI.
 
 *   The `sharept` boolean controls whether the IOMMU pagetables are shared
     with the CPU-side HAP pagetables, or allocated separately.  Sharing
@@ -1366,6 +1521,12 @@ boolean (e.g. `iommu=no`) can override this and leave the IOMMUs disabled.
     systems.
 
     This option is ignored on ARM, and the pagetables are always shared.
+
+*   The `superpages` boolean controls whether superpage mappings may be used
+    in IOMMU page tables.  If using this option is necessary to fix an issue,
+    please report a bug.
+
+    This option is only valid on x86.
 
 *   The `intremap` boolean controls the Interrupt Remapping sub-feature, and
     is active by default on compatible hardware.  On x86 systems, the first
@@ -1409,8 +1570,8 @@ The following options are specific to Intel VT-d hardware:
     version 6 and greater as Registered-Based Invalidation isn't supported
     by them.
 
-*   The `igfx` boolean is active by default, and controls whether the IOMMU in
-    front of an Intel Graphics Device is enabled or not.
+*   The `igfx` boolean is active by default, and controls whether IOMMUs in
+    front of solely graphics devices get enabled or not.
 
     It is intended as a debugging mechanism for graphics issues, and to be
     similar to Linux's `intel_iommu=igfx_off` option.  If specifying `no-igfx`
@@ -1449,6 +1610,31 @@ _dom0-iommu=map-inclusive_ - using both options in combination is undefined.**
 > `= <integer>`
 
 ### irq_vector_map (x86)
+
+### ivmd (x86)
+> `= <start>[-<end>][=<bdf1>[-<bdf1'>][,<bdf2>[-<bdf2'>][,...]]][;<start>...]`
+
+Define IVMD-like ranges that are missing from ACPI tables along with the
+device(s) they belong to, and use them for 1:1 mapping.  End addresses can be
+omitted when exactly one page is meant.  The ranges are inclusive when start
+and end are specified.  Note that only PCI segment 0 is supported at this time,
+but it is fine to specify it explicitly.
+
+'start' and 'end' values are page numbers (not full physical addresses),
+in hexadecimal format (can optionally be preceded by "0x").
+
+Omitting the optional (range of) BDF spcifiers signals that the range is to
+be applied to all devices.
+
+Usage example: If device 0:0:1d.0 requires one page (0xd5d45) to be
+reserved, and devices 0:0:1a.0...0:0:1a.3 collectively require three pages
+(0xd5d46 thru 0xd5d48) to be reserved, one usage would be:
+
+ivmd=d5d45=0:1d.0;0xd5d46-0xd5d48=0:1a.0-0:1a.3
+
+Note: grub2 requires to escape or quote special characters, like ';' when
+multiple ranges are specified - refer to the grub2 documentation.
+
 ### ivrs_hpet[`<hpet>`] (AMD)
 > `=[<seg>:]<bus>:<device>.<func>`
 
@@ -1513,12 +1699,15 @@ with **crashinfo_maxaddr**.
 Specify the threshold below which Xen will inform dom0 that the quantity of
 free memory is getting low.  Specifying `0` will disable this notification.
 
-### maxcpus (x86)
+### maxcpus
 > `= <integer>`
 
 Specify the maximum number of CPUs that should be brought up.
 
 This option is ignored in **pv-shim** mode.
+
+**WARNING: On Arm big.LITTLE systems, when `hmp-unsafe` option is enabled, this command line
+option does not guarantee on which CPU types will be used.**
 
 ### max_cstate (x86)
 > `= <integer>[,<integer>]`
@@ -1543,10 +1732,23 @@ one pending bit to be allocated.
 Defaults to 20 bits (to cover at most 1048576 interrupts).
 
 ### mce (x86)
-> `= <integer>`
+> `= <boolean>`
+
+> Default: `true`
+
+Allows to disable the use of Machine Check Exceptions.  Note that doing
+so may result in silent shutdown of the system in case an event occurs
+which would have resulted in raising a Machine Check Exception.  Silent
+here is as far as Xen is concerned; firmware may offer to retrieve some
+collected data.
 
 ### mce_fb (Intel)
-> `= <integer>`
+> `= <boolean>`
+
+> Default: `false`
+
+Force broadcasting of Machine Check Exceptions, suppressing the use of
+Local MCE functionality available in newer Intel hardware.
 
 ### mce_verbosity (x86)
 > `= verbose`
@@ -1676,6 +1878,16 @@ This option is ignored in **pv-shim** mode.
 ### nr_irqs (x86)
 > `= <integer>`
 
+### irq-max-guests (x86)
+> `= <integer>`
+
+> Default: `32`
+
+Maximum number of guests any individual IRQ could be shared between,
+i.e. a limit on the number of guests it is possible to start each having
+assigned a device sharing a common interrupt line.  Accepts values between
+1 and 255.
+
 ### numa (x86)
 > `= on | off | fake=<integer> | noacpi`
 
@@ -1698,6 +1910,13 @@ advertising so, so the IOMMU can create translation contexts for them.
 All numbers specified must be hexadecimal ones.
 
 This option can be specified more than once (up to 8 times at present).
+
+### pci-passthrough (arm)
+> `= <boolean>`
+
+> Default: `false`
+
+Flag to enable or disable support for PCI passthrough
 
 ### pcid (x86)
 > `= <boolean> | xpti=<bool>`
@@ -1728,6 +1947,12 @@ paging controls access to usermode addresses.
 
 ### ple_window (Intel)
 > `= <integer>`
+
+### preferred-cstates (x86)
+> `= ( <integer> | List of ( C1 | C1E | C2 | ... )`
+
+This is a mask of C-states which are to be used preferably.  This option is
+applicable only on hardware were certain C-states are exclusive of one another.
 
 ### psr (Intel)
 > `= List of ( cmt:<boolean> | rmid_max:<integer> | cat:<boolean> | cos_max:<integer> | cdp:<boolean> )`
@@ -1911,9 +2136,11 @@ with read and write permissions.
 ### sched
 > `= credit | credit2 | arinc653 | rtds | null`
 
-> Default: `sched=credit`
+> Default: `sched=credit2`
 
-Choose the default scheduler.
+Choose the default scheduler. Note the default scheduler is selectable via
+Kconfig and depends on enabled schedulers. Check
+`CONFIG_SCHED_DEFAULT` to see which scheduler is the default.
 
 ### sched_credit2_max_cpus_runqueue
 > `= <integer>`
@@ -2096,9 +2323,11 @@ not be able to control the state of the mitigation.
 By default SSBD will be mitigated at runtime (i.e `ssbd=runtime`).
 
 ### spec-ctrl (x86)
-> `= List of [ <bool>, xen=<bool>, {pv,hvm,msr-sc,rsb,md-clear}=<bool>,
->              bti-thunk=retpoline|lfence|jmp, {ibrs,ibpb,ssbd,eager-fpu,
->              l1d-flush,branch-harden,srb-lock}=<bool> ]`
+> `= List of [ <bool>, xen=<bool>, {pv,hvm}=<bool>,
+>              {msr-sc,rsb,md-clear,ibpb-entry}=<bool>|{pv,hvm}=<bool>,
+>              bti-thunk=retpoline|lfence|jmp, {ibrs,ibpb,ssbd,psfd,
+>              eager-fpu,l1d-flush,branch-harden,srb-lock,
+>              unpriv-mmio,gds-mit,div-scrub}=<bool> ]`
 
 Controls for speculative execution sidechannel mitigations.  By default, Xen
 will pick the most appropriate mitigations based on compiled in support,
@@ -2120,44 +2349,67 @@ in place for guests to use.
 
 Use of a positive boolean value for either of these options is invalid.
 
-The booleans `pv=`, `hvm=`, `msr-sc=`, `rsb=` and `md-clear=` offer fine
-grained control over the alternative blocks used by Xen.  These impact Xen's
-ability to protect itself, and Xen's ability to virtualise support for guests
-to use.
+The `pv=`, `hvm=`, `msr-sc=`, `rsb=`, `md-clear=` and `ibpb-entry=` options
+offer fine grained control over the primitives by Xen.  These impact Xen's
+ability to protect itself, and/or Xen's ability to virtualise support for
+guests to use.
 
 * `pv=` and `hvm=` offer control over all suboptions for PV and HVM guests
   respectively.
+* Each other option can be used either as a plain boolean
+  (e.g. `spec-ctrl=rsb` to control both the PV and HVM sub-options), or with
+  `pv=` or `hvm=` subsuboptions (e.g. `spec-ctrl=rsb=no-hvm` to disable HVM
+  RSB only).
+
 * `msr-sc=` offers control over Xen's support for manipulating `MSR_SPEC_CTRL`
   on entry and exit.  These blocks are necessary to virtualise support for
   guests and if disabled, guests will be unable to use IBRS/STIBP/SSBD/etc.
 * `rsb=` offers control over whether to overwrite the Return Stack Buffer /
-  Return Address Stack on entry to Xen.
+  Return Address Stack on entry to Xen and on idle.
 * `md-clear=` offers control over whether to use VERW to flush
   microarchitectural buffers on idle and exit from Xen.  *Note: For
   compatibility with development versions of this fix, `mds=` is also accepted
   on Xen 4.12 and earlier as an alias.  Consult vendor documentation in
   preference to here.*
+* `ibpb-entry=` offers control over whether IBPB (Indirect Branch Prediction
+  Barrier) is used on entry to Xen.  This is used by default on hardware
+  vulnerable to Branch Type Confusion, and hardware vulnerable to Speculative
+  Return Stack Overflow if appropriate microcode has been loaded, but for
+  performance reasons dom0 is unprotected by default.  If it is necessary to
+  protect dom0 too, boot with `spec-ctrl=ibpb-entry`.
 
 If Xen was compiled with INDIRECT_THUNK support, `bti-thunk=` can be used to
 select which of the thunks gets patched into the `__x86_indirect_thunk_%reg`
-locations.  The default thunk is `retpoline` (generally preferred for Intel
-hardware), with the alternatives being `jmp` (a `jmp *%reg` gadget, minimal
-overhead), and `lfence` (an `lfence; jmp *%reg` gadget, preferred for AMD).
+locations.  The default thunk is `retpoline` (generally preferred), with the
+alternatives being `jmp` (a `jmp *%reg` gadget, minimal overhead), and
+`lfence` (an `lfence; jmp *%reg` gadget).
 
 On hardware supporting IBRS (Indirect Branch Restricted Speculation), the
 `ibrs=` option can be used to force or prevent Xen using the feature itself.
 If Xen is not using IBRS itself, functionality is still set up so IBRS can be
 virtualised for guests.
 
+On hardware supporting STIBP (Single Thread Indirect Branch Predictors), the
+`stibp=` option can be used to force or prevent Xen using the feature itself.
+By default, Xen will use STIBP when IBRS is in use (IBRS implies STIBP), and
+when hardware hints recommend using it as a blanket setting.
+
+On hardware supporting SSBD (Speculative Store Bypass Disable), the `ssbd=`
+option can be used to force or prevent Xen using the feature itself.  The
+feature is virtualised for guests, independently of Xen's choice of setting.
+On AMD hardware, disabling Xen SSBD usage on the command line (`ssbd=0` which
+is the default value) can lead to Xen running with the guest SSBD selection
+depending on hardware support, on the same hardware setting `ssbd=1` will
+result in SSBD always being enabled, regardless of guest choice.
+
+On hardware supporting PSFD (Predictive Store Forwarding Disable), the `psfd=`
+option can be used to force or prevent Xen using the feature itself.  By
+default, Xen will not use PSFD.  PSFD is implied by SSBD, and SSBD is off by
+default.
+
 On hardware supporting IBPB (Indirect Branch Prediction Barrier), the `ibpb=`
 option can be used to force (the default) or prevent Xen from issuing branch
 prediction barriers on vcpu context switches.
-
-On hardware supporting SSBD (Speculative Store Bypass Disable), the `ssbd=`
-option can be used to force or prevent Xen using the feature itself.  On AMD
-hardware, this is a global option applied at boot, and not virtualised for
-guest use.  On Intel hardware, the feature is virtualised for guests,
-independently of Xen's choice of setting.
 
 On all hardware, the `eager-fpu=` option can be used to force or prevent Xen
 from using fully eager FPU context switches.  This is currently implemented as
@@ -2178,8 +2430,28 @@ Xen will enable this mitigation.
 On hardware supporting SRBDS_CTRL, the `srb-lock=` option can be used to force
 or prevent Xen from protect the Special Register Buffer from leaking stale
 data. By default, Xen will enable this mitigation, except on parts where MDS
-is fixed and TAA is fixed/mitigated (in which case, there is believed to be no
-way for an attacker to obtain the stale data).
+is fixed and TAA is fixed/mitigated and there are no unprivileged MMIO
+mappings (in which case, there is believed to be no way for an attacker to
+obtain stale data).
+
+The `unpriv-mmio=` boolean indicates whether the system has (or will have)
+less than fully privileged domains granted access to MMIO devices.  By
+default, this option is disabled.  If enabled, Xen will use the `FB_CLEAR`
+and/or `SRBDS_CTRL` functionality available in the Intel May 2022 microcode
+release to mitigate cross-domain leakage of data via the MMIO Stale Data
+vulnerabilities.
+
+On all hardware, the `gds-mit=` option can be used to force or prevent Xen
+from mitigating the GDS (Gather Data Sampling) vulnerability.  By default, Xen
+will mitigate GDS on hardware believed to be vulnerable.  On hardware
+supporting GDS_CTRL (requires the August 2023 microcode), and where firmware
+has elected not to lock the configuration, Xen will use GDS_CTRL to mitigate
+GDS with.  Otherwise, Xen will mitigate by disabling AVX, which blocks the use
+of the AVX2 Gather instructions.
+
+On all hardware, the `div-scrub=` option can be used to force or prevent Xen
+from mitigating the DIV-leakage vulnerability.  By default, Xen will mitigate
+DIV-leakage on hardware believed to be vulnerable.
 
 ### sync_console
 > `= <boolean>`
@@ -2242,7 +2514,9 @@ Several microcode updates are relevant:
    Introduced MSR_TSX_CTRL on all TSX-enabled MDS_NO parts to date,
    CLX/WHL-R/CFL-R, with the controls becoming architectural moving forward
    and formally retiring HLE from the architecture.  The user can disable TSX
-   to mitigate TAA, and elect to hide the HLE/RTM CPUID bits.
+   to mitigate TAA, and elect to hide the HLE/RTM CPUID bits.  Also causes
+   VERW to once-again flush the microarchiectural buffers in case a TAA
+   mitigation is wanted along with TSX being enabled.
 
  * June 2021, removing the workaround for March 2019 on client CPUs and
    formally de-featured TSX on SKL/KBL/WHL/CFL (Note: SKX still retains the
@@ -2250,18 +2524,31 @@ Several microcode updates are relevant:
    PCR3 works fine, and TSX is disabled by default, but the user can re-enable
    TSX at their own risk, accepting that the memory order erratum is unfixed.
 
+ * February 2022, removing the VERW flushing workaround from November 2019 on
+   client CPUs and formally de-featuring TSX on WHL-R/CFL-R (Note: CLX still
+   retains the VERW flushing workaround).  TSX defaults to disabled, and is
+   locked off when SGX is enabled in the BIOS.  When SGX is not enabled, TSX
+   can be re-enabled at the users own risk, as it reintroduces the TSX Async
+   Abort speculative vulnerability.
+
 On systems with the ability to configure TSX, this boolean offers system wide
 control of whether TSX is enabled or disabled.
+
+When TSX is disabled, transactions unconditionally abort.  This is compatible
+with the TSX spec, which requires software to have a non-transactional path as
+a fallback.  The RTM and HLE CPUID bits are hidden from VMs by default, but
+can be re-enabled if required.  This allows VMs which previously saw RTM/HLE
+to be migrated in, although any TSX-enabled software will run with reduced
+performance.
+
+ * When TSX is locked off by firmware, `tsx=` is ignored and treated as
+   `false`.
 
  * An explicit `tsx=` choice is honoured, even if it is `true` and would
    result in a vulnerable system.
 
  * When no explicit `tsx=` choice is given, parts vulnerable to TAA will be
    mitigated by disabling TSX, as this is the lowest overhead option.
-
-   If the use of TSX is important, the more expensive TAA mitigations can be
-   opted in to with `smt=0 spec-ctrl=md-clear`, at which point TSX will remain
-   active by default.
 
  * When no explicit `tsx=` option is given, parts susceptible to the memory
    ordering errata default to `true` to enable working TSX.  Alternatively,
@@ -2275,7 +2562,7 @@ control of whether TSX is enabled or disabled.
    Alternatively, selecting `tsx=1` will re-enable TSX at the users own risk.
 
 ### ucode
-> `= List of [ <integer> | scan=<bool>, nmi=<bool> ]`
+> `= List of [ <integer> | scan=<bool>, nmi=<bool>, allow-same=<bool> ]`
 
     Applicability: x86
     Default: `nmi`
@@ -2307,6 +2594,11 @@ precedence over `scan`.
 stop_machine context. In NMI handler, even NMIs are blocked, which is
 considered safer. The default value is `true`.
 
+'allow-same' alters the default acceptance policy for new microcode to permit
+trying to reload the same version.  Many CPUs will actually reload microcode
+of the same version, and this allows for easy testing of the late microcode
+loading path.
+
 ### unrestricted_guest (Intel)
 > `= <boolean>`
 
@@ -2320,14 +2612,13 @@ PCPUs when using the credit1 scheduler. This prevents rapid fluttering
 of a VCPU between CPUs, and reduces the implicit overheads such as
 cache-warming. 1ms (1000) has been measured as a good value.
 
-### vesa-map
-> `= <integer>`
-
-### vesa-mtrr
-> `= <integer>`
-
 ### vesa-ram
 > `= <integer>`
+
+> Default: `0`
+
+This allows to override the amount of video RAM, in MiB, determined to be
+present.
 
 ### vga
 > `= ( ask | current | text-80x<rows> | gfx-<width>x<height>x<depth> | mode-<mode> )[,keep]`
@@ -2367,6 +2658,17 @@ guest will notify Xen that it has failed to acquire a spinlock.
 
 <major>, <minor> and <build> must be integers. The values will be
 encoded in guest CPUID 0x40000002 if viridian enlightenments are enabled.
+
+### vm-notify-window (Intel)
+> `= <integer>`
+
+> Default: `0`
+
+Specify the value of the VM Notify window used to detect locked VMs. Set to -1
+to disable the feature.  Value is in units of crystal clock cycles.
+
+Note the hardware might add a threshold to the provided value in order to make
+it safe, and hence using 0 is fine.
 
 ### vpid (Intel)
 > `= <boolean>`
@@ -2456,6 +2758,15 @@ the watchdog.
 
 Permit use of x2apic setup for SMP environments.
 
+### x2apic-mode (x86)
+> `= physical | cluster | mixed`
+
+> Default: `physical` if **FADT** mandates physical mode, otherwise set at
+>          build time by CONFIG_X2APIC_{PHYSICAL,LOGICAL,MIXED}.
+
+In the case that x2apic is in use, this option switches between modes to
+address APICs in the system as interrupt destinations.
+
 ### x2apic_phys (x86)
 > `= <boolean>`
 
@@ -2465,6 +2776,9 @@ Permit use of x2apic setup for SMP environments.
 In the case that x2apic is in use, this option switches between physical and
 clustered mode.  The default, given no hint from the **FADT**, is cluster
 mode.
+
+**WARNING: `x2apic_phys` is deprecated and superseded by `x2apic-mode`.
+The latter takes precedence if both are set.**
 
 ### xenheap_megabytes (arm32)
 > `= <size>`

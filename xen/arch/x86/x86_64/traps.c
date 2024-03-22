@@ -16,6 +16,7 @@
 #include <asm/current.h>
 #include <asm/flushtlb.h>
 #include <asm/traps.h>
+#include <asm/endbr.h>
 #include <asm/event.h>
 #include <asm/nmi.h>
 #include <asm/msr.h>
@@ -29,9 +30,9 @@ static void print_xen_info(void)
 {
     char taint_str[TAINT_STRING_MAX_LEN];
 
-    printk("----[ Xen-%d.%d%s  x86_64  debug=%c " gcov_string "  %s ]----\n",
+    printk("----[ Xen-%d.%d%s  x86_64  %s  %s ]----\n",
            xen_major_version(), xen_minor_version(), xen_extra_version(),
-           debug_build() ? 'y' : 'n', print_tainted(taint_str));
+           xen_build_info(), print_tainted(taint_str));
 }
 
 enum context { CTXT_hypervisor, CTXT_pv_guest, CTXT_hvm_guest };
@@ -43,13 +44,43 @@ static void read_registers(struct cpu_user_regs *regs, unsigned long crs[8])
     crs[2] = read_cr2();
     crs[3] = read_cr3();
     crs[4] = read_cr4();
-    regs->ds = read_sreg(ds);
-    regs->es = read_sreg(es);
-    regs->fs = read_sreg(fs);
-    regs->gs = read_sreg(gs);
-    crs[5] = rdfsbase();
-    crs[6] = rdgsbase();
-    crs[7] = rdgsshadow();
+    read_sregs(regs);
+    crs[5] = read_fs_base();
+    crs[6] = read_gs_base();
+    crs[7] = read_gs_shadow();
+}
+
+static void get_hvm_registers(struct vcpu *v, struct cpu_user_regs *regs,
+                              unsigned long crs[8])
+{
+    struct segment_register sreg;
+
+    crs[0] = v->arch.hvm.guest_cr[0];
+    crs[2] = v->arch.hvm.guest_cr[2];
+    crs[3] = v->arch.hvm.guest_cr[3];
+    crs[4] = v->arch.hvm.guest_cr[4];
+
+    hvm_get_segment_register(v, x86_seg_cs, &sreg);
+    regs->cs = sreg.sel;
+
+    hvm_get_segment_register(v, x86_seg_ds, &sreg);
+    regs->ds = sreg.sel;
+
+    hvm_get_segment_register(v, x86_seg_es, &sreg);
+    regs->es = sreg.sel;
+
+    hvm_get_segment_register(v, x86_seg_fs, &sreg);
+    regs->fs = sreg.sel;
+    crs[5] = sreg.base;
+
+    hvm_get_segment_register(v, x86_seg_gs, &sreg);
+    regs->gs = sreg.sel;
+    crs[6] = sreg.base;
+
+    hvm_get_segment_register(v, x86_seg_ss, &sreg);
+    regs->ss = sreg.sel;
+
+    crs[7] = hvm_get_reg(v, MSR_SHADOW_GS_BASE);
 }
 
 static void _show_registers(
@@ -102,27 +133,8 @@ void show_registers(const struct cpu_user_regs *regs)
 
     if ( guest_mode(regs) && is_hvm_vcpu(v) )
     {
-        struct segment_register sreg;
+        get_hvm_registers(v, &fault_regs, fault_crs);
         context = CTXT_hvm_guest;
-        fault_crs[0] = v->arch.hvm.guest_cr[0];
-        fault_crs[2] = v->arch.hvm.guest_cr[2];
-        fault_crs[3] = v->arch.hvm.guest_cr[3];
-        fault_crs[4] = v->arch.hvm.guest_cr[4];
-        hvm_get_segment_register(v, x86_seg_cs, &sreg);
-        fault_regs.cs = sreg.sel;
-        hvm_get_segment_register(v, x86_seg_ds, &sreg);
-        fault_regs.ds = sreg.sel;
-        hvm_get_segment_register(v, x86_seg_es, &sreg);
-        fault_regs.es = sreg.sel;
-        hvm_get_segment_register(v, x86_seg_fs, &sreg);
-        fault_regs.fs = sreg.sel;
-        fault_crs[5] = sreg.base;
-        hvm_get_segment_register(v, x86_seg_gs, &sreg);
-        fault_regs.gs = sreg.sel;
-        fault_crs[6] = sreg.base;
-        hvm_get_segment_register(v, x86_seg_ss, &sreg);
-        fault_regs.ss = sreg.sel;
-        fault_crs[7] = hvm_get_shadow_gs_base(v);
     }
     else
     {
@@ -162,24 +174,35 @@ void show_registers(const struct cpu_user_regs *regs)
 void vcpu_show_registers(const struct vcpu *v)
 {
     const struct cpu_user_regs *regs = &v->arch.user_regs;
-    bool kernel = guest_kernel_mode(v, regs);
+    struct cpu_user_regs aux_regs;
+    enum context context;
     unsigned long crs[8];
 
-    /* Only handle PV guests for now */
-    if ( !is_pv_vcpu(v) )
-        return;
+    if ( is_hvm_vcpu(v) )
+    {
+        aux_regs = *regs;
+        get_hvm_registers(v->domain->vcpu[v->vcpu_id], &aux_regs, crs);
+        regs = &aux_regs;
+        context = CTXT_hvm_guest;
+    }
+    else
+    {
+        bool kernel = guest_kernel_mode(v, regs);
 
-    crs[0] = v->arch.pv.ctrlreg[0];
-    crs[2] = arch_get_cr2(v);
-    crs[3] = pagetable_get_paddr(kernel ?
-                                 v->arch.guest_table :
-                                 v->arch.guest_table_user);
-    crs[4] = v->arch.pv.ctrlreg[4];
-    crs[5] = v->arch.pv.fs_base;
-    crs[6 + !kernel] = v->arch.pv.gs_base_kernel;
-    crs[7 - !kernel] = v->arch.pv.gs_base_user;
+        crs[0] = v->arch.pv.ctrlreg[0];
+        crs[2] = arch_get_cr2(v);
+        crs[3] = pagetable_get_paddr(kernel ?
+                                     v->arch.guest_table :
+                                     v->arch.guest_table_user);
+        crs[4] = v->arch.pv.ctrlreg[4];
+        crs[5] = v->arch.pv.fs_base;
+        crs[6 + !kernel] = v->arch.pv.gs_base_kernel;
+        crs[7 - !kernel] = v->arch.pv.gs_base_user;
 
-    _show_registers(regs, crs, CTXT_pv_guest, v);
+        context = CTXT_pv_guest;
+    }
+
+    _show_registers(regs, crs, context, v);
 }
 
 void show_page_walk(unsigned long addr)
@@ -251,7 +274,8 @@ void do_double_fault(struct cpu_user_regs *regs)
 
     console_force_unlock();
 
-    asm ( "lsll %1, %0" : "=r" (cpu) : "rm" (PER_CPU_SELECTOR) );
+    asm ( "lsll %[sel], %[limit]" : [limit] "=r" (cpu)
+                                  : [sel] "r" (PER_CPU_SELECTOR) );
 
     /* Find information saved during fault and dump it to the console. */
     printk("*** DOUBLE FAULT ***\n");
@@ -271,30 +295,41 @@ static unsigned int write_stub_trampoline(
     unsigned char *stub, unsigned long stub_va,
     unsigned long stack_bottom, unsigned long target_va)
 {
+    unsigned char *p = stub;
+
+    if ( cpu_has_xen_ibt )
+    {
+        place_endbr64(p);
+        p += 4;
+    }
+
+    /* Store guest %rax into %ss slot */
     /* movabsq %rax, stack_bottom - 8 */
-    stub[0] = 0x48;
-    stub[1] = 0xa3;
-    *(uint64_t *)&stub[2] = stack_bottom - 8;
+    *p++ = 0x48;
+    *p++ = 0xa3;
+    *(uint64_t *)p = stack_bottom - 8;
+    p += 8;
 
+    /* Store guest %rsp in %rax */
     /* movq %rsp, %rax */
-    stub[10] = 0x48;
-    stub[11] = 0x89;
-    stub[12] = 0xe0;
+    *p++ = 0x48;
+    *p++ = 0x89;
+    *p++ = 0xe0;
 
+    /* Switch to Xen stack */
     /* movabsq $stack_bottom - 8, %rsp */
-    stub[13] = 0x48;
-    stub[14] = 0xbc;
-    *(uint64_t *)&stub[15] = stack_bottom - 8;
-
-    /* pushq %rax */
-    stub[23] = 0x50;
+    *p++ = 0x48;
+    *p++ = 0xbc;
+    *(uint64_t *)p = stack_bottom - 8;
+    p += 8;
 
     /* jmp target_va */
-    stub[24] = 0xe9;
-    *(int32_t *)&stub[25] = target_va - (stub_va + 29);
+    *p++ = 0xe9;
+    *(int32_t *)p = target_va - (stub_va + (p - stub) + 4);
+    p += 4;
 
     /* Round up to a multiple of 16 bytes. */
-    return 32;
+    return ROUNDUP(p - stub, 16);
 }
 
 DEFINE_PER_CPU(struct stubs, stubs);

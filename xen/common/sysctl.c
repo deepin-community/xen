@@ -12,6 +12,7 @@
 #include <xen/sched.h>
 #include <xen/domain.h>
 #include <xen/event.h>
+#include <xen/grant_table.h>
 #include <xen/domain_page.h>
 #include <xen/trace.h>
 #include <xen/console.h>
@@ -76,7 +77,7 @@ long do_sysctl(XEN_GUEST_HANDLE_PARAM(xen_sysctl_t) u_sysctl)
     case XEN_SYSCTL_getdomaininfolist:
     { 
         struct domain *d;
-        struct xen_domctl_getdomaininfo info = { 0 };
+        struct xen_domctl_getdomaininfo info;
         u32 num_domains = 0;
 
         rcu_read_lock(&domlist_read_lock);
@@ -88,8 +89,7 @@ long do_sysctl(XEN_GUEST_HANDLE_PARAM(xen_sysctl_t) u_sysctl)
             if ( num_domains == op->u.getdomaininfolist.max_domains )
                 break;
 
-            ret = xsm_getdomaininfo(XSM_HOOK, d);
-            if ( ret )
+            if ( xsm_getdomaininfo(XSM_HOOK, d) )
                 continue;
 
             getdomaininfo(d, &info);
@@ -277,6 +277,16 @@ long do_sysctl(XEN_GUEST_HANDLE_PARAM(xen_sysctl_t) u_sysctl)
             if ( iommu_hap_pt_share )
                 pi->capabilities |= XEN_SYSCTL_PHYSCAP_iommu_hap_pt_share;
         }
+        if ( vmtrace_available )
+            pi->capabilities |= XEN_SYSCTL_PHYSCAP_vmtrace;
+
+        if ( vpmu_is_available )
+            pi->capabilities |= XEN_SYSCTL_PHYSCAP_vpmu;
+
+        if ( opt_gnttab_max_version >= 1 )
+            pi->capabilities |= XEN_SYSCTL_PHYSCAP_gnttab_v1;
+        if ( opt_gnttab_max_version >= 2 )
+            pi->capabilities |= XEN_SYSCTL_PHYSCAP_gnttab_v2;
 
         if ( copy_to_guest(u_sysctl, op, 1) )
             ret = -EFAULT;
@@ -436,7 +446,7 @@ long do_sysctl(XEN_GUEST_HANDLE_PARAM(xen_sysctl_t) u_sysctl)
             }
 
             pcidevs_lock();
-            pdev = pci_get_pdev(dev.seg, dev.bus, dev.devfn);
+            pdev = pci_get_pdev(NULL, PCI_SBDF(dev.seg, dev.bus, dev.devfn));
             if ( !pdev )
                 node = XEN_INVALID_DEV;
             else if ( pdev->node == NUMA_NO_NODE )

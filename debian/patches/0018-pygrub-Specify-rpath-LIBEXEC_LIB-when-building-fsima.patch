@@ -1,0 +1,58 @@
+From: Ian Jackson <ian.jackson@citrix.com>
+Date: Fri, 22 Feb 2019 12:24:35 +0000
+Subject: pygrub: Specify -rpath LIBEXEC_LIB when building fsimage.so
+
+If LIBEXEC_LIB is not on the default linker search path, the python
+fsimage.so module fails to find libfsimage.so.
+
+Add the relevant directory to the rpath explicitly.
+
+(This situation occurs in the Debian package, where
+--with-libexec-libdir is used to put each Xen version's libraries and
+utilities in their own directory, to allow them to be coinstalled.)
+
+Signed-off-by: Ian Jackson <ian.jackson@citrix.com>
+---
+ tools/pygrub/Makefile | 3 ++-
+ tools/pygrub/setup.py | 5 +++++
+ 2 files changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/tools/pygrub/Makefile b/tools/pygrub/Makefile
+index 37b2146..17bdd2d 100644
+--- a/tools/pygrub/Makefile
++++ b/tools/pygrub/Makefile
+@@ -10,12 +10,13 @@ INSTALL_LOG = build/installed_files.txt
+ all: build
+ .PHONY: build
+ build:
+-	CC="$(CC)" CFLAGS="$(PY_CFLAGS)" LDSHARED="$(CC)" LDFLAGS="$(PY_LDFLAGS)" $(PYTHON) setup.py build
++	CC="$(CC)" CFLAGS="$(PY_CFLAGS)" LDSHARED="$(CC)" LDFLAGS="$(PY_LDFLAGS)" LIBEXEC_LIB=$(LIBEXEC_LIB) $(PYTHON) setup.py build
+ 
+ .PHONY: install
+ install: all
+ 	$(INSTALL_DIR) $(DESTDIR)/$(bindir)
+ 	CC="$(CC)" CFLAGS="$(PY_CFLAGS)" LDSHARED="$(CC)" \
++		LIBEXEC_LIB=$(LIBEXEC_LIB) \
+ 		LDFLAGS="$(PY_LDFLAGS)" $(PYTHON) setup.py install \
+ 		--record $(INSTALL_LOG) $(PYTHON_PREFIX_ARG) \
+ 		 --root="$(DESTDIR)" --install-scripts=$(LIBEXEC_BIN) --force
+diff --git a/tools/pygrub/setup.py b/tools/pygrub/setup.py
+index 06b9673..2915190 100644
+--- a/tools/pygrub/setup.py
++++ b/tools/pygrub/setup.py
+@@ -5,10 +5,15 @@ import sys
+ 
+ extra_compile_args  = [ "-fno-strict-aliasing" ]
+ 
++extra_link_args = []
++try: extra_link_args += [ "-Wl,-rpath," + os.environ['LIBEXEC_LIB'] ]
++except KeyError: pass
++
+ XEN_ROOT = "../.."
+ 
+ xenfsimage = Extension("xenfsimage",
+     extra_compile_args = extra_compile_args,
++    extra_link_args = extra_link_args,
+     include_dirs = [ XEN_ROOT + "/tools/libfsimage/common/" ],
+     library_dirs = [ XEN_ROOT + "/tools/libfsimage/common/" ],
+     libraries = ["xenfsimage"],

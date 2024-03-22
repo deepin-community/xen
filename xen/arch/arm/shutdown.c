@@ -2,13 +2,19 @@
 #include <xen/cpu.h>
 #include <xen/delay.h>
 #include <xen/lib.h>
+#include <xen/shutdown.h>
 #include <xen/smp.h>
 #include <asm/platform.h>
 #include <asm/psci.h>
 
 static void noreturn halt_this_cpu(void *arg)
 {
-    stop_cpu();
+    local_irq_disable();
+    /* Make sure the write happens before we sleep forever */
+    dsb(sy);
+    isb();
+    while ( 1 )
+        wfi();
 }
 
 void machine_halt(void)
@@ -36,6 +42,7 @@ void machine_halt(void)
 void machine_restart(unsigned int delay_millisecs)
 {
     int timeout = 10;
+    unsigned long count = 0;
 
     watchdog_disable();
     console_start_sync();
@@ -59,6 +66,9 @@ void machine_restart(unsigned int delay_millisecs)
     {
         platform_reset();
         mdelay(100);
+        if ( (count % 50) == 0 )
+            printk(XENLOG_ERR "Xen: Platform reset did not work properly!\n");
+        count++;
     }
 }
 

@@ -30,34 +30,50 @@ ENTRY(__high_start)
         test    %ebx,%ebx
         jz      .L_bsp
 
-        /* APs.  Set up shadow stacks before entering C. */
-#ifdef CONFIG_XEN_SHSTK
-        testl   $cpufeat_mask(X86_FEATURE_XEN_SHSTK), \
-                CPUINFO_FEATURE_OFFSET(X86_FEATURE_XEN_SHSTK) + boot_cpu_data(%rip)
-        je      .L_ap_shstk_done
+        /* APs.  Set up CET before entering C properly. */
+#if defined(CONFIG_XEN_SHSTK) || defined(CONFIG_XEN_IBT)
+        call    xen_msr_s_cet_value
+        test    %eax, %eax
+        jz      .L_ap_cet_done
 
         /* Set up MSR_S_CET. */
         mov     $MSR_S_CET, %ecx
         xor     %edx, %edx
-        mov     $CET_SHSTK_EN | CET_WRSS_EN, %eax
         wrmsr
 
-        /* Derive MSR_PL0_SSP from %rsp (token written when stack is allocated). */
-        mov     $MSR_PL0_SSP, %ecx
-        mov     %rsp, %rdx
-        shr     $32, %rdx
-        mov     %esp, %eax
-        and     $~(STACK_SIZE - 1), %eax
-        or      $(PRIMARY_SHSTK_SLOT + 1) * PAGE_SIZE - 8, %eax
-        wrmsr
-
-        /* Enable CET.  MSR_INTERRUPT_SSP_TABLE is set up later in load_system_tables(). */
+        /* Enable CR4.CET. */
         mov     $XEN_MINIMAL_CR4 | X86_CR4_CET, %ecx
         mov     %rcx, %cr4
-        setssbsy
-#endif
 
-.L_ap_shstk_done:
+        /* WARNING! call/ret now fatal (iff SHSTK) until SETSSBSY loads SSP */
+
+#if defined(CONFIG_XEN_SHSTK)
+        test    $CET_SHSTK_EN, %al
+        jz      .L_ap_cet_done
+
+        /* Derive the supervisor token address from %rsp. */
+        mov     %rsp, %rdx
+        and     $~(STACK_SIZE - 1), %rdx
+        or      $(PRIMARY_SHSTK_SLOT + 1) * PAGE_SIZE - 8, %rdx
+
+        /*
+         * Write a new supervisor token.  Doesn't matter on boot, but for S3
+         * resume this clears the busy bit.
+         */
+        wrssq   %rdx, (%rdx)
+
+        /* Point MSR_PL0_SSP at the token. */
+        mov     $MSR_PL0_SSP, %ecx
+        mov     %edx, %eax
+        shr     $32, %rdx
+        wrmsr
+
+        setssbsy
+
+#endif /* CONFIG_XEN_SHSTK */
+.L_ap_cet_done:
+#endif /* CONFIG_XEN_SHSTK || CONFIG_XEN_IBT */
+
         call    start_secondary
         BUG     /* start_secondary() shouldn't return. */
 
@@ -66,14 +82,6 @@ ENTRY(__high_start)
         mov     multiboot_ptr(%rip),%edi
         call    __start_xen
         BUG     /* __start_xen() shouldn't return. */
-
-        .data
-        .align 8
-multiboot_ptr:
-        .long   0
-
-GLOBAL(stack_start)
-        .quad   cpu0_stack + STACK_SIZE - CPUINFO_sizeof
 
         .section .data.page_aligned, "aw", @progbits
         .align PAGE_SIZE, 0

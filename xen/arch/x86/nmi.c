@@ -30,7 +30,6 @@
 #include <asm/msr.h>
 #include <asm/mpspec.h>
 #include <asm/nmi.h>
-#include <asm/debugger.h>
 #include <asm/div64.h>
 #include <asm/apic.h>
 
@@ -48,7 +47,7 @@ bool __initdata opt_watchdog;
 /* watchdog_force: If true, process unknown NMIs when running the watchdog. */
 bool watchdog_force;
 
-static int __init parse_watchdog(const char *s)
+static int __init cf_check parse_watchdog(const char *s)
 {
     if ( !*s )
     {
@@ -78,7 +77,7 @@ custom_param("watchdog", parse_watchdog);
 /* opt_watchdog_timeout: Number of seconds to wait before panic. */
 static unsigned int opt_watchdog_timeout = 5;
 
-static int parse_watchdog_timeout(const char *s)
+static int __init cf_check parse_watchdog_timeout(const char *s)
 {
     const char *q;
 
@@ -132,7 +131,7 @@ int nmi_active;
 #define P4_ESCR_EVENT_SELECT(N)	((N)<<25)
 #define P4_CCCR_OVF_PMI0	(1<<26)
 #define P4_CCCR_OVF_PMI1	(1<<27)
-#define P4_CCCR_OVF		(1<<31)
+#define P4_CCCR_OVF		(1u << 31)
 #define P4_CCCR_THRESHOLD(N)	((N)<<20)
 #define P4_CCCR_COMPLEMENT	(1<<19)
 #define P4_CCCR_COMPARE		(1<<18)
@@ -149,7 +148,7 @@ int nmi_active;
     (P4_CCCR_OVF_PMI0|P4_CCCR_THRESHOLD(15)|P4_CCCR_COMPLEMENT| \
      P4_CCCR_COMPARE|P4_CCCR_REQUIRED|P4_CCCR_ESCR_SELECT(4)|P4_CCCR_ENABLE)
 
-static void __init wait_for_nmis(void *p)
+static void __init cf_check wait_for_nmis(void *p)
 {
     unsigned int start_count = this_cpu(nmi_count);
     unsigned long ticks = 10 * 1000 * cpu_khz / nmi_hz;
@@ -211,7 +210,7 @@ void __init check_nmi_watchdog(void)
     return;
 }
 
-static void nmi_timer_fn(void *unused)
+static void cf_check nmi_timer_fn(void *unused)
 {
     this_cpu(nmi_timer_ticks)++;
     set_timer(&this_cpu(nmi_timer), NOW() + MILLISECS(1000));
@@ -292,10 +291,9 @@ static void clear_msr_range(unsigned int base, unsigned int n)
 
 static inline void write_watchdog_counter(const char *descr)
 {
-    u64 count = (u64)cpu_khz * 1000;
+    uint64_t count = cpu_khz * 1000ULL / nmi_hz;
 
-    do_div(count, nmi_hz);
-    if(descr)
+    if ( descr )
         Dprintk("setting %s to -%#"PRIx64"\n", descr, count);
     wrmsrl(nmi_perfctr_msr, 0 - count);
 }
@@ -428,7 +426,7 @@ void setup_apic_nmi_watchdog(void)
     nmi_active = 1;
 }
 
-static int cpu_nmi_callback(
+static int cf_check cpu_nmi_callback(
     struct notifier_block *nfb, unsigned long action, void *hcpu)
 {
     unsigned int cpu = (unsigned long)hcpu;
@@ -578,13 +576,13 @@ void self_nmi(void)
     local_irq_restore(flags);
 }
 
-static void do_nmi_trigger(unsigned char key)
+static void cf_check do_nmi_trigger(unsigned char key)
 {
     printk("Triggering NMI on APIC ID %x\n", get_apic_id());
     self_nmi();
 }
 
-static void do_nmi_stats(unsigned char key)
+static void cf_check do_nmi_stats(unsigned char key)
 {
     const struct vcpu *v;
     unsigned int cpu;
@@ -606,7 +604,7 @@ static void do_nmi_stats(unsigned char key)
         printk("%pv: NMI neither pending nor masked\n", v);
 }
 
-static __init int register_nmi_trigger(void)
+static int __init cf_check register_nmi_trigger(void)
 {
     register_keyhandler('N', do_nmi_trigger, "trigger an NMI", 0);
     register_keyhandler('n', do_nmi_stats, "NMI statistics", 1);

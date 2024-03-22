@@ -21,11 +21,13 @@ union lock_debug {
     };
 };
 #define _LOCK_DEBUG { LOCK_DEBUG_INITVAL }
+void check_lock(union lock_debug *debug, bool try);
 void spin_debug_enable(void);
 void spin_debug_disable(void);
 #else
 union lock_debug { };
 #define _LOCK_DEBUG { }
+#define check_lock(l, t) ((void)0)
 #define spin_debug_enable() ((void)0)
 #define spin_debug_disable() ((void)0)
 #endif
@@ -72,7 +74,7 @@ struct spinlock;
 
 struct lock_profile {
     struct lock_profile *next;       /* forward link */
-    char                *name;       /* lock name */
+    const char          *name;       /* lock name */
     struct spinlock     *lock;       /* the lock itself */
     u64                 lock_cnt;    /* # of complete locking ops */
     u64                 block_cnt;   /* # of complete wait for lock */
@@ -103,26 +105,32 @@ struct lock_profile_qhead {
     do {                                                                      \
         struct lock_profile *prof;                                            \
         prof = xzalloc(struct lock_profile);                                  \
-        if (!prof) break;                                                     \
+        (s)->l = (spinlock_t)_SPIN_LOCK_UNLOCKED(prof);                       \
+        if ( !prof )                                                          \
+        {                                                                     \
+            printk(XENLOG_WARNING                                             \
+                   "lock profiling unavailable for %p(%d)'s %s\n",            \
+                   s, (s)->profile_head.idx, #l);                             \
+            break;                                                            \
+        }                                                                     \
         prof->name = #l;                                                      \
         prof->lock = &(s)->l;                                                 \
-        (s)->l = (spinlock_t)_SPIN_LOCK_UNLOCKED(prof);                       \
         prof->next = (s)->profile_head.elem_q;                                \
         (s)->profile_head.elem_q = prof;                                      \
     } while(0)
 
 void _lock_profile_register_struct(
-    int32_t, struct lock_profile_qhead *, int32_t, char *);
+    int32_t, struct lock_profile_qhead *, int32_t);
 void _lock_profile_deregister_struct(int32_t, struct lock_profile_qhead *);
 
-#define lock_profile_register_struct(type, ptr, idx, print)                   \
-    _lock_profile_register_struct(type, &((ptr)->profile_head), idx, print)
+#define lock_profile_register_struct(type, ptr, idx)                          \
+    _lock_profile_register_struct(type, &((ptr)->profile_head), idx)
 #define lock_profile_deregister_struct(type, ptr)                             \
     _lock_profile_deregister_struct(type, &((ptr)->profile_head))
 
 extern int spinlock_profile_control(struct xen_sysctl_lockprof_op *pc);
-extern void spinlock_profile_printall(unsigned char key);
-extern void spinlock_profile_reset(unsigned char key);
+extern void cf_check spinlock_profile_printall(unsigned char key);
+extern void cf_check spinlock_profile_reset(unsigned char key);
 
 #else
 
@@ -132,7 +140,7 @@ struct lock_profile_qhead { };
 #define DEFINE_SPINLOCK(l) spinlock_t l = SPIN_LOCK_UNLOCKED
 
 #define spin_lock_init_prof(s, l) spin_lock_init(&((s)->l))
-#define lock_profile_register_struct(type, ptr, idx, print)
+#define lock_profile_register_struct(type, ptr, idx)
 #define lock_profile_deregister_struct(type, ptr)
 #define spinlock_profile_printall(key)
 

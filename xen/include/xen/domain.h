@@ -27,9 +27,22 @@ struct xen_domctl_getdomaininfo;
 void getdomaininfo(struct domain *d, struct xen_domctl_getdomaininfo *info);
 void arch_get_domain_info(const struct domain *d,
                           struct xen_domctl_getdomaininfo *info);
-int xenctl_bitmap_to_bitmap(unsigned long *bitmap,
-                            const struct xenctl_bitmap *xenctl_bitmap,
-                            unsigned int nbits);
+
+/* CDF_* constant. Internal flags for domain creation. */
+/* Is this a privileged domain? */
+#define CDF_privileged           (1U << 0)
+#ifdef CONFIG_ARM
+/* Should domain memory be directly mapped? */
+#define CDF_directmap            (1U << 1)
+#endif
+/* Is domain memory on static allocation? */
+#ifdef CONFIG_STATIC_MEMORY
+#define CDF_staticmem            (1U << 2)
+#else
+#define CDF_staticmem            0
+#endif
+
+#define is_domain_using_staticmem(d) ((d)->cdf & CDF_staticmem)
 
 /*
  * Arch-specifics.
@@ -47,7 +60,7 @@ void free_vcpu_struct(struct vcpu *v);
 #ifndef alloc_pirq_struct
 struct pirq *alloc_pirq_struct(struct domain *);
 #endif
-void free_pirq_struct(void *);
+void cf_check free_pirq_struct(void *);
 
 /*
  * Initialise/destroy arch-specific details of a VCPU.
@@ -60,11 +73,12 @@ void free_pirq_struct(void *);
 int  arch_vcpu_create(struct vcpu *v);
 void arch_vcpu_destroy(struct vcpu *v);
 
-int map_vcpu_info(struct vcpu *v, unsigned long gfn, unsigned offset);
+int map_vcpu_info(struct vcpu *v, unsigned long gfn, unsigned int offset);
 void unmap_vcpu_info(struct vcpu *v);
 
 int arch_domain_create(struct domain *d,
-                       struct xen_domctl_createdomain *config);
+                       struct xen_domctl_createdomain *config,
+                       unsigned int flags);
 
 void arch_domain_destroy(struct domain *d);
 
@@ -83,6 +97,9 @@ void arch_get_info_guest(struct vcpu *, vcpu_guest_context_u);
 
 int arch_initialise_vcpu(struct vcpu *v, XEN_GUEST_HANDLE_PARAM(void) arg);
 int default_initialise_vcpu(struct vcpu *v, XEN_GUEST_HANDLE_PARAM(void) arg);
+
+int arch_get_paging_mempool_size(struct domain *d, uint64_t *size /* bytes */);
+int arch_set_paging_mempool_size(struct domain *d, uint64_t size /* bytes */);
 
 int domain_relinquish_resources(struct domain *d);
 
@@ -128,6 +145,14 @@ struct vnuma_info {
     struct xen_vmemrange *vmemrange;
 };
 
+#ifndef CONFIG_PV_SHIM_EXCLUSIVE
 void vnuma_destroy(struct vnuma_info *vnuma);
+#else
+static inline void vnuma_destroy(struct vnuma_info *vnuma) { ASSERT(!vnuma); }
+#endif
+
+extern bool vmtrace_available;
+
+extern bool vpmu_is_available;
 
 #endif /* __XEN_DOMAIN_H__ */

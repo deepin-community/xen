@@ -140,8 +140,12 @@ int iommu_add_dt_device(struct dt_device_node *np)
     if ( !ops )
         return -EINVAL;
 
+    /*
+     * The device may already have been registered. As there is no harm in
+     * it just return success early.
+     */
     if ( dev_iommu_fwspec_get(dev) )
-        return -EEXIST;
+        return 0;
 
     /*
      * According to the Documentation/devicetree/bindings/iommu/iommu.txt
@@ -155,22 +159,7 @@ int iommu_add_dt_device(struct dt_device_node *np)
          * these callback implemented.
          */
         if ( !ops->add_device || !ops->dt_xlate )
-        {
-            /*
-             * Some Device Trees may expose both legacy SMMU and generic
-             * IOMMU bindings together. However, the SMMU driver is only
-             * supporting the former and will protect them during the
-             * initialization. So we need to skip them and not return
-             * error here.
-             *
-             * XXX: This can be dropped when the SMMU is able to deal
-             * with generic bindings.
-             */
-            if ( dt_device_is_protected(np) )
-                return 0;
-            else
-                return -EINVAL;
-        }
+            return -EINVAL;
 
         if ( !dt_device_is_available(iommu_spec.np) )
             break;
@@ -249,12 +238,7 @@ int iommu_do_dt_domctl(struct xen_domctl *domctl, struct domain *d,
             return -EINVAL;
 
         ret = iommu_add_dt_device(dev);
-        /*
-         * Ignore "-EEXIST" error code as it would mean that the device is
-         * already added to the IOMMU (positive result). Such happens after
-         * re-creating guest domain.
-         */
-        if ( ret < 0 && ret != -EEXIST )
+        if ( ret < 0 )
         {
             printk(XENLOG_G_ERR "Failed to add %s to the IOMMU\n",
                    dt_node_full_name(dev));
@@ -285,6 +269,8 @@ int iommu_do_dt_domctl(struct xen_domctl *domctl, struct domain *d,
             break;
 
         ret = xsm_deassign_dtdevice(XSM_HOOK, d, dt_node_full_name(dev));
+        if ( ret )
+            break;
 
         if ( d == dom_io )
             return -EINVAL;

@@ -41,9 +41,7 @@ l1_pgentry_t *map_guest_l1e(unsigned long linear, mfn_t *gl1mfn)
         return NULL;
 
     /* Find this l1e and its enclosing l1mfn in the linear map. */
-    if ( __copy_from_user(&l2e,
-                          &__linear_l2_table[l2_linear_offset(linear)],
-                          sizeof(l2_pgentry_t)) )
+    if ( get_unsafe(l2e, &__linear_l2_table[l2_linear_offset(linear)]) )
         return NULL;
 
     /* Check flags that it will be safe to read the l1e. */
@@ -53,27 +51,6 @@ l1_pgentry_t *map_guest_l1e(unsigned long linear, mfn_t *gl1mfn)
     *gl1mfn = l2e_get_mfn(l2e);
 
     return (l1_pgentry_t *)map_domain_page(*gl1mfn) + l1_table_offset(linear);
-}
-
-/*
- * Read the guest's l1e that maps this address, from the kernel-mode
- * page tables.
- */
-static l1_pgentry_t guest_get_eff_kern_l1e(unsigned long linear)
-{
-    struct vcpu *curr = current;
-    const bool user_mode = !(curr->arch.flags & TF_kernel_mode);
-    l1_pgentry_t l1e;
-
-    if ( user_mode )
-        toggle_guest_pt(curr);
-
-    l1e = guest_get_eff_l1e(linear);
-
-    if ( user_mode )
-        toggle_guest_pt(curr);
-
-    return l1e;
 }
 
 /*
@@ -127,6 +104,15 @@ bool pv_map_ldt_shadow_page(unsigned int offset)
 
     return true;
 }
+
+#ifdef CONFIG_PV32
+void init_xen_pae_l2_slots(l2_pgentry_t *l2t, const struct domain *d)
+{
+    memcpy(&l2t[COMPAT_L2_PAGETABLE_FIRST_XEN_SLOT(d)],
+           compat_idle_pg_table_l2,
+           COMPAT_L2_PAGETABLE_XEN_SLOTS(d) * sizeof(*l2t));
+}
+#endif
 
 /*
  * Local variables:

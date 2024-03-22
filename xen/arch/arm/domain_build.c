@@ -21,17 +21,29 @@
 #include <asm/device.h>
 #include <asm/kernel.h>
 #include <asm/setup.h>
+#include <asm/tee/tee.h>
 #include <asm/platform.h>
 #include <asm/psci.h>
 #include <asm/setup.h>
 #include <asm/cpufeature.h>
 #include <asm/domain_build.h>
+#include <xen/event.h>
 
 #include <xen/irq.h>
 #include <xen/grant_table.h>
+#include <xen/serial.h>
+
+#define STATIC_EVTCHN_NODE_SIZE_CELLS 2
 
 static unsigned int __initdata opt_dom0_max_vcpus;
 integer_param("dom0_max_vcpus", opt_dom0_max_vcpus);
+
+/*
+ * If true, the extended regions support is enabled for dom0 and
+ * dom0less domUs.
+ */
+static bool __initdata opt_ext_regions = true;
+boolean_param("ext_regions", opt_ext_regions);
 
 static u64 __initdata dom0_mem;
 static bool __initdata dom0_mem_set;
@@ -45,12 +57,6 @@ static int __init parse_dom0_mem(const char *s)
     return *s ? -EINVAL : 0;
 }
 custom_param("dom0_mem", parse_dom0_mem);
-
-struct map_range_data
-{
-    struct domain *d;
-    p2m_type_t p2mt;
-};
 
 /* Override macros from asm/page.h to make them work with mfn_t */
 #undef virt_to_mfn
@@ -73,7 +79,10 @@ struct map_range_data
 unsigned int __init dom0_max_vcpus(void)
 {
     if ( opt_dom0_max_vcpus == 0 )
-        opt_dom0_max_vcpus = num_online_cpus();
+    {
+        ASSERT(cpupool0);
+        opt_dom0_max_vcpus = cpumask_weight(cpupool_valid_cpus(cpupool0));
+    }
     if ( opt_dom0_max_vcpus > MAX_VIRT_CPUS )
         opt_dom0_max_vcpus = MAX_VIRT_CPUS;
 
@@ -108,7 +117,8 @@ static bool __init insert_11_bank(struct domain *d,
                                   struct page_info *pg,
                                   unsigned int order)
 {
-    int res, i;
+    unsigned int i;
+    int res;
     mfn_t smfn;
     paddr_t start, size;
 
@@ -261,7 +271,7 @@ static void __init allocate_memory_11(struct domain *d,
     const unsigned int min_order = get_order_from_bytes(MB(4));
     struct page_info *pg;
     unsigned int order = get_allocation_size(kinfo->unassigned_mem);
-    int i;
+    unsigned int i;
 
     bool lowmem = true;
     unsigned int lowmem_bitsize = min(32U, arch_get_dma_bitsize());
@@ -390,6 +400,14 @@ static bool __init allocate_bank_memory(struct domain *d,
     struct membank *bank;
     unsigned int max_order = ~0;
 
+    /*
+     * allocate_bank_memory can be called with a tot_size of zero for
+     * the second memory bank. It is not an error and we can safely
+     * avoid creating a zero-size memory bank.
+     */
+    if ( tot_size == 0 )
+        return true;
+
     bank = &kinfo->mem.bank[kinfo->mem.nr_banks];
     bank->start = gfn_to_gaddr(sgfn);
     bank->size = tot_size;
@@ -477,6 +495,598 @@ fail:
           /* Don't want format this as PRIpaddr (16 digit hex) */
           " %ldKB unallocated. Fix the VMs configurations.\n",
           (unsigned long)kinfo->unassigned_mem >> 10);
+}
+
+#ifdef CONFIG_STATIC_MEMORY
+static bool __init append_static_memory_to_bank(struct domain *d,
+                                                struct membank *bank,
+                                                mfn_t smfn,
+                                                paddr_t size)
+{
+    int res;
+    unsigned int nr_pages = PFN_DOWN(size);
+    gfn_t sgfn;
+
+    /*
+     * For direct-mapped domain, the GFN match the MFN.
+     * Otherwise, this is inferred on what has already been allocated
+     * in the bank.
+     */
+    if ( !is_domain_direct_mapped(d) )
+        sgfn = gaddr_to_gfn(bank->start + bank->size);
+    else
+        sgfn = gaddr_to_gfn(mfn_to_maddr(smfn));
+
+    res = guest_physmap_add_pages(d, sgfn, smfn, nr_pages);
+    if ( res )
+    {
+        dprintk(XENLOG_ERR, "Failed to map pages to DOMU: %d", res);
+        return false;
+    }
+
+    bank->size = bank->size + size;
+
+    return true;
+}
+
+static mfn_t __init acquire_static_memory_bank(struct domain *d,
+                                               const __be32 **cell,
+                                               u32 addr_cells, u32 size_cells,
+                                               paddr_t *pbase, paddr_t *psize)
+{
+    mfn_t smfn;
+    int res;
+
+    device_tree_get_reg(cell, addr_cells, size_cells, pbase, psize);
+    ASSERT(IS_ALIGNED(*pbase, PAGE_SIZE) && IS_ALIGNED(*psize, PAGE_SIZE));
+    if ( PFN_DOWN(*psize) > UINT_MAX )
+    {
+        printk(XENLOG_ERR "%pd: static memory size too large: %#"PRIpaddr,
+               d, *psize);
+        return INVALID_MFN;
+    }
+
+    smfn = maddr_to_mfn(*pbase);
+    res = acquire_domstatic_pages(d, smfn, PFN_DOWN(*psize), 0);
+    if ( res )
+    {
+        printk(XENLOG_ERR
+               "%pd: failed to acquire static memory: %d.\n", d, res);
+        return INVALID_MFN;
+    }
+
+    return smfn;
+}
+
+static int __init parse_static_mem_prop(const struct dt_device_node *node,
+                                        u32 *addr_cells, u32 *size_cells,
+                                        int *length, const __be32 **cell)
+{
+    const struct dt_property *prop;
+
+    prop = dt_find_property(node, "xen,static-mem", NULL);
+
+    *addr_cells = dt_n_addr_cells(node);
+    *size_cells = dt_n_size_cells(node);
+
+    *cell = (const __be32 *)prop->value;
+    *length = prop->length;
+
+    return 0;
+}
+
+/* Allocate memory from static memory as RAM for one specific domain d. */
+static void __init allocate_static_memory(struct domain *d,
+                                          struct kernel_info *kinfo,
+                                          const struct dt_device_node *node)
+{
+    u32 addr_cells, size_cells, reg_cells;
+    unsigned int nr_banks, gbank, bank = 0;
+    const uint64_t rambase[] = GUEST_RAM_BANK_BASES;
+    const uint64_t ramsize[] = GUEST_RAM_BANK_SIZES;
+    const __be32 *cell;
+    u64 tot_size = 0;
+    paddr_t pbase, psize, gsize;
+    mfn_t smfn;
+    int length;
+
+    if ( parse_static_mem_prop(node, &addr_cells, &size_cells, &length, &cell) )
+        goto fail;
+    reg_cells = addr_cells + size_cells;
+
+    /*
+     * The static memory will be mapped in the guest at the usual guest memory
+     * addresses (GUEST_RAM0_BASE, GUEST_RAM1_BASE) defined by
+     * xen/include/public/arch-arm.h.
+     */
+    gbank = 0;
+    gsize = ramsize[gbank];
+    kinfo->mem.bank[gbank].start = rambase[gbank];
+    nr_banks = length / (reg_cells * sizeof (u32));
+
+    for ( ; bank < nr_banks; bank++ )
+    {
+        smfn = acquire_static_memory_bank(d, &cell, addr_cells, size_cells,
+                                          &pbase, &psize);
+        if ( mfn_eq(smfn, INVALID_MFN) )
+            goto fail;
+
+        printk(XENLOG_INFO "%pd: STATIC BANK[%u] %#"PRIpaddr"-%#"PRIpaddr"\n",
+               d, bank, pbase, pbase + psize);
+
+        while ( 1 )
+        {
+            /* Map as much as possible the static range to the guest bank */
+            if ( !append_static_memory_to_bank(d, &kinfo->mem.bank[gbank], smfn,
+                                               min(psize, gsize)) )
+                goto fail;
+
+            /*
+             * The current physical bank is fully mapped.
+             * Handle the next physical bank.
+             */
+            if ( gsize >= psize )
+            {
+                gsize = gsize - psize;
+                break;
+            }
+            /*
+             * When current guest bank is not enough to map, exhaust
+             * the current one and seek to the next.
+             * Before seeking to the next, check if we still have available
+             * guest bank.
+             */
+            else if ( (gbank + 1) >= GUEST_RAM_BANKS )
+            {
+                printk(XENLOG_ERR "Exhausted all possible guest banks.\n");
+                goto fail;
+            }
+            else
+            {
+                psize = psize - gsize;
+                smfn = mfn_add(smfn, gsize >> PAGE_SHIFT);
+                /* Update to the next guest bank. */
+                gbank++;
+                gsize = ramsize[gbank];
+                kinfo->mem.bank[gbank].start = rambase[gbank];
+            }
+        }
+
+        tot_size += psize;
+    }
+
+    kinfo->mem.nr_banks = ++gbank;
+
+    kinfo->unassigned_mem -= tot_size;
+    /*
+     * The property 'memory' should match the amount of memory given to the
+     * guest.
+     * Currently, it is only possible to either acquire static memory or let
+     * Xen allocate. *Mixing* is not supported.
+     */
+    if ( kinfo->unassigned_mem )
+    {
+        printk(XENLOG_ERR
+               "Size of \"memory\" property doesn't match up with the sum-up of \"xen,static-mem\". Unsupported configuration.\n");
+        goto fail;
+    }
+
+    return;
+
+ fail:
+    panic("Failed to allocate requested static memory for domain %pd.", d);
+}
+
+/*
+ * Allocate static memory as RAM for one specific domain d.
+ * The static memory will be directly mapped in the guest(Guest Physical
+ * Address == Physical Address).
+ */
+static void __init assign_static_memory_11(struct domain *d,
+                                           struct kernel_info *kinfo,
+                                           const struct dt_device_node *node)
+{
+    u32 addr_cells, size_cells, reg_cells;
+    unsigned int nr_banks, bank = 0;
+    const __be32 *cell;
+    paddr_t pbase, psize;
+    mfn_t smfn;
+    int length;
+
+    if ( parse_static_mem_prop(node, &addr_cells, &size_cells, &length, &cell) )
+    {
+        printk(XENLOG_ERR
+               "%pd: failed to parse \"xen,static-mem\" property.\n", d);
+        goto fail;
+    }
+    reg_cells = addr_cells + size_cells;
+    nr_banks = length / (reg_cells * sizeof(u32));
+
+    if ( nr_banks > NR_MEM_BANKS )
+    {
+        printk(XENLOG_ERR
+               "%pd: exceed max number of supported guest memory banks.\n", d);
+        goto fail;
+    }
+
+    for ( ; bank < nr_banks; bank++ )
+    {
+        smfn = acquire_static_memory_bank(d, &cell, addr_cells, size_cells,
+                                          &pbase, &psize);
+        if ( mfn_eq(smfn, INVALID_MFN) )
+            goto fail;
+
+        printk(XENLOG_INFO "%pd: STATIC BANK[%u] %#"PRIpaddr"-%#"PRIpaddr"\n",
+               d, bank, pbase, pbase + psize);
+
+        /* One guest memory bank is matched with one physical memory bank. */
+        kinfo->mem.bank[bank].start = pbase;
+        if ( !append_static_memory_to_bank(d, &kinfo->mem.bank[bank],
+                                           smfn, psize) )
+            goto fail;
+
+        kinfo->unassigned_mem -= psize;
+    }
+
+    kinfo->mem.nr_banks = nr_banks;
+
+    /*
+     * The property 'memory' should match the amount of memory given to
+     * the guest.
+     * Currently, it is only possible to either acquire static memory or
+     * let Xen allocate. *Mixing* is not supported.
+     */
+    if ( kinfo->unassigned_mem != 0 )
+    {
+        printk(XENLOG_ERR
+               "Size of \"memory\" property doesn't match up with the sum-up of \"xen,static-mem\".\n");
+        goto fail;
+    }
+
+    return;
+
+ fail:
+    panic("Failed to assign requested static memory for direct-map domain %pd.",
+          d);
+}
+
+#ifdef CONFIG_STATIC_SHM
+static int __init acquire_nr_borrower_domain(struct domain *d,
+                                             paddr_t pbase, paddr_t psize,
+                                             unsigned long *nr_borrowers)
+{
+    unsigned int bank;
+
+    /* Iterate reserved memory to find requested shm bank. */
+    for ( bank = 0 ; bank < bootinfo.reserved_mem.nr_banks; bank++ )
+    {
+        paddr_t bank_start = bootinfo.reserved_mem.bank[bank].start;
+        paddr_t bank_size = bootinfo.reserved_mem.bank[bank].size;
+
+        if ( (pbase == bank_start) && (psize == bank_size) )
+            break;
+    }
+
+    if ( bank == bootinfo.reserved_mem.nr_banks )
+        return -ENOENT;
+
+    *nr_borrowers = bootinfo.reserved_mem.bank[bank].nr_shm_borrowers;
+
+    return 0;
+}
+
+/*
+ * This function checks whether the static shared memory region is
+ * already allocated to dom_io.
+ */
+static bool __init is_shm_allocated_to_domio(paddr_t pbase)
+{
+    struct page_info *page;
+    struct domain *d;
+
+    page = maddr_to_page(pbase);
+    d = page_get_owner_and_reference(page);
+    if ( d == NULL )
+        return false;
+    put_page(page);
+
+    if ( d != dom_io )
+    {
+        printk(XENLOG_ERR
+               "shm memory node has already been allocated to a specific owner %pd, Please check your configuration\n",
+               d);
+        return false;
+    }
+
+    return true;
+}
+
+static mfn_t __init acquire_shared_memory_bank(struct domain *d,
+                                               paddr_t pbase, paddr_t psize)
+{
+    mfn_t smfn;
+    unsigned long nr_pfns;
+    int res;
+
+    /*
+     * Pages of statically shared memory shall be included
+     * into domain_tot_pages().
+     */
+    nr_pfns = PFN_DOWN(psize);
+    if ( (UINT_MAX - d->max_pages) < nr_pfns )
+    {
+        printk(XENLOG_ERR "%pd: Over-allocation for d->max_pages: %lu.\n",
+               d, nr_pfns);
+        return INVALID_MFN;
+    }
+    d->max_pages += nr_pfns;
+
+    smfn = maddr_to_mfn(pbase);
+    res = acquire_domstatic_pages(d, smfn, nr_pfns, 0);
+    if ( res )
+    {
+        printk(XENLOG_ERR
+               "%pd: failed to acquire static memory: %d.\n", d, res);
+        d->max_pages -= nr_pfns;
+        return INVALID_MFN;
+    }
+
+    return smfn;
+}
+
+static int __init assign_shared_memory(struct domain *d,
+                                       uint32_t addr_cells, uint32_t size_cells,
+                                       paddr_t pbase, paddr_t psize,
+                                       paddr_t gbase)
+{
+    mfn_t smfn;
+    int ret = 0;
+    unsigned long nr_pages, nr_borrowers, i;
+    struct page_info *page;
+
+    printk("%pd: allocate static shared memory BANK %#"PRIpaddr"-%#"PRIpaddr".\n",
+           d, pbase, pbase + psize);
+
+    smfn = acquire_shared_memory_bank(d, pbase, psize);
+    if ( mfn_eq(smfn, INVALID_MFN) )
+        return -EINVAL;
+
+    /*
+     * DOMID_IO is not auto-translated (i.e. it sees RAM 1:1). So we do not need
+     * to create mapping in the P2M.
+     */
+    nr_pages = PFN_DOWN(psize);
+    if ( d != dom_io )
+    {
+        ret = guest_physmap_add_pages(d, gaddr_to_gfn(gbase), smfn,
+                                      PFN_DOWN(psize));
+        if ( ret )
+        {
+            printk(XENLOG_ERR "Failed to map shared memory to %pd.\n", d);
+            return ret;
+        }
+    }
+
+    /*
+     * Get the right amount of references per page, which is the number of
+     * borrower domains.
+     */
+    ret = acquire_nr_borrower_domain(d, pbase, psize, &nr_borrowers);
+    if ( ret )
+        return ret;
+
+    /*
+     * Instead of letting borrower domain get a page ref, we add as many
+     * additional reference as the number of borrowers when the owner
+     * is allocated, since there is a chance that owner is created
+     * after borrower.
+     * So if the borrower is created first, it will cause adding pages
+     * in the P2M without reference.
+     */
+    page = mfn_to_page(smfn);
+    for ( i = 0; i < nr_pages; i++ )
+    {
+        if ( !get_page_nr(page + i, d, nr_borrowers) )
+        {
+            printk(XENLOG_ERR
+                   "Failed to add %lu references to page %"PRI_mfn".\n",
+                   nr_borrowers, mfn_x(smfn) + i);
+            goto fail;
+        }
+    }
+
+    return 0;
+
+ fail:
+    while ( --i >= 0 )
+        put_page_nr(page + i, nr_borrowers);
+    return ret;
+}
+
+static int __init append_shm_bank_to_domain(struct kernel_info *kinfo,
+                                            paddr_t start, paddr_t size,
+                                            const char *shm_id)
+{
+    if ( kinfo->shm_mem.nr_banks >= NR_MEM_BANKS )
+        return -ENOMEM;
+
+    kinfo->shm_mem.bank[kinfo->shm_mem.nr_banks].start = start;
+    kinfo->shm_mem.bank[kinfo->shm_mem.nr_banks].size = size;
+    safe_strcpy(kinfo->shm_mem.bank[kinfo->shm_mem.nr_banks].shm_id, shm_id);
+    kinfo->shm_mem.nr_banks++;
+
+    return 0;
+}
+
+static int __init process_shm(struct domain *d, struct kernel_info *kinfo,
+                              const struct dt_device_node *node)
+{
+    struct dt_device_node *shm_node;
+
+    dt_for_each_child_node(node, shm_node)
+    {
+        const struct dt_property *prop;
+        const __be32 *cells;
+        uint32_t addr_cells, size_cells;
+        paddr_t gbase, pbase, psize;
+        int ret = 0;
+        unsigned int i;
+        const char *role_str;
+        const char *shm_id;
+        bool owner_dom_io = true;
+
+        if ( !dt_device_is_compatible(shm_node, "xen,domain-shared-memory-v1") )
+            continue;
+
+        /*
+         * xen,shared-mem = <pbase, gbase, size>;
+         * TODO: pbase is optional.
+         */
+        addr_cells = dt_n_addr_cells(shm_node);
+        size_cells = dt_n_size_cells(shm_node);
+        prop = dt_find_property(shm_node, "xen,shared-mem", NULL);
+        BUG_ON(!prop);
+        cells = (const __be32 *)prop->value;
+        device_tree_get_reg(&cells, addr_cells, addr_cells, &pbase, &gbase);
+        psize = dt_read_number(cells, size_cells);
+        if ( !IS_ALIGNED(pbase, PAGE_SIZE) || !IS_ALIGNED(gbase, PAGE_SIZE) )
+        {
+            printk("%pd: physical address 0x%"PRIpaddr", or guest address 0x%"PRIpaddr" is not suitably aligned.\n",
+                   d, pbase, gbase);
+            return -EINVAL;
+        }
+        if ( !IS_ALIGNED(psize, PAGE_SIZE) )
+        {
+            printk("%pd: size 0x%"PRIpaddr" is not suitably aligned\n",
+                   d, psize);
+            return -EINVAL;
+        }
+
+        for ( i = 0; i < PFN_DOWN(psize); i++ )
+            if ( !mfn_valid(mfn_add(maddr_to_mfn(pbase), i)) )
+            {
+                printk("%pd: invalid physical address 0x%"PRI_mfn"\n",
+                       d, mfn_x(mfn_add(maddr_to_mfn(pbase), i)));
+                return -EINVAL;
+            }
+
+        /*
+         * "role" property is optional and if it is defined explicitly,
+         * then the owner domain is not the default "dom_io" domain.
+         */
+        if ( dt_property_read_string(shm_node, "role", &role_str) == 0 )
+            owner_dom_io = false;
+
+        if ( dt_property_read_string(shm_node, "xen,shm-id", &shm_id) )
+        {
+            printk("%pd: invalid \"xen,shm-id\" property", d);
+            return -EINVAL;
+        }
+        BUG_ON((strlen(shm_id) <= 0) || (strlen(shm_id) >= MAX_SHM_ID_LENGTH));
+
+        /*
+         * DOMID_IO is a fake domain and is not described in the Device-Tree.
+         * Therefore when the owner of the shared region is DOMID_IO, we will
+         * only find the borrowers.
+         */
+        if ( (owner_dom_io && !is_shm_allocated_to_domio(pbase)) ||
+             (!owner_dom_io && strcmp(role_str, "owner") == 0) )
+        {
+            /*
+             * We found the first borrower of the region, the owner was not
+             * specified, so they should be assigned to dom_io.
+             */
+            ret = assign_shared_memory(owner_dom_io ? dom_io : d,
+                                       addr_cells, size_cells,
+                                       pbase, psize, gbase);
+            if ( ret )
+                return ret;
+        }
+
+        if ( owner_dom_io || (strcmp(role_str, "borrower") == 0) )
+        {
+            /* Set up P2M foreign mapping for borrower domain. */
+            ret = map_regions_p2mt(d, _gfn(PFN_UP(gbase)), PFN_DOWN(psize),
+                                   _mfn(PFN_UP(pbase)), p2m_map_foreign_rw);
+            if ( ret )
+                return ret;
+        }
+
+        /*
+         * Record static shared memory region info for later setting
+         * up shm-node in guest device tree.
+         */
+        ret = append_shm_bank_to_domain(kinfo, gbase, psize, shm_id);
+        if ( ret )
+            return ret;
+    }
+
+    return 0;
+}
+#endif /* CONFIG_STATIC_SHM */
+#else
+static void __init allocate_static_memory(struct domain *d,
+                                          struct kernel_info *kinfo,
+                                          const struct dt_device_node *node)
+{
+    ASSERT_UNREACHABLE();
+}
+
+static void __init assign_static_memory_11(struct domain *d,
+                                           struct kernel_info *kinfo,
+                                           const struct dt_device_node *node)
+{
+    ASSERT_UNREACHABLE();
+}
+#endif
+
+/*
+ * When PCI passthrough is available we want to keep the
+ * "linux,pci-domain" in sync for every host bridge.
+ *
+ * Xen may not have a driver for all the host bridges. So we have
+ * to write an heuristic to detect whether a device node describes
+ * a host bridge.
+ *
+ * The current heuristic assumes that a device is a host bridge
+ * if the type is "pci" and then parent type is not "pci".
+ */
+static int __init handle_linux_pci_domain(struct kernel_info *kinfo,
+                                          const struct dt_device_node *node)
+{
+    uint16_t segment;
+    int res;
+
+    if ( !is_pci_passthrough_enabled() )
+        return 0;
+
+    if ( !dt_device_type_is_equal(node, "pci") )
+        return 0;
+
+    if ( node->parent && dt_device_type_is_equal(node->parent, "pci") )
+        return 0;
+
+    if ( dt_find_property(node, "linux,pci-domain", NULL) )
+        return 0;
+
+    /* Allocate and create the linux,pci-domain */
+    res = pci_get_host_bridge_segment(node, &segment);
+    if ( res < 0 )
+    {
+        res = pci_get_new_domain_nr();
+        if ( res < 0 )
+        {
+            printk(XENLOG_DEBUG "Can't assign PCI segment to %s\n",
+                   node->full_name);
+            return -FDT_ERR_NOTFOUND;
+        }
+
+        segment = res;
+        printk(XENLOG_DEBUG "Assigned segment %d to %s\n",
+               segment, node->full_name);
+    }
+
+    return fdt_property_cell(kinfo->fdt, "linux,pci-domain", segment);
 }
 
 static int __init write_properties(struct domain *d, struct kernel_info *kinfo,
@@ -580,6 +1190,11 @@ static int __init write_properties(struct domain *d, struct kernel_info *kinfo,
             return res;
     }
 
+    res = handle_linux_pci_domain(kinfo, node);
+
+    if ( res )
+        return res;
+
     /*
      * Override the property "status" to disable the device when it's
      * marked for passthrough.
@@ -657,7 +1272,7 @@ static void __init set_interrupt(gic_interrupt_t interrupt,
  */
 static int __init fdt_property_interrupts(const struct kernel_info *kinfo,
                                           gic_interrupt_t *intr,
-                                          unsigned num_irq)
+                                          unsigned int num_irq)
 {
     int res;
 
@@ -677,23 +1292,29 @@ static int __init make_memory_node(const struct domain *d,
                                    int addrcells, int sizecells,
                                    struct meminfo *mem)
 {
-    int res, i;
-    int reg_size = addrcells + sizecells;
-    int nr_cells = reg_size * mem->nr_banks;
+    unsigned int i;
+    int res, reg_size = addrcells + sizecells;
+    int nr_cells = 0;
     /* Placeholder for memory@ + a 64-bit number + \0 */
     char buf[24];
     __be32 reg[NR_MEM_BANKS * 4 /* Worst case addrcells + sizecells */];
     __be32 *cells;
 
-    BUG_ON(nr_cells >= ARRAY_SIZE(reg));
     if ( mem->nr_banks == 0 )
         return -ENOENT;
 
-    dt_dprintk("Create memory node (reg size %d, nr cells %d)\n",
-               reg_size, nr_cells);
+    /* find the first memory range that is reserved for device (or firmware) */
+    for ( i = 0; i < mem->nr_banks &&
+                 (mem->bank[i].type != MEMBANK_DEFAULT); i++ )
+        ;
+
+    if ( i == mem->nr_banks )
+        return 0;
+
+    dt_dprintk("Create memory node\n");
 
     /* ePAPR 3.4 */
-    snprintf(buf, sizeof(buf), "memory@%"PRIx64, mem->bank[0].start);
+    snprintf(buf, sizeof(buf), "memory@%"PRIx64, mem->bank[i].start);
     res = fdt_begin_node(fdt, buf);
     if ( res )
         return res;
@@ -703,16 +1324,23 @@ static int __init make_memory_node(const struct domain *d,
         return res;
 
     cells = &reg[0];
-    for ( i = 0 ; i < mem->nr_banks; i++ )
+    for ( ; i < mem->nr_banks; i++ )
     {
         u64 start = mem->bank[i].start;
         u64 size = mem->bank[i].size;
 
+        if ( mem->bank[i].type == MEMBANK_STATIC_DOMAIN )
+            continue;
+
         dt_dprintk("  Bank %d: %#"PRIx64"->%#"PRIx64"\n",
                    i, start, start + size);
 
+        nr_cells += reg_size;
+        BUG_ON(nr_cells >= ARRAY_SIZE(reg));
         dt_child_set_range(&cells, addrcells, sizecells, start, size);
     }
+
+    dt_dprintk("(reg size %d, nr cells %d)\n", reg_size, nr_cells);
 
     res = fdt_property(fdt, "reg", reg, nr_cells * sizeof(*reg));
     if ( res )
@@ -723,18 +1351,419 @@ static int __init make_memory_node(const struct domain *d,
     return res;
 }
 
+#ifdef CONFIG_STATIC_SHM
+static int __init make_shm_memory_node(const struct domain *d,
+                                       void *fdt,
+                                       int addrcells, int sizecells,
+                                       const struct meminfo *mem)
+{
+    unsigned int i = 0;
+    int res = 0;
+
+    if ( mem->nr_banks == 0 )
+        return -ENOENT;
+
+    /*
+     * For each shared memory region, a range is exposed under
+     * the /reserved-memory node as a child node. Each range sub-node is
+     * named xen-shmem@<address>.
+     */
+    dt_dprintk("Create xen-shmem node\n");
+
+    for ( ; i < mem->nr_banks; i++ )
+    {
+        uint64_t start = mem->bank[i].start;
+        uint64_t size = mem->bank[i].size;
+        /* Placeholder for xen-shmem@ + a 64-bit number + \0 */
+        char buf[27];
+        const char compat[] = "xen,shared-memory-v1";
+        /* Worst case addrcells + sizecells */
+        __be32 reg[GUEST_ROOT_ADDRESS_CELLS + GUEST_ROOT_SIZE_CELLS];
+        __be32 *cells;
+        unsigned int len = (addrcells + sizecells) * sizeof(__be32);
+
+        snprintf(buf, sizeof(buf), "xen-shmem@%"PRIx64, mem->bank[i].start);
+        res = fdt_begin_node(fdt, buf);
+        if ( res )
+            return res;
+
+        res = fdt_property(fdt, "compatible", compat, sizeof(compat));
+        if ( res )
+            return res;
+
+        cells = reg;
+        dt_child_set_range(&cells, addrcells, sizecells, start, size);
+
+        res = fdt_property(fdt, "reg", reg, len);
+        if ( res )
+            return res;
+
+        dt_dprintk("Shared memory bank %u: %#"PRIx64"->%#"PRIx64"\n",
+                   i, start, start + size);
+
+        res = fdt_property_string(fdt, "xen,id", mem->bank[i].shm_id);
+        if ( res )
+            return res;
+
+        /*
+         * TODO:
+         * - xen,offset: (borrower VMs only)
+         *   64 bit integer offset within the owner virtual machine's shared
+         *   memory region used for the mapping in the borrower VM
+         */
+        res = fdt_property_u64(fdt, "xen,offset", 0);
+        if ( res )
+            return res;
+
+        res = fdt_end_node(fdt);
+        if ( res )
+            return res;
+    }
+
+    return res;
+}
+#else
+static int __init make_shm_memory_node(const struct domain *d,
+                                       void *fdt,
+                                       int addrcells, int sizecells,
+                                       const struct meminfo *mem)
+{
+    ASSERT_UNREACHABLE();
+    return -EOPNOTSUPP;
+}
+#endif
+
+static int __init make_resv_memory_node(const struct domain *d,
+                                        void *fdt,
+                                        int addrcells, int sizecells,
+                                        const struct meminfo *mem)
+{
+    int res = 0;
+    /* Placeholder for reserved-memory\0 */
+    const char resvbuf[16] = "reserved-memory";
+
+    if ( mem->nr_banks == 0 )
+        /* No shared memory provided. */
+        return 0;
+
+    dt_dprintk("Create reserved-memory node\n");
+
+    res = fdt_begin_node(fdt, resvbuf);
+    if ( res )
+        return res;
+
+    res = fdt_property(fdt, "ranges", NULL, 0);
+    if ( res )
+        return res;
+
+    res = fdt_property_cell(fdt, "#address-cells", addrcells);
+    if ( res )
+        return res;
+
+    res = fdt_property_cell(fdt, "#size-cells", sizecells);
+    if ( res )
+        return res;
+
+    res = make_shm_memory_node(d, fdt, addrcells, sizecells, mem);
+    if ( res )
+        return res;
+
+    res = fdt_end_node(fdt);
+
+    return res;
+}
+
+static int __init add_ext_regions(unsigned long s, unsigned long e, void *data)
+{
+    struct meminfo *ext_regions = data;
+    paddr_t start, size;
+
+    if ( ext_regions->nr_banks >= ARRAY_SIZE(ext_regions->bank) )
+        return 0;
+
+    /*
+     * Both start and size of the extended region should be 2MB aligned to
+     * potentially allow superpage mapping.
+     */
+    start = (s + SZ_2M - 1) & ~(SZ_2M - 1);
+    if ( start > e )
+        return 0;
+
+    /*
+     * e is actually "end-1" because it is called by rangeset functions
+     * which are inclusive of the last address.
+     */
+    e += 1;
+    size = (e - start) & ~(SZ_2M - 1);
+
+    /*
+     * Reasonable size. Not too little to pick up small ranges which are
+     * not quite useful but increase bookkeeping and not too large
+     * to skip a large proportion of unused address space.
+     */
+    if ( size < MB(64) )
+        return 0;
+
+    ext_regions->bank[ext_regions->nr_banks].start = start;
+    ext_regions->bank[ext_regions->nr_banks].size = size;
+    ext_regions->nr_banks++;
+
+    return 0;
+}
+
+/*
+ * Find unused regions of Host address space which can be exposed to Dom0
+ * as extended regions for the special memory mappings. In order to calculate
+ * regions we exclude every region assigned to Dom0 from the Host RAM:
+ * - domain RAM
+ * - reserved-memory
+ * - grant table space
+ */
+static int __init find_unallocated_memory(const struct kernel_info *kinfo,
+                                          struct meminfo *ext_regions)
+{
+    const struct meminfo *assign_mem = &kinfo->mem;
+    struct rangeset *unalloc_mem;
+    paddr_t start, end;
+    unsigned int i;
+    int res;
+
+    dt_dprintk("Find unallocated memory for extended regions\n");
+
+    unalloc_mem = rangeset_new(NULL, NULL, 0);
+    if ( !unalloc_mem )
+        return -ENOMEM;
+
+    /* Start with all available RAM */
+    for ( i = 0; i < bootinfo.mem.nr_banks; i++ )
+    {
+        start = bootinfo.mem.bank[i].start;
+        end = bootinfo.mem.bank[i].start + bootinfo.mem.bank[i].size;
+        res = rangeset_add_range(unalloc_mem, start, end - 1);
+        if ( res )
+        {
+            printk(XENLOG_ERR "Failed to add: %#"PRIpaddr"->%#"PRIpaddr"\n",
+                   start, end);
+            goto out;
+        }
+    }
+
+    /* Remove RAM assigned to Dom0 */
+    for ( i = 0; i < assign_mem->nr_banks; i++ )
+    {
+        start = assign_mem->bank[i].start;
+        end = assign_mem->bank[i].start + assign_mem->bank[i].size;
+        res = rangeset_remove_range(unalloc_mem, start, end - 1);
+        if ( res )
+        {
+            printk(XENLOG_ERR "Failed to remove: %#"PRIpaddr"->%#"PRIpaddr"\n",
+                   start, end);
+            goto out;
+        }
+    }
+
+    /* Remove reserved-memory regions */
+    for ( i = 0; i < bootinfo.reserved_mem.nr_banks; i++ )
+    {
+        start = bootinfo.reserved_mem.bank[i].start;
+        end = bootinfo.reserved_mem.bank[i].start +
+            bootinfo.reserved_mem.bank[i].size;
+        res = rangeset_remove_range(unalloc_mem, start, end - 1);
+        if ( res )
+        {
+            printk(XENLOG_ERR "Failed to remove: %#"PRIpaddr"->%#"PRIpaddr"\n",
+                   start, end);
+            goto out;
+        }
+    }
+
+    /* Remove grant table region */
+    start = kinfo->gnttab_start;
+    end = kinfo->gnttab_start + kinfo->gnttab_size;
+    res = rangeset_remove_range(unalloc_mem, start, end - 1);
+    if ( res )
+    {
+        printk(XENLOG_ERR "Failed to remove: %#"PRIpaddr"->%#"PRIpaddr"\n",
+               start, end);
+        goto out;
+    }
+
+    start = 0;
+    end = (1ULL << p2m_ipa_bits) - 1;
+    res = rangeset_report_ranges(unalloc_mem, start, end,
+                                 add_ext_regions, ext_regions);
+    if ( res )
+        ext_regions->nr_banks = 0;
+    else if ( !ext_regions->nr_banks )
+        res = -ENOENT;
+
+out:
+    rangeset_destroy(unalloc_mem);
+
+    return res;
+}
+
+static int __init handle_pci_range(const struct dt_device_node *dev,
+                                   u64 addr, u64 len, void *data)
+{
+    struct rangeset *mem_holes = data;
+    paddr_t start, end;
+    int res;
+
+    start = addr & PAGE_MASK;
+    end = PAGE_ALIGN(addr + len);
+    res = rangeset_remove_range(mem_holes, start, end - 1);
+    if ( res )
+    {
+        printk(XENLOG_ERR "Failed to remove: %#"PRIpaddr"->%#"PRIpaddr"\n",
+               start, end);
+        return res;
+    }
+
+    return 0;
+}
+
+/*
+ * Find the holes in the Host DT which can be exposed to Dom0 as extended
+ * regions for the special memory mappings. In order to calculate regions
+ * we exclude every addressable memory region described by "reg" and "ranges"
+ * properties from the maximum possible addressable physical memory range:
+ * - MMIO
+ * - Host RAM
+ * - PCI aperture
+ */
+static int __init find_memory_holes(const struct kernel_info *kinfo,
+                                    struct meminfo *ext_regions)
+{
+    struct dt_device_node *np;
+    struct rangeset *mem_holes;
+    paddr_t start, end;
+    unsigned int i;
+    int res;
+
+    dt_dprintk("Find memory holes for extended regions\n");
+
+    mem_holes = rangeset_new(NULL, NULL, 0);
+    if ( !mem_holes )
+        return -ENOMEM;
+
+    /* Start with maximum possible addressable physical memory range */
+    start = 0;
+    end = (1ULL << p2m_ipa_bits) - 1;
+    res = rangeset_add_range(mem_holes, start, end);
+    if ( res )
+    {
+        printk(XENLOG_ERR "Failed to add: %#"PRIpaddr"->%#"PRIpaddr"\n",
+               start, end);
+        goto out;
+    }
+
+    /*
+     * Remove regions described by "reg" and "ranges" properties where
+     * the memory is addressable (MMIO, RAM, PCI BAR, etc).
+     */
+    dt_for_each_device_node( dt_host, np )
+    {
+        unsigned int naddr;
+        u64 addr, size;
+
+        naddr = dt_number_of_address(np);
+
+        for ( i = 0; i < naddr; i++ )
+        {
+            res = dt_device_get_address(np, i, &addr, &size);
+            if ( res )
+            {
+                printk(XENLOG_ERR "Unable to retrieve address %u for %s\n",
+                       i, dt_node_full_name(np));
+                goto out;
+            }
+
+            start = addr & PAGE_MASK;
+            end = PAGE_ALIGN(addr + size);
+            res = rangeset_remove_range(mem_holes, start, end - 1);
+            if ( res )
+            {
+                printk(XENLOG_ERR "Failed to remove: %#"PRIpaddr"->%#"PRIpaddr"\n",
+                       start, end);
+                goto out;
+            }
+        }
+
+        if ( dt_device_type_is_equal(np, "pci") )
+        {
+            /*
+             * The ranges property in this context describes the PCI host
+             * bridge aperture. It shall be absent if no addresses are mapped
+             * through the bridge.
+             */
+            if ( !dt_get_property(np, "ranges", NULL) )
+                continue;
+
+            res = dt_for_each_range(np, &handle_pci_range, mem_holes);
+            if ( res )
+                goto out;
+        }
+    }
+
+    start = 0;
+    end = (1ULL << p2m_ipa_bits) - 1;
+    res = rangeset_report_ranges(mem_holes, start, end,
+                                 add_ext_regions,  ext_regions);
+    if ( res )
+        ext_regions->nr_banks = 0;
+    else if ( !ext_regions->nr_banks )
+        res = -ENOENT;
+
+out:
+    rangeset_destroy(mem_holes);
+
+    return res;
+}
+
+static int __init find_domU_holes(const struct kernel_info *kinfo,
+                                  struct meminfo *ext_regions)
+{
+    unsigned int i;
+    paddr_t bankend;
+    const paddr_t bankbase[] = GUEST_RAM_BANK_BASES;
+    const paddr_t banksize[] = GUEST_RAM_BANK_SIZES;
+    int res = -ENOENT;
+
+    for ( i = 0; i < GUEST_RAM_BANKS; i++ )
+    {
+        struct membank *ext_bank = &(ext_regions->bank[ext_regions->nr_banks]);
+
+        ext_bank->start = ROUNDUP(bankbase[i] + kinfo->mem.bank[i].size, SZ_2M);
+
+        bankend = ~0ULL >> (64 - p2m_ipa_bits);
+        bankend = min(bankend, bankbase[i] + banksize[i] - 1);
+        if ( bankend > ext_bank->start )
+            ext_bank->size = bankend - ext_bank->start + 1;
+
+        /* 64MB is the minimum size of an extended region */
+        if ( ext_bank->size < MB(64) )
+            continue;
+        ext_regions->nr_banks++;
+        res = 0;
+    }
+
+    return res;
+}
+
 static int __init make_hypervisor_node(struct domain *d,
                                        const struct kernel_info *kinfo,
                                        int addrcells, int sizecells)
 {
     const char compat[] =
-        "xen,xen-"__stringify(XEN_VERSION)"."__stringify(XEN_SUBVERSION)"\0"
+        "xen,xen-" XEN_VERSION_STRING "\0"
         "xen,xen";
-    __be32 reg[4];
+    __be32 *reg, *cells;
     gic_interrupt_t intr;
-    __be32 *cells;
     int res;
     void *fdt = kinfo->fdt;
+    struct meminfo *ext_regions = NULL;
+    unsigned int i, nr_ext_regions;
 
     dt_dprintk("Create hypervisor node\n");
 
@@ -756,12 +1785,70 @@ static int __init make_hypervisor_node(struct domain *d,
     if ( res )
         return res;
 
+    if ( !opt_ext_regions )
+    {
+        printk(XENLOG_INFO "%pd: extended regions support is disabled\n", d);
+        nr_ext_regions = 0;
+    }
+    else if ( is_32bit_domain(d) )
+    {
+        printk(XENLOG_WARNING
+               "%pd: extended regions not supported for 32-bit guests\n", d);
+        nr_ext_regions = 0;
+    }
+    else
+    {
+        ext_regions = xzalloc(struct meminfo);
+        if ( !ext_regions )
+            return -ENOMEM;
+
+        if ( is_domain_direct_mapped(d) )
+        {
+            if ( !is_iommu_enabled(d) )
+                res = find_unallocated_memory(kinfo, ext_regions);
+            else
+                res = find_memory_holes(kinfo, ext_regions);
+        }
+        else
+        {
+            res = find_domU_holes(kinfo, ext_regions);
+        }
+
+        if ( res )
+            printk(XENLOG_WARNING "%pd: failed to allocate extended regions\n",
+                   d);
+        nr_ext_regions = ext_regions->nr_banks;
+    }
+
+    reg = xzalloc_array(__be32, (nr_ext_regions + 1) * (addrcells + sizecells));
+    if ( !reg )
+    {
+        xfree(ext_regions);
+        return -ENOMEM;
+    }
+
     /* reg 0 is grant table space */
     cells = &reg[0];
     dt_child_set_range(&cells, addrcells, sizecells,
                        kinfo->gnttab_start, kinfo->gnttab_size);
+    /* reg 1...N are extended regions */
+    for ( i = 0; i < nr_ext_regions; i++ )
+    {
+        u64 start = ext_regions->bank[i].start;
+        u64 size = ext_regions->bank[i].size;
+
+        printk("%pd: extended region %d: %#"PRIx64"->%#"PRIx64"\n",
+               d, i, start, start + size);
+
+        dt_child_set_range(&cells, addrcells, sizecells, start, size);
+    }
+
     res = fdt_property(fdt, "reg", reg,
-                       dt_cells_to_size(addrcells + sizecells));
+                       dt_cells_to_size(addrcells + sizecells) *
+                       (nr_ext_regions + 1));
+    xfree(ext_regions);
+    xfree(reg);
+
     if ( res )
         return res;
 
@@ -1021,8 +2108,7 @@ static int __init make_timer_node(const struct kernel_info *kinfo)
     void *fdt = kinfo->fdt;
     static const struct dt_device_match timer_ids[] __initconst =
     {
-        DT_MATCH_COMPATIBLE("arm,armv7-timer"),
-        DT_MATCH_COMPATIBLE("arm,armv8-timer"),
+        DT_MATCH_TIMER,
         { /* sentinel */ },
     };
     struct dt_device_node *dev;
@@ -1182,10 +2268,10 @@ static int __init map_dt_irq_to_domain(const struct dt_device_node *dev,
                                        const struct dt_irq *dt_irq,
                                        void *data)
 {
-    struct domain *d = data;
+    struct map_range_data *mr_data = data;
+    struct domain *d = mr_data->d;
     unsigned int irq = dt_irq->irq;
     int res;
-    bool need_mapping = !dt_device_for_passthrough(dev);
 
     if ( irq < NR_LOCAL_IRQS )
     {
@@ -1204,18 +2290,16 @@ static int __init map_dt_irq_to_domain(const struct dt_device_node *dev,
         return res;
     }
 
-    res = map_irq_to_domain(d, irq, need_mapping, dt_node_name(dev));
+    res = map_irq_to_domain(d, irq, !mr_data->skip_mapping, dt_node_name(dev));
 
     return 0;
 }
 
-static int __init map_range_to_domain(const struct dt_device_node *dev,
-                                      u64 addr, u64 len,
-                                      void *data)
+int __init map_range_to_domain(const struct dt_device_node *dev,
+                               u64 addr, u64 len, void *data)
 {
     struct map_range_data *mr_data = data;
     struct domain *d = mr_data->d;
-    bool need_mapping = !dt_device_for_passthrough(dev);
     int res;
 
     /*
@@ -1223,8 +2307,8 @@ static int __init map_range_to_domain(const struct dt_device_node *dev,
      * They are not MMIO and therefore a domain should not be able to
      * manage them via the IOMEM interface.
      */
-    if ( strnicmp(dt_node_full_name(dev), "/reserved-memory/",
-         strlen("/reserved-memory/")) != 0 )
+    if ( strncasecmp(dt_node_full_name(dev), "/reserved-memory/",
+                     strlen("/reserved-memory/")) != 0 )
     {
         res = iomem_permit_access(d, paddr_to_pfn(addr),
                 paddr_to_pfn(PAGE_ALIGN(addr + len - 1)));
@@ -1238,7 +2322,7 @@ static int __init map_range_to_domain(const struct dt_device_node *dev,
         }
     }
 
-    if ( need_mapping )
+    if ( !mr_data->skip_mapping )
     {
         res = map_regions_p2mt(d,
                                gaddr_to_gfn(addr),
@@ -1267,23 +2351,21 @@ static int __init map_range_to_domain(const struct dt_device_node *dev,
  * then we may need to perform additional mappings in order to make
  * the child resources available to domain 0.
  */
-static int __init map_device_children(struct domain *d,
-                                      const struct dt_device_node *dev,
-                                      p2m_type_t p2mt)
+static int __init map_device_children(const struct dt_device_node *dev,
+                                      struct map_range_data *mr_data)
 {
-    struct map_range_data mr_data = { .d = d, .p2mt = p2mt };
-    int ret;
-
     if ( dt_device_type_is_equal(dev, "pci") )
     {
+        int ret;
+
         dt_dprintk("Mapping children of %s to guest\n",
                    dt_node_full_name(dev));
 
-        ret = dt_for_each_irq_map(dev, &map_dt_irq_to_domain, d);
+        ret = dt_for_each_irq_map(dev, &map_dt_irq_to_domain, mr_data);
         if ( ret < 0 )
             return ret;
 
-        ret = dt_for_each_range(dev, &map_range_to_domain, &mr_data);
+        ret = dt_for_each_range(dev, &map_range_to_domain, mr_data);
         if ( ret < 0 )
             return ret;
     }
@@ -1363,14 +2445,28 @@ static int __init handle_device(struct domain *d, struct dt_device_node *dev,
     unsigned int i;
     int res;
     u64 addr, size;
-    bool need_mapping = !dt_device_for_passthrough(dev);
+    bool own_device = !dt_device_for_passthrough(dev);
+    /*
+     * We want to avoid mapping the MMIO in dom0 for the following cases:
+     *   - The device is owned by dom0 (i.e. it has been flagged for
+     *     passthrough).
+     *   - PCI host bridges with driver in Xen. They will later be mapped by
+     *     pci_host_bridge_mappings().
+     */
+    struct map_range_data mr_data = {
+        .d = d,
+        .p2mt = p2mt,
+        .skip_mapping = !own_device ||
+                        (is_pci_passthrough_enabled() &&
+                        (device_get_class(dev) == DEVICE_PCI_HOSTBRIDGE))
+    };
 
     naddr = dt_number_of_address(dev);
 
     dt_dprintk("%s passthrough = %d naddr = %u\n",
-               dt_node_full_name(dev), need_mapping, naddr);
+               dt_node_full_name(dev), own_device, naddr);
 
-    if ( need_mapping )
+    if ( own_device )
     {
         dt_dprintk("Check if %s is behind the IOMMU and add it\n",
                    dt_node_full_name(dev));
@@ -1396,14 +2492,13 @@ static int __init handle_device(struct domain *d, struct dt_device_node *dev,
         }
     }
 
-    res = handle_device_interrupts(d, dev, need_mapping);
+    res = handle_device_interrupts(d, dev, own_device);
     if ( res < 0 )
         return res;
 
     /* Give permission and map MMIOs */
     for ( i = 0; i < naddr; i++ )
     {
-        struct map_range_data mr_data = { .d = d, .p2mt = p2mt };
         res = dt_device_get_address(dev, i, &addr, &size);
         if ( res )
         {
@@ -1417,7 +2512,7 @@ static int __init handle_device(struct domain *d, struct dt_device_node *dev,
             return res;
     }
 
-    res = map_device_children(d, dev, p2mt);
+    res = map_device_children(dev, &mr_data);
     if ( res )
         return res;
 
@@ -1601,6 +2696,11 @@ static int __init handle_node(struct domain *d, struct kernel_info *kinfo,
             if ( res )
                 return res;
         }
+
+        res = make_resv_memory_node(d, kinfo->fdt, addrcells, sizecells,
+                                    &kinfo->shm_mem);
+        if ( res )
+            return res;
     }
 
     res = fdt_end_node(kinfo->fdt);
@@ -1614,8 +2714,13 @@ static int __init make_gicv2_domU_node(struct kernel_info *kinfo)
     int res = 0;
     __be32 reg[(GUEST_ROOT_ADDRESS_CELLS + GUEST_ROOT_SIZE_CELLS) * 2];
     __be32 *cells;
+    const struct domain *d = kinfo->d;
+    /* Placeholder for interrupt-controller@ + a 64-bit number + \0 */
+    char buf[38];
 
-    res = fdt_begin_node(fdt, "interrupt-controller@"__stringify(GUEST_GICD_BASE));
+    snprintf(buf, sizeof(buf), "interrupt-controller@%"PRIx64,
+             vgic_dist_base(&d->arch.vgic));
+    res = fdt_begin_node(fdt, buf);
     if ( res )
         return res;
 
@@ -1637,9 +2742,9 @@ static int __init make_gicv2_domU_node(struct kernel_info *kinfo)
 
     cells = &reg[0];
     dt_child_set_range(&cells, GUEST_ROOT_ADDRESS_CELLS, GUEST_ROOT_SIZE_CELLS,
-                       GUEST_GICD_BASE, GUEST_GICD_SIZE);
+                       vgic_dist_base(&d->arch.vgic), GUEST_GICD_SIZE);
     dt_child_set_range(&cells, GUEST_ROOT_ADDRESS_CELLS, GUEST_ROOT_SIZE_CELLS,
-                       GUEST_GICC_BASE, GUEST_GICC_SIZE);
+                       vgic_cpu_base(&d->arch.vgic), GUEST_GICC_SIZE);
 
     res = fdt_property(fdt, "reg", reg, sizeof(reg));
     if (res)
@@ -1658,14 +2763,21 @@ static int __init make_gicv2_domU_node(struct kernel_info *kinfo)
     return res;
 }
 
+#ifdef CONFIG_GICV3
 static int __init make_gicv3_domU_node(struct kernel_info *kinfo)
 {
     void *fdt = kinfo->fdt;
     int res = 0;
-    __be32 reg[(GUEST_ROOT_ADDRESS_CELLS + GUEST_ROOT_SIZE_CELLS) * 2];
-    __be32 *cells;
+    __be32 *reg, *cells;
+    const struct domain *d = kinfo->d;
+    /* Placeholder for interrupt-controller@ + a 64-bit number + \0 */
+    char buf[38];
+    unsigned int i, len = 0;
 
-    res = fdt_begin_node(fdt, "interrupt-controller@"__stringify(GUEST_GICV3_GICD_BASE));
+    snprintf(buf, sizeof(buf), "interrupt-controller@%"PRIx64,
+             vgic_dist_base(&d->arch.vgic));
+
+    res = fdt_begin_node(fdt, buf);
     if ( res )
         return res;
 
@@ -1685,13 +2797,25 @@ static int __init make_gicv3_domU_node(struct kernel_info *kinfo)
     if ( res )
         return res;
 
-    cells = &reg[0];
-    dt_child_set_range(&cells, GUEST_ROOT_ADDRESS_CELLS, GUEST_ROOT_SIZE_CELLS,
-                       GUEST_GICV3_GICD_BASE, GUEST_GICV3_GICD_SIZE);
-    dt_child_set_range(&cells, GUEST_ROOT_ADDRESS_CELLS, GUEST_ROOT_SIZE_CELLS,
-                       GUEST_GICV3_GICR0_BASE, GUEST_GICV3_GICR0_SIZE);
+    /* reg specifies all re-distributors and Distributor. */
+    len = (GUEST_ROOT_ADDRESS_CELLS + GUEST_ROOT_SIZE_CELLS) *
+          (d->arch.vgic.nr_regions + 1) * sizeof(__be32);
+    reg = xmalloc_bytes(len);
+    if ( reg == NULL )
+        return -ENOMEM;
+    cells = reg;
 
-    res = fdt_property(fdt, "reg", reg, sizeof(reg));
+    dt_child_set_range(&cells, GUEST_ROOT_ADDRESS_CELLS, GUEST_ROOT_SIZE_CELLS,
+                       vgic_dist_base(&d->arch.vgic), GUEST_GICV3_GICD_SIZE);
+
+    for ( i = 0; i < d->arch.vgic.nr_regions; i++ )
+        dt_child_set_range(&cells,
+                           GUEST_ROOT_ADDRESS_CELLS, GUEST_ROOT_SIZE_CELLS,
+                           d->arch.vgic.rdist_regions[i].base,
+                           d->arch.vgic.rdist_regions[i].size);
+
+    res = fdt_property(fdt, "reg", reg, len);
+    xfree(reg);
     if (res)
         return res;
 
@@ -1707,13 +2831,16 @@ static int __init make_gicv3_domU_node(struct kernel_info *kinfo)
 
     return res;
 }
+#endif
 
 static int __init make_gic_domU_node(struct kernel_info *kinfo)
 {
     switch ( kinfo->d->arch.vgic.version )
     {
+#ifdef CONFIG_GICV3
     case GIC_V3:
         return make_gicv3_domU_node(kinfo);
+#endif
     case GIC_V2:
         return make_gicv2_domU_node(kinfo);
     default:
@@ -1729,8 +2856,12 @@ static int __init make_vpl011_uart_node(struct kernel_info *kinfo)
     gic_interrupt_t intr;
     __be32 reg[GUEST_ROOT_ADDRESS_CELLS + GUEST_ROOT_SIZE_CELLS];
     __be32 *cells;
+    struct domain *d = kinfo->d;
+    /* Placeholder for sbsa-uart@ + a 64-bit number + \0 */
+    char buf[27];
 
-    res = fdt_begin_node(fdt, "sbsa-uart@"__stringify(GUEST_PL011_BASE));
+    snprintf(buf, sizeof(buf), "sbsa-uart@%"PRIx64, d->arch.vpl011.base_addr);
+    res = fdt_begin_node(fdt, buf);
     if ( res )
         return res;
 
@@ -1740,14 +2871,14 @@ static int __init make_vpl011_uart_node(struct kernel_info *kinfo)
 
     cells = &reg[0];
     dt_child_set_range(&cells, GUEST_ROOT_ADDRESS_CELLS,
-                       GUEST_ROOT_SIZE_CELLS, GUEST_PL011_BASE,
+                       GUEST_ROOT_SIZE_CELLS, d->arch.vpl011.base_addr,
                        GUEST_PL011_SIZE);
 
     res = fdt_property(fdt, "reg", reg, sizeof(reg));
     if ( res )
         return res;
 
-    set_interrupt(intr, GUEST_VPL011_SPI, 0xf, DT_IRQ_TYPE_LEVEL_HIGH);
+    set_interrupt(intr, d->arch.vpl011.virq, 0xf, DT_IRQ_TYPE_LEVEL_HIGH);
 
     res = fdt_property(fdt, "interrupts", intr, sizeof (intr));
     if ( res )
@@ -2078,6 +3209,8 @@ static int __init prepare_dtb_domU(struct domain *d, struct kernel_info *kinfo)
     int ret;
 
     kinfo->phandle_gic = GUEST_PHANDLE_GIC;
+    kinfo->gnttab_start = GUEST_GNTTAB_BASE;
+    kinfo->gnttab_size = GUEST_GNTTAB_SIZE;
 
     addrcells = GUEST_ROOT_ADDRESS_CELLS;
     sizecells = GUEST_ROOT_SIZE_CELLS;
@@ -2122,6 +3255,11 @@ static int __init prepare_dtb_domU(struct domain *d, struct kernel_info *kinfo)
     if ( ret )
         goto err;
 
+    ret = make_resv_memory_node(d, kinfo->fdt, addrcells, sizecells,
+                                &kinfo->shm_mem);
+    if ( ret )
+        goto err;
+
     /*
      * domain_handle_dtb_bootmodule has to be called before the rest of
      * the device tree is generated because it depends on the value of
@@ -2148,6 +3286,13 @@ static int __init prepare_dtb_domU(struct domain *d, struct kernel_info *kinfo)
 #ifdef CONFIG_SBSA_VUART_CONSOLE
         ret = make_vpl011_uart_node(kinfo);
 #endif
+        if ( ret )
+            goto err;
+    }
+
+    if ( kinfo->dom0less_feature & DOM0LESS_ENHANCED_NO_XS )
+    {
+        ret = make_hypervisor_node(d, kinfo, addrcells, sizecells);
         if ( ret )
             goto err;
     }
@@ -2273,6 +3418,8 @@ static void __init initrd_load(struct kernel_info *kinfo)
                                           initrd, len);
     if ( res != 0 )
         panic("Unable to copy the initrd in the hwdom memory\n");
+
+    iounmap(initrd);
 }
 
 /*
@@ -2306,6 +3453,150 @@ void __init evtchn_allocate(struct domain *d)
     d->arch.hvm.params[HVM_PARAM_CALLBACK_IRQ] = val;
 }
 
+static int __init get_evtchn_dt_property(const struct dt_device_node *np,
+                                         uint32_t *port, uint32_t *phandle)
+{
+    const __be32 *prop = NULL;
+    uint32_t len;
+
+    prop = dt_get_property(np, "xen,evtchn", &len);
+    if ( !prop )
+    {
+        printk(XENLOG_ERR "xen,evtchn property should not be empty.\n");
+        return -EINVAL;
+    }
+
+    if ( !len || len < dt_cells_to_size(STATIC_EVTCHN_NODE_SIZE_CELLS) )
+    {
+        printk(XENLOG_ERR "xen,evtchn property value is not valid.\n");
+        return -EINVAL;
+    }
+
+    *port = dt_next_cell(1, &prop);
+    *phandle = dt_next_cell(1, &prop);
+
+    return 0;
+}
+
+static int __init alloc_domain_evtchn(struct dt_device_node *node)
+{
+    int rc;
+    uint32_t domU1_port, domU2_port, remote_phandle;
+    struct dt_device_node *remote_node;
+    const struct dt_device_node *p1_node, *p2_node;
+    struct evtchn_alloc_unbound alloc_unbound;
+    struct evtchn_bind_interdomain bind_interdomain;
+    struct domain *d1 = NULL, *d2 = NULL;
+
+    if ( !dt_device_is_compatible(node, "xen,evtchn-v1") )
+        return 0;
+
+    /*
+     * Event channel is already created while parsing the other side of
+     * evtchn node.
+     */
+    if ( dt_device_static_evtchn_created(node) )
+        return 0;
+
+    rc = get_evtchn_dt_property(node, &domU1_port, &remote_phandle);
+    if ( rc )
+        return rc;
+
+    remote_node = dt_find_node_by_phandle(remote_phandle);
+    if ( !remote_node )
+    {
+        printk(XENLOG_ERR
+                "evtchn: could not find remote evtchn phandle\n");
+        return -EINVAL;
+    }
+
+    rc = get_evtchn_dt_property(remote_node, &domU2_port, &remote_phandle);
+    if ( rc )
+        return rc;
+
+    if ( node->phandle != remote_phandle )
+    {
+        printk(XENLOG_ERR "xen,evtchn property is not setup correctly.\n");
+        return -EINVAL;
+    }
+
+    p1_node = dt_get_parent(node);
+    if ( !p1_node )
+    {
+        printk(XENLOG_ERR "evtchn: evtchn parent node is NULL\n" );
+        return -EINVAL;
+    }
+
+    p2_node = dt_get_parent(remote_node);
+    if ( !p2_node )
+    {
+        printk(XENLOG_ERR "evtchn: remote parent node is NULL\n" );
+        return -EINVAL;
+    }
+
+    d1 = get_domain_by_id(p1_node->used_by);
+    d2 = get_domain_by_id(p2_node->used_by);
+
+    if ( !d1 || !d2 )
+    {
+        printk(XENLOG_ERR "evtchn: could not find domains\n" );
+        return -EINVAL;
+    }
+
+    alloc_unbound.dom = d1->domain_id;
+    alloc_unbound.remote_dom = d2->domain_id;
+
+    rc = evtchn_alloc_unbound(&alloc_unbound, domU1_port);
+    if ( rc < 0 )
+    {
+        printk(XENLOG_ERR
+                "evtchn_alloc_unbound() failure (Error %d) \n", rc);
+        return rc;
+    }
+
+    bind_interdomain.remote_dom  = d1->domain_id;
+    bind_interdomain.remote_port = domU1_port;
+
+    rc = evtchn_bind_interdomain(&bind_interdomain, d2, domU2_port);
+    if ( rc < 0 )
+    {
+        printk(XENLOG_ERR
+                "evtchn_bind_interdomain() failure (Error %d) \n", rc);
+        return rc;
+    }
+
+    dt_device_set_static_evtchn_created(node);
+    dt_device_set_static_evtchn_created(remote_node);
+
+    return 0;
+}
+
+void __init alloc_static_evtchn(void)
+{
+    struct dt_device_node *node, *evtchn_node;
+    struct dt_device_node *chosen = dt_find_node_by_path("/chosen");
+
+    BUG_ON(chosen == NULL);
+
+    if ( hardware_domain )
+        dt_device_set_used_by(chosen, hardware_domain->domain_id);
+
+    dt_for_each_child_node(chosen, node)
+    {
+        if ( hardware_domain )
+        {
+            if ( alloc_domain_evtchn(node) != 0 )
+                panic("Could not set up domains evtchn\n");
+        }
+
+        dt_for_each_child_node(node, evtchn_node)
+        {
+            if ( alloc_domain_evtchn(evtchn_node) != 0 )
+                panic("Could not set up domains evtchn\n");
+        }
+    }
+}
+
 static void __init find_gnttab_region(struct domain *d,
                                       struct kernel_info *kinfo)
 {
@@ -2331,6 +3622,21 @@ static void __init find_gnttab_region(struct domain *d,
 
     printk("Grant table range: %#"PRIpaddr"-%#"PRIpaddr"\n",
            kinfo->gnttab_start, kinfo->gnttab_start + kinfo->gnttab_size);
+}
+
+static unsigned long __init domain_p2m_pages(unsigned long maxmem_kb,
+                                             unsigned int smp_cpus)
+{
+    /*
+     * Keep in sync with libxl__get_required_paging_memory().
+     * 256 pages (1MB) per vcpu, plus 1 page per MiB of RAM for the P2M map,
+     * plus 128 pages to cover extended regions.
+     */
+    unsigned long memkb = 4 * (256 * smp_cpus + (maxmem_kb / 1024) + 128);
+
+    BUILD_BUG_ON(PAGE_SIZE != SZ_4K);
+
+    return DIV_ROUND_UP(memkb, 1024) << (20 - PAGE_SHIFT);
 }
 
 static int __init construct_domain(struct domain *d, struct kernel_info *kinfo)
@@ -2418,12 +3724,34 @@ static int __init construct_domain(struct domain *d, struct kernel_info *kinfo)
     return 0;
 }
 
+static int __init alloc_xenstore_evtchn(struct domain *d)
+{
+    evtchn_alloc_unbound_t alloc;
+    int rc;
+
+    alloc.dom = d->domain_id;
+    alloc.remote_dom = hardware_domain->domain_id;
+    rc = evtchn_alloc_unbound(&alloc, 0);
+    if ( rc )
+    {
+        printk("Failed allocating event channel for domain\n");
+        return rc;
+    }
+
+    d->arch.hvm.params[HVM_PARAM_STORE_EVTCHN] = alloc.port;
+
+    return 0;
+}
+
 static int __init construct_domU(struct domain *d,
                                  const struct dt_device_node *node)
 {
     struct kernel_info kinfo = {};
+    const char *dom0less_enhanced;
     int rc;
     u64 mem;
+    u32 p2m_mem_mb;
+    unsigned long p2m_pages;
 
     rc = dt_property_read_u64(node, "memory", &mem);
     if ( !rc )
@@ -2433,9 +3761,34 @@ static int __init construct_domU(struct domain *d,
     }
     kinfo.unassigned_mem = (paddr_t)mem * SZ_1K;
 
+    rc = dt_property_read_u32(node, "xen,domain-p2m-mem-mb", &p2m_mem_mb);
+    /* If xen,domain-p2m-mem-mb is not specified, use the default value. */
+    p2m_pages = rc ?
+                p2m_mem_mb << (20 - PAGE_SHIFT) :
+                domain_p2m_pages(mem, d->max_vcpus);
+
+    spin_lock(&d->arch.paging.lock);
+    rc = p2m_set_allocation(d, p2m_pages, NULL);
+    spin_unlock(&d->arch.paging.lock);
+    if ( rc != 0 )
+        return rc;
+
     printk("*** LOADING DOMU cpus=%u memory=%"PRIx64"KB ***\n", d->max_vcpus, mem);
 
     kinfo.vpl011 = dt_property_read_bool(node, "vpl011");
+
+    rc = dt_property_read_string(node, "xen,enhanced", &dom0less_enhanced);
+    if ( rc == -EILSEQ ||
+         rc == -ENODATA ||
+         (rc == 0 && !strcmp(dom0less_enhanced, "enabled")) )
+    {
+        if ( hardware_domain )
+            kinfo.dom0less_feature = DOM0LESS_ENHANCED;
+        else
+            panic("At the moment, Xenstore support requires dom0 to be present\n");
+    }
+    else if ( rc == 0 && !strcmp(dom0less_enhanced, "no-xenstore") )
+        kinfo.dom0less_feature = DOM0LESS_ENHANCED_NO_XS;
 
     if ( vcpu_create(d, 0) == NULL )
         return -ENOMEM;
@@ -2452,7 +3805,26 @@ static int __init construct_domU(struct domain *d,
     /* type must be set before allocate memory */
     d->arch.type = kinfo.type;
 #endif
-    allocate_memory(d, &kinfo);
+    if ( !dt_find_property(node, "xen,static-mem", NULL) )
+        allocate_memory(d, &kinfo);
+    else if ( !is_domain_direct_mapped(d) )
+        allocate_static_memory(d, &kinfo, node);
+    else
+        assign_static_memory_11(d, &kinfo, node);
+
+#ifdef CONFIG_STATIC_SHM
+    rc = process_shm(d, &kinfo, node);
+    if ( rc < 0 )
+        return rc;
+#endif
+
+    /*
+     * Base address and irq number are needed when creating vpl011 device
+     * tree node in prepare_dtb_domU, so initialization on related variables
+     * shall be done first.
+     */
+    if ( kinfo.vpl011 )
+        rc = domain_vpl011_init(d, NULL);
 
     rc = prepare_dtb_domU(d, &kinfo);
     if ( rc < 0 )
@@ -2462,8 +3834,14 @@ static int __init construct_domU(struct domain *d,
     if ( rc < 0 )
         return rc;
 
-    if ( kinfo.vpl011 )
-        rc = domain_vpl011_init(d, NULL);
+    if ( kinfo.dom0less_feature & DOM0LESS_XENSTORE )
+    {
+        ASSERT(hardware_domain);
+        rc = alloc_xenstore_evtchn(d);
+        if ( rc < 0 )
+            return rc;
+        d->arch.hvm.params[HVM_PARAM_STORE_PFN] = ~0ULL;
+    }
 
     return rc;
 }
@@ -2471,7 +3849,8 @@ static int __init construct_domU(struct domain *d,
 void __init create_domUs(void)
 {
     struct dt_device_node *node;
-    const struct dt_device_node *chosen = dt_find_node_by_path("/chosen");
+    const struct dt_device_node *cpupool_node,
+                                *chosen = dt_find_node_by_path("/chosen");
 
     BUG_ON(chosen == NULL);
     dt_for_each_child_node(chosen, node)
@@ -2480,24 +3859,65 @@ void __init create_domUs(void)
         struct xen_domctl_createdomain d_cfg = {
             .arch.gic_version = XEN_DOMCTL_CONFIG_GIC_NATIVE,
             .flags = XEN_DOMCTL_CDF_hvm | XEN_DOMCTL_CDF_hap,
-            .max_evtchn_port = -1,
-            .max_grant_frames = 64,
-            .max_maptrack_frames = 1024,
+            /*
+             * The default of 1023 should be sufficient for guests because
+             * on ARM we don't bind physical interrupts to event channels.
+             * The only use of the evtchn port is inter-domain communications.
+             * 1023 is also the default value used in libxl.
+             */
+            .max_evtchn_port = 1023,
+            .max_grant_frames = -1,
+            .max_maptrack_frames = -1,
+            .grant_opts = XEN_DOMCTL_GRANT_version(opt_gnttab_max_version),
         };
+        unsigned int flags = 0U;
 
         if ( !dt_device_is_compatible(node, "xen,domain") )
             continue;
+
+        if ( dt_find_property(node, "xen,static-mem", NULL) )
+            flags |= CDF_staticmem;
+
+        if ( dt_property_read_bool(node, "direct-map") )
+        {
+            if ( !(flags & CDF_staticmem) )
+                panic("direct-map is not valid for domain %s without static allocation.\n",
+                      dt_node_name(node));
+
+            flags |= CDF_directmap;
+        }
 
         if ( !dt_property_read_u32(node, "cpus", &d_cfg.max_vcpus) )
             panic("Missing property 'cpus' for domain %s\n",
                   dt_node_name(node));
 
-        if ( dt_find_compatible_node(node, NULL, "multiboot,device-tree") )
+        if ( dt_find_compatible_node(node, NULL, "multiboot,device-tree") &&
+             iommu_enabled )
             d_cfg.flags |= XEN_DOMCTL_CDF_iommu;
 
         if ( !dt_property_read_u32(node, "nr_spis", &d_cfg.arch.nr_spis) )
         {
+            unsigned int vpl011_virq = GUEST_VPL011_SPI;
+
             d_cfg.arch.nr_spis = gic_number_lines() - 32;
+
+            /*
+             * The VPL011 virq is GUEST_VPL011_SPI, unless direct-map is
+             * set, in which case it'll match the hardware.
+             *
+             * Since the domain is not yet created, we can't use
+             * d->arch.vpl011.irq. So the logic to find the vIRQ has to
+             * be hardcoded.
+             * The logic here shall be consistent with the one in
+             * domain_vpl011_init().
+             */
+            if ( flags & CDF_directmap )
+            {
+                vpl011_virq = serial_irq(SERHND_DTUART);
+                if ( vpl011_virq < 0 )
+                    panic("Error getting IRQ number for this serial port %d\n",
+                          SERHND_DTUART);
+            }
 
             /*
              * vpl011 uses one emulated SPI. If vpl011 is requested, make
@@ -2505,24 +3925,44 @@ void __init create_domUs(void)
              */
             if ( dt_property_read_bool(node, "vpl011") )
                 d_cfg.arch.nr_spis = MAX(d_cfg.arch.nr_spis,
-                                         GUEST_VPL011_SPI - 32 + 1);
+                                         vpl011_virq - 32 + 1);
         }
 
-        d = domain_create(++max_init_domid, &d_cfg, false);
+        /* Get the optional property domain-cpupool */
+        cpupool_node = dt_parse_phandle(node, "domain-cpupool", 0);
+        if ( cpupool_node )
+        {
+            int pool_id = btcpupools_get_domain_pool_id(cpupool_node);
+            if ( pool_id < 0 )
+                panic("Error getting cpupool id from domain-cpupool (%d)\n",
+                      pool_id);
+            d_cfg.cpupool_id = pool_id;
+        }
+
+        /*
+         * The variable max_init_domid is initialized with zero, so here it's
+         * very important to use the pre-increment operator to call
+         * domain_create() with a domid > 0. (domid == 0 is reserved for Dom0)
+         */
+        d = domain_create(++max_init_domid, &d_cfg, flags);
         if ( IS_ERR(d) )
             panic("Error creating domain %s\n", dt_node_name(node));
 
         d->is_console = true;
+        dt_device_set_used_by(node, d->domain_id);
 
         if ( construct_domU(d, node) != 0 )
             panic("Could not set up domain %s\n", dt_node_name(node));
     }
 }
 
-int __init construct_dom0(struct domain *d)
+static int __init construct_dom0(struct domain *d)
 {
     struct kernel_info kinfo = {};
     int rc;
+#ifdef CONFIG_STATIC_SHM
+    const struct dt_device_node *chosen = dt_find_node_by_path("/chosen");
+#endif
 
     /* Sanity! */
     BUG_ON(d->domain_id != 0);
@@ -2557,6 +3997,12 @@ int __init construct_dom0(struct domain *d)
     allocate_memory_11(d, &kinfo);
     find_gnttab_region(d, &kinfo);
 
+#ifdef CONFIG_STATIC_SHM
+    rc = process_shm(d, &kinfo, chosen);
+    if ( rc < 0 )
+        return rc;
+#endif
+
     /* Map extra GIC MMIO, irqs and other hw stuffs to dom0. */
     rc = gic_map_hwdom_extra_mappings(d);
     if ( rc < 0 )
@@ -2567,7 +4013,14 @@ int __init construct_dom0(struct domain *d)
         return rc;
 
     if ( acpi_disabled )
+    {
         rc = prepare_dtb_hwdom(d, &kinfo);
+        if ( rc < 0 )
+            return rc;
+#ifdef CONFIG_HAS_PCI
+        rc = pci_host_bridge_mappings(d);
+#endif
+    }
     else
         rc = prepare_acpi(d, &kinfo);
 
@@ -2575,6 +4028,40 @@ int __init construct_dom0(struct domain *d)
         return rc;
 
     return construct_domain(d, &kinfo);
+}
+
+void __init create_dom0(void)
+{
+    struct domain *dom0;
+    struct xen_domctl_createdomain dom0_cfg = {
+        .flags = XEN_DOMCTL_CDF_hvm | XEN_DOMCTL_CDF_hap,
+        .max_evtchn_port = -1,
+        .max_grant_frames = gnttab_dom0_frames(),
+        .max_maptrack_frames = -1,
+        .grant_opts = XEN_DOMCTL_GRANT_version(opt_gnttab_max_version),
+    };
+
+    /* The vGIC for DOM0 is exactly emulating the hardware GIC */
+    dom0_cfg.arch.gic_version = XEN_DOMCTL_CONFIG_GIC_NATIVE;
+    /*
+     * Xen vGIC supports a maximum of 992 interrupt lines.
+     * 32 are substracted to cover local IRQs.
+     */
+    dom0_cfg.arch.nr_spis = min(gic_number_lines(), (unsigned int) 992) - 32;
+    if ( gic_number_lines() > 992 )
+        printk(XENLOG_WARNING "Maximum number of vGIC IRQs exceeded.\n");
+    dom0_cfg.arch.tee_type = tee_get_type();
+    dom0_cfg.max_vcpus = dom0_max_vcpus();
+
+    if ( iommu_enabled )
+        dom0_cfg.flags |= XEN_DOMCTL_CDF_iommu;
+
+    dom0 = domain_create(0, &dom0_cfg, CDF_privileged | CDF_directmap);
+    if ( IS_ERR(dom0) || (alloc_dom0_vcpu0(dom0) == NULL) )
+        panic("Error creating domain 0\n");
+
+    if ( construct_dom0(dom0) != 0)
+        panic("Could not set up DOM0 guest OS\n");
 }
 
 /*

@@ -92,6 +92,10 @@ struct dt_device_node {
 
     /* IOMMU specific fields */
     bool is_protected;
+
+    /* HACK: Remove this if there is a need of space */
+    bool_t static_evtchn_created;
+
     /*
      * The main purpose of this list is to link the structure in the list
      * of devices assigned to domain.
@@ -317,6 +321,18 @@ static inline bool_t dt_property_name_is_equal(const struct dt_property *pp,
     return !dt_prop_cmp(pp->name, name);
 }
 
+static inline void
+dt_device_set_static_evtchn_created(struct dt_device_node *device)
+{
+    device->static_evtchn_created = true;
+}
+
+static inline bool_t
+dt_device_static_evtchn_created(const struct dt_device_node *device)
+{
+    return device->static_evtchn_created;
+}
+
 /**
  * dt_find_compatible_node - Find a node based on type and one of the
  *                           tokens in its "compatible" property
@@ -366,6 +382,62 @@ bool_t dt_property_read_u32(const struct dt_device_node *np,
 bool_t dt_property_read_u64(const struct dt_device_node *np,
                             const char *name, u64 *out_value);
 
+
+/**
+ * dt_property_read_variable_u32_array - Find and read an array of 32 bit
+ * integers from a property, with bounds on the minimum and maximum array size.
+ *
+ * @np:     device node from which the property value is to be read.
+ * @propname:   name of the property to be searched.
+ * @out_values: pointer to return found values.
+ * @sz_min: minimum number of array elements to read
+ * @sz_max: maximum number of array elements to read, if zero there is no
+ *      upper limit on the number of elements in the dts entry but only
+ *      sz_min will be read.
+ *
+ * Search for a property in a device node and read 32-bit value(s) from
+ * it.
+ *
+ * Return: The number of elements read on success, -EINVAL if the property
+ * does not exist, -ENODATA if property does not have a value, and -EOVERFLOW
+ * if the property data is smaller than sz_min or longer than sz_max.
+ *
+ * The out_values is modified only if a valid u32 value can be decoded.
+ */
+int dt_property_read_variable_u32_array(const struct dt_device_node *np,
+                                        const char *propname, u32 *out_values,
+                                        size_t sz_min, size_t sz_max);
+
+/**
+ * dt_property_read_u32_array - Find and read an array of 32 bit integers
+ * from a property.
+ *
+ * @np:     device node from which the property value is to be read.
+ * @propname:   name of the property to be searched.
+ * @out_values: pointer to return value, modified only if return value is 0.
+ * @sz:     number of array elements to read
+ *
+ * Search for a property in a device node and read 32-bit value(s) from
+ * it.
+ *
+ * Return: 0 on success, -EINVAL if the property does not exist,
+ * -ENODATA if property does not have a value, and -EOVERFLOW if the
+ * property data isn't large enough.
+ *
+ * The out_values is modified only if a valid u32 value can be decoded.
+ */
+static inline int dt_property_read_u32_array(const struct dt_device_node *np,
+                                             const char *propname,
+                                             u32 *out_values, size_t sz)
+{
+    int ret = dt_property_read_variable_u32_array(np, propname, out_values,
+                              sz, 0);
+    if ( ret >= 0 )
+        return 0;
+    else
+        return ret;
+}
+
 /**
  * dt_property_read_bool - Check if a property exists
  * @np: node to get the value
@@ -395,10 +467,25 @@ static inline bool_t dt_property_read_bool(const struct dt_device_node *np,
  * doest not have value, and -EILSEQ if the string is not
  * null-terminated with the length of the property data.
  *
+ * Note that the empty string "" has length of 1, thus -ENODATA cannot
+ * be interpreted as an empty string.
+ *
  * The out_string pointer is modified only if a valid string can be decoded.
  */
 int dt_property_read_string(const struct dt_device_node *np,
                             const char *propname, const char **out_string);
+
+/**
+ * dt_property_match_string() - Find string in a list and return index
+ * @np: pointer to node containing string list property
+ * @propname: string list property name
+ * @string: pointer to string to search for in string list
+ *
+ * This function searches a string list property and returns the index
+ * of a specific string value.
+ */
+int dt_property_match_string(const struct dt_device_node *np,
+                             const char *propname, const char *string);
 
 /**
  * Checks if the given "compat" string matches one of the strings in
@@ -763,6 +850,25 @@ int dt_parse_phandle_with_args(const struct dt_device_node *np,
 int dt_count_phandle_with_args(const struct dt_device_node *np,
                                const char *list_name,
                                const char *cells_name);
+
+/**
+ * dt_get_pci_domain_nr - Find the host bridge domain number
+ *            of the given device node.
+ * @node: Device tree node with the domain information.
+ *
+ * This function will try to obtain the host bridge domain number by finding
+ * a property called "linux,pci-domain" of the given device node.
+ *
+ * Return:
+ * * > 0    - On success, an associated domain number.
+ * * -EINVAL    - The property "linux,pci-domain" does not exist.
+ *
+ * Returns the associated domain number from DT in the range [0-0xffff], or
+ * a negative value if the required property is not found.
+ */
+int dt_get_pci_domain_nr(struct dt_device_node *node);
+
+struct dt_device_node *dt_find_node_by_phandle(dt_phandle handle);
 
 #ifdef CONFIG_DEVICE_TREE_DEBUG
 #define dt_dprintk(fmt, args...)  \

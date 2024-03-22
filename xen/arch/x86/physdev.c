@@ -12,7 +12,7 @@
 #include <asm/io_apic.h>
 #include <asm/msi.h>
 #include <asm/hvm/irq.h>
-#include <asm/hypercall.h>
+#include <xen/hypercall.h>
 #include <public/xen.h>
 #include <public/physdev.h>
 #include <xsm/xsm.h>
@@ -34,7 +34,7 @@ static int physdev_hvm_map_pirq(
 
     ASSERT(!is_hardware_domain(d));
 
-    spin_lock(&d->event_lock);
+    write_lock(&d->event_lock);
     switch ( type )
     {
     case MAP_PIRQ_TYPE_GSI: {
@@ -84,7 +84,7 @@ static int physdev_hvm_map_pirq(
         break;
     }
 
-    spin_unlock(&d->event_lock);
+    write_unlock(&d->event_lock);
     return ret;
 }
 
@@ -154,18 +154,18 @@ int physdev_unmap_pirq(domid_t domid, int pirq)
 
     if ( is_hvm_domain(d) && has_pirq(d) )
     {
-        spin_lock(&d->event_lock);
+        write_lock(&d->event_lock);
         if ( domain_pirq_to_emuirq(d, pirq) != IRQ_UNBOUND )
             ret = unmap_domain_pirq_emuirq(d, pirq);
-        spin_unlock(&d->event_lock);
+        write_unlock(&d->event_lock);
         if ( domid == DOMID_SELF || ret )
             goto free_domain;
     }
 
     pcidevs_lock();
-    spin_lock(&d->event_lock);
+    write_lock(&d->event_lock);
     ret = unmap_domain_pirq(d, pirq);
-    spin_unlock(&d->event_lock);
+    write_unlock(&d->event_lock);
     pcidevs_unlock();
 
  free_domain:
@@ -192,10 +192,10 @@ ret_t do_physdev_op(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
         ret = -EINVAL;
         if ( eoi.irq >= currd->nr_pirqs )
             break;
-        spin_lock(&currd->event_lock);
+        read_lock(&currd->event_lock);
         pirq = pirq_info(currd, eoi.irq);
         if ( !pirq ) {
-            spin_unlock(&currd->event_lock);
+            read_unlock(&currd->event_lock);
             break;
         }
         if ( currd->arch.auto_unmask )
@@ -214,7 +214,7 @@ ret_t do_physdev_op(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
                     && hvm_irq->gsi_assert_count[gsi] )
                 send_guest_pirq(currd, pirq);
         }
-        spin_unlock(&currd->event_lock);
+        read_unlock(&currd->event_lock);
         ret = 0;
         break;
     }
@@ -312,21 +312,21 @@ ret_t do_physdev_op(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
         {
         case MAP_PIRQ_TYPE_MSI_SEG:
             map.type = MAP_PIRQ_TYPE_MSI;
-            msi.seg = map.bus >> 16;
+            msi.sbdf.seg = map.bus >> 16;
             break;
 
         case MAP_PIRQ_TYPE_MULTI_MSI:
             if ( map.table_base )
                 return -EINVAL;
-            msi.seg = map.bus >> 16;
+            msi.sbdf.seg = map.bus >> 16;
             break;
 
         default:
-            msi.seg = 0;
+            msi.sbdf.seg = 0;
             break;
         }
-        msi.bus = map.bus;
-        msi.devfn = map.devfn;
+        msi.sbdf.bus = map.bus;
+        msi.sbdf.devfn = map.devfn;
         msi.entry_nr = map.entry_nr;
         msi.table_base = map.table_base;
         ret = physdev_map_pirq(map.domid, map.type, &map.index, &map.pirq,
@@ -480,54 +480,6 @@ ret_t do_physdev_op(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
         break;
     }
 
-    case PHYSDEVOP_pci_device_add: {
-        struct physdev_pci_device_add add;
-        struct pci_dev_info pdev_info;
-        nodeid_t node;
-
-        ret = -EFAULT;
-        if ( copy_from_guest(&add, arg, 1) != 0 )
-            break;
-
-        pdev_info.is_extfn = !!(add.flags & XEN_PCI_DEV_EXTFN);
-        if ( add.flags & XEN_PCI_DEV_VIRTFN )
-        {
-            pdev_info.is_virtfn = 1;
-            pdev_info.physfn.bus = add.physfn.bus;
-            pdev_info.physfn.devfn = add.physfn.devfn;
-        }
-        else
-            pdev_info.is_virtfn = 0;
-
-        if ( add.flags & XEN_PCI_DEV_PXM )
-        {
-            uint32_t pxm;
-            size_t optarr_off = offsetof(struct physdev_pci_device_add, optarr) /
-                                sizeof(add.optarr[0]);
-
-            if ( copy_from_guest_offset(&pxm, arg, optarr_off, 1) )
-                break;
-
-            node = pxm_to_node(pxm);
-        }
-        else
-            node = NUMA_NO_NODE;
-
-        ret = pci_add_device(add.seg, add.bus, add.devfn, &pdev_info, node);
-        break;
-    }
-
-    case PHYSDEVOP_pci_device_remove: {
-        struct physdev_pci_device dev;
-
-        ret = -EFAULT;
-        if ( copy_from_guest(&dev, arg, 1) != 0 )
-            break;
-
-        ret = pci_remove_device(dev.seg, dev.bus, dev.devfn);
-        break;
-    }
-
     case PHYSDEVOP_prepare_msix:
     case PHYSDEVOP_release_msix: {
         struct physdev_pci_device dev;
@@ -579,7 +531,8 @@ ret_t do_physdev_op(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
             break;
 
         pcidevs_lock();
-        pdev = pci_get_pdev(0, restore_msi.bus, restore_msi.devfn);
+        pdev = pci_get_pdev(NULL,
+                            PCI_SBDF(0, restore_msi.bus, restore_msi.devfn));
         ret = pdev ? pci_restore_msi_state(pdev) : -ENODEV;
         pcidevs_unlock();
         break;
@@ -594,7 +547,7 @@ ret_t do_physdev_op(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
             break;
 
         pcidevs_lock();
-        pdev = pci_get_pdev(dev.seg, dev.bus, dev.devfn);
+        pdev = pci_get_pdev(NULL, PCI_SBDF(dev.seg, dev.bus, dev.devfn));
         ret = pdev ? pci_restore_msi_state(pdev) : -ENODEV;
         pcidevs_unlock();
         break;
@@ -626,7 +579,7 @@ ret_t do_physdev_op(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
         if ( copy_from_guest(&out, arg, 1) != 0 )
             break;
 
-        spin_lock(&currd->event_lock);
+        write_lock(&currd->event_lock);
 
         ret = get_free_pirq(currd, out.type);
         if ( ret >= 0 )
@@ -639,7 +592,7 @@ ret_t do_physdev_op(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
                 ret = -ENOMEM;
         }
 
-        spin_unlock(&currd->event_lock);
+        write_unlock(&currd->event_lock);
 
         if ( ret >= 0 )
         {
@@ -663,7 +616,7 @@ ret_t do_physdev_op(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
     }
 
     default:
-        ret = -ENOSYS;
+        ret = pci_physdev_op(cmd, arg);
         break;
     }
 

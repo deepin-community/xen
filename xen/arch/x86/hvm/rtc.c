@@ -81,7 +81,7 @@ static void rtc_update_irq(RTCState *s)
 
 /* Called by the VPT code after it's injected a PF interrupt for us.
  * Fix up the register state to reflect what happened. */
-static void rtc_pf_callback(struct vcpu *v, void *opaque)
+static void cf_check rtc_pf_callback(struct vcpu *v, void *opaque)
 {
     RTCState *s = opaque;
 
@@ -217,7 +217,7 @@ static void check_update_timer(RTCState *s)
         s->use_timer = 0;
 }
 
-static void rtc_update_timer(void *opaque)
+static void cf_check rtc_update_timer(void *opaque)
 {
     RTCState *s = opaque;
 
@@ -230,7 +230,7 @@ static void rtc_update_timer(void *opaque)
     spin_unlock(&s->lock);
 }
 
-static void rtc_update_timer2(void *opaque)
+static void cf_check rtc_update_timer2(void *opaque)
 {
     RTCState *s = opaque;
 
@@ -421,7 +421,7 @@ static void alarm_timer_update(RTCState *s)
     }
 }
 
-static void rtc_alarm_cb(void *opaque)
+static void cf_check rtc_alarm_cb(void *opaque)
 {
     RTCState *s = opaque;
 
@@ -696,7 +696,7 @@ static uint32_t rtc_ioport_read(RTCState *s, uint32_t addr)
     return ret;
 }
 
-static int handle_rtc_io(
+static int cf_check handle_rtc_io(
     int dir, unsigned int port, unsigned int bytes, uint32_t *val)
 {
     struct RTCState *vrtc = vcpu_vrtc(current);
@@ -738,7 +738,7 @@ void rtc_migrate_timers(struct vcpu *v)
 }
 
 /* Save RTC hardware state */
-static int rtc_save(struct vcpu *v, hvm_domain_context_t *h)
+static int cf_check rtc_save(struct vcpu *v, hvm_domain_context_t *h)
 {
     const struct domain *d = v->domain;
     RTCState *s = domain_vrtc(d);
@@ -756,7 +756,7 @@ static int rtc_save(struct vcpu *v, hvm_domain_context_t *h)
 }
 
 /* Reload the hardware state from a saved domain */
-static int rtc_load(struct domain *d, hvm_domain_context_t *h)
+static int cf_check rtc_load(struct domain *d, hvm_domain_context_t *h)
 {
     RTCState *s = domain_vrtc(d);
 
@@ -809,8 +809,8 @@ void rtc_reset(struct domain *d)
 }
 
 /* RTC mediator for HVM hardware domain. */
-static int hw_rtc_io(int dir, unsigned int port, unsigned int size,
-                     uint32_t *val)
+static int cf_check hw_rtc_io(
+    int dir, unsigned int port, unsigned int size, uint32_t *val)
 {
     if ( dir == IOREQ_READ )
         *val = ~0;

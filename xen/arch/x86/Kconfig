@@ -1,42 +1,51 @@
 config X86_64
 	def_bool y
+	select 64BIT
 
 config X86
 	def_bool y
 	select ACPI
 	select ACPI_LEGACY_TABLES_LOOKUP
+	select ACPI_NUMA
+	select ALTERNATIVE_CALL
+	select ARCH_MAP_DOMAIN_PAGE
 	select ARCH_SUPPORTS_INT128
-	select COMPAT
-	select CORE_PARKING
+	imply CORE_PARKING
 	select HAS_ALTERNATIVE
+	select HAS_COMPAT
 	select HAS_CPUFREQ
+	select HAS_DIT
 	select HAS_EHCI
 	select HAS_EX_TABLE
 	select HAS_FAST_MULTIPLY
 	select HAS_IOPORTS
 	select HAS_KEXEC
-	select MEM_ACCESS_ALWAYS_ON
-	select HAS_MEM_PAGING
 	select HAS_NS16550
 	select HAS_PASSTHROUGH
 	select HAS_PCI
+	select HAS_PCI_MSI
 	select HAS_PDX
 	select HAS_SCHED_GRANULARITY
 	select HAS_UBSAN
-	select HAS_VPCI if !PV_SHIM_EXCLUSIVE && HVM
+	select HAS_VPCI if HVM
 	select NEEDS_LIBELF
-	select NUMA
 
 config ARCH_DEFCONFIG
 	string
 	default "arch/x86/configs/x86_64_defconfig"
 
-config INDIRECT_THUNK
-	def_bool $(cc-option,-mindirect-branch-register)
+config CC_HAS_INDIRECT_THUNK
+	def_bool $(cc-option,-mindirect-branch-register) || \
+	         $(cc-option,-mretpoline-external-thunk)
 
 config HAS_AS_CET_SS
 	# binutils >= 2.29 or LLVM >= 6
 	def_bool $(as-instr,wrssq %rax$(comma)0;setssbsy)
+
+config HAS_CC_CET_IBT
+	# GCC >= 9 and binutils >= 2.29
+	# Retpoline check to work around https://gcc.gnu.org/bugzilla/show_bug.cgi?id=93654
+	def_bool $(cc-option,-fcf-protection=branch -mmanual-endbr -mindirect-branch=thunk-extern) && $(as-instr,endbr64)
 
 menu "Architecture Features"
 
@@ -57,6 +66,7 @@ config PV32
 	bool "Support for 32bit PV guests"
 	depends on PV
 	default PV_SHIM
+	select COMPAT
 	---help---
 	  The 32bit PV ABI uses Ring1, an area of the x86 architecture which
 	  was deprecated and mostly removed in the AMD64 spec.  As a result,
@@ -93,8 +103,12 @@ config PV_LINEAR_PT
          If unsure, say Y.
 
 config HVM
-	def_bool !PV_SHIM_EXCLUSIVE
-	prompt "HVM support"
+	bool "HVM support"
+	depends on !PV_SHIM_EXCLUSIVE
+	default !PV_SHIM
+	select COMPAT
+	select IOREQ_SERVER
+	select MEM_ACCESS_ALWAYS_ON
 	---help---
 	  Interfaces to support HVM domains.  HVM domains require hardware
 	  virtualisation extensions (e.g. Intel VT-x, AMD SVM), but can boot
@@ -106,7 +120,7 @@ config HVM
 
 config XEN_SHSTK
 	bool "Supervisor Shadow Stacks"
-	depends on HAS_AS_CET_SS && EXPERT
+	depends on HAS_AS_CET_SS
 	default y
 	---help---
 	  Control-flow Enforcement Technology (CET) is a set of features in
@@ -118,10 +132,23 @@ config XEN_SHSTK
 	  When CET-SS is active, 32bit PV guests cannot be used.  Backwards
 	  compatiblity can be provided via the PV Shim mechanism.
 
+config XEN_IBT
+	bool "Supervisor Indirect Branch Tracking"
+	depends on HAS_CC_CET_IBT
+	default y
+	help
+	  Control-flow Enforcement Technology (CET) is a set of features in
+	  hardware designed to combat Return-oriented Programming (ROP, also
+	  call/jump COP/JOP) attacks.  Indirect Branch Tracking is one CET
+	  feature designed to provide function pointer protection.
+
+	  This option arranges for Xen to use CET-IBT for its own protection.
+
 config SHADOW_PAGING
-        bool "Shadow Paging"
-        default y
-        ---help---
+	bool "Shadow Paging"
+	default !PV_SHIM_EXCLUSIVE
+	depends on PV || HVM
+	---help---
 
           Shadow paging is a software alternative to hardware paging support
           (Intel EPT, AMD NPT).
@@ -149,7 +176,7 @@ config BIGMEM
 	  If unsure, say N.
 
 config HVM_FEP
-	bool "HVM Forced Emulation Prefix support" if EXPERT
+	bool "HVM Forced Emulation Prefix support (UNSUPPORTED)" if UNSUPPORTED
 	default DEBUG
 	depends on HVM
 	---help---
@@ -168,14 +195,15 @@ config HVM_FEP
 	  If unsure, say N.
 
 config TBOOT
-	def_bool y
-	prompt "Xen tboot support" if EXPERT
+	bool "Xen tboot support (UNSUPPORTED)"
+	depends on UNSUPPORTED
+	default !PV_SHIM_EXCLUSIVE
 	select CRYPTO
 	---help---
 	  Allows support for Trusted Boot using the Intel(R) Trusted Execution
 	  Technology (TXT)
 
-	  If unsure, say Y.
+	  If unsure, stay with the default.
 
 choice
 	prompt "Alignment of Xen image"
@@ -197,6 +225,49 @@ config XEN_ALIGN_DEFAULT
 
 config XEN_ALIGN_2M
 	bool "2M alignment"
+
+endchoice
+
+choice
+	prompt "x2APIC Driver default"
+	default X2APIC_MIXED
+	help
+	  Select APIC addressing when x2APIC is enabled.
+
+	  The default mode is mixed which should provide the best aspects
+	  of both physical and cluster modes.
+
+config X2APIC_PHYSICAL
+	bool "Physical Destination mode"
+	help
+	  When using this mode APICs are addressed using the Physical
+	  Destination mode, which allows using all dynamic vectors on each
+	  CPU independently.
+
+	  Physical Destination has the benefit of having more vectors available
+	  for external interrupts, but it also makes the delivery of multi
+	  destination inter processor interrupts (IPIs) slightly slower than
+	  Logical Destination mode.
+
+config X2APIC_CLUSTER
+	bool "Cluster Destination mode"
+	help
+	  When using this mode APICs are addressed using the Cluster Logical
+	  Destination mode.
+
+	  Cluster Destination has the benefit of sending IPIs faster since
+	  multiple APICs can be targeted as destinations of a single IPI.
+	  However the vector space is shared between all CPUs on the cluster,
+	  and hence using this mode reduces the number of available vectors
+	  when compared to Physical mode.
+
+config X2APIC_MIXED
+	bool "Mixed Destination mode"
+	help
+	  When using this mode APICs are addressed using the Cluster Logical
+	  Destination mode for IPIs and Physical mode for external interrupts.
+
+	  Should provide the best of both modes.
 
 endchoice
 
@@ -253,8 +324,12 @@ config HYPERV_GUEST
 
 endif
 
+config MEM_PAGING
+	bool "Xen memory paging support (UNSUPPORTED)" if UNSUPPORTED
+	depends on HVM
+
 config MEM_SHARING
-	bool "Xen memory sharing support" if EXPERT
+	bool "Xen memory sharing support (UNSUPPORTED)" if UNSUPPORTED
 	depends on HVM
 
 endmenu

@@ -19,8 +19,8 @@ static int vgacon_keep;
 static unsigned int xpos, ypos;
 static unsigned char *video;
 
-static void vga_text_puts(const char *s, size_t nr);
-static void vga_noop_puts(const char *s, size_t nr) {}
+static void cf_check vga_text_puts(const char *s, size_t nr);
+static void cf_check vga_noop_puts(const char *s, size_t nr) {}
 void (*video_puts)(const char *, size_t nr) = vga_noop_puts;
 
 /*
@@ -79,7 +79,7 @@ void __init video_init(void)
     {
     case XEN_VGATYPE_TEXT_MODE_3:
         if ( page_is_ram_type(paddr_to_pfn(0xB8000), RAM_TYPE_CONVENTIONAL) ||
-             ((video = ioremap(0xB8000, 0x8000)) == NULL) )
+             ((video = ioremap_wc(0xB8000, 0x8000)) == NULL) )
             return;
         outw(0x200a, 0x3d4); /* disable cursor */
         columns = vga_console_info.u.text_mode_3.columns;
@@ -118,13 +118,13 @@ void __init video_endboot(void)
                 u8 b = bus, df = devfn, sb;
 
                 pcidevs_lock();
-                pdev = pci_get_pdev(0, bus, devfn);
+                pdev = pci_get_pdev(NULL, PCI_SBDF(0, bus, devfn));
                 pcidevs_unlock();
 
                 if ( !pdev ||
-                     pci_conf_read16(PCI_SBDF3(0, bus, devfn),
+                     pci_conf_read16(PCI_SBDF(0, bus, devfn),
                                      PCI_CLASS_DEVICE) != 0x0300 ||
-                     !(pci_conf_read16(PCI_SBDF3(0, bus, devfn), PCI_COMMAND) &
+                     !(pci_conf_read16(PCI_SBDF(0, bus, devfn), PCI_COMMAND) &
                        (PCI_COMMAND_IO | PCI_COMMAND_MEMORY)) )
                     continue;
 
@@ -136,12 +136,12 @@ void __init video_endboot(void)
                         b = 0;
                         break;
                     case 1:
-                        switch ( pci_conf_read8(PCI_SBDF3(0, b, df),
+                        switch ( pci_conf_read8(PCI_SBDF(0, b, df),
                                                 PCI_HEADER_TYPE) )
                         {
                         case PCI_HEADER_TYPE_BRIDGE:
                         case PCI_HEADER_TYPE_CARDBUS:
-                            if ( pci_conf_read16(PCI_SBDF3(0, b, df),
+                            if ( pci_conf_read16(PCI_SBDF(0, b, df),
                                                  PCI_BRIDGE_CONTROL) &
                                  PCI_BRIDGE_CTL_VGA )
                                 continue;
@@ -164,7 +164,11 @@ void __init video_endboot(void)
     {
     case XEN_VGATYPE_TEXT_MODE_3:
         if ( !vgacon_keep )
+        {
             memset(video, 0, columns * lines * 2);
+            iounmap(video);
+            video = ZERO_BLOCK_PTR;
+        }
         break;
     case XEN_VGATYPE_VESA_LFB:
     case XEN_VGATYPE_EFI_LFB:
@@ -175,7 +179,7 @@ void __init video_endboot(void)
     }
 }
 
-static void vga_text_puts(const char *s, size_t nr)
+static void cf_check vga_text_puts(const char *s, size_t nr)
 {
     for ( ; nr > 0; nr--, s++ )
     {

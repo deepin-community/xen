@@ -16,8 +16,9 @@
  */
 
 #include <xen/types.h>
+#include <xen/domain_page.h>
+#include <xen/elfstructs.h>
 #include <xen/kexec.h>
-#include <xen/guest_access.h>
 #include <asm/fixmap.h>
 #include <asm/hpet.h>
 #include <asm/page.h>
@@ -116,7 +117,7 @@ int machine_kexec_load(struct kexec_image *image)
     }
 
     code_page = __map_domain_page(image->control_code_page);
-    memcpy(code_page, kexec_reloc, kexec_reloc_size);
+    memcpy(code_page, kexec_reloc, kexec_reloc_end - (char *)kexec_reloc);
     unmap_domain_page(code_page);
 
     /*
@@ -170,6 +171,16 @@ void machine_kexec(struct kexec_image *image)
         if ( idt_tables[i] == NULL )
             continue;
         _update_gate_addr_lower(&idt_tables[i][TRAP_machine_check], &trap_nop);
+    }
+
+    /* Reset CPUID masking and faulting to the host's default. */
+    ctxt_switch_levelling(NULL);
+
+    /* Disable CET. */
+    if ( read_cr4() & X86_CR4_CET )
+    {
+        wrmsrl(MSR_S_CET, 0);
+        write_cr4(read_cr4() & ~X86_CR4_CET);
     }
 
     /* Explicitly enable NMIs on this CPU.  Some crashdump kernels do

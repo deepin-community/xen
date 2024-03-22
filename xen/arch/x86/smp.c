@@ -22,6 +22,7 @@
 #include <asm/hardirq.h>
 #include <asm/hpet.h>
 #include <asm/hvm/support.h>
+#include <asm/setup.h>
 #include <irq_vectors.h>
 #include <mach_apic.h>
 
@@ -160,12 +161,13 @@ void send_IPI_self(int vector)
  * The following functions deal with sending IPIs between CPUs.
  */
 
-void send_IPI_self_legacy(uint8_t vector)
+void cf_check send_IPI_self_legacy(uint8_t vector)
 {
+    /* NMI continuation handling relies on using a shorthand here. */
     send_IPI_shortcut(APIC_DEST_SELF, vector, APIC_DEST_PHYSICAL);
 }
 
-void send_IPI_mask_flat(const cpumask_t *cpumask, int vector)
+void cf_check send_IPI_mask_flat(const cpumask_t *cpumask, int vector)
 {
     unsigned long mask = cpumask_bits(cpumask)[0];
     unsigned long cfg;
@@ -202,7 +204,7 @@ void send_IPI_mask_flat(const cpumask_t *cpumask, int vector)
     local_irq_restore(flags);
 }
 
-void send_IPI_mask_phys(const cpumask_t *mask, int vector)
+void cf_check send_IPI_mask_phys(const cpumask_t *mask, int vector)
 {
     unsigned long cfg, flags;
     unsigned int query_cpu;
@@ -244,7 +246,7 @@ static cpumask_t flush_cpumask;
 static const void *flush_va;
 static unsigned int flush_flags;
 
-void invalidate_interrupt(struct cpu_user_regs *regs)
+void cf_check invalidate_interrupt(struct cpu_user_regs *regs)
 {
     unsigned int flags = flush_flags;
     ack_APIC_irq();
@@ -260,7 +262,10 @@ void flush_area_mask(const cpumask_t *mask, const void *va, unsigned int flags)
 {
     unsigned int cpu = smp_processor_id();
 
-    ASSERT(local_irq_is_enabled());
+    /* Local flushes can be performed with interrupts disabled. */
+    ASSERT(local_irq_is_enabled() || cpumask_subset(mask, cpumask_of(cpu)));
+    /* Exclude use of FLUSH_VCPU_STATE for the local CPU. */
+    ASSERT(!cpumask_test_cpu(cpu, mask) || !(flags & FLUSH_VCPU_STATE));
 
     if ( (flags & ~(FLUSH_VCPU_STATE | FLUSH_ORDER_MASK)) &&
          cpumask_test_cpu(cpu, mask) )
@@ -288,7 +293,7 @@ void flush_area_mask(const cpumask_t *mask, const void *va, unsigned int flags)
 }
 
 /* Call with no locks held and interrupts enabled (e.g., softirq context). */
-void new_tlbflush_clock_period(void)
+void cf_check new_tlbflush_clock_period(void)
 {
     cpumask_t allbutself;
 
@@ -337,7 +342,7 @@ void __stop_this_cpu(void)
     cpumask_clear_cpu(smp_processor_id(), &cpu_online_map);
 }
 
-static void stop_this_cpu(void *dummy)
+static void cf_check stop_this_cpu(void *dummy)
 {
     __stop_this_cpu();
     for ( ; ; )
@@ -383,16 +388,49 @@ void smp_send_nmi_allbutself(void)
     send_IPI_mask(&cpu_online_map, APIC_DM_NMI);
 }
 
-void event_check_interrupt(struct cpu_user_regs *regs)
+void cf_check event_check_interrupt(struct cpu_user_regs *regs)
 {
     ack_APIC_irq();
     perfc_incr(ipis);
     this_cpu(irq_count)++;
 }
 
-void call_function_interrupt(struct cpu_user_regs *regs)
+void cf_check call_function_interrupt(struct cpu_user_regs *regs)
 {
     ack_APIC_irq();
     perfc_incr(ipis);
     smp_call_function_interrupt();
+}
+
+long cf_check cpu_up_helper(void *data)
+{
+    unsigned int cpu = (unsigned long)data;
+    int ret = cpu_up(cpu);
+
+    /* Have one more go on EBUSY. */
+    if ( ret == -EBUSY )
+        ret = cpu_up(cpu);
+
+    if ( !ret && !opt_smt &&
+         cpu_data[cpu].compute_unit_id == INVALID_CUID &&
+         cpumask_weight(per_cpu(cpu_sibling_mask, cpu)) > 1 )
+    {
+        ret = cpu_down_helper(data);
+        if ( ret )
+            printk("Could not re-offline CPU%u (%d)\n", cpu, ret);
+        else
+            ret = -EPERM;
+    }
+
+    return ret;
+}
+
+long cf_check cpu_down_helper(void *data)
+{
+    int cpu = (unsigned long)data;
+    int ret = cpu_down(cpu);
+    /* Have one more go on EBUSY. */
+    if ( ret == -EBUSY )
+        ret = cpu_down(cpu);
+    return ret;
 }

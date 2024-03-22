@@ -16,25 +16,19 @@
 
 #include <xen/event.h>
 #include <xen/guest_access.h>
+#include <xen/dm.h>
 #include <xen/hypercall.h>
+#include <xen/ioreq.h>
 #include <xen/nospec.h>
 #include <xen/sched.h>
 
 #include <asm/hap.h>
 #include <asm/hvm/cacheattr.h>
-#include <asm/hvm/ioreq.h>
 #include <asm/shadow.h>
 
 #include <xsm/xsm.h>
 
 #include <public/hvm/hvm_op.h>
-
-struct dmop_args {
-    domid_t domid;
-    unsigned int nr_bufs;
-    /* Reserve enough buf elements for all current hypercalls. */
-    struct xen_dm_op_buf buf[2];
-};
 
 static bool _raw_copy_from_guest_buf_offset(void *dst,
                                             const struct dmop_args *args,
@@ -62,9 +56,10 @@ static bool _raw_copy_from_guest_buf_offset(void *dst,
                                     sizeof(dst))
 
 static int track_dirty_vram(struct domain *d, xen_pfn_t first_pfn,
-                            unsigned int nr, const struct xen_dm_op_buf *buf)
+                            unsigned int nr_frames,
+                            const struct xen_dm_op_buf *buf)
 {
-    if ( nr > (GB(1) >> PAGE_SHIFT) )
+    if ( nr_frames > (GB(1) >> PAGE_SHIFT) )
         return -EINVAL;
 
     if ( d->is_dying )
@@ -73,12 +68,12 @@ static int track_dirty_vram(struct domain *d, xen_pfn_t first_pfn,
     if ( !d->max_vcpus || !d->vcpu[0] )
         return -EINVAL;
 
-    if ( ((nr + 7) / 8) > buf->size )
+    if ( DIV_ROUND_UP(nr_frames, BITS_PER_BYTE) > buf->size )
         return -EINVAL;
 
-    return shadow_mode_enabled(d) ?
-        shadow_track_dirty_vram(d, first_pfn, nr, buf->h) :
-        hap_track_dirty_vram(d, first_pfn, nr, buf->h);
+    return shadow_mode_enabled(d)
+        ? shadow_track_dirty_vram(d, first_pfn, nr_frames, buf->h)
+        :    hap_track_dirty_vram(d, first_pfn, nr_frames, buf->h);
 }
 
 static int set_pci_intx_level(struct domain *d, uint16_t domain,
@@ -337,7 +332,7 @@ static int inject_event(struct domain *d,
     return 0;
 }
 
-static int dm_op(const struct dmop_args *op_args)
+int dm_op(const struct dmop_args *op_args)
 {
     struct domain *d;
     struct xen_dm_op op;
@@ -364,6 +359,7 @@ static int dm_op(const struct dmop_args *op_args)
         [XEN_DMOP_remote_shutdown]                  = sizeof(struct xen_dm_op_remote_shutdown),
         [XEN_DMOP_relocate_memory]                  = sizeof(struct xen_dm_op_relocate_memory),
         [XEN_DMOP_pin_memory_cacheattr]             = sizeof(struct xen_dm_op_pin_memory_cacheattr),
+        [XEN_DMOP_nr_vcpus]                         = sizeof(struct xen_dm_op_nr_vcpus),
     };
 
     rc = rcu_lock_remote_domain_by_id(op_args->domid, &d);
@@ -408,71 +404,6 @@ static int dm_op(const struct dmop_args *op_args)
 
     switch ( op.op )
     {
-    case XEN_DMOP_create_ioreq_server:
-    {
-        struct xen_dm_op_create_ioreq_server *data =
-            &op.u.create_ioreq_server;
-
-        const_op = false;
-
-        rc = -EINVAL;
-        if ( data->pad[0] || data->pad[1] || data->pad[2] )
-            break;
-
-        rc = hvm_create_ioreq_server(d, data->handle_bufioreq,
-                                     &data->id);
-        break;
-    }
-
-    case XEN_DMOP_get_ioreq_server_info:
-    {
-        struct xen_dm_op_get_ioreq_server_info *data =
-            &op.u.get_ioreq_server_info;
-        const uint16_t valid_flags = XEN_DMOP_no_gfns;
-
-        const_op = false;
-
-        rc = -EINVAL;
-        if ( data->flags & ~valid_flags )
-            break;
-
-        rc = hvm_get_ioreq_server_info(d, data->id,
-                                       (data->flags & XEN_DMOP_no_gfns) ?
-                                       NULL : &data->ioreq_gfn,
-                                       (data->flags & XEN_DMOP_no_gfns) ?
-                                       NULL : &data->bufioreq_gfn,
-                                       &data->bufioreq_port);
-        break;
-    }
-
-    case XEN_DMOP_map_io_range_to_ioreq_server:
-    {
-        const struct xen_dm_op_ioreq_server_range *data =
-            &op.u.map_io_range_to_ioreq_server;
-
-        rc = -EINVAL;
-        if ( data->pad )
-            break;
-
-        rc = hvm_map_io_range_to_ioreq_server(d, data->id, data->type,
-                                              data->start, data->end);
-        break;
-    }
-
-    case XEN_DMOP_unmap_io_range_from_ioreq_server:
-    {
-        const struct xen_dm_op_ioreq_server_range *data =
-            &op.u.unmap_io_range_from_ioreq_server;
-
-        rc = -EINVAL;
-        if ( data->pad )
-            break;
-
-        rc = hvm_unmap_io_range_from_ioreq_server(d, data->id, data->type,
-                                                  data->start, data->end);
-        break;
-    }
-
     case XEN_DMOP_map_mem_type_to_ioreq_server:
     {
         struct xen_dm_op_map_mem_type_to_ioreq_server *data =
@@ -486,8 +417,8 @@ static int dm_op(const struct dmop_args *op_args)
             break;
 
         if ( first_gfn == 0 )
-            rc = hvm_map_mem_type_to_ioreq_server(d, data->id,
-                                                  data->type, data->flags);
+            rc = ioreq_server_map_mem_type(d, data->id,
+                                           data->type, data->flags);
         else
             rc = 0;
 
@@ -520,32 +451,6 @@ static int dm_op(const struct dmop_args *op_args)
             }
         }
 
-        break;
-    }
-
-    case XEN_DMOP_set_ioreq_server_state:
-    {
-        const struct xen_dm_op_set_ioreq_server_state *data =
-            &op.u.set_ioreq_server_state;
-
-        rc = -EINVAL;
-        if ( data->pad )
-            break;
-
-        rc = hvm_set_ioreq_server_state(d, data->id, !!data->enabled);
-        break;
-    }
-
-    case XEN_DMOP_destroy_ioreq_server:
-    {
-        const struct xen_dm_op_destroy_ioreq_server *data =
-            &op.u.destroy_ioreq_server;
-
-        rc = -EINVAL;
-        if ( data->pad )
-            break;
-
-        rc = hvm_destroy_ioreq_server(d, data->id);
         break;
     }
 
@@ -702,8 +607,18 @@ static int dm_op(const struct dmop_args *op_args)
         break;
     }
 
+    case XEN_DMOP_nr_vcpus:
+    {
+        struct xen_dm_op_nr_vcpus *data = &op.u.nr_vcpus;
+
+        data->vcpus = d->max_vcpus;
+        const_op = false;
+        rc = 0;
+        break;
+    }
+
     default:
-        rc = -EOPNOTSUPP;
+        rc = ioreq_server_dm_op(&op, d, &const_op);
         break;
     }
 
@@ -718,6 +633,8 @@ static int dm_op(const struct dmop_args *op_args)
     return rc;
 }
 
+#include <compat/hvm/dm_op.h>
+
 CHECK_dm_op_create_ioreq_server;
 CHECK_dm_op_get_ioreq_server_info;
 CHECK_dm_op_ioreq_server_range;
@@ -731,13 +648,14 @@ CHECK_dm_op_modified_memory;
 CHECK_dm_op_set_mem_type;
 CHECK_dm_op_inject_event;
 CHECK_dm_op_inject_msi;
+CHECK_dm_op_map_mem_type_to_ioreq_server;
 CHECK_dm_op_remote_shutdown;
 CHECK_dm_op_relocate_memory;
 CHECK_dm_op_pin_memory_cacheattr;
+CHECK_dm_op_nr_vcpus;
 
-int compat_dm_op(domid_t domid,
-                 unsigned int nr_bufs,
-                 XEN_GUEST_HANDLE_PARAM(void) bufs)
+int compat_dm_op(
+    domid_t domid, unsigned int nr_bufs, XEN_GUEST_HANDLE_PARAM(void) bufs)
 {
     struct dmop_args args;
     unsigned int i;
@@ -763,31 +681,6 @@ int compat_dm_op(domid_t domid,
 
 #undef XLAT_dm_op_buf_HNDL_h
     }
-
-    rc = dm_op(&args);
-
-    if ( rc == -ERESTART )
-        rc = hypercall_create_continuation(__HYPERVISOR_dm_op, "iih",
-                                           domid, nr_bufs, bufs);
-
-    return rc;
-}
-
-long do_dm_op(domid_t domid,
-              unsigned int nr_bufs,
-              XEN_GUEST_HANDLE_PARAM(xen_dm_op_buf_t) bufs)
-{
-    struct dmop_args args;
-    int rc;
-
-    if ( nr_bufs > ARRAY_SIZE(args.buf) )
-        return -E2BIG;
-
-    args.domid = domid;
-    args.nr_bufs = array_index_nospec(nr_bufs, ARRAY_SIZE(args.buf) + 1);
-
-    if ( copy_from_guest_offset(&args.buf[0], bufs, 0, args.nr_bufs) )
-        return -EFAULT;
 
     rc = dm_op(&args);
 

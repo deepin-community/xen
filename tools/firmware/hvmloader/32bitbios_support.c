@@ -20,11 +20,8 @@
  * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <inttypes.h>
-#include <elf.h>
-#ifdef __sun__
-#include <sys/machelf.h>
-#endif
+#include <stdint.h>
+#include <xen/libelf/elfstructs.h>
 
 #include "util.h"
 #include "config.h"

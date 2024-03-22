@@ -63,7 +63,7 @@ struct mca_banks *mca_allbanks;
 #endif
 
 int mce_verbosity;
-static int __init mce_set_verbosity(const char *str)
+static int __init cf_check mce_set_verbosity(const char *str)
 {
     if ( strcmp("verbose", str) == 0 )
         mce_verbosity = MCE_VERBOSE;
@@ -75,7 +75,7 @@ static int __init mce_set_verbosity(const char *str)
 custom_param("mce_verbosity", mce_set_verbosity);
 
 /* Handle unconfigured int18 (should never happen) */
-static void unexpected_machine_check(const struct cpu_user_regs *regs)
+static void cf_check unexpected_machine_check(const struct cpu_user_regs *regs)
 {
     console_force_unlock();
     printk("Unexpected Machine Check Exception\n");
@@ -469,7 +469,7 @@ static int mce_urgent_action(const struct cpu_user_regs *regs,
 }
 
 /* Shared #MC handler. */
-void mcheck_cmn_handler(const struct cpu_user_regs *regs)
+void cf_check mcheck_cmn_handler(const struct cpu_user_regs *regs)
 {
     static DEFINE_MCE_BARRIER(mce_trap_bar);
     static atomic_t severity_cpu = ATOMIC_INIT(-1);
@@ -733,7 +733,7 @@ static int cpu_bank_alloc(unsigned int cpu)
     return 0;
 }
 
-static int cpu_callback(
+static int cf_check cpu_callback(
     struct notifier_block *nfb, unsigned long action, void *hcpu)
 {
     unsigned int cpu = (unsigned long)hcpu;
@@ -961,7 +961,7 @@ void x86_mcinfo_dump(struct mc_info *mi)
     } while ( 1 );
 }
 
-static void do_mc_get_cpu_info(void *v)
+static void cf_check do_mc_get_cpu_info(void *v)
 {
     int cpu = smp_processor_id();
     int cindex, cpn;
@@ -1242,7 +1242,7 @@ static void x86_mc_hwcr_wren_restore(uint64_t hwcr)
         wrmsrl(MSR_K8_HWCR, hwcr);
 }
 
-static void x86_mc_msrinject(void *data)
+static void cf_check x86_mc_msrinject(void *data)
 {
     struct xen_mc_msrinject *mci = data;
     struct mcinfo_msr *msr;
@@ -1274,7 +1274,7 @@ static void x86_mc_msrinject(void *data)
 }
 
 /*ARGSUSED*/
-static void x86_mc_mceinject(void *data)
+static void cf_check x86_mc_mceinject(void *data)
 {
     printk("Simulating #MC on cpu %d\n", smp_processor_id());
     __asm__ __volatile__("int $0x12");
@@ -1290,6 +1290,8 @@ static void x86_mc_mceinject(void *data)
 #else
 #error BITS_PER_LONG definition absent
 #endif
+
+# ifdef CONFIG_COMPAT
 
 # include <compat/arch-x86/xen-mca.h>
 
@@ -1307,15 +1309,17 @@ CHECK_mcinfo_common;
 
 CHECK_FIELD_(struct, mc_fetch, flags);
 CHECK_FIELD_(struct, mc_fetch, fetch_id);
-# define CHECK_compat_mc_fetch       struct mc_fetch
+# define CHECK_mc_fetch              struct mc_fetch
 
 CHECK_FIELD_(struct, mc_physcpuinfo, ncpus);
-# define CHECK_compat_mc_physcpuinfo struct mc_physcpuinfo
+# define CHECK_mc_physcpuinfo        struct mc_physcpuinfo
 
-#define CHECK_compat_mc_inject_v2   struct mc_inject_v2
+# define xen_ctl_bitmap              xenctl_bitmap
+
 CHECK_mc;
-# undef CHECK_compat_mc_fetch
-# undef CHECK_compat_mc_physcpuinfo
+# undef CHECK_mc_fetch
+# undef CHECK_mc_physcpuinfo
+# undef xen_ctl_bitmap
 
 # define xen_mc_info                 mc_info
 CHECK_mc_info;
@@ -1341,6 +1345,11 @@ CHECK_mcinfo_recovery;
 # undef xen_page_offline_action
 # undef xen_mcinfo_recovery
 
+# else
+#  define compat_handle_is_null(h) true
+#  define copy_to_compat(h, p, n)  true /* really (-EFAULT), but gcc chokes */
+# endif /* CONFIG_COMPAT */
+
 /* Machine Check Architecture Hypercall */
 long do_mca(XEN_GUEST_HANDLE_PARAM(xen_mc_t) u_xen_mc)
 {
@@ -1349,11 +1358,15 @@ long do_mca(XEN_GUEST_HANDLE_PARAM(xen_mc_t) u_xen_mc)
     struct vcpu *v = current;
     union {
         struct xen_mc_fetch *nat;
+#ifdef CONFIG_COMPAT
         struct compat_mc_fetch *cmp;
+#endif
     } mc_fetch;
     union {
         struct xen_mc_physcpuinfo *nat;
+#ifdef CONFIG_COMPAT
         struct compat_mc_physcpuinfo *cmp;
+#endif
     } mc_physcpuinfo;
     uint32_t flags, cmdflags;
     int nlcpu;
@@ -1495,7 +1508,6 @@ long do_mca(XEN_GUEST_HANDLE_PARAM(xen_mc_t) u_xen_mc)
 
         if ( mc_msrinject->mcinj_flags & MC_MSRINJ_F_GPADDR )
         {
-            domid_t domid;
             struct domain *d;
             struct mcinfo_msr *msr;
             unsigned int i;
@@ -1503,17 +1515,17 @@ long do_mca(XEN_GUEST_HANDLE_PARAM(xen_mc_t) u_xen_mc)
             unsigned long gfn, mfn;
             p2m_type_t t;
 
-            domid = (mc_msrinject->mcinj_domid == DOMID_SELF) ?
-                    current->domain->domain_id : mc_msrinject->mcinj_domid;
-            if ( domid >= DOMID_FIRST_RESERVED )
-                return x86_mcerr("do_mca inject: incompatible flag "
-                                 "MC_MSRINJ_F_GPADDR with domain %d",
-                                 -EINVAL, domid);
-
-            d = get_domain_by_id(domid);
+            d = rcu_lock_domain_by_any_id(mc_msrinject->mcinj_domid);
             if ( d == NULL )
+            {
+                if ( mc_msrinject->mcinj_domid >= DOMID_FIRST_RESERVED )
+                    return x86_mcerr("do_mca inject: incompatible flag "
+                                     "MC_MSRINJ_F_GPADDR with domain %d",
+                                     -EINVAL, domid);
+
                 return x86_mcerr("do_mca inject: bad domain id %d",
                                  -EINVAL, domid);
+            }
 
             for ( i = 0, msr = &mc_msrinject->mcinj_msr[0];
                   i < mc_msrinject->mcinj_count;
@@ -1526,7 +1538,7 @@ long do_mca(XEN_GUEST_HANDLE_PARAM(xen_mc_t) u_xen_mc)
                 if ( mfn == mfn_x(INVALID_MFN) )
                 {
                     put_gfn(d, gfn);
-                    put_domain(d);
+                    rcu_unlock_domain(d);
                     return x86_mcerr("do_mca inject: bad gfn %#lx of domain %d",
                                      -EINVAL, gfn, domid);
                 }
@@ -1536,7 +1548,7 @@ long do_mca(XEN_GUEST_HANDLE_PARAM(xen_mc_t) u_xen_mc)
                 put_gfn(d, gfn);
             }
 
-            put_domain(d);
+            rcu_unlock_domain(d);
         }
 
         if ( !x86_mc_msrinject_verify(mc_msrinject) )
@@ -1672,7 +1684,7 @@ long do_mca(XEN_GUEST_HANDLE_PARAM(xen_mc_t) u_xen_mc)
 }
 
 int mcinfo_dumpped;
-static int x86_mcinfo_dump_panic(mctelem_cookie_t mctc)
+static int cf_check x86_mcinfo_dump_panic(mctelem_cookie_t mctc)
 {
     struct mc_info *mcip = mctelem_dataptr(mctc);
 
@@ -1789,7 +1801,7 @@ static enum mce_result mce_action(const struct cpu_user_regs *regs,
  * should be committed for dom0 consumption, 0 if it should be
  * dismissed.
  */
-static int mce_delayed_action(mctelem_cookie_t mctc)
+static int cf_check mce_delayed_action(mctelem_cookie_t mctc)
 {
     enum mce_result result;
     int ret = 0;
@@ -1825,7 +1837,7 @@ static int mce_delayed_action(mctelem_cookie_t mctc)
 }
 
 /* Softirq Handler for this MCE# processing */
-static void mce_softirq(void)
+static void cf_check mce_softirq(void)
 {
     static DEFINE_MCE_BARRIER(mce_inside_bar);
     static DEFINE_MCE_BARRIER(mce_severity_bar);

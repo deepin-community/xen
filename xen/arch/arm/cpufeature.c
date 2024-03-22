@@ -24,6 +24,26 @@
 
 DECLARE_BITMAP(cpu_hwcaps, ARM_NCAPS);
 
+struct cpuinfo_arm __read_mostly guest_cpuinfo;
+
+#ifdef CONFIG_ARM_64
+static bool has_sb_instruction(const struct arm_cpu_capabilities *entry)
+{
+    return system_cpuinfo.isa64.sb;
+}
+#endif
+
+static const struct arm_cpu_capabilities arm_features[] = {
+#ifdef CONFIG_ARM_64
+    {
+        .desc = "Speculation barrier instruction (SB)",
+        .capability = ARM_HAS_SB,
+        .matches = has_sb_instruction,
+    },
+#endif
+    {},
+};
+
 void update_cpu_capabilities(const struct arm_cpu_capabilities *caps,
                              const char *info)
 {
@@ -68,6 +88,16 @@ void __init enable_cpu_capabilities(const struct arm_cpu_capabilities *caps)
     }
 }
 
+void check_local_cpu_features(void)
+{
+    update_cpu_capabilities(arm_features, "enabled support for");
+}
+
+void __init enable_cpu_features(void)
+{
+    enable_cpu_capabilities(arm_features);
+}
+
 /*
  * Run through the enabled capabilities and enable() them on the calling CPU.
  * If enabling of any capability fails the error is returned. After enabling a
@@ -99,45 +129,122 @@ int enable_nonboot_cpu_caps(const struct arm_cpu_capabilities *caps)
 
 void identify_cpu(struct cpuinfo_arm *c)
 {
-        c->midr.bits = READ_SYSREG32(MIDR_EL1);
-        c->mpidr.bits = READ_SYSREG(MPIDR_EL1);
+    bool aarch32_el0 = true;
+
+    c->midr.bits = READ_SYSREG(MIDR_EL1);
+    c->mpidr.bits = READ_SYSREG(MPIDR_EL1);
 
 #ifdef CONFIG_ARM_64
-        c->pfr64.bits[0] = READ_SYSREG64(ID_AA64PFR0_EL1);
-        c->pfr64.bits[1] = READ_SYSREG64(ID_AA64PFR1_EL1);
+    c->pfr64.bits[0] = READ_SYSREG(ID_AA64PFR0_EL1);
+    c->pfr64.bits[1] = READ_SYSREG(ID_AA64PFR1_EL1);
 
-        c->dbg64.bits[0] = READ_SYSREG64(ID_AA64DFR0_EL1);
-        c->dbg64.bits[1] = READ_SYSREG64(ID_AA64DFR1_EL1);
+    c->dbg64.bits[0] = READ_SYSREG(ID_AA64DFR0_EL1);
+    c->dbg64.bits[1] = READ_SYSREG(ID_AA64DFR1_EL1);
 
-        c->aux64.bits[0] = READ_SYSREG64(ID_AA64AFR0_EL1);
-        c->aux64.bits[1] = READ_SYSREG64(ID_AA64AFR1_EL1);
+    c->aux64.bits[0] = READ_SYSREG(ID_AA64AFR0_EL1);
+    c->aux64.bits[1] = READ_SYSREG(ID_AA64AFR1_EL1);
 
-        c->mm64.bits[0]  = READ_SYSREG64(ID_AA64MMFR0_EL1);
-        c->mm64.bits[1]  = READ_SYSREG64(ID_AA64MMFR1_EL1);
+    c->mm64.bits[0]  = READ_SYSREG(ID_AA64MMFR0_EL1);
+    c->mm64.bits[1]  = READ_SYSREG(ID_AA64MMFR1_EL1);
+    c->mm64.bits[2]  = READ_SYSREG(ID_AA64MMFR2_EL1);
 
-        c->isa64.bits[0] = READ_SYSREG64(ID_AA64ISAR0_EL1);
-        c->isa64.bits[1] = READ_SYSREG64(ID_AA64ISAR1_EL1);
+    c->isa64.bits[0] = READ_SYSREG(ID_AA64ISAR0_EL1);
+    c->isa64.bits[1] = READ_SYSREG(ID_AA64ISAR1_EL1);
+    c->isa64.bits[2] = READ_SYSREG(ID_AA64ISAR2_EL1);
+
+    c->zfr64.bits[0] = READ_SYSREG(ID_AA64ZFR0_EL1);
+
+    c->dczid.bits[0] = READ_SYSREG(DCZID_EL0);
+
+    c->ctr.bits[0] = READ_SYSREG(CTR_EL0);
+
+    aarch32_el0 = cpu_feature64_has_el0_32(c);
 #endif
 
-        c->pfr32.bits[0] = READ_SYSREG32(ID_PFR0_EL1);
-        c->pfr32.bits[1] = READ_SYSREG32(ID_PFR1_EL1);
+    if ( aarch32_el0 )
+    {
+        c->pfr32.bits[0] = READ_SYSREG(ID_PFR0_EL1);
+        c->pfr32.bits[1] = READ_SYSREG(ID_PFR1_EL1);
+        c->pfr32.bits[2] = READ_SYSREG(ID_PFR2_EL1);
 
-        c->dbg32.bits[0] = READ_SYSREG32(ID_DFR0_EL1);
+        c->dbg32.bits[0] = READ_SYSREG(ID_DFR0_EL1);
+        c->dbg32.bits[1] = READ_SYSREG(ID_DFR1_EL1);
 
-        c->aux32.bits[0] = READ_SYSREG32(ID_AFR0_EL1);
+        c->aux32.bits[0] = READ_SYSREG(ID_AFR0_EL1);
 
-        c->mm32.bits[0]  = READ_SYSREG32(ID_MMFR0_EL1);
-        c->mm32.bits[1]  = READ_SYSREG32(ID_MMFR1_EL1);
-        c->mm32.bits[2]  = READ_SYSREG32(ID_MMFR2_EL1);
-        c->mm32.bits[3]  = READ_SYSREG32(ID_MMFR3_EL1);
+        c->mm32.bits[0]  = READ_SYSREG(ID_MMFR0_EL1);
+        c->mm32.bits[1]  = READ_SYSREG(ID_MMFR1_EL1);
+        c->mm32.bits[2]  = READ_SYSREG(ID_MMFR2_EL1);
+        c->mm32.bits[3]  = READ_SYSREG(ID_MMFR3_EL1);
+        c->mm32.bits[4]  = READ_SYSREG(ID_MMFR4_EL1);
+        c->mm32.bits[5]  = READ_SYSREG(ID_MMFR5_EL1);
 
-        c->isa32.bits[0] = READ_SYSREG32(ID_ISAR0_EL1);
-        c->isa32.bits[1] = READ_SYSREG32(ID_ISAR1_EL1);
-        c->isa32.bits[2] = READ_SYSREG32(ID_ISAR2_EL1);
-        c->isa32.bits[3] = READ_SYSREG32(ID_ISAR3_EL1);
-        c->isa32.bits[4] = READ_SYSREG32(ID_ISAR4_EL1);
-        c->isa32.bits[5] = READ_SYSREG32(ID_ISAR5_EL1);
+        c->isa32.bits[0] = READ_SYSREG(ID_ISAR0_EL1);
+        c->isa32.bits[1] = READ_SYSREG(ID_ISAR1_EL1);
+        c->isa32.bits[2] = READ_SYSREG(ID_ISAR2_EL1);
+        c->isa32.bits[3] = READ_SYSREG(ID_ISAR3_EL1);
+        c->isa32.bits[4] = READ_SYSREG(ID_ISAR4_EL1);
+        c->isa32.bits[5] = READ_SYSREG(ID_ISAR5_EL1);
+        c->isa32.bits[6] = READ_SYSREG(ID_ISAR6_EL1);
+
+        c->mvfr.bits[0] = READ_SYSREG(MVFR0_EL1);
+        c->mvfr.bits[1] = READ_SYSREG(MVFR1_EL1);
+#ifndef MVFR2_MAYBE_UNDEFINED
+        c->mvfr.bits[2] = READ_SYSREG(MVFR2_EL1);
+#endif
+    }
 }
+
+/*
+ * This function is creating a cpuinfo structure with values modified to mask
+ * all cpu features that should not be published to guest.
+ * The created structure is then used to provide ID registers values to guests.
+ */
+static int __init create_guest_cpuinfo(void)
+{
+    /* Use the sanitized cpuinfo as initial guest cpuinfo */
+    guest_cpuinfo = system_cpuinfo;
+
+#ifdef CONFIG_ARM_64
+    /* Hide MPAM support as xen does not support it */
+    guest_cpuinfo.pfr64.mpam = 0;
+    guest_cpuinfo.pfr64.mpam_frac = 0;
+
+    /* Hide SVE as Xen does not support it */
+    guest_cpuinfo.pfr64.sve = 0;
+    guest_cpuinfo.zfr64.bits[0] = 0;
+
+    /* Hide MTE support as Xen does not support it */
+    guest_cpuinfo.pfr64.mte = 0;
+
+    /* Hide PAC support as Xen does not support it */
+    guest_cpuinfo.isa64.apa = 0;
+    guest_cpuinfo.isa64.api = 0;
+    guest_cpuinfo.isa64.gpa = 0;
+    guest_cpuinfo.isa64.gpi = 0;
+#endif
+
+    /* Hide AMU support */
+#ifdef CONFIG_ARM_64
+    guest_cpuinfo.pfr64.amu = 0;
+#endif
+    guest_cpuinfo.pfr32.amu = 0;
+
+    /* Hide RAS support as Xen does not support it */
+#ifdef CONFIG_ARM_64
+    guest_cpuinfo.pfr64.ras = 0;
+    guest_cpuinfo.pfr64.ras_frac = 0;
+#endif
+    guest_cpuinfo.pfr32.ras = 0;
+    guest_cpuinfo.pfr32.ras_frac = 0;
+
+    return 0;
+}
+/*
+ * This function needs to be run after all smp are started to have
+ * cpuinfo structures for all cores.
+ */
+__initcall(create_guest_cpuinfo);
 
 /*
  * Local variables:

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /*
  * hvm/save.h
  *
@@ -5,24 +6,6 @@
  * be saved along with the domain's memory and device-model state.
  *
  * Copyright (c) 2007 XenSource Ltd.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to
- * deal in the Software without restriction, including without limitation the
- * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
- * sell copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in
- * all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
  */
 
 #ifndef __XEN_PUBLIC_HVM_SAVE_H__
@@ -82,12 +65,12 @@ struct hvm_save_descriptor {
     struct __HVM_SAVE_TYPE_##_x { _type t; char c[_code]; char cpt[1];}
 #endif
 
-#define HVM_SAVE_TYPE(_x) typeof (((struct __HVM_SAVE_TYPE_##_x *)(0))->t)
+#define HVM_SAVE_TYPE(_x) __typeof__ (((struct __HVM_SAVE_TYPE_##_x *)(0))->t)
 #define HVM_SAVE_LENGTH(_x) (sizeof (HVM_SAVE_TYPE(_x)))
 #define HVM_SAVE_CODE(_x) (sizeof (((struct __HVM_SAVE_TYPE_##_x *)(0))->c))
 
 #ifdef __XEN__
-# define HVM_SAVE_TYPE_COMPAT(_x) typeof (((struct __HVM_SAVE_TYPE_COMPAT_##_x *)(0))->t)
+# define HVM_SAVE_TYPE_COMPAT(_x) __typeof__ (((struct __HVM_SAVE_TYPE_COMPAT_##_x *)(0))->t)
 # define HVM_SAVE_LENGTH_COMPAT(_x) (sizeof (HVM_SAVE_TYPE_COMPAT(_x)))
 
 # define HVM_SAVE_HAS_COMPAT(_x) (sizeof (((struct __HVM_SAVE_TYPE_##_x *)(0))->cpt)-1)

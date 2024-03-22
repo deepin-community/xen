@@ -42,6 +42,12 @@ static struct node node_memblk_range[NR_NODE_MEMBLKS];
 static nodeid_t memblk_nodeid[NR_NODE_MEMBLKS];
 static __initdata DECLARE_BITMAP(memblk_hotplug, NR_NODE_MEMBLKS);
 
+enum conflicts {
+	NO_CONFLICT,
+	OVERLAP,
+	INTERLEAVE,
+};
+
 static inline bool node_found(unsigned idx, unsigned pxm)
 {
 	return ((pxm2node[idx].pxm == pxm) &&
@@ -104,7 +110,7 @@ nodeid_t setup_node(unsigned pxm)
 	return node;
 }
 
-int valid_numa_range(u64 start, u64 end, nodeid_t node)
+int valid_numa_range(paddr_t start, paddr_t end, nodeid_t node)
 {
 	int i;
 
@@ -119,23 +125,48 @@ int valid_numa_range(u64 start, u64 end, nodeid_t node)
 	return 0;
 }
 
-static __init int conflicting_memblks(u64 start, u64 end)
+static
+enum conflicts __init conflicting_memblks(nodeid_t nid, paddr_t start,
+					  paddr_t end, paddr_t nd_start,
+					  paddr_t nd_end, unsigned int *mblkid)
 {
-	int i;
+	unsigned int i;
 
+	/*
+	 * Scan all recorded nodes' memory blocks to check conflicts:
+	 * Overlap or interleave.
+	 */
 	for (i = 0; i < num_node_memblks; i++) {
 		struct node *nd = &node_memblk_range[i];
+
+		*mblkid = i;
+
+		/* Skip 0 bytes node memory block. */
 		if (nd->start == nd->end)
 			continue;
+		/*
+		 * Use memblk range to check memblk overlaps, include the
+		 * self-overlap case. As nd's range is non-empty, the special
+		 * case "nd->end == end && nd->start == start" also can be covered.
+		 */
 		if (nd->end > start && nd->start < end)
-			return i;
-		if (nd->end == end && nd->start == start)
-			return i;
+			return OVERLAP;
+
+		/*
+		 * Use node memory range to check whether new range contains
+		 * memory from other nodes - interleave check. We just need
+		 * to check full contains situation. Because overlaps have
+		 * been checked above.
+		 */
+	        if (nid != memblk_nodeid[i] &&
+		    nd->start >= nd_start && nd->end <= nd_end)
+			return INTERLEAVE;
 	}
-	return -1;
+
+	return NO_CONFLICT;
 }
 
-static __init void cutoff_node(int i, u64 start, u64 end)
+static __init void cutoff_node(int i, paddr_t start, paddr_t end)
 {
 	struct node *nd = &nodes[i];
 	if (nd->start < start) {
@@ -230,8 +261,10 @@ acpi_numa_x2apic_affinity_init(const struct acpi_srat_x2apic_cpu_affinity *pa)
 	apicid_to_node[pa->apic_id] = node;
 	node_set(node, processor_nodes_parsed);
 	acpi_numa = 1;
-	printk(KERN_INFO "SRAT: PXM %u -> APIC %08x -> Node %u\n",
-	       pxm, pa->apic_id, node);
+
+	if (opt_acpi_verbose)
+		printk(KERN_INFO "SRAT: PXM %u -> APIC %08x -> Node %u\n",
+		       pxm, pa->apic_id, node);
 }
 
 /* Callback for Proximity Domain -> LAPIC mapping */
@@ -263,18 +296,23 @@ acpi_numa_processor_affinity_init(const struct acpi_srat_cpu_affinity *pa)
 	apicid_to_node[pa->apic_id] = node;
 	node_set(node, processor_nodes_parsed);
 	acpi_numa = 1;
-	printk(KERN_INFO "SRAT: PXM %u -> APIC %02x -> Node %u\n",
-	       pxm, pa->apic_id, node);
+
+	if (opt_acpi_verbose)
+		printk(KERN_INFO "SRAT: PXM %u -> APIC %02x -> Node %u\n",
+		       pxm, pa->apic_id, node);
 }
 
 /* Callback for parsing of the Proximity Domain <-> Memory Area mappings */
 void __init
 acpi_numa_memory_affinity_init(const struct acpi_srat_mem_affinity *ma)
 {
-	u64 start, end;
+	struct node *nd;
+	paddr_t nd_start, nd_end;
+	paddr_t start, end;
 	unsigned pxm;
 	nodeid_t node;
-	int i;
+	unsigned int i;
+	bool next = false;
 
 	if (srat_disabled())
 		return;
@@ -306,54 +344,107 @@ acpi_numa_memory_affinity_init(const struct acpi_srat_mem_affinity *ma)
 		bad_srat();
 		return;
 	}
-	/* It is fine to add this area to the nodes data it will be used later*/
-	i = conflicting_memblks(start, end);
-	if (i < 0)
-		/* everything fine */;
-	else if (memblk_nodeid[i] == node) {
-		bool mismatch = !(ma->flags & ACPI_SRAT_MEM_HOT_PLUGGABLE) !=
-		                !test_bit(i, memblk_hotplug);
 
-		printk("%sSRAT: PXM %u (%"PRIx64"-%"PRIx64") overlaps with itself (%"PRIx64"-%"PRIx64")\n",
-		       mismatch ? KERN_ERR : KERN_WARNING, pxm, start, end,
-		       node_memblk_range[i].start, node_memblk_range[i].end);
-		if (mismatch) {
-			bad_srat();
-			return;
+	/*
+	 * For the node that already has some memory blocks, we will
+	 * expand the node memory range temporarily to check memory
+	 * interleaves with other nodes. We will not use this node
+	 * temp memory range to check overlaps, because it will mask
+	 * the overlaps in same node.
+	 *
+	 * Node with 0 bytes memory doesn't need this expandsion.
+	 */
+	nd_start = start;
+	nd_end = end;
+	nd = &nodes[node];
+	if (nd->start != nd->end) {
+		if (nd_start > nd->start)
+			nd_start = nd->start;
+
+		if (nd_end < nd->end)
+			nd_end = nd->end;
+	}
+
+	/* It is fine to add this area to the nodes data it will be used later*/
+	switch (conflicting_memblks(node, start, end, nd_start, nd_end, &i)) {
+	case OVERLAP:
+		if (memblk_nodeid[i] == node) {
+			bool mismatch = !(ma->flags &
+					  ACPI_SRAT_MEM_HOT_PLUGGABLE) !=
+			                !test_bit(i, memblk_hotplug);
+
+			printk("%sSRAT: PXM %u [%"PRIpaddr", %"PRIpaddr"] overlaps with itself [%"PRIpaddr", %"PRIpaddr"]\n",
+			       mismatch ? KERN_ERR : KERN_WARNING, pxm, start,
+			       end - 1, node_memblk_range[i].start,
+			       node_memblk_range[i].end - 1);
+			if (mismatch) {
+				bad_srat();
+				return;
+			}
+			break;
 		}
-	} else {
+
 		printk(KERN_ERR
-		       "SRAT: PXM %u (%"PRIx64"-%"PRIx64") overlaps with PXM %u (%"PRIx64"-%"PRIx64")\n",
-		       pxm, start, end, node_to_pxm(memblk_nodeid[i]),
-		       node_memblk_range[i].start, node_memblk_range[i].end);
+		       "SRAT: PXM %u [%"PRIpaddr", %"PRIpaddr"] overlaps with PXM %u [%"PRIpaddr", %"PRIpaddr"]\n",
+		       pxm, start, end - 1, node_to_pxm(memblk_nodeid[i]),
+		       node_memblk_range[i].start,
+		       node_memblk_range[i].end - 1);
 		bad_srat();
 		return;
-	}
-	if (!(ma->flags & ACPI_SRAT_MEM_HOT_PLUGGABLE)) {
-		struct node *nd = &nodes[node];
 
-		if (!node_test_and_set(node, memory_nodes_parsed)) {
-			nd->start = start;
-			nd->end = end;
-		} else {
-			if (start < nd->start)
-				nd->start = start;
-			if (nd->end < end)
-				nd->end = end;
-		}
+	case INTERLEAVE:
+		printk(KERN_ERR
+		       "SRAT： PXM %u: [%"PRIpaddr", %"PRIpaddr"] interleaves with PXM %u memblk [%"PRIpaddr", %"PRIpaddr"]\n",
+		       pxm, nd_start, nd_end - 1, node_to_pxm(memblk_nodeid[i]),
+		       node_memblk_range[i].start, node_memblk_range[i].end - 1);
+		bad_srat();
+		return;
+
+	case NO_CONFLICT:
+		break;
 	}
-	printk(KERN_INFO "SRAT: Node %u PXM %u %"PRIx64"-%"PRIx64"%s\n",
-	       node, pxm, start, end,
+
+	if (!(ma->flags & ACPI_SRAT_MEM_HOT_PLUGGABLE)) {
+		node_set(node, memory_nodes_parsed);
+		nd->start = nd_start;
+		nd->end = nd_end;
+	}
+
+	printk(KERN_INFO "SRAT: Node %u PXM %u [%"PRIpaddr", %"PRIpaddr"]%s\n",
+	       node, pxm, start, end - 1,
 	       ma->flags & ACPI_SRAT_MEM_HOT_PLUGGABLE ? " (hotplug)" : "");
 
-	node_memblk_range[num_node_memblks].start = start;
-	node_memblk_range[num_node_memblks].end = end;
-	memblk_nodeid[num_node_memblks] = node;
+	/* Keep node_memblk_range[] sorted by address. */
+	for (i = 0; i < num_node_memblks; ++i)
+		if (node_memblk_range[i].start > start ||
+		    (node_memblk_range[i].start == start &&
+		     node_memblk_range[i].end > end))
+			break;
+
+	memmove(&node_memblk_range[i + 1], &node_memblk_range[i],
+	        (num_node_memblks - i) * sizeof(*node_memblk_range));
+	node_memblk_range[i].start = start;
+	node_memblk_range[i].end = end;
+
+	memmove(&memblk_nodeid[i + 1], &memblk_nodeid[i],
+	        (num_node_memblks - i) * sizeof(*memblk_nodeid));
+	memblk_nodeid[i] = node;
+
 	if (ma->flags & ACPI_SRAT_MEM_HOT_PLUGGABLE) {
-		__set_bit(num_node_memblks, memblk_hotplug);
+		next = true;
 		if (end > mem_hotplug)
 			mem_hotplug = end;
 	}
+	for (; i <= num_node_memblks; ++i) {
+		bool prev = next;
+
+		next = test_bit(i, memblk_hotplug);
+		if (prev)
+			__set_bit(i, memblk_hotplug);
+		else
+			__clear_bit(i, memblk_hotplug);
+	}
+
 	num_node_memblks++;
 }
 
@@ -365,7 +456,7 @@ static int __init nodes_cover_memory(void)
 
 	for (i = 0; i < e820.nr_map; i++) {
 		int j, found;
-		unsigned long long start, end;
+		paddr_t start, end;
 
 		if (e820.map[i].type != E820_RAM) {
 			continue;
@@ -392,7 +483,7 @@ static int __init nodes_cover_memory(void)
 
 		if (start < end) {
 			printk(KERN_ERR "SRAT: No PXM for e820 range: "
-				"%016Lx - %016Lx\n", start, end);
+				"[%"PRIpaddr", %"PRIpaddr"]\n", start, end - 1);
 			return 0;
 		}
 	}
@@ -403,8 +494,8 @@ void __init acpi_numa_arch_fixup(void) {}
 
 static uint64_t __initdata srat_region_mask;
 
-static int __init srat_parse_region(struct acpi_subtable_header *header,
-				    const unsigned long end)
+static int __init cf_check srat_parse_region(
+    struct acpi_subtable_header *header, const unsigned long end)
 {
 	struct acpi_srat_mem_affinity *ma;
 
@@ -428,7 +519,7 @@ static int __init srat_parse_region(struct acpi_subtable_header *header,
 	return 0;
 }
 
-void __init srat_parse_regions(u64 addr)
+void __init srat_parse_regions(paddr_t addr)
 {
 	u64 mask;
 	unsigned int i;
@@ -453,7 +544,7 @@ void __init srat_parse_regions(u64 addr)
 }
 
 /* Use the information discovered above to actually set up the nodes. */
-int __init acpi_scan_nodes(u64 start, u64 end)
+int __init acpi_scan_nodes(paddr_t start, paddr_t end)
 {
 	int i;
 	nodemask_t all_nodes_parsed;
@@ -485,10 +576,10 @@ int __init acpi_scan_nodes(u64 start, u64 end)
 	/* Finally register nodes */
 	for_each_node_mask(i, all_nodes_parsed)
 	{
-		u64 size = nodes[i].end - nodes[i].start;
+		uint64_t size = nodes[i].end - nodes[i].start;
+
 		if ( size == 0 )
-			printk(KERN_WARNING "SRAT: Node %u has no memory. "
-			       "BIOS Bug or mis-configured hardware?\n", i);
+			printk(KERN_INFO "SRAT: node %u has no memory\n", i);
 
 		setup_node_bootmem(i, nodes[i].start, nodes[i].end);
 	}

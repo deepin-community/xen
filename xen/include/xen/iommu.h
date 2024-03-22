@@ -19,14 +19,13 @@
 #ifndef _IOMMU_H_
 #define _IOMMU_H_
 
+#include <xen/mm-frame.h>
 #include <xen/init.h>
 #include <xen/page-defs.h>
-#include <xen/spinlock.h>
 #include <xen/pci.h>
-#include <xen/typesafe.h>
-#include <xen/mm.h>
-#include <public/hvm/ioreq.h>
+#include <xen/spinlock.h>
 #include <public/domctl.h>
+#include <public/hvm/ioreq.h>
 #include <asm/device.h>
 
 TYPE_SAFE(uint64_t, dfn);
@@ -52,8 +51,14 @@ static inline bool_t dfn_eq(dfn_t x, dfn_t y)
     return dfn_x(x) == dfn_x(y);
 }
 
+#ifdef CONFIG_HAS_PASSTHROUGH
 extern bool_t iommu_enable, iommu_enabled;
-extern bool force_iommu, iommu_quarantine, iommu_verbose;
+extern bool force_iommu, iommu_verbose;
+/* Boolean except for the specific purposes of drivers/passthrough/iommu.c. */
+extern uint8_t iommu_quarantine;
+#else
+#define iommu_enabled false
+#endif
 
 #ifdef CONFIG_X86
 extern enum __packed iommu_intremap {
@@ -119,13 +124,15 @@ void arch_iommu_check_autotranslated_hwdom(struct domain *d);
 void arch_iommu_hwdom_init(struct domain *d);
 
 /*
- * The following flags are passed to map operations and passed by lookup
- * operations.
+ * The following flags are passed to map (applicable ones also to unmap)
+ * operations, while some are passed back by lookup operations.
  */
-#define _IOMMUF_readable 0
+#define IOMMUF_order(n)  ((n) & 0x3f)
+#define _IOMMUF_readable 6
 #define IOMMUF_readable  (1u<<_IOMMUF_readable)
-#define _IOMMUF_writable 1
+#define _IOMMUF_writable 7
 #define IOMMUF_writable  (1u<<_IOMMUF_writable)
+#define IOMMUF_preempt   (1u << 8)
 
 /*
  * flush_flags:
@@ -141,28 +148,36 @@ enum
 {
     _IOMMU_FLUSHF_added,
     _IOMMU_FLUSHF_modified,
+    _IOMMU_FLUSHF_all,
 };
 #define IOMMU_FLUSHF_added (1u << _IOMMU_FLUSHF_added)
 #define IOMMU_FLUSHF_modified (1u << _IOMMU_FLUSHF_modified)
+#define IOMMU_FLUSHF_all (1u << _IOMMU_FLUSHF_all)
 
-int __must_check iommu_map(struct domain *d, dfn_t dfn, mfn_t mfn,
-                           unsigned int page_order, unsigned int flags,
-                           unsigned int *flush_flags);
-int __must_check iommu_unmap(struct domain *d, dfn_t dfn,
-                             unsigned int page_order,
-                             unsigned int *flush_flags);
+/*
+ * For both of these: Negative return values are error indicators. Zero
+ * indicates full successful completion of the request, while positive
+ * values indicate partial completion, which is possible only with
+ * IOMMUF_preempt passed in.
+ */
+long __must_check iommu_map(struct domain *d, dfn_t dfn, mfn_t mfn,
+                            unsigned long page_count, unsigned int flags,
+                            unsigned int *flush_flags);
+long __must_check iommu_unmap(struct domain *d, dfn_t dfn,
+                              unsigned long page_count, unsigned int flags,
+                              unsigned int *flush_flags);
 
 int __must_check iommu_legacy_map(struct domain *d, dfn_t dfn, mfn_t mfn,
-                                  unsigned int page_order,
+                                  unsigned long page_count,
                                   unsigned int flags);
 int __must_check iommu_legacy_unmap(struct domain *d, dfn_t dfn,
-                                    unsigned int page_order);
+                                    unsigned long page_count);
 
 int __must_check iommu_lookup_page(struct domain *d, dfn_t dfn, mfn_t *mfn,
                                    unsigned int *flags);
 
 int __must_check iommu_iotlb_flush(struct domain *d, dfn_t dfn,
-                                   unsigned int page_count,
+                                   unsigned long page_count,
                                    unsigned int flush_flags);
 int __must_check iommu_iotlb_flush_all(struct domain *d,
                                        unsigned int flush_flags);
@@ -184,17 +199,9 @@ int pt_irq_destroy_bind(struct domain *, const struct xen_domctl_bind_pt_irq *);
 void hvm_dpci_isairq_eoi(struct domain *d, unsigned int isairq);
 struct hvm_irq_dpci *domain_get_irq_dpci(const struct domain *);
 void free_hvm_irq_dpci(struct hvm_irq_dpci *dpci);
-#ifdef CONFIG_HVM
-bool pt_irq_need_timer(uint32_t flags);
-#else
-static inline bool pt_irq_need_timer(unsigned int flags) { return false; }
-#endif
 
 struct msi_desc;
 struct msi_msg;
-
-int iommu_update_ire_from_msi(struct msi_desc *msi_desc, struct msi_msg *msg);
-void iommu_read_msi_from_ire(struct msi_desc *msi_desc, struct msi_msg *msg);
 
 #define PT_IRQ_TIME_OUT MILLISECS(8)
 #endif /* HAS_PCI */
@@ -234,9 +241,10 @@ struct page_info;
 typedef int iommu_grdm_t(xen_pfn_t start, xen_ulong_t nr, u32 id, void *ctxt);
 
 struct iommu_ops {
+    unsigned long page_sizes;
     int (*init)(struct domain *d);
     void (*hwdom_init)(struct domain *d);
-    int (*quarantine_init)(struct domain *d);
+    int (*quarantine_init)(device_t *dev, bool scratch_page);
     int (*add_device)(u8 devfn, device_t *dev);
     int (*enable_device)(device_t *dev);
     int (*remove_device)(u8 devfn, device_t *dev);
@@ -245,8 +253,6 @@ struct iommu_ops {
                            u8 devfn, device_t *dev);
 #ifdef CONFIG_HAS_PCI
     int (*get_device_group_id)(u16 seg, u8 bus, u8 devfn);
-    int (*update_ire_from_msi)(struct msi_desc *msi_desc, struct msi_msg *msg);
-    void (*read_msi_from_ire)(struct msi_desc *msi_desc, struct msi_msg *msg);
 #endif /* HAS_PCI */
 
     void (*teardown)(struct domain *d);
@@ -259,35 +265,34 @@ struct iommu_ops {
                                  unsigned int flags,
                                  unsigned int *flush_flags);
     int __must_check (*unmap_page)(struct domain *d, dfn_t dfn,
+                                   unsigned int order,
                                    unsigned int *flush_flags);
     int __must_check (*lookup_page)(struct domain *d, dfn_t dfn, mfn_t *mfn,
                                     unsigned int *flags);
-
-    void (*free_page_table)(struct page_info *);
 
 #ifdef CONFIG_X86
     int (*enable_x2apic)(void);
     void (*disable_x2apic)(void);
 
-    void (*update_ire_from_apic)(unsigned int apic, unsigned int reg, unsigned int value);
+    void (*update_ire_from_apic)(unsigned int apic, unsigned int pin,
+                                 uint64_t rte);
     unsigned int (*read_apic_from_ire)(unsigned int apic, unsigned int reg);
 
     int (*setup_hpet_msi)(struct msi_desc *);
 
-    int (*adjust_irq_affinities)(void);
-    void (*sync_cache)(const void *addr, unsigned int size);
+    void (*adjust_irq_affinities)(void);
+    void (*clear_root_pgtable)(struct domain *d);
+    int (*update_ire_from_msi)(struct msi_desc *msi_desc, struct msi_msg *msg);
 #endif /* CONFIG_X86 */
 
     int __must_check (*suspend)(void);
     void (*resume)(void);
-    void (*share_p2m)(struct domain *d);
     void (*crash_shutdown)(void);
     int __must_check (*iotlb_flush)(struct domain *d, dfn_t dfn,
-                                    unsigned int page_count,
+                                    unsigned long page_count,
                                     unsigned int flush_flags);
-    int __must_check (*iotlb_flush_all)(struct domain *d);
     int (*get_reserved_device_memory)(iommu_grdm_t *, void *);
-    void (*dump_p2m_table)(struct domain *d);
+    void (*dump_page_tables)(struct domain *d);
 
 #ifdef CONFIG_HAS_DEVICE_TREE
     /*
@@ -299,6 +304,20 @@ struct iommu_ops {
     int (*dt_xlate)(device_t *dev, const struct dt_phandle_args *args);
 #endif
 };
+
+/*
+ * To be called by Xen internally, to register extra RMRR/IVMD ranges.
+ * Needs to be called before IOMMU initialization.
+ */
+extern int iommu_add_extra_reserved_device_memory(unsigned long start,
+                                                  unsigned long nr,
+                                                  pci_sbdf_t sbdf);
+/*
+ * To be called by specific IOMMU driver during initialization,
+ * to fetch ranges registered with iommu_add_extra_reserved_device_memory().
+ */
+extern int iommu_get_extra_reserved_device_memory(iommu_grdm_t *func,
+                                                  void *ctxt);
 
 #include <asm/iommu.h>
 
@@ -348,24 +367,29 @@ struct domain_iommu {
 /* Does the IOMMU pagetable need to be kept synchronized with the P2M */
 #ifdef CONFIG_HAS_PASSTHROUGH
 #define need_iommu_pt_sync(d)     (dom_iommu(d)->need_sync)
+
+int iommu_do_domctl(struct xen_domctl *domctl, struct domain *d,
+                    XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl);
 #else
 #define need_iommu_pt_sync(d)     ({ (void)(d); false; })
+
+static inline int iommu_do_domctl(struct xen_domctl *domctl, struct domain *d,
+                                  XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
+{
+    return -ENOSYS;
+}
 #endif
 
 int __must_check iommu_suspend(void);
 void iommu_resume(void);
 void iommu_crash_shutdown(void);
 int iommu_get_reserved_device_memory(iommu_grdm_t *, void *);
-
-void iommu_share_p2m_table(struct domain *d);
+int iommu_quarantine_dev_init(device_t *dev);
 
 #ifdef CONFIG_HAS_PCI
 int iommu_do_pci_domctl(struct xen_domctl *, struct domain *d,
                         XEN_GUEST_HANDLE_PARAM(xen_domctl_t));
 #endif
-
-int iommu_do_domctl(struct xen_domctl *, struct domain *d,
-                    XEN_GUEST_HANDLE_PARAM(xen_domctl_t));
 
 void iommu_dev_iotlb_flush_timeout(struct domain *d, struct pci_dev *pdev);
 
@@ -383,6 +407,17 @@ DECLARE_PER_CPU(bool_t, iommu_dont_flush_iotlb);
 
 extern struct spinlock iommu_pt_cleanup_lock;
 extern struct page_list_head iommu_pt_cleanup_list;
+
+bool arch_iommu_use_permitted(const struct domain *d);
+
+#ifdef CONFIG_X86
+static inline int iommu_update_ire_from_msi(
+    struct msi_desc *msi_desc, struct msi_msg *msg)
+{
+    return iommu_intremap
+           ? iommu_call(&iommu_ops, update_ire_from_msi, msi_desc, msg) : 0;
+}
+#endif
 
 #endif /* _IOMMU_H_ */
 

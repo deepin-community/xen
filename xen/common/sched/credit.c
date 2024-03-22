@@ -230,8 +230,8 @@ struct csched_private {
     struct timer master_ticker;
 };
 
-static void csched_tick(void *_cpu);
-static void csched_acct(void *dummy);
+static void cf_check csched_tick(void *_cpu);
+static void cf_check csched_acct(void *dummy);
 
 static inline int
 __unit_on_runq(const struct csched_unit *svc)
@@ -348,7 +348,7 @@ static void burn_credits(struct csched_unit *svc, s_time_t now)
 static bool __read_mostly opt_tickle_one_idle = true;
 boolean_param("tickle_one_idle_cpu", opt_tickle_one_idle);
 
-DEFINE_PER_CPU(unsigned int, last_tickle_cpu);
+static DEFINE_PER_CPU(unsigned int, last_tickle_cpu);
 
 static inline void __runq_tickle(const struct csched_unit *new)
 {
@@ -507,7 +507,7 @@ static inline void __runq_tickle(const struct csched_unit *new)
         SCHED_STAT_CRANK(tickled_no_cpu);
 }
 
-static void
+static void cf_check
 csched_free_pdata(const struct scheduler *ops, void *pcpu, int cpu)
 {
     const struct csched_private *prv = CSCHED_PRIV(ops);
@@ -524,7 +524,7 @@ csched_free_pdata(const struct scheduler *ops, void *pcpu, int cpu)
     xfree(pcpu);
 }
 
-static void
+static void cf_check
 csched_deinit_pdata(const struct scheduler *ops, void *pcpu, int cpu)
 {
     struct csched_private *prv = CSCHED_PRIV(ops);
@@ -566,7 +566,7 @@ csched_deinit_pdata(const struct scheduler *ops, void *pcpu, int cpu)
     spin_unlock_irqrestore(&prv->lock, flags);
 }
 
-static void *
+static void *cf_check
 csched_alloc_pdata(const struct scheduler *ops, int cpu)
 {
     struct csched_pcpu *spc;
@@ -614,8 +614,20 @@ init_pdata(struct csched_private *prv, struct csched_pcpu *spc, int cpu)
     spc->nr_runnable = 0;
 }
 
+static void cf_check
+csched_move_timers(const struct scheduler *ops, struct sched_resource *sr)
+{
+    struct csched_private *prv = CSCHED_PRIV(ops);
+    struct csched_pcpu *spc = sr->sched_priv;
+
+    if ( sr->master_cpu == prv->master )
+        migrate_timer(&prv->master_ticker, prv->master);
+
+    migrate_timer(&spc->ticker, sr->master_cpu);
+}
+
 /* Change the scheduler of cpu to us (Credit). */
-static spinlock_t *
+static spinlock_t *cf_check
 csched_switch_sched(struct scheduler *new_ops, unsigned int cpu,
                     void *pdata, void *vdata)
 {
@@ -848,7 +860,7 @@ _csched_cpu_pick(const struct scheduler *ops, const struct sched_unit *unit,
     return cpu;
 }
 
-static struct sched_resource *
+static struct sched_resource *cf_check
 csched_res_pick(const struct scheduler *ops, const struct sched_unit *unit)
 {
     struct csched_unit *svc = CSCHED_UNIT(unit);
@@ -985,9 +997,8 @@ csched_unit_acct(struct csched_private *prv, unsigned int cpu)
     }
 }
 
-static void *
-csched_alloc_udata(const struct scheduler *ops, struct sched_unit *unit,
-                   void *dd)
+static void *cf_check csched_alloc_udata(
+    const struct scheduler *ops, struct sched_unit *unit, void *dd)
 {
     struct csched_unit *svc;
 
@@ -1007,7 +1018,7 @@ csched_alloc_udata(const struct scheduler *ops, struct sched_unit *unit,
     return svc;
 }
 
-static void
+static void cf_check
 csched_unit_insert(const struct scheduler *ops, struct sched_unit *unit)
 {
     struct csched_unit *svc = unit->priv;
@@ -1032,7 +1043,7 @@ csched_unit_insert(const struct scheduler *ops, struct sched_unit *unit)
     SCHED_STAT_CRANK(unit_insert);
 }
 
-static void
+static void cf_check
 csched_free_udata(const struct scheduler *ops, void *priv)
 {
     struct csched_unit *svc = priv;
@@ -1042,7 +1053,7 @@ csched_free_udata(const struct scheduler *ops, void *priv)
     xfree(svc);
 }
 
-static void
+static void cf_check
 csched_unit_remove(const struct scheduler *ops, struct sched_unit *unit)
 {
     struct csched_private *prv = CSCHED_PRIV(ops);
@@ -1069,7 +1080,7 @@ csched_unit_remove(const struct scheduler *ops, struct sched_unit *unit)
     BUG_ON( sdom == NULL );
 }
 
-static void
+static void cf_check
 csched_unit_sleep(const struct scheduler *ops, struct sched_unit *unit)
 {
     struct csched_unit * const svc = CSCHED_UNIT(unit);
@@ -1094,7 +1105,7 @@ csched_unit_sleep(const struct scheduler *ops, struct sched_unit *unit)
         runq_remove(svc);
 }
 
-static void
+static void cf_check
 csched_unit_wake(const struct scheduler *ops, struct sched_unit *unit)
 {
     struct csched_unit * const svc = CSCHED_UNIT(unit);
@@ -1156,7 +1167,7 @@ csched_unit_wake(const struct scheduler *ops, struct sched_unit *unit)
     __runq_tickle(svc);
 }
 
-static void
+static void cf_check
 csched_unit_yield(const struct scheduler *ops, struct sched_unit *unit)
 {
     struct csched_unit * const svc = CSCHED_UNIT(unit);
@@ -1165,7 +1176,7 @@ csched_unit_yield(const struct scheduler *ops, struct sched_unit *unit)
     set_bit(CSCHED_FLAG_UNIT_YIELD, &svc->flags);
 }
 
-static int
+static int cf_check
 csched_dom_cntl(
     const struct scheduler *ops,
     struct domain *d,
@@ -1210,7 +1221,7 @@ csched_dom_cntl(
     return rc;
 }
 
-static void
+static void cf_check
 csched_aff_cntl(const struct scheduler *ops, struct sched_unit *unit,
                 const cpumask_t *hard, const cpumask_t *soft)
 {
@@ -1238,7 +1249,7 @@ __csched_set_tslice(struct csched_private *prv, unsigned int timeslice_ms)
     prv->credit = prv->credits_per_tslice * prv->ncpus;
 }
 
-static int
+static int cf_check
 csched_sys_cntl(const struct scheduler *ops,
                         struct xen_sysctl_scheduler_op *sc)
 {
@@ -1281,7 +1292,7 @@ csched_sys_cntl(const struct scheduler *ops,
     return rc;
 }
 
-static void *
+static void *cf_check
 csched_alloc_domdata(const struct scheduler *ops, struct domain *dom)
 {
     struct csched_dom *sdom;
@@ -1299,7 +1310,7 @@ csched_alloc_domdata(const struct scheduler *ops, struct domain *dom)
     return sdom;
 }
 
-static void
+static void cf_check
 csched_free_domdata(const struct scheduler *ops, void *data)
 {
     xfree(data);
@@ -1356,8 +1367,7 @@ csched_runq_sort(struct csched_private *prv, unsigned int cpu)
     pcpu_schedule_unlock_irqrestore(lock, flags, cpu);
 }
 
-static void
-csched_acct(void* dummy)
+static void cf_check csched_acct(void* dummy)
 {
     struct csched_private *prv = dummy;
     unsigned long flags;
@@ -1563,8 +1573,7 @@ out:
     set_timer( &prv->master_ticker, NOW() + prv->tslice);
 }
 
-static void
-csched_tick(void *_cpu)
+static void cf_check csched_tick(void *_cpu)
 {
     unsigned int cpu = (unsigned long)_cpu;
     const struct sched_resource *sr = get_sched_res(cpu);
@@ -1811,7 +1820,7 @@ csched_load_balance(struct csched_private *prv, int cpu,
  * This function is in the critical path. It is designed to be simple and
  * fast for the common case.
  */
-static void csched_schedule(
+static void cf_check csched_schedule(
     const struct scheduler *ops, struct sched_unit *unit, s_time_t now,
     bool tasklet_work_scheduled)
 {
@@ -2028,7 +2037,7 @@ csched_dump_unit(const struct csched_unit *svc)
     printk("\n");
 }
 
-static void
+static void cf_check
 csched_dump_pcpu(const struct scheduler *ops, int cpu)
 {
     const struct list_head *runq;
@@ -2081,7 +2090,7 @@ csched_dump_pcpu(const struct scheduler *ops, int cpu)
     spin_unlock_irqrestore(&prv->lock, flags);
 }
 
-static void
+static void cf_check
 csched_dump(const struct scheduler *ops)
 {
     struct list_head *iter_sdom, *iter_svc;
@@ -2145,7 +2154,7 @@ csched_dump(const struct scheduler *ops)
     spin_unlock_irqrestore(&prv->lock, flags);
 }
 
-static int __init
+static int __init cf_check
 csched_global_init(void)
 {
     if ( sched_credit_tslice_ms > XEN_SYSCTL_CSCHED_TSLICE_MAX ||
@@ -2175,7 +2184,7 @@ csched_global_init(void)
     return 0;
 }
 
-static int
+static int cf_check
 csched_init(struct scheduler *ops)
 {
     struct csched_private *prv;
@@ -2217,7 +2226,7 @@ csched_init(struct scheduler *ops)
     return 0;
 }
 
-static void
+static void cf_check
 csched_deinit(struct scheduler *ops)
 {
     struct csched_private *prv;
@@ -2267,6 +2276,7 @@ static const struct scheduler sched_credit_def = {
     .switch_sched   = csched_switch_sched,
     .alloc_domdata  = csched_alloc_domdata,
     .free_domdata   = csched_free_domdata,
+    .move_timers    = csched_move_timers,
 };
 
 REGISTER_SCHEDULER(sched_credit_def);

@@ -16,7 +16,7 @@
 /* Never drop characters, even if the async transmit buffer fills. */
 /* #define SERIAL_NEVER_DROP_CHARS 1 */
 
-unsigned int __read_mostly serial_txbufsz = 16384;
+unsigned int __ro_after_init serial_txbufsz = CONFIG_SERIAL_TX_BUFSIZE;
 size_param("serial_tx_buffer", serial_txbufsz);
 
 #define mask_serial_rxbuf_idx(_i) ((_i)&(serial_rxbufsz-1))
@@ -301,13 +301,25 @@ char serial_getc(int handle)
     return c & 0x7f;
 }
 
-int __init serial_parse_handle(char *conf)
+int __init serial_parse_handle(const char *conf)
 {
     int handle, flags = 0;
 
     if ( !strncmp(conf, "dbgp", 4) && (!conf[4] || conf[4] == ',') )
     {
         handle = SERHND_DBGP;
+        goto common;
+    }
+
+    if ( !strncmp(conf, "ehci", 4) && (!conf[4] || conf[4] == ',') )
+    {
+        handle = SERHND_DBGP;
+        goto common;
+    }
+
+    if ( !strncmp(conf, "xhci", 4) && (!conf[4] || conf[4] == ',') )
+    {
+        handle = SERHND_XHCI;
         goto common;
     }
 

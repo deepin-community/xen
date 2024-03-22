@@ -1,0 +1,26 @@
+From: Ian Jackson <iwj@barriere.debian.org>
+Date: Fri, 12 Oct 2018 16:00:16 +0000
+Subject: config/Tools.mk.in: Respect caller's CONFIG_PV_SHIM
+
+This makes it easier to disable the shim build.  (In Debian we need to
+build the shim separately because it needs different compiler flags).
+
+Signed-off-by: Ian Jackson <ijackson@chiark.greenend.org.uk>
+[ Hans: adjust from tools/firmware/Makefile to config/Tools.mk.in to
+follow changes that happened in 8845155c83 ("pvshim: make PV shim build
+selectable from configure") ]
+Signed-off-by: Hans van Kranenburg <hans@knorrie.org>
+---
+ config/Tools.mk.in | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/config/Tools.mk.in b/config/Tools.mk.in
+index 204c79c..605d4ac 100644
+--- a/config/Tools.mk.in
++++ b/config/Tools.mk.in
+@@ -75,4 +75,4 @@ ARGP_LDFLAGS        := @argp_ldflags@
+ 
+ FILE_OFFSET_BITS    := @FILE_OFFSET_BITS@
+ 
+-CONFIG_PV_SHIM      := @pvshim@
++CONFIG_PV_SHIM      ?= @pvshim@

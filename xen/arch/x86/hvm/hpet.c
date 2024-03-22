@@ -162,7 +162,7 @@ static inline int hpet_check_access_length(
     return 0;
 }
 
-static int hpet_read(
+static int cf_check hpet_read(
     struct vcpu *v, unsigned long addr, unsigned int length,
     unsigned long *pval)
 {
@@ -219,7 +219,7 @@ static void hpet_stop_timer(HPETState *h, unsigned int tn,
     hpet_get_comparator(h, tn, guest_time);
 }
 
-static void hpet_timer_fired(struct vcpu *v, void *data)
+static void cf_check hpet_timer_fired(struct vcpu *v, void *data)
 {
     unsigned int tn = (unsigned long)data;
     HPETState *h = vcpu_vhpet(v);
@@ -240,6 +240,7 @@ static void hpet_set_timer(HPETState *h, unsigned int tn,
     uint64_t tn_cmp, cur_tick, diff;
     unsigned int irq;
     unsigned int oneshot;
+    s_time_t diff_ns, period_ns = 0;
 
     ASSERT(tn < HPET_TIMER_NUM);
     ASSERT(rw_is_write_locked(&h->lock));
@@ -311,13 +312,14 @@ static void hpet_set_timer(HPETState *h, unsigned int tn,
      * status register) before another interrupt can be delivered.
      */
     oneshot = !timer_is_periodic(h, tn) || timer_level(h, tn);
+    diff_ns = hpet_tick_to_ns(h, diff);
+    if ( !oneshot )
+        period_ns = hpet_tick_to_ns(h, h->hpet.period[tn]);
+
     TRACE_2_LONG_4D(TRC_HVM_EMUL_HPET_START_TIMER, tn, irq,
-                    TRC_PAR_LONG(hpet_tick_to_ns(h, diff)),
-                    TRC_PAR_LONG(oneshot ? 0LL :
-                                 hpet_tick_to_ns(h, h->hpet.period[tn])));
-    create_periodic_time(vhpet_vcpu(h), &h->pt[tn],
-                         hpet_tick_to_ns(h, diff),
-                         oneshot ? 0 : hpet_tick_to_ns(h, h->hpet.period[tn]),
+                    TRC_PAR_LONG(diff_ns), TRC_PAR_LONG(period_ns));
+
+    create_periodic_time(vhpet_vcpu(h), &h->pt[tn], diff_ns, period_ns,
                          irq, timer_level(h, tn) ? hpet_timer_fired : NULL,
                          timer_level(h, tn) ? (void *)(unsigned long)tn : NULL,
                          timer_level(h, tn));
@@ -349,7 +351,7 @@ static void timer_sanitize_int_route(HPETState *h, unsigned int tn)
                   HPET_TN_ROUTE);
 }
 
-static int hpet_write(
+static int cf_check hpet_write(
     struct vcpu *v, unsigned long addr,
     unsigned int length, unsigned long val)
 {
@@ -567,7 +569,7 @@ static int hpet_write(
     return X86EMUL_OKAY;
 }
 
-static int hpet_range(struct vcpu *v, unsigned long addr)
+static int cf_check hpet_range(struct vcpu *v, unsigned long addr)
 {
     return ( (addr >= HPET_BASE_ADDRESS) &&
              (addr < (HPET_BASE_ADDRESS + HPET_MMAP_SIZE)) );
@@ -580,7 +582,7 @@ static const struct hvm_mmio_ops hpet_mmio_ops = {
 };
 
 
-static int hpet_save(struct vcpu *v, hvm_domain_context_t *h)
+static int cf_check hpet_save(struct vcpu *v, hvm_domain_context_t *h)
 {
     const struct domain *d = v->domain;
     HPETState *hp = domain_vhpet(d);
@@ -643,7 +645,7 @@ static int hpet_save(struct vcpu *v, hvm_domain_context_t *h)
     return rc;
 }
 
-static int hpet_load(struct domain *d, hvm_domain_context_t *h)
+static int cf_check hpet_load(struct domain *d, hvm_domain_context_t *h)
 {
     HPETState *hp = domain_vhpet(d);
     struct hvm_hw_hpet *rec;

@@ -52,8 +52,10 @@ libxl_bitmap global_pv_affinity_mask;
 enum output_format default_output_format = OUTPUT_FORMAT_JSON;
 int claim_mode = 1;
 bool progress_use_cr = 0;
+bool timestamps = 0;
 int max_grant_frames = -1;
 int max_maptrack_frames = -1;
+int max_grant_version = LIBXL_MAX_GRANT_DEFAULT;
 libxl_domid domid_policy = INVALID_DOMID;
 
 xentoollog_level minmsglevel = minmsglevel_default;
@@ -79,14 +81,20 @@ static int auto_autoballoon(void)
     if (!info)
         return 1; /* default to on */
 
+#define SIZE_PATTERN "-?[0-9]+[bBkKmMgGtT]?"
+
     ret = regcomp(&regex,
-                  "(^| )dom0_mem=((|min:|max:)[0-9]+[bBkKmMgG]?,?)+($| )",
+                  "(^| )dom0_mem=((|min:|max:)(" SIZE_PATTERN "|(" SIZE_PATTERN "\\+)?[0-9]{1,2}%),?)+($| )",
                   REG_NOSUB | REG_EXTENDED);
+
+#undef SIZE_PATTERN
+
     if (ret)
         return 1;
 
     ret = regexec(&regex, info->commandline, 0, NULL, 0);
     regfree(&regex);
+
     return ret == REG_NOMATCH;
 }
 
@@ -209,6 +217,13 @@ static void parse_global_config(const char *configfile,
                                   INT_MAX, &l, 1);
     if (!e)
         max_maptrack_frames = l;
+    else if (e != ESRCH)
+        exit(1);
+
+    e = xlu_cfg_get_bounded_long (config, "max_grant_version", 0,
+                                  INT_MAX, &l, 1);
+    if (!e)
+        max_grant_version = l;
     else if (e != ESRCH)
         exit(1);
 
@@ -361,12 +376,13 @@ int main(int argc, char **argv)
 {
     int opt = 0;
     char *cmd = 0;
-    struct cmd_spec *cspec;
+    const struct cmd_spec *cspec;
     int ret;
     void *config_data = 0;
     int config_len = 0;
+    unsigned int xtl_flags = 0;
 
-    while ((opt = getopt(argc, argv, "+vftN")) >= 0) {
+    while ((opt = getopt(argc, argv, "+vftTN")) >= 0) {
         switch (opt) {
         case 'v':
             if (minmsglevel > 0) minmsglevel--;
@@ -379,6 +395,9 @@ int main(int argc, char **argv)
             break;
         case 't':
             progress_use_cr = 1;
+            break;
+        case 'T':
+            timestamps = 1;
             break;
         default:
             fprintf(stderr, "unknown global option\n");
@@ -394,8 +413,11 @@ int main(int argc, char **argv)
     }
     opterr = 0;
 
-    logger = xtl_createlogger_stdiostream(stderr, minmsglevel,
-        (progress_use_cr ? XTL_STDIOSTREAM_PROGRESS_USE_CR : 0));
+    if (progress_use_cr)
+        xtl_flags |= XTL_STDIOSTREAM_PROGRESS_USE_CR;
+    if (timestamps)
+        xtl_flags |= XTL_STDIOSTREAM_SHOW_DATE | XTL_STDIOSTREAM_SHOW_PID;
+    logger = xtl_createlogger_stdiostream(stderr, minmsglevel, xtl_flags);
     if (!logger) exit(EXIT_FAILURE);
 
     xl_ctx_alloc();
@@ -454,10 +476,10 @@ int child_report(xlchildnum child)
 void help(const char *command)
 {
     int i;
-    struct cmd_spec *cmd;
+    const struct cmd_spec *cmd;
 
     if (!command || !strcmp(command, "help")) {
-        printf("Usage xl [-vfN] <subcommand> [args]\n\n");
+        printf("Usage xl [-vfNtT] <subcommand> [args]\n\n");
         printf("xl full list of subcommands:\n\n");
         for (i = 0; i < cmdtable_len; i++) {
             printf(" %-19s ", cmd_table[i].cmd_name);
@@ -468,7 +490,7 @@ void help(const char *command)
     } else {
         cmd = cmdtable_lookup(command);
         if (cmd) {
-            printf("Usage: xl [-v%s%s] %s %s\n\n%s.\n\n",
+            printf("Usage: xl [-vtT%s%s] %s %s\n\n%s.\n\n",
                    cmd->modifies ? "f" : "",
                    cmd->can_dryrun ? "N" : "",
                    cmd->cmd_name,

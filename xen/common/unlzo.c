@@ -34,30 +34,19 @@
 
 #ifdef __XEN__
 #include <asm/byteorder.h>
-#endif
+#include <asm/unaligned.h>
+#else
 
-#if 1 /* ndef CONFIG_??? */
-static inline u16 INIT get_unaligned_be16(void *p)
+static inline u16 get_unaligned_be16(const void *p)
 {
 	return be16_to_cpup(p);
 }
 
-static inline u32 INIT get_unaligned_be32(void *p)
+static inline u32 get_unaligned_be32(const void *p)
 {
 	return be32_to_cpup(p);
 }
-#else
-#include <asm/unaligned.h>
 
-static inline u16 INIT get_unaligned_be16(void *p)
-{
-	return be16_to_cpu(__get_unaligned(p, 2));
-}
-
-static inline u32 INIT get_unaligned_be32(void *p)
-{
-	return be32_to_cpu(__get_unaligned(p, 4));
-}
 #endif
 
 static const unsigned char lzop_magic[] = {
@@ -68,7 +57,7 @@ static const unsigned char lzop_magic[] = {
 #define HEADER_SIZE_MIN       (9 + 7     + 4 + 8     + 1       + 4)
 #define HEADER_SIZE_MAX       (9 + 7 + 1 + 8 + 8 + 4 + 1 + 255 + 4)
 
-static int INIT parse_header(u8 *input, int *skip, int in_len)
+static int __init parse_header(u8 *input, int *skip, int in_len)
 {
 	int l;
 	u8 *parse = input;
@@ -125,11 +114,11 @@ static int INIT parse_header(u8 *input, int *skip, int in_len)
 	return 1;
 }
 
-STATIC int INIT unlzo(u8 *input, unsigned int in_len,
-		      int (*fill) (void *, unsigned int),
-		      int (*flush) (void *, unsigned int),
-		      u8 *output, unsigned int *posp,
-		      void (*error) (const char *x))
+int __init unlzo(unsigned char *input, unsigned int in_len,
+		 int (*fill) (void *, unsigned int),
+		 int (*flush) (void *, unsigned int),
+		 unsigned char *output, unsigned int *posp,
+		 void (*error) (const char *x))
 {
 	u8 r = 0;
 	int skip = 0;

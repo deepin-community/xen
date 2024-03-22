@@ -175,11 +175,27 @@ The major version of Xen.
 
 The minor version of Xen.
 
+#### /cpupool/
+
+A directory of all current cpupools.
+
+#### /cpupool/*/
+
+The individual cpupools. Each entry is a directory with the name being the
+cpupool-id (e.g. /cpupool/0/).
+
+#### /cpupool/*/sched-gran = ("cpu" | "core" | "socket") [w]
+
+The scheduling granularity of a cpupool.
+
+Writing a value is allowed only for cpupools with no cpu assigned and if the
+architecture is supporting different scheduling granularities.
+
 #### /params/
 
 A directory of runtime parameters.
 
-#### /params/*
+#### /params/* [w]
 
 The individual parameters. The description of the different parameters can be
 found in `docs/misc/xen-command-line.pandoc`.

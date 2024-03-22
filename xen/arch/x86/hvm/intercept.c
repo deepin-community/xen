@@ -17,6 +17,7 @@
  * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <xen/ioreq.h>
 #include <xen/types.h>
 #include <xen/sched.h>
 #include <asm/regs.h>
@@ -31,10 +32,10 @@
 #include <xen/event.h>
 #include <xen/iommu.h>
 
-static bool_t hvm_mmio_accept(const struct hvm_io_handler *handler,
-                              const ioreq_t *p)
+static bool cf_check hvm_mmio_accept(
+    const struct hvm_io_handler *handler, const ioreq_t *p)
 {
-    paddr_t first = hvm_mmio_first_byte(p), last;
+    paddr_t first = ioreq_mmio_first_byte(p), last;
 
     BUG_ON(handler->type != IOREQ_TYPE_COPY);
 
@@ -42,7 +43,7 @@ static bool_t hvm_mmio_accept(const struct hvm_io_handler *handler,
         return 0;
 
     /* Make sure the handler will accept the whole access. */
-    last = hvm_mmio_last_byte(p);
+    last = ioreq_mmio_last_byte(p);
     if ( last != first &&
          !handler->mmio.ops->check(current, last) )
         domain_crash(current->domain);
@@ -50,16 +51,18 @@ static bool_t hvm_mmio_accept(const struct hvm_io_handler *handler,
     return 1;
 }
 
-static int hvm_mmio_read(const struct hvm_io_handler *handler,
-                         uint64_t addr, uint32_t size, uint64_t *data)
+static int cf_check hvm_mmio_read(
+    const struct hvm_io_handler *handler, uint64_t addr, uint32_t size,
+    uint64_t *data)
 {
     BUG_ON(handler->type != IOREQ_TYPE_COPY);
 
     return handler->mmio.ops->read(current, addr, size, data);
 }
 
-static int hvm_mmio_write(const struct hvm_io_handler *handler,
-                          uint64_t addr, uint32_t size, uint64_t data)
+static int cf_check hvm_mmio_write(
+    const struct hvm_io_handler *handler, uint64_t addr, uint32_t size,
+    uint64_t data)
 {
     BUG_ON(handler->type != IOREQ_TYPE_COPY);
 
@@ -72,8 +75,8 @@ static const struct hvm_io_ops mmio_ops = {
     .write = hvm_mmio_write
 };
 
-static bool_t hvm_portio_accept(const struct hvm_io_handler *handler,
-                                const ioreq_t *p)
+static bool cf_check hvm_portio_accept(
+    const struct hvm_io_handler *handler, const ioreq_t *p)
 {
     unsigned int start = handler->portio.port;
     unsigned int end = start + handler->portio.size;
@@ -83,8 +86,9 @@ static bool_t hvm_portio_accept(const struct hvm_io_handler *handler,
     return (p->addr >= start) && ((p->addr + p->size) <= end);
 }
 
-static int hvm_portio_read(const struct hvm_io_handler *handler,
-                           uint64_t addr, uint32_t size, uint64_t *data)
+static int cf_check hvm_portio_read(
+    const struct hvm_io_handler *handler, uint64_t addr, uint32_t size,
+    uint64_t *data)
 {
     uint32_t val = ~0u;
     int rc;
@@ -97,8 +101,9 @@ static int hvm_portio_read(const struct hvm_io_handler *handler,
     return rc;
 }
 
-static int hvm_portio_write(const struct hvm_io_handler *handler,
-                            uint64_t addr, uint32_t size, uint64_t data)
+static int cf_check hvm_portio_write(
+    const struct hvm_io_handler *handler, uint64_t addr, uint32_t size,
+    uint64_t data)
 {
     uint32_t val = data;
 

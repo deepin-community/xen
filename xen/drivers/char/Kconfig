@@ -1,5 +1,6 @@
 config HAS_NS16550
 	bool "NS16550 UART driver" if ARM
+	default n if RISCV
 	default y
 	help
 	  This selects the 16550-series UART support. For most systems, say Y.
@@ -11,6 +12,13 @@ config HAS_CADENCE_UART
 	help
 	  This selects the Xilinx Zynq Cadence UART. If you have a Xilinx Zynq
 	  based board, say Y.
+
+config HAS_IMX_LPUART
+	bool "i.MX LPUART driver"
+	default y
+	depends on ARM_64
+	help
+	  This selects the i.MX LPUART. If you have i.MX8QM based board, say Y.
 
 config HAS_MVEBU
 	bool "Marvell MVEBU UART driver"
@@ -66,3 +74,22 @@ config HAS_EHCI
 	help
 	  This selects the USB based EHCI debug port to be used as a UART. If
 	  you have an x86 based system with USB, say Y.
+
+config SERIAL_TX_BUFSIZE
+	int "Size of the transmit serial buffer"
+	default 16384
+	help
+	  Controls the default size of the transmit buffer (in bytes) used by
+	  the serial driver.  Note the value provided will be rounded down to
+	  the nearest power of 2.
+
+	  Default value is 16384 (16kiB).
+
+config XHCI
+	bool "XHCI DbC UART driver"
+	depends on X86
+	help
+	  This selects the USB based XHCI debug capability to be usable as a UART.
+	  Enabling this option makes Xen use extra ~230KiB memory, even if XHCI UART
+	  is not selected.
+	  If you have an x86 based system with USB3, say Y.

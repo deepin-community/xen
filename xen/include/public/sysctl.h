@@ -1,25 +1,8 @@
+/* SPDX-License-Identifier: MIT */
 /******************************************************************************
  * sysctl.h
  *
  * System management operations. For use by node control stack.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to
- * deal in the Software without restriction, including without limitation the
- * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
- * sell copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in
- * all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
  *
  * Copyright (c) 2002-2006, K Fraser
  */
@@ -35,7 +18,7 @@
 #include "domctl.h"
 #include "physdev.h"
 
-#define XEN_SYSCTL_INTERFACE_VERSION 0x00000013
+#define XEN_SYSCTL_INTERFACE_VERSION 0x00000015
 
 /*
  * Read console content from Xen buffer ring.
@@ -100,9 +83,16 @@ struct xen_sysctl_tbuf_op {
 #define _XEN_SYSCTL_PHYSCAP_iommu_hap_pt_share 5
 #define XEN_SYSCTL_PHYSCAP_iommu_hap_pt_share  \
     (1u << _XEN_SYSCTL_PHYSCAP_iommu_hap_pt_share)
+#define XEN_SYSCTL_PHYSCAP_vmtrace       (1u << 6)
+/* The platform supports vPMU. */
+#define XEN_SYSCTL_PHYSCAP_vpmu          (1u << 7)
+
+/* Xen supports the Grant v1 and/or v2 ABIs. */
+#define XEN_SYSCTL_PHYSCAP_gnttab_v1     (1u << 8)
+#define XEN_SYSCTL_PHYSCAP_gnttab_v2     (1u << 9)
 
 /* Max XEN_SYSCTL_PHYSCAP_* constant.  Used for ABI checking. */
-#define XEN_SYSCTL_PHYSCAP_MAX XEN_SYSCTL_PHYSCAP_iommu_hap_pt_share
+#define XEN_SYSCTL_PHYSCAP_MAX XEN_SYSCTL_PHYSCAP_gnttab_v2
 
 struct xen_sysctl_physinfo {
     uint32_t threads_per_core;
@@ -113,6 +103,8 @@ struct xen_sysctl_physinfo {
     uint32_t max_node_id; /* Largest possible node ID on this host */
     uint32_t cpu_khz;
     uint32_t capabilities;/* XEN_SYSCTL_PHYSCAP_??? */
+    uint32_t arch_capabilities;/* XEN_SYSCTL_PHYSCAP_{X86,ARM,...}_??? */
+    uint32_t pad;
     uint64_aligned_t total_pages;
     uint64_aligned_t free_pages;
     uint64_aligned_t scrub_pages;
@@ -617,7 +609,7 @@ struct xen_sysctl_arinc653_schedule {
         /* If a domain has multiple VCPUs, vcpu_id specifies which one
          * this schedule entry applies to. It should be set to 0 if
          * there is only one VCPU for the domain. */
-        unsigned int vcpu_id;
+        uint32_t vcpu_id;
         /* runtime specifies the amount of time that should be allocated
          * to this VCPU per major frame. It is specified in nanoseconds */
         uint64_aligned_t runtime;
@@ -637,18 +629,18 @@ struct xen_sysctl_credit_schedule {
     /* Length of timeslice in milliseconds */
 #define XEN_SYSCTL_CSCHED_TSLICE_MAX 1000
 #define XEN_SYSCTL_CSCHED_TSLICE_MIN 1
-    unsigned tslice_ms;
-    unsigned ratelimit_us;
+    uint32_t tslice_ms;
+    uint32_t ratelimit_us;
     /*
      * How long we consider a vCPU to be cache-hot on the
      * CPU where it has run (max 100ms, in microseconds)
     */
 #define XEN_SYSCTL_CSCHED_MGR_DLY_MAX_US (100 * 1000)
-    unsigned vcpu_migr_delay_us;
+    uint32_t vcpu_migr_delay_us;
 };
 
 struct xen_sysctl_credit2_schedule {
-    unsigned ratelimit_us;
+    uint32_t ratelimit_us;
 };
 
 /* XEN_SYSCTL_scheduler_op */
@@ -804,6 +796,8 @@ struct xen_sysctl_cpu_featureset {
 #define XEN_SYSCTL_cpu_featureset_host     1
 #define XEN_SYSCTL_cpu_featureset_pv       2
 #define XEN_SYSCTL_cpu_featureset_hvm      3
+#define XEN_SYSCTL_cpu_featureset_pv_max   4
+#define XEN_SYSCTL_cpu_featureset_hvm_max  5
     uint32_t index;       /* IN: Which featureset to query? */
     uint32_t nr_features; /* IN/OUT: Number of entries in/written to
                            * 'features', or the maximum number of features if
@@ -867,9 +861,7 @@ struct livepatch_func {
     uint32_t new_size;
     uint32_t old_size;
     uint8_t version;        /* MUST be LIVEPATCH_PAYLOAD_VERSION. */
-    uint8_t opaque[LIVEPATCH_OPAQUE_SIZE];
-    uint8_t applied;
-    uint8_t _pad[7];
+    uint8_t _pad[39];
     livepatch_expectation_t expect;
 };
 typedef struct livepatch_func livepatch_func_t;
@@ -1048,15 +1040,13 @@ struct xen_sysctl_cpu_policy {
 #define XEN_SYSCTL_cpu_policy_pv_default   4
 #define XEN_SYSCTL_cpu_policy_hvm_default  5
     uint32_t index;       /* IN: Which policy to query? */
-    uint32_t nr_leaves;   /* IN/OUT: Number of leaves in/written to
-                           * 'cpuid_policy', or the maximum number of leaves
-                           * if the guest handle is NULL. */
-    uint32_t nr_msrs;     /* IN/OUT: Number of MSRs in/written to
-                           * 'msr_policy', or the maximum number of MSRs if
-                           * the guest handle is NULL. */
+    uint32_t nr_leaves;   /* IN/OUT: Number of leaves in/written to 'leaves',
+                           * or the max number if 'leaves' is NULL. */
+    uint32_t nr_msrs;     /* IN/OUT: Number of MSRs in/written to 'msrs', or
+                           * the max number of if 'msrs' is NULL. */
     uint32_t _rsvd;       /* Must be zero. */
-    XEN_GUEST_HANDLE_64(xen_cpuid_leaf_t) cpuid_policy; /* OUT */
-    XEN_GUEST_HANDLE_64(xen_msr_entry_t) msr_policy;    /* OUT */
+    XEN_GUEST_HANDLE_64(xen_cpuid_leaf_t) leaves; /* OUT */
+    XEN_GUEST_HANDLE_64(xen_msr_entry_t)  msrs;   /* OUT */
 };
 typedef struct xen_sysctl_cpu_policy xen_sysctl_cpu_policy_t;
 DEFINE_XEN_GUEST_HANDLE(xen_sysctl_cpu_policy_t);

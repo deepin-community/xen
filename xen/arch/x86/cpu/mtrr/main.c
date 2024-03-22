@@ -131,7 +131,7 @@ struct set_mtrr_data {
  */
 int hold_mtrr_updates_on_aps;
 
-static void ipi_handler(void *info)
+static void cf_check ipi_handler(void *info)
 /*  [SUMMARY] Synchronisation handler. Executed by "other" CPUs.
     [RETURNS] Nothing.
 */
@@ -632,7 +632,7 @@ void mtrr_bp_restore(void)
 	mtrr_if->set_all();
 }
 
-static int __init mtrr_init_finialize(void)
+static int __init cf_check mtrr_init_finialize(void)
 {
 	if (!mtrr_if)
 		return 0;

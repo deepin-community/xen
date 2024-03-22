@@ -320,9 +320,7 @@ int main(int argc, char *argv[])
     }
 
     puts("\t.section .reloc, \"a\", @progbits\n"
-         "\t.balign 4\n"
-         "\t.globl __base_relocs_start, __base_relocs_end\n"
-         "__base_relocs_start:");
+         "\t.balign 4");
 
     for ( i = 0; i < nsec; ++i )
     {
@@ -346,9 +344,7 @@ int main(int argc, char *argv[])
          * Don't generate relocations for sections that definitely
          * aren't used by the boot loader code.
          */
-        if ( memcmp(sec1[i].name, ".initcal", sizeof(sec1[i].name)) == 0 ||
-             memcmp(sec1[i].name, ".init.se", sizeof(sec1[i].name)) == 0 ||
-             memcmp(sec1[i].name, ".buildid", sizeof(sec1[i].name)) == 0 ||
+        if ( memcmp(sec1[i].name, ".buildid", sizeof(sec1[i].name)) == 0 ||
              memcmp(sec1[i].name, ".lockpro", sizeof(sec1[i].name)) == 0 )
             continue;
 
@@ -374,8 +370,6 @@ int main(int argc, char *argv[])
     }
 
     diff_sections(NULL, NULL, NULL, 0, 0, 0, 0);
-
-    puts("__base_relocs_end:");
 
     close(in1);
     close(in2);

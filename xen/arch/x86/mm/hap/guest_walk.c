@@ -18,9 +18,6 @@
  * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
-/* Allow uniquely identifying static symbols in the 3 generated objects. */
-asm(".file \"" __OBJECT_FILE__ "\"");
-
 #include <xen/domain_page.h>
 #include <xen/paging.h>
 #include <xen/sched.h>
@@ -39,14 +36,14 @@ asm(".file \"" __OBJECT_FILE__ "\"");
 #include <asm/guest_pt.h>
 #include <asm/p2m.h>
 
-unsigned long hap_gva_to_gfn(GUEST_PAGING_LEVELS)(
+unsigned long cf_check hap_gva_to_gfn(GUEST_PAGING_LEVELS)(
     struct vcpu *v, struct p2m_domain *p2m, unsigned long gva, uint32_t *pfec)
 {
     unsigned long cr3 = v->arch.hvm.guest_cr[3];
     return hap_p2m_ga_to_gfn(GUEST_PAGING_LEVELS)(v, p2m, cr3, gva, pfec, NULL);
 }
 
-unsigned long hap_p2m_ga_to_gfn(GUEST_PAGING_LEVELS)(
+unsigned long cf_check hap_p2m_ga_to_gfn(GUEST_PAGING_LEVELS)(
     struct vcpu *v, struct p2m_domain *p2m, unsigned long cr3,
     paddr_t ga, uint32_t *pfec, unsigned int *page_order)
 {

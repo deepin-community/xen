@@ -72,17 +72,15 @@ struct cpufreq_policy {
     s8                  turbo;  /* tristate flag: 0 for unsupported
                                  * -1 for disable, 1 for enabled
                                  * See CPUFREQ_TURBO_* below for defines */
-    bool_t              aperf_mperf; /* CPU has APERF/MPERF MSRs */
 };
 DECLARE_PER_CPU(struct cpufreq_policy *, cpufreq_cpu_policy);
 
 extern int __cpufreq_set_policy(struct cpufreq_policy *data,
                                 struct cpufreq_policy *policy);
 
-#define CPUFREQ_SHARED_TYPE_NONE (0) /* None */
-#define CPUFREQ_SHARED_TYPE_HW   (1) /* HW does needed coordination */
-#define CPUFREQ_SHARED_TYPE_ALL  (2) /* All dependent CPUs should set freq */
-#define CPUFREQ_SHARED_TYPE_ANY  (3) /* Freq can be set from any dependent CPU*/
+#define CPUFREQ_SHARED_TYPE_HW   XEN_CPUPERF_SHARED_TYPE_HW
+#define CPUFREQ_SHARED_TYPE_ALL  XEN_CPUPERF_SHARED_TYPE_ALL
+#define CPUFREQ_SHARED_TYPE_ANY  XEN_CPUPERF_SHARED_TYPE_ANY
 
 /******************** cpufreq transition notifiers *******************/
 
@@ -162,7 +160,6 @@ struct cpufreq_driver {
                      unsigned int target_freq,
                      unsigned int relation);
     unsigned int    (*get)(unsigned int cpu);
-    unsigned int    (*getavg)(unsigned int cpu, unsigned int flag);
     int    (*exit)(struct cpufreq_policy *policy);
 };
 
@@ -229,7 +226,6 @@ struct cpu_dbs_info_s {
     int8_t stoppable;
 };
 
-int cpufreq_governor_dbs(struct cpufreq_policy *policy, unsigned int event);
 int get_cpufreq_ondemand_para(uint32_t *sampling_rate_max,
                               uint32_t *sampling_rate_min,
                               uint32_t *sampling_rate,

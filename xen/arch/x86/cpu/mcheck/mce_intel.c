@@ -55,7 +55,7 @@ bool __read_mostly lmce_support;
 #define MCE_RING                0x1
 static DEFINE_PER_CPU(int, last_state);
 
-static void intel_thermal_interrupt(struct cpu_user_regs *regs)
+static void cf_check intel_thermal_interrupt(struct cpu_user_regs *regs)
 {
     uint64_t msr_content;
     unsigned int cpu = smp_processor_id();
@@ -271,12 +271,13 @@ static void intel_memerr_dhandler(
     mc_memerr_dhandler(binfo, result, regs);
 }
 
-static bool intel_srar_check(uint64_t status)
+static bool cf_check intel_srar_check(uint64_t status)
 {
     return (intel_check_mce_type(status) == intel_mce_ucr_srar);
 }
 
-static bool intel_checkaddr(uint64_t status, uint64_t misc, int addrtype)
+static bool cf_check intel_checkaddr(
+    uint64_t status, uint64_t misc, int addrtype)
 {
     if ( !(status & MCi_STATUS_ADDRV) ||
          !(status & MCi_STATUS_MISCV) ||
@@ -287,10 +288,9 @@ static bool intel_checkaddr(uint64_t status, uint64_t misc, int addrtype)
     return (addrtype == MC_ADDR_PHYSICAL);
 }
 
-static void intel_srar_dhandler(
-             struct mca_binfo *binfo,
-             enum mce_result *result,
-             const struct cpu_user_regs *regs)
+static void cf_check intel_srar_dhandler(
+    struct mca_binfo *binfo, enum mce_result *result,
+    const struct cpu_user_regs *regs)
 {
     uint64_t status = binfo->mib->mc_status;
 
@@ -306,15 +306,14 @@ static void intel_srar_dhandler(
     }
 }
 
-static bool intel_srao_check(uint64_t status)
+static bool cf_check intel_srao_check(uint64_t status)
 {
     return (intel_check_mce_type(status) == intel_mce_ucr_srao);
 }
 
-static void intel_srao_dhandler(
-             struct mca_binfo *binfo,
-             enum mce_result *result,
-             const struct cpu_user_regs *regs)
+static void cf_check intel_srao_dhandler(
+    struct mca_binfo *binfo, enum mce_result *result,
+    const struct cpu_user_regs *regs)
 {
     uint64_t status = binfo->mib->mc_status;
 
@@ -333,15 +332,14 @@ static void intel_srao_dhandler(
     }
 }
 
-static bool intel_default_check(uint64_t status)
+static bool cf_check intel_default_check(uint64_t status)
 {
     return true;
 }
 
-static void intel_default_mce_dhandler(
-             struct mca_binfo *binfo,
-             enum mce_result *result,
-             const struct cpu_user_regs * regs)
+static void cf_check intel_default_mce_dhandler(
+    struct mca_binfo *binfo, enum mce_result *result,
+    const struct cpu_user_regs * regs)
 {
     uint64_t status = binfo->mib->mc_status;
     enum intel_mce_type type;
@@ -360,10 +358,9 @@ static const struct mca_error_handler intel_mce_dhandlers[] = {
     {intel_default_check, intel_default_mce_dhandler}
 };
 
-static void intel_default_mce_uhandler(
-             struct mca_binfo *binfo,
-             enum mce_result *result,
-             const struct cpu_user_regs *regs)
+static void cf_check intel_default_mce_uhandler(
+    struct mca_binfo *binfo, enum mce_result *result,
+    const struct cpu_user_regs *regs)
 {
     uint64_t status = binfo->mib->mc_status;
     enum intel_mce_type type;
@@ -396,7 +393,7 @@ static const struct mca_error_handler intel_mce_uhandlers[] = {
  * 3) ser_support = 1, SRAO, UC = 1, S = 1, AR = 0, [EN = 1]
  */
 
-static bool intel_need_clearbank_scan(enum mca_source who, u64 status)
+static bool cf_check intel_need_clearbank_scan(enum mca_source who, u64 status)
 {
     if ( who == MCA_CMCI_HANDLER )
     {
@@ -453,7 +450,7 @@ static bool intel_need_clearbank_scan(enum mca_source who, u64 status)
  * 4) SRAO ser_support = 1, PCC = 0, S = 1, AR = 0, EN = 1 [UC = 1]
  * 5) UCNA ser_support = 1, OVER = 0, EN = 1, PCC = 0, S = 0, AR = 0, [UC = 1]
  */
-static bool intel_recoverable_scan(uint64_t status)
+static bool cf_check intel_recoverable_scan(uint64_t status)
 {
 
     if ( !(status & MCi_STATUS_UC ) )
@@ -599,7 +596,7 @@ static void mce_set_owner(void)
     cmci_discover();
 }
 
-static void __cpu_mcheck_distribute_cmci(void *unused)
+static void cf_check __cpu_mcheck_distribute_cmci(void *unused)
 {
     cmci_discover();
 }
@@ -639,7 +636,7 @@ static void cpu_mcheck_disable(void)
         clear_cmci();
 }
 
-static void cmci_interrupt(struct cpu_user_regs *regs)
+static void cf_check cmci_interrupt(struct cpu_user_regs *regs)
 {
     mctelem_cookie_t mctc;
     struct mca_summary bs;
@@ -859,12 +856,20 @@ static void intel_init_ppin(const struct cpuinfo_x86 *c)
     /*
      * Even if testing the presence of the MSR would be enough, we don't
      * want to risk the situation where other models reuse this MSR for
-     * other purposes.
+     * other purposes.  Despite the late addition of a CPUID bit (rendering
+     * the MSR architectural), keep using the same detection logic there.
      */
     switch ( c->x86_model )
     {
         uint64_t val;
 
+    default:
+        if ( !cpu_has(c, X86_FEATURE_INTEL_PPIN) )
+        {
+            ppin_msr = 0;
+            return;
+        }
+        fallthrough;
     case 0x3e: /* IvyBridge X */
     case 0x3f: /* Haswell X */
     case 0x4f: /* Broadwell X */
@@ -872,7 +877,9 @@ static void intel_init_ppin(const struct cpuinfo_x86 *c)
     case 0x56: /* Broadwell Xeon D */
     case 0x57: /* Knights Landing */
     case 0x6a: /* Icelake X */
+    case 0x6c: /* Icelake D */
     case 0x85: /* Knights Mill */
+    case 0x8f: /* Sapphire Rapids X */
 
         if ( (c != &boot_cpu_data && !ppin_msr) ||
              rdmsr_safe(MSR_PPIN_CTL, val) )
@@ -921,7 +928,7 @@ static int cpu_mcabank_alloc(unsigned int cpu)
     return -ENOMEM;
 }
 
-static int cpu_callback(
+static int cf_check cpu_callback(
     struct notifier_block *nfb, unsigned long action, void *hcpu)
 {
     unsigned int cpu = (unsigned long)hcpu;
@@ -1001,7 +1008,26 @@ int vmce_intel_wrmsr(struct vcpu *v, uint32_t msr, uint64_t val)
 
 int vmce_intel_rdmsr(const struct vcpu *v, uint32_t msr, uint64_t *val)
 {
+    const struct cpu_policy *cp = v->domain->arch.cpu_policy;
     unsigned int bank = msr - MSR_IA32_MC0_CTL2;
+
+    switch ( msr )
+    {
+    case MSR_P5_MC_ADDR:
+        /*
+         * Bank 0 is used for the 'bank 0 quirk' on older processors.
+         * See vcpu_fill_mc_msrs() for reference.
+         */
+        *val = v->arch.vmce.bank[1].mci_addr;
+        return 1;
+
+    case MSR_P5_MC_TYPE:
+        *val = v->arch.vmce.bank[1].mci_status;
+        return 1;
+    }
+
+    if ( !(cp->x86_vendor & X86_VENDOR_INTEL) )
+        return 0;
 
     if ( bank < GUEST_MC_BANK_NUM )
     {

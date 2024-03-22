@@ -40,6 +40,7 @@
 #include <irq_vectors.h>
 #include <xen/kexec.h>
 #include <asm/guest.h>
+#include <asm/nmi.h>
 #include <asm/time.h>
 
 static bool __read_mostly tdt_enabled;
@@ -242,6 +243,8 @@ void __init connect_bsp_APIC(void)
         outb(0x70, 0x22);
         outb(0x01, 0x23);
     }
+
+    printk("Enabling APIC mode.  Using %d I/O APICs\n", nr_ioapics);
     enable_apic_mode();
 }
 
@@ -768,7 +771,7 @@ int lapic_resume(void)
  * Original code written by Keir Fraser.
  */
 
-static int __init lapic_disable(const char *str)
+static int __init cf_check lapic_disable(const char *str)
 {
     enable_local_apic = -1;
     setup_clear_cpu_cap(X86_FEATURE_APIC);
@@ -777,7 +780,7 @@ static int __init lapic_disable(const char *str)
 custom_param("nolapic", lapic_disable);
 boolean_param("lapic", enable_local_apic);
 
-static int __init apic_set_verbosity(const char *str)
+static int __init cf_check apic_set_verbosity(const char *str)
 {
     if (strcmp("debug", str) == 0)
         apic_verbosity = APIC_DEBUG;
@@ -864,6 +867,7 @@ void x2apic_ap_setup(void)
 void __init x2apic_bsp_setup(void)
 {
     struct IO_APIC_route_entry **ioapic_entries = NULL;
+    bool iommu_x2apic;
     const char *orig_name;
 
     if ( !cpu_has_x2apic )
@@ -879,7 +883,8 @@ void __init x2apic_bsp_setup(void)
         printk("x2APIC: Already enabled by BIOS: Ignoring cmdline disable.\n");
     }
 
-    if ( iommu_supports_x2apic() )
+    iommu_x2apic = iommu_supports_x2apic();
+    if ( iommu_x2apic )
     {
         if ( (ioapic_entries = alloc_ioapic_entries()) == NULL )
         {
@@ -932,8 +937,11 @@ void __init x2apic_bsp_setup(void)
         printk("Switched to APIC driver %s\n", genapic.name);
 
 restore_out:
-    /* iommu_x2apic_enabled cannot be used here in the error case. */
-    if ( iommu_supports_x2apic() )
+    /*
+     * iommu_x2apic_enabled and iommu_supports_x2apic() cannot be used here
+     * in the error case.
+     */
+    if ( iommu_x2apic )
     {
         /*
          * NB: do not use raw mode when restoring entries if the iommu has
@@ -1030,11 +1038,6 @@ static void __init wait_8254_wraparound(void)
     do {
         prev_count = curr_count;
         curr_count = get_8254_timer_count();
-
-        /* workaround for broken Mercury/Neptune */
-        if (prev_count >= curr_count + 0x100)
-            curr_count = get_8254_timer_count();
-        
     } while (prev_count >= curr_count);
 }
 
@@ -1044,9 +1047,6 @@ static void __init wait_8254_wraparound(void)
  * this function twice on the boot CPU, once with a bogus timeout
  * value, second time for real. The other (noncalibrating) CPUs
  * call this function only once, with the real, calibrated value.
- *
- * We do reads before writes even if unnecessary, to get around the
- * P5 APIC double write bug.
  */
 
 #define APIC_DIVISOR 1
@@ -1055,26 +1055,27 @@ static void __setup_APIC_LVTT(unsigned int clocks)
 {
     unsigned int lvtt_value, tmp_value;
 
-    /* NB. Xen uses local APIC timer in one-shot mode. */
-    lvtt_value = /*APIC_TIMER_MODE_PERIODIC |*/ LOCAL_TIMER_VECTOR;
-
     if ( tdt_enabled )
     {
-        lvtt_value &= (~APIC_TIMER_MODE_MASK);
-        lvtt_value |= APIC_TIMER_MODE_TSC_DEADLINE;
+        lvtt_value = APIC_TIMER_MODE_TSC_DEADLINE | LOCAL_TIMER_VECTOR;
+        apic_write(APIC_LVTT, lvtt_value);
+
+        /*
+         * See Intel SDM: TSC-Deadline Mode chapter. In xAPIC mode,
+         * writing to the APIC LVTT and TSC_DEADLINE MSR isn't serialized.
+         * According to Intel, MFENCE can do the serialization here.
+         */
+        asm volatile( "mfence" : : : "memory" );
+
+        return;
     }
 
+    /* NB. Xen uses local APIC timer in one-shot mode. */
+    lvtt_value = APIC_TIMER_MODE_ONESHOT | LOCAL_TIMER_VECTOR;
     apic_write(APIC_LVTT, lvtt_value);
 
-    /*
-     * See Intel SDM: TSC-Deadline Mode chapter. In xAPIC mode,
-     * writing to the APIC LVTT and TSC_DEADLINE MSR isn't serialized.
-     * According to Intel, MFENCE can do the serialization here.
-     */
-    asm volatile( "mfence" : : : "memory" );
-
-    tmp_value = apic_read(APIC_TDCR);
-    apic_write(APIC_TDCR, tmp_value | APIC_TDR_DIV_1);
+    tmp_value = apic_read(APIC_TDCR) & ~APIC_TDR_DIV_MASK;
+    apic_write(APIC_TDCR, tmp_value | PASTE(APIC_TDR_DIV_, APIC_DIVISOR));
 
     apic_write(APIC_TMICT, clocks / APIC_DIVISOR);
 }
@@ -1178,18 +1179,20 @@ static void __init check_deadline_errata(void)
            "please update microcode to version %#x (or later)\n", rev);
 }
 
-static void wait_tick_pvh(void)
+uint32_t __init apic_tmcct_read(void)
 {
-    u64 lapse_ns = 1000000000ULL / HZ;
-    s_time_t start, curr_time;
+    if ( x2apic_enabled )
+    {
+        /*
+         * Have a barrier here just like in rdtsc_ordered() as it's
+         * unclear whether this non-serializing RDMSR also can be
+         * executed speculatively (like RDTSC can).
+         */
+        alternative("lfence", "mfence", X86_FEATURE_MFENCE_RDTSC);
+        return apic_rdmsr(APIC_TMCCT);
+    }
 
-    start = NOW();
-
-    /* Won't wrap around */
-    do {
-        cpu_relax();
-        curr_time = NOW();
-    } while ( curr_time - start < lapse_ns );
+    return apic_mem_read(APIC_TMCCT);
 }
 
 /*
@@ -1205,11 +1208,10 @@ static void wait_tick_pvh(void)
  * APIC irq that way.
  */
 
+#define BUS_SCALE_SHIFT 18
+
 static void __init calibrate_APIC_clock(void)
 {
-    unsigned long long t1, t2;
-    unsigned long tt1, tt2;
-    unsigned int i;
     unsigned long bus_freq; /* KAF: pointer-size avoids compile warns. */
     unsigned int bus_cycle; /* length of one bus cycle in pico-seconds */
 #define LOOPS_FRAC 10U      /* measure for one tenth of a second */
@@ -1222,39 +1224,38 @@ static void __init calibrate_APIC_clock(void)
      */
     __setup_APIC_LVTT(0xffffffff);
 
-    if ( !xen_guest )
+    bus_freq = calibrate_apic_timer();
+    if ( !bus_freq )
+    {
+        unsigned int i, tt1, tt2;
+        unsigned long t1, t2;
+
+        ASSERT(!xen_guest);
+
         /*
-         * The timer chip counts down to zero. Let's wait
-         * for a wraparound to start exact measurement:
-         * (the current tick might have been already half done)
+         * The timer chip counts down to zero. Let's wait for a wraparound to
+         * start exact measurement (the current tick might have been already
+         * half done):
          */
         wait_8254_wraparound();
-    else
-        wait_tick_pvh();
 
-    /*
-     * We wrapped around just now. Let's start:
-     */
-    t1 = rdtsc_ordered();
-    tt1 = apic_read(APIC_TMCCT);
+        /* We wrapped around just now. Let's start: */
+        t1 = rdtsc_ordered();
+        tt1 = apic_read(APIC_TMCCT);
 
-    /*
-     * Let's wait HZ / LOOPS_FRAC ticks:
-     */
-    for (i = 0; i < HZ / LOOPS_FRAC; i++)
-        if ( !xen_guest )
+        /* Let's wait HZ / LOOPS_FRAC ticks: */
+        for ( i = 0; i < HZ / LOOPS_FRAC; ++i )
             wait_8254_wraparound();
-        else
-            wait_tick_pvh();
 
-    tt2 = apic_read(APIC_TMCCT);
-    t2 = rdtsc_ordered();
+        t2 = rdtsc_ordered();
+        tt2 = apic_read(APIC_TMCCT);
 
-    bus_freq = (tt1 - tt2) * APIC_DIVISOR * LOOPS_FRAC;
+        bus_freq = (tt1 - tt2) * APIC_DIVISOR * LOOPS_FRAC;
 
-    apic_printk(APIC_VERBOSE, "..... CPU clock speed is %lu.%04lu MHz.\n",
-                ((unsigned long)(t2 - t1) * LOOPS_FRAC) / 1000000,
-                (((unsigned long)(t2 - t1) * LOOPS_FRAC) / 100) % 10000);
+        apic_printk(APIC_VERBOSE, "..... CPU clock speed is %lu.%04lu MHz.\n",
+                    ((t2 - t1) * LOOPS_FRAC) / 1000000,
+                    (((t2 - t1) * LOOPS_FRAC) / 100) % 10000);
+    }
 
     apic_printk(APIC_VERBOSE, "..... host bus clock speed is %ld.%04ld MHz.\n",
                 bus_freq / 1000000, (bus_freq / 100) % 10000);
@@ -1262,8 +1263,8 @@ static void __init calibrate_APIC_clock(void)
     /* set up multipliers for accurate timer code */
     bus_cycle  = 1000000000000UL / bus_freq; /* in pico seconds */
     bus_cycle += (1000000000000UL % bus_freq) * 2 > bus_freq;
-    bus_scale  = (1000*262144)/bus_cycle;
-    bus_scale += ((1000 * 262144) % bus_cycle) * 2 > bus_cycle;
+    bus_scale  = (1000 << BUS_SCALE_SHIFT) / bus_cycle;
+    bus_scale += ((1000 << BUS_SCALE_SHIFT) % bus_cycle) * 2 > bus_cycle;
 
     apic_printk(APIC_VERBOSE, "..... bus_scale = %#x\n", bus_scale);
     /* reset APIC to zero timeout value */
@@ -1280,11 +1281,15 @@ void __init setup_boot_APIC_clock(void)
 
     check_deadline_errata();
 
+    if ( !boot_cpu_has(X86_FEATURE_TSC_DEADLINE) )
+        tdt_enable = false;
+
     local_irq_save(flags);
 
-    calibrate_APIC_clock();
+    if ( !tdt_enable || apic_verbosity )
+        calibrate_APIC_clock();
 
-    if ( tdt_enable && boot_cpu_has(X86_FEATURE_TSC_DEADLINE) )
+    if ( tdt_enable )
     {
         printk(KERN_DEBUG "TSC deadline timer enabled\n");
         tdt_enabled = true;
@@ -1346,14 +1351,15 @@ int reprogram_timer(s_time_t timeout)
     }
 
     if ( timeout && ((expire = timeout - NOW()) > 0) )
-        apic_tmict = min_t(u64, (bus_scale * expire) >> 18, UINT_MAX);
+        apic_tmict = min_t(uint64_t, (bus_scale * expire) >> BUS_SCALE_SHIFT,
+                           UINT32_MAX);
 
     apic_write(APIC_TMICT, (unsigned long)apic_tmict);
 
     return apic_tmict || !timeout;
 }
 
-void apic_timer_interrupt(struct cpu_user_regs * regs)
+void cf_check apic_timer_interrupt(struct cpu_user_regs *regs)
 {
     ack_APIC_irq();
     perfc_incr(apic_timer);
@@ -1372,20 +1378,26 @@ void smp_send_state_dump(unsigned int cpu)
 /*
  * Spurious interrupts should _never_ happen with our APIC/SMP architecture.
  */
-void spurious_interrupt(struct cpu_user_regs *regs)
+void cf_check spurious_interrupt(struct cpu_user_regs *regs)
 {
     /*
      * Check if this is a vectored interrupt (most likely, as this is probably
-     * a request to dump local CPU state). Vectored interrupts are ACKed;
-     * spurious interrupts are not.
+     * a request to dump local CPU state or to continue NMI handling).
+     * Vectored interrupts are ACKed; spurious interrupts are not.
      */
     if (apic_isr_read(SPURIOUS_APIC_VECTOR)) {
+        bool is_spurious;
+
         ack_APIC_irq();
+        is_spurious = !nmi_check_continuation();
         if (this_cpu(state_dump_pending)) {
             this_cpu(state_dump_pending) = false;
             dump_execstate(regs);
-            return;
+            is_spurious = false;
         }
+
+        if ( !is_spurious )
+            return;
     }
 
     /* see sw-dev-man vol 3, chapter 7.4.13.5 */
@@ -1397,7 +1409,7 @@ void spurious_interrupt(struct cpu_user_regs *regs)
  * This interrupt should never happen with our APIC/SMP architecture
  */
 
-void error_interrupt(struct cpu_user_regs *regs)
+void cf_check error_interrupt(struct cpu_user_regs *regs)
 {
     static const char *const esr_fields[] = {
         "Send CS error",
@@ -1430,7 +1442,7 @@ void error_interrupt(struct cpu_user_regs *regs)
  * This interrupt handles performance counters interrupt
  */
 
-void pmu_apic_interrupt(struct cpu_user_regs *regs)
+void cf_check pmu_apic_interrupt(struct cpu_user_regs *regs)
 {
     ack_APIC_irq();
     vpmu_do_interrupt(regs);
@@ -1474,6 +1486,10 @@ int __init APIC_init_uniprocessor (void)
 #endif
     physids_clear(phys_cpu_present_map);
     physid_set(boot_cpu_physical_apicid, phys_cpu_present_map);
+
+    if ( !skip_ioapic_setup && nr_ioapics )
+        /* Sanitize the IO-APIC pins before enabling the lapic LVTERR/ESR. */
+        enable_IO_APIC();
 
     setup_local_APIC(true);
 

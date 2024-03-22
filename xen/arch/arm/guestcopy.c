@@ -1,9 +1,10 @@
-#include <xen/lib.h>
 #include <xen/domain_page.h>
+#include <xen/guest_access.h>
+#include <xen/lib.h>
 #include <xen/mm.h>
 #include <xen/sched.h>
+
 #include <asm/current.h>
-#include <asm/guest_access.h>
 
 #define COPY_flush_dcache   (1U << 0)
 #define COPY_from_guest     (0U << 1)
@@ -55,7 +56,7 @@ static unsigned long copy_guest(void *buf, uint64_t addr, unsigned int len,
                                 copy_info_t info, unsigned int flags)
 {
     /* XXX needs to handle faults */
-    unsigned offset = addr & ~PAGE_MASK;
+    unsigned int offset = addr & ~PAGE_MASK;
 
     BUILD_BUG_ON((sizeof(addr)) < sizeof(vaddr_t));
     BUILD_BUG_ON((sizeof(addr)) < sizeof(paddr_t));
@@ -63,7 +64,7 @@ static unsigned long copy_guest(void *buf, uint64_t addr, unsigned int len,
     while ( len )
     {
         void *p;
-        unsigned size = min(len, (unsigned)PAGE_SIZE - offset);
+        unsigned int size = min(len, (unsigned int)PAGE_SIZE - offset);
         struct page_info *page;
 
         page = translate_get_page(info, addr, flags & COPY_linear,
@@ -105,26 +106,27 @@ static unsigned long copy_guest(void *buf, uint64_t addr, unsigned int len,
     return 0;
 }
 
-unsigned long raw_copy_to_guest(void *to, const void *from, unsigned len)
+unsigned long raw_copy_to_guest(void *to, const void *from, unsigned int len)
 {
     return copy_guest((void *)from, (vaddr_t)to, len,
                       GVA_INFO(current), COPY_to_guest | COPY_linear);
 }
 
 unsigned long raw_copy_to_guest_flush_dcache(void *to, const void *from,
-                                             unsigned len)
+                                             unsigned int len)
 {
     return copy_guest((void *)from, (vaddr_t)to, len, GVA_INFO(current),
                       COPY_to_guest | COPY_flush_dcache | COPY_linear);
 }
 
-unsigned long raw_clear_guest(void *to, unsigned len)
+unsigned long raw_clear_guest(void *to, unsigned int len)
 {
     return copy_guest(NULL, (vaddr_t)to, len, GVA_INFO(current),
                       COPY_to_guest | COPY_linear);
 }
 
-unsigned long raw_copy_from_guest(void *to, const void __user *from, unsigned len)
+unsigned long raw_copy_from_guest(void *to, const void __user *from,
+                                  unsigned int len)
 {
     return copy_guest(to, (vaddr_t)from, len, GVA_INFO(current),
                       COPY_from_guest | COPY_linear);

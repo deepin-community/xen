@@ -25,24 +25,37 @@ EMIT_FILE;
 #include <xen/numa.h>
 #include <xen/nodemask.h>
 #include <xen/guest_access.h>
-#include <xen/hypercall.h>
 #include <xen/mem_access.h>
 #include <asm/current.h>
 #include <asm/asm_defns.h>
 #include <asm/page.h>
 #include <asm/flushtlb.h>
 #include <asm/fixmap.h>
-#include <asm/hypercall.h>
 #include <asm/msr.h>
+#include <asm/pv/domain.h>
 #include <asm/setup.h>
 #include <asm/numa.h>
 #include <asm/mem_paging.h>
 #include <asm/mem_sharing.h>
 #include <public/memory.h>
 
-unsigned int __read_mostly m2p_compat_vstart = __HYPERVISOR_COMPAT_VIRT_START;
+#ifdef CONFIG_PV32
 
-l2_pgentry_t *compat_idle_pg_table_l2;
+#define compat_machine_to_phys_mapping ((unsigned int *)RDWR_COMPAT_MPT_VIRT_START)
+
+unsigned int __initdata m2p_compat_vstart = __HYPERVISOR_COMPAT_VIRT_START;
+
+l2_pgentry_t *__read_mostly compat_idle_pg_table_l2;
+
+#else /* !CONFIG_PV32 */
+
+/*
+ * Declare the symbol such that (dead) code referencing it can be built
+ * without a lot of #ifdef-ary (relying on DCE by the compiler).
+ */
+extern unsigned int compat_machine_to_phys_mapping[];
+
+#endif /* CONFIG_PV32 */
 
 void *do_page_walk(struct vcpu *v, unsigned long addr)
 {
@@ -218,7 +231,8 @@ static void destroy_compat_m2p_mapping(struct mem_hotadd_info *info)
 {
     unsigned long i, smap = info->spfn, emap = info->spfn;
 
-    if ( smap > ((RDWR_COMPAT_MPT_VIRT_END - RDWR_COMPAT_MPT_VIRT_START) >> 2) )
+    if ( !opt_pv32 ||
+         smap > ((RDWR_COMPAT_MPT_VIRT_END - RDWR_COMPAT_MPT_VIRT_START) >> 2) )
         return;
 
     if ( emap > ((RDWR_COMPAT_MPT_VIRT_END - RDWR_COMPAT_MPT_VIRT_START) >> 2) )
@@ -326,7 +340,8 @@ static int setup_compat_m2p_table(struct mem_hotadd_info *info)
      * Notice: For hot-added memory, only range below m2p_compat_vstart
      * will be filled up (assuming memory is discontinous when booting).
      */
-    if   ((smap > ((RDWR_COMPAT_MPT_VIRT_END - RDWR_COMPAT_MPT_VIRT_START) >> 2)) )
+    if ( !opt_pv32 ||
+         (smap > ((RDWR_COMPAT_MPT_VIRT_END - RDWR_COMPAT_MPT_VIRT_START) >> 2)) )
         return 0;
 
     if ( epfn > ((RDWR_COMPAT_MPT_VIRT_END - RDWR_COMPAT_MPT_VIRT_START) >> 2) )
@@ -385,7 +400,8 @@ static int setup_m2p_table(struct mem_hotadd_info *info)
 
     ASSERT(l4e_get_flags(idle_pg_table[l4_table_offset(RO_MPT_VIRT_START)])
             & _PAGE_PRESENT);
-    l3_ro_mpt = l4e_to_l3e(idle_pg_table[l4_table_offset(RO_MPT_VIRT_START)]);
+    l3_ro_mpt = map_l3t_from_l4e(
+                    idle_pg_table[l4_table_offset(RO_MPT_VIRT_START)]);
 
     smap = (info->spfn & (~((1UL << (L2_PAGETABLE_SHIFT - 3)) -1)));
     emap = ((info->epfn + ((1UL << (L2_PAGETABLE_SHIFT - 3)) - 1 )) &
@@ -403,6 +419,10 @@ static int setup_m2p_table(struct mem_hotadd_info *info)
     i = smap;
     while ( i < emap )
     {
+        if ( (RO_MPT_VIRT_START + i * sizeof(*machine_to_phys_mapping)) &
+             ((1UL << L3_PAGETABLE_SHIFT) - 1) )
+            UNMAP_DOMAIN_PAGE(l2_ro_mpt);
+
         switch ( m2p_mapped(i) )
         {
         case M2P_1G_MAPPED:
@@ -438,32 +458,31 @@ static int setup_m2p_table(struct mem_hotadd_info *info)
 
             ASSERT(!(l3e_get_flags(l3_ro_mpt[l3_table_offset(va)]) &
                   _PAGE_PSE));
-            if ( l3e_get_flags(l3_ro_mpt[l3_table_offset(va)]) &
-              _PAGE_PRESENT )
-                l2_ro_mpt = l3e_to_l2e(l3_ro_mpt[l3_table_offset(va)]) +
-                  l2_table_offset(va);
+            if ( l2_ro_mpt )
+                /* nothing */;
+            else if ( l3e_get_flags(l3_ro_mpt[l3_table_offset(va)]) &
+                      _PAGE_PRESENT )
+                l2_ro_mpt = map_l2t_from_l3e(l3_ro_mpt[l3_table_offset(va)]);
             else
             {
-                l2_ro_mpt = alloc_xen_pagetable();
+                mfn_t l2_ro_mpt_mfn;
+
+                l2_ro_mpt = alloc_mapped_pagetable(&l2_ro_mpt_mfn);
                 if ( !l2_ro_mpt )
                 {
                     ret = -ENOMEM;
                     goto error;
                 }
 
-                clear_page(l2_ro_mpt);
                 l3e_write(&l3_ro_mpt[l3_table_offset(va)],
-                          l3e_from_paddr(__pa(l2_ro_mpt),
-                                         __PAGE_HYPERVISOR_RO | _PAGE_USER));
-                l2_ro_mpt += l2_table_offset(va);
+                          l3e_from_mfn(l2_ro_mpt_mfn,
+                                       __PAGE_HYPERVISOR_RO | _PAGE_USER));
             }
 
             /* NB. Cannot be GLOBAL: guest user mode should not see it. */
-            l2e_write(l2_ro_mpt, l2e_from_mfn(mfn,
+            l2e_write(&l2_ro_mpt[l2_table_offset(va)], l2e_from_mfn(mfn,
                    /*_PAGE_GLOBAL|*/_PAGE_PSE|_PAGE_USER|_PAGE_PRESENT));
         }
-        if ( !((unsigned long)l2_ro_mpt & ~PAGE_MASK) )
-            l2_ro_mpt = NULL;
         i += ( 1UL << (L2_PAGETABLE_SHIFT - 3));
     }
 #undef CNT
@@ -471,6 +490,8 @@ static int setup_m2p_table(struct mem_hotadd_info *info)
 
     ret = setup_compat_m2p_table(info);
 error:
+    unmap_domain_page(l2_ro_mpt);
+    unmap_domain_page(l3_ro_mpt);
     return ret;
 }
 
@@ -479,8 +500,9 @@ void __init paging_init(void)
     unsigned long i, mpt_size, va;
     unsigned int n, memflags;
     l3_pgentry_t *l3_ro_mpt;
-    l2_pgentry_t *l2_ro_mpt = NULL;
+    l2_pgentry_t *pl2e = NULL, *l2_ro_mpt = NULL;
     struct page_info *l1_pg;
+    mfn_t mfn;
 
     /*
      * We setup the L3s for 1:1 mapping if host support memory hotplug
@@ -493,22 +515,22 @@ void __init paging_init(void)
         if ( !(l4e_get_flags(idle_pg_table[l4_table_offset(va)]) &
               _PAGE_PRESENT) )
         {
-            l3_pgentry_t *pl3t = alloc_xen_pagetable();
+            l3_pgentry_t *pl3t = alloc_mapped_pagetable(&mfn);
 
             if ( !pl3t )
                 goto nomem;
-            clear_page(pl3t);
+            UNMAP_DOMAIN_PAGE(pl3t);
             l4e_write(&idle_pg_table[l4_table_offset(va)],
-                      l4e_from_paddr(__pa(pl3t), __PAGE_HYPERVISOR_RW));
+                      l4e_from_mfn(mfn, __PAGE_HYPERVISOR_RW));
         }
     }
 
     /* Create user-accessible L2 directory to map the MPT for guests. */
-    if ( (l3_ro_mpt = alloc_xen_pagetable()) == NULL )
+    l3_ro_mpt = alloc_mapped_pagetable(&mfn);
+    if ( !l3_ro_mpt )
         goto nomem;
-    clear_page(l3_ro_mpt);
     l4e_write(&idle_pg_table[l4_table_offset(RO_MPT_VIRT_START)],
-              l4e_from_paddr(__pa(l3_ro_mpt), __PAGE_HYPERVISOR_RO | _PAGE_USER));
+              l4e_from_mfn(mfn, __PAGE_HYPERVISOR_RO | _PAGE_USER));
 
     /*
      * Allocate and map the machine-to-phys table.
@@ -529,7 +551,7 @@ void __init paging_init(void)
             (L2_PAGETABLE_SHIFT - 3 + PAGE_SHIFT)));
 
         if ( cpu_has_page1gb &&
-             !((unsigned long)l2_ro_mpt & ~PAGE_MASK) &&
+             !((unsigned long)pl2e & ~PAGE_MASK) &&
              (mpt_size >> L3_PAGETABLE_SHIFT) > (i >> PAGETABLE_ORDER) )
         {
             unsigned int k, holes;
@@ -589,43 +611,57 @@ void __init paging_init(void)
             memset((void *)(RDWR_MPT_VIRT_START + (i << L2_PAGETABLE_SHIFT)),
                    0xFF, 1UL << L2_PAGETABLE_SHIFT);
         }
-        if ( !((unsigned long)l2_ro_mpt & ~PAGE_MASK) )
+        if ( !((unsigned long)pl2e & ~PAGE_MASK) )
         {
-            if ( (l2_ro_mpt = alloc_xen_pagetable()) == NULL )
+            UNMAP_DOMAIN_PAGE(l2_ro_mpt);
+
+            l2_ro_mpt = alloc_mapped_pagetable(&mfn);
+            if ( !l2_ro_mpt )
                 goto nomem;
-            clear_page(l2_ro_mpt);
+
             l3e_write(&l3_ro_mpt[l3_table_offset(va)],
-                      l3e_from_paddr(__pa(l2_ro_mpt),
-                                     __PAGE_HYPERVISOR_RO | _PAGE_USER));
+                      l3e_from_mfn(mfn, __PAGE_HYPERVISOR_RO | _PAGE_USER));
+            pl2e = l2_ro_mpt;
             ASSERT(!l2_table_offset(va));
         }
         /* NB. Cannot be GLOBAL: guest user mode should not see it. */
         if ( l1_pg )
-            l2e_write(l2_ro_mpt, l2e_from_page(
+            l2e_write(pl2e, l2e_from_page(
                 l1_pg, /*_PAGE_GLOBAL|*/_PAGE_PSE|_PAGE_USER|_PAGE_PRESENT));
-        l2_ro_mpt++;
+        pl2e++;
     }
 #undef CNT
 #undef MFN
+    UNMAP_DOMAIN_PAGE(l2_ro_mpt);
+    UNMAP_DOMAIN_PAGE(l3_ro_mpt);
 
     /* Create user-accessible L2 directory to map the MPT for compat guests. */
-    if ( (l2_ro_mpt = alloc_xen_pagetable()) == NULL )
-        goto nomem;
-    compat_idle_pg_table_l2 = l2_ro_mpt;
-    clear_page(l2_ro_mpt);
-    /* Allocate and map the compatibility mode machine-to-phys table. */
-    mpt_size = (mpt_size >> 1) + (1UL << (L2_PAGETABLE_SHIFT - 1));
-    if ( mpt_size > RDWR_COMPAT_MPT_VIRT_END - RDWR_COMPAT_MPT_VIRT_START )
-        mpt_size = RDWR_COMPAT_MPT_VIRT_END - RDWR_COMPAT_MPT_VIRT_START;
-    mpt_size &= ~((1UL << L2_PAGETABLE_SHIFT) - 1UL);
-    if ( (m2p_compat_vstart + mpt_size) < MACH2PHYS_COMPAT_VIRT_END )
-        m2p_compat_vstart = MACH2PHYS_COMPAT_VIRT_END - mpt_size;
+    if ( opt_pv32 )
+    {
+        mfn = alloc_xen_pagetable();
+        if ( mfn_eq(mfn, INVALID_MFN) )
+            goto nomem;
+        compat_idle_pg_table_l2 = map_domain_page_global(mfn);
+        clear_page(compat_idle_pg_table_l2);
+        pl2e = compat_idle_pg_table_l2;
+
+        /* Allocate and map the compatibility mode machine-to-phys table. */
+        mpt_size = (mpt_size >> 1) + (1UL << (L2_PAGETABLE_SHIFT - 1));
+        if ( mpt_size > RDWR_COMPAT_MPT_VIRT_END - RDWR_COMPAT_MPT_VIRT_START )
+            mpt_size = RDWR_COMPAT_MPT_VIRT_END - RDWR_COMPAT_MPT_VIRT_START;
+        mpt_size &= ~((1UL << L2_PAGETABLE_SHIFT) - 1UL);
+        if ( (m2p_compat_vstart + mpt_size) < MACH2PHYS_COMPAT_VIRT_END )
+            m2p_compat_vstart = MACH2PHYS_COMPAT_VIRT_END - mpt_size;
+    }
+    else
+        mpt_size = 0;
+
 #define MFN(x) (((x) << L2_PAGETABLE_SHIFT) / sizeof(unsigned int))
 #define CNT ((sizeof(*frame_table) & -sizeof(*frame_table)) / \
              sizeof(*compat_machine_to_phys_mapping))
     BUILD_BUG_ON((sizeof(*frame_table) & ~sizeof(*frame_table)) % \
                  sizeof(*compat_machine_to_phys_mapping));
-    for ( i = 0; i < (mpt_size >> L2_PAGETABLE_SHIFT); i++, l2_ro_mpt++ )
+    for ( i = 0; i < (mpt_size >> L2_PAGETABLE_SHIFT); i++, pl2e++ )
     {
         memflags = MEMF_node(phys_to_nid(i <<
             (L2_PAGETABLE_SHIFT - 2 + PAGE_SHIFT)));
@@ -647,7 +683,7 @@ void __init paging_init(void)
                         (i << L2_PAGETABLE_SHIFT)),
                0xFF, 1UL << L2_PAGETABLE_SHIFT);
         /* NB. Cannot be GLOBAL as the ptes get copied into per-VM space. */
-        l2e_write(l2_ro_mpt, l2e_from_page(l1_pg, _PAGE_PSE|_PAGE_PRESENT));
+        l2e_write(pl2e, l2e_from_page(l1_pg, _PAGE_PSE|_PAGE_PRESENT));
     }
 #undef CNT
 #undef MFN
@@ -845,23 +881,24 @@ void __init subarch_init_memory(void)
                 mfn_to_page(_mfn(m2p_start_mfn + i)), SHARE_ro);
     }
 
-    for ( v  = RDWR_COMPAT_MPT_VIRT_START;
-          v != RDWR_COMPAT_MPT_VIRT_END;
-          v += 1 << L2_PAGETABLE_SHIFT )
-    {
-        l3e = l3e_from_l4e(idle_pg_table[l4_table_offset(v)],
-                           l3_table_offset(v));
-        if ( !(l3e_get_flags(l3e) & _PAGE_PRESENT) )
-            continue;
-        l2e = l2e_from_l3e(l3e, l2_table_offset(v));
-        if ( !(l2e_get_flags(l2e) & _PAGE_PRESENT) )
-            continue;
-        m2p_start_mfn = l2e_get_pfn(l2e);
+    if ( opt_pv32 )
+        for ( v  = RDWR_COMPAT_MPT_VIRT_START;
+              v != RDWR_COMPAT_MPT_VIRT_END;
+              v += 1 << L2_PAGETABLE_SHIFT )
+        {
+            l3e = l3e_from_l4e(idle_pg_table[l4_table_offset(v)],
+                               l3_table_offset(v));
+            if ( !(l3e_get_flags(l3e) & _PAGE_PRESENT) )
+                continue;
+            l2e = l2e_from_l3e(l3e, l2_table_offset(v));
+            if ( !(l2e_get_flags(l2e) & _PAGE_PRESENT) )
+                continue;
+            m2p_start_mfn = l2e_get_pfn(l2e);
 
-        for ( i = 0; i < L1_PAGETABLE_ENTRIES; i++ )
-            share_xen_page_with_privileged_guests(
-                mfn_to_page(_mfn(m2p_start_mfn + i)), SHARE_ro);
-    }
+            for ( i = 0; i < L1_PAGETABLE_ENTRIES; i++ )
+                share_xen_page_with_privileged_guests(
+                    mfn_to_page(_mfn(m2p_start_mfn + i)), SHARE_ro);
+        }
 
     /* Mark all of direct map NX if hardware supports it. */
     if ( !cpu_has_nx )
@@ -933,6 +970,9 @@ long subarch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
         break;
 
     case XENMEM_machphys_compat_mfn_list:
+        if ( !opt_pv32 )
+            return -EOPNOTSUPP;
+
         if ( copy_from_guest(&xmml, arg, 1) )
             return -EFAULT;
 
@@ -966,8 +1006,10 @@ long subarch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
     case XENMEM_get_sharing_shared_pages:
         return mem_sharing_get_nr_shared_mfns();
 
+#ifdef CONFIG_MEM_PAGING
     case XENMEM_paging_op:
         return mem_paging_memop(guest_handle_cast(arg, xen_mem_paging_op_t));
+#endif
 
 #ifdef CONFIG_MEM_SHARING
     case XENMEM_sharing_op:
@@ -980,194 +1022,6 @@ long subarch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
     }
 
     return rc;
-}
-
-long do_stack_switch(unsigned long ss, unsigned long esp)
-{
-    fixup_guest_stack_selector(current->domain, ss);
-    current->arch.pv.kernel_ss = ss;
-    current->arch.pv.kernel_sp = esp;
-    return 0;
-}
-
-long do_set_segment_base(unsigned int which, unsigned long base)
-{
-    struct vcpu *v = current;
-    long ret = 0;
-
-    if ( is_pv_32bit_vcpu(v) )
-        return -ENOSYS; /* x86/64 only. */
-
-    switch ( which )
-    {
-    case SEGBASE_FS:
-        if ( is_canonical_address(base) )
-            wrfsbase(base);
-        else
-            ret = -EINVAL;
-        break;
-
-    case SEGBASE_GS_USER:
-        if ( is_canonical_address(base) )
-        {
-            wrgsshadow(base);
-            v->arch.pv.gs_base_user = base;
-        }
-        else
-            ret = -EINVAL;
-        break;
-
-    case SEGBASE_GS_KERNEL:
-        if ( is_canonical_address(base) )
-            wrgsbase(base);
-        else
-            ret = -EINVAL;
-        break;
-
-    case SEGBASE_GS_USER_SEL:
-    {
-        unsigned int sel = (uint16_t)base;
-
-        /*
-         * We wish to update the user %gs from the GDT/LDT.  Currently, the
-         * guest kernel's GS_BASE is in context.
-         */
-        asm volatile ( "swapgs" );
-
-        if ( sel > 3 )
-            /* Fix up RPL for non-NUL selectors. */
-            sel |= 3;
-        else if ( boot_cpu_data.x86_vendor &
-                  (X86_VENDOR_AMD | X86_VENDOR_HYGON) )
-            /* Work around NUL segment behaviour on AMD hardware. */
-            asm volatile ( "mov %[sel], %%gs"
-                           :: [sel] "r" (FLAT_USER_DS32) );
-
-        /*
-         * Load the chosen selector, with fault handling.
-         *
-         * Errors ought to fail the hypercall, but that was never built in
-         * originally, and Linux will BUG() if this call fails.
-         *
-         * NUL the selector in the case of an error.  This too needs to deal
-         * with the AMD NUL segment behaviour, but it is already a slowpath in
-         * #GP context so perform the flat load unconditionally to avoid
-         * complicated logic.
-         *
-         * Anyone wanting to check for errors from this hypercall should
-         * re-read %gs and compare against the input.
-         */
-        asm volatile ( "1: mov %[sel], %%gs\n\t"
-                       ".section .fixup, \"ax\", @progbits\n\t"
-                       "2: mov %k[flat], %%gs\n\t"
-                       "   xor %[sel], %[sel]\n\t"
-                       "   jmp 1b\n\t"
-                       ".previous\n\t"
-                       _ASM_EXTABLE(1b, 2b)
-                       : [sel] "+r" (sel)
-                       : [flat] "r" (FLAT_USER_DS32) );
-
-        /* Update the cache of the inactive base, as read from the GDT/LDT. */
-        v->arch.pv.gs_base_user = rdgsbase();
-
-        asm volatile ( safe_swapgs );
-        break;
-    }
-
-    default:
-        ret = -EINVAL;
-        break;
-    }
-
-    return ret;
-}
-
-
-/* Returns TRUE if given descriptor is valid for GDT or LDT. */
-int check_descriptor(const struct domain *dom, seg_desc_t *d)
-{
-    u32 a = d->a, b = d->b;
-    u16 cs;
-    unsigned int dpl;
-
-    /* A not-present descriptor will always fault, so is safe. */
-    if ( !(b & _SEGMENT_P) ) 
-        return 1;
-
-    /* Check and fix up the DPL. */
-    dpl = (b >> 13) & 3;
-    __fixup_guest_selector(dom, dpl);
-    b = (b & ~_SEGMENT_DPL) | (dpl << 13);
-
-    /* All code and data segments are okay. No base/limit checking. */
-    if ( (b & _SEGMENT_S) )
-    {
-        if ( is_pv_32bit_domain(dom) )
-        {
-            unsigned long base, limit;
-
-            if ( b & _SEGMENT_L )
-                goto bad;
-
-            /*
-             * Older PAE Linux guests use segments which are limited to
-             * 0xf6800000. Extend these to allow access to the larger read-only
-             * M2P table available in 32on64 mode.
-             */
-            base = (b & 0xff000000) | ((b & 0xff) << 16) | (a >> 16);
-
-            limit = (b & 0xf0000) | (a & 0xffff);
-            limit++; /* We add one because limit is inclusive. */
-
-            if ( (b & _SEGMENT_G) )
-                limit <<= 12;
-
-            if ( (base == 0) && (limit > HYPERVISOR_COMPAT_VIRT_START(dom)) )
-            {
-                a |= 0x0000ffff;
-                b |= 0x000f0000;
-            }
-        }
-
-        goto good;
-    }
-
-    /* Invalid type 0 is harmless. It is used for 2nd half of a call gate. */
-    if ( (b & _SEGMENT_TYPE) == 0x000 )
-        return 1;
-
-    /* Everything but a call gate is discarded here. */
-    if ( (b & _SEGMENT_TYPE) != 0xc00 )
-        goto bad;
-
-    /* Validate the target code selector. */
-    cs = a >> 16;
-    if ( !guest_gate_selector_okay(dom, cs) )
-        goto bad;
-    /*
-     * Force DPL to zero, causing a GP fault with its error code indicating
-     * the gate in use, allowing emulation. This is necessary because with
-     * native guests (kernel in ring 3) call gates cannot be used directly
-     * to transition from user to kernel mode (and whether a gate is used
-     * to enter the kernel can only be determined when the gate is being
-     * used), and with compat guests call gates cannot be used at all as
-     * there are only 64-bit ones.
-     * Store the original DPL in the selector's RPL field.
-     */
-    b &= ~_SEGMENT_DPL;
-    cs = (cs & ~3) | dpl;
-    a = (a & 0xffffU) | (cs << 16);
-
-    /* Reserved bits must be zero. */
-    if ( b & (is_pv_32bit_domain(dom) ? 0xe0 : 0xff) )
-        goto bad;
-        
- good:
-    d->a = a;
-    d->b = b;
-    return 1;
- bad:
-    return 0;
 }
 
 int pagefault_by_memadd(unsigned long addr, struct cpu_user_regs *regs)
@@ -1446,7 +1300,7 @@ int memory_add(unsigned long spfn, unsigned long epfn, unsigned int pxm)
     {
         for ( i = spfn; i < epfn; i++ )
             if ( iommu_legacy_map(hardware_domain, _dfn(i), _mfn(i),
-                                  PAGE_ORDER_4K,
+                                  1ul << PAGE_ORDER_4K,
                                   IOMMUF_readable | IOMMUF_writable) )
                 break;
         if ( i != epfn )
@@ -1454,7 +1308,7 @@ int memory_add(unsigned long spfn, unsigned long epfn, unsigned int pxm)
             while (i-- > old_max)
                 /* If statement to satisfy __must_check. */
                 if ( iommu_legacy_unmap(hardware_domain, _dfn(i),
-                                        PAGE_ORDER_4K) )
+                                        1ul << PAGE_ORDER_4K) )
                     continue;
 
             goto destroy_m2p;
@@ -1485,7 +1339,31 @@ destroy_frametable:
     return ret;
 }
 
+void set_gpfn_from_mfn(unsigned long mfn, unsigned long pfn)
+{
+    unsigned long entry = pfn;
+
+    if ( unlikely(!machine_to_phys_mapping_valid) )
+        return;
+
+    if ( entry != INVALID_M2P_ENTRY )
+    {
+        const struct domain *d = page_get_owner(mfn_to_page(_mfn(mfn)));
+
+        if ( d && (d == dom_cow) )
+            entry = SHARED_M2P_ENTRY;
+    }
+
+    if ( opt_pv32 &&
+         mfn < (RDWR_COMPAT_MPT_VIRT_END - RDWR_COMPAT_MPT_VIRT_START) / 4 )
+        compat_machine_to_phys_mapping[mfn] = entry;
+
+    machine_to_phys_mapping[mfn] = entry;
+}
+
+#ifdef CONFIG_COMPAT
 #include "compat/mm.c"
+#endif
 
 /*
  * Local variables:

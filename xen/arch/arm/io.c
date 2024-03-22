@@ -16,13 +16,16 @@
  * GNU General Public License for more details.
  */
 
+#include <xen/ioreq.h>
 #include <xen/lib.h>
 #include <xen/spinlock.h>
 #include <xen/sched.h>
 #include <xen/sort.h>
 #include <asm/cpuerrata.h>
 #include <asm/current.h>
+#include <asm/ioreq.h>
 #include <asm/mmio.h>
+#include <asm/traps.h>
 
 #include "decode.h"
 
@@ -38,26 +41,11 @@ static enum io_state handle_read(const struct mmio_handler *handler,
      * setting r).
      */
     register_t r = 0;
-    uint8_t size = (1 << dabt.size) * 8;
 
     if ( !handler->ops->read(v, info, &r, handler->priv) )
         return IO_ABORT;
 
-    /*
-     * Sign extend if required.
-     * Note that we expect the read handler to have zeroed the bits
-     * outside the requested access size.
-     */
-    if ( dabt.sign && (r & (1UL << (size - 1))) )
-    {
-        /*
-         * We are relying on register_t using the same as
-         * an unsigned long in order to keep the 32-bit assembly
-         * code smaller.
-         */
-        BUILD_BUG_ON(sizeof(register_t) != sizeof(unsigned long));
-        r |= (~0UL) << size;
-    }
+    r = sign_extend(dabt, r);
 
     set_user_reg(regs, dabt.reg, r);
 
@@ -92,6 +80,13 @@ static int cmp_mmio_handler(const void *key, const void *elem)
     return 0;
 }
 
+static void swap_mmio_handler(void *_a, void *_b, size_t size)
+{
+    struct mmio_handler *a = _a, *b = _b;
+
+    SWAP(*a, *b);
+}
+
 static const struct mmio_handler *find_mmio_handler(struct domain *d,
                                                     paddr_t gpa)
 {
@@ -107,49 +102,108 @@ static const struct mmio_handler *find_mmio_handler(struct domain *d,
     return handler;
 }
 
+void try_decode_instruction(const struct cpu_user_regs *regs,
+                            mmio_info_t *info)
+{
+    int rc;
+
+    if ( info->dabt.valid )
+    {
+        info->dabt_instr.state = INSTR_VALID;
+
+        /*
+         * Erratum 766422: Thumb store translation fault to Hypervisor may
+         * not have correct HSR Rt value.
+         */
+        if ( check_workaround_766422() && (regs->cpsr & PSR_THUMB) &&
+             info->dabt.write )
+        {
+            rc = decode_instruction(regs, info);
+            if ( rc )
+            {
+                gprintk(XENLOG_DEBUG, "Unable to decode instruction\n");
+                info->dabt_instr.state = INSTR_ERROR;
+            }
+        }
+        return;
+    }
+
+    /*
+     * At this point, we know that the stage1 translation table is either in an
+     * emulated MMIO region or its address is invalid . This is not expected by
+     * Xen and thus it forwards the abort to the guest.
+     */
+    if ( info->dabt.s1ptw )
+    {
+        info->dabt_instr.state = INSTR_ERROR;
+        return;
+    }
+
+    /*
+     * When the data abort is caused due to cache maintenance, Xen should check
+     * if the address belongs to an emulated MMIO region or not. The behavior
+     * will differ accordingly.
+     */
+    if ( info->dabt.cache )
+    {
+        info->dabt_instr.state = INSTR_CACHE;
+        return;
+    }
+
+    /*
+     * Armv8 processor does not provide a valid syndrome for decoding some
+     * instructions. So in order to process these instructions, Xen must
+     * decode them.
+     */
+    rc = decode_instruction(regs, info);
+    if ( rc )
+    {
+        gprintk(XENLOG_ERR, "Unable to decode instruction\n");
+        info->dabt_instr.state = INSTR_ERROR;
+    }
+}
+
 enum io_state try_handle_mmio(struct cpu_user_regs *regs,
-                              const union hsr hsr,
-                              paddr_t gpa)
+                              mmio_info_t *info)
 {
     struct vcpu *v = current;
     const struct mmio_handler *handler = NULL;
-    const struct hsr_dabt dabt = hsr.dabt;
-    mmio_info_t info = {
-        .gpa = gpa,
-        .dabt = dabt
-    };
+    int rc;
 
-    ASSERT(hsr.ec == HSR_EC_DATA_ABORT_LOWER_EL);
+    ASSERT(info->dabt.ec == HSR_EC_DATA_ABORT_LOWER_EL);
 
-    handler = find_mmio_handler(v->domain, info.gpa);
-    if ( !handler )
-        return IO_UNHANDLED;
-
-    /* All the instructions used on emulated MMIO region should be valid */
-    if ( !dabt.valid )
-        return IO_ABORT;
-
-    /*
-     * Erratum 766422: Thumb store translation fault to Hypervisor may
-     * not have correct HSR Rt value.
-     */
-    if ( check_workaround_766422() && (regs->cpsr & PSR_THUMB) &&
-         dabt.write )
+    if ( !(info->dabt.valid || (info->dabt_instr.state == INSTR_CACHE)) )
     {
-        int rc;
-
-        rc = decode_instruction(regs, &info.dabt);
-        if ( rc )
-        {
-            gprintk(XENLOG_DEBUG, "Unable to decode instruction\n");
-            return IO_ABORT;
-        }
+        ASSERT_UNREACHABLE();
+        return IO_ABORT;
     }
 
-    if ( info.dabt.write )
-        return handle_write(handler, v, &info);
+    handler = find_mmio_handler(v->domain, info->gpa);
+    if ( !handler )
+    {
+        rc = try_fwd_ioserv(regs, v, info);
+        if ( rc == IO_HANDLED )
+            return handle_ioserv(regs, v);
+
+        return rc;
+    }
+
+    /*
+     * When the data abort is caused due to cache maintenance and the address
+     * belongs to an emulated region, Xen should ignore this instruction.
+     */
+    if ( info->dabt_instr.state == INSTR_CACHE )
+        return IO_HANDLED;
+
+    /*
+     * At this point, we know that the instruction is either valid or has been
+     * decoded successfully. Thus, Xen should be allowed to execute the
+     * instruction on the emulated MMIO region.
+     */
+    if ( info->dabt.write )
+        return handle_write(handler, v, info);
     else
-        return handle_read(handler, v, &info);
+        return handle_read(handler, v, info);
 }
 
 void register_mmio_handler(struct domain *d,
@@ -174,7 +228,7 @@ void register_mmio_handler(struct domain *d,
 
     /* Sort mmio handlers in ascending order based on base address */
     sort(vmmio->handlers, vmmio->num_entries, sizeof(struct mmio_handler),
-         cmp_mmio_handler, NULL);
+         cmp_mmio_handler, swap_mmio_handler);
 
     write_unlock(&vmmio->lock);
 }

@@ -28,20 +28,20 @@
 #include <asm/setup.h>
 #include <asm/acpi.h>
 #include "../../../common/decompress.h"
-#define XZ_EXTERN STATIC
+#define XZ_EXTERN static
 #include "../../../common/xz/crc32.c"
 
 /* Constant to indicate "Xen" in unicode u16 format */
 static const CHAR16 xen_efi_fw_vendor[] = {0x0058, 0x0065, 0x006E, 0x0000};
 
-size_t __init estimate_efi_size(int mem_nr_banks)
+size_t __init estimate_efi_size(unsigned int mem_nr_banks)
 {
     size_t size;
     size_t est_size = sizeof(EFI_SYSTEM_TABLE);
     size_t ect_size = sizeof(EFI_CONFIGURATION_TABLE);
     size_t emd_size = sizeof(EFI_MEMORY_DESCRIPTOR);
     size_t fw_vendor_size = sizeof(xen_efi_fw_vendor);
-    int acpi_mem_nr_banks = 0;
+    unsigned int acpi_mem_nr_banks = 0;
 
     if ( !acpi_disabled )
         acpi_mem_nr_banks = bootinfo.acpi.nr_banks;

@@ -22,6 +22,7 @@
 #include "utils.h"
 #include "io.h"
 #include <xenevtchn.h>
+#include <xenforeignmemory.h>
 #include <xengnttab.h>
 #include <xenstore.h>
 #include <xen/io/console.h>
@@ -49,9 +50,7 @@
 #include <sys/ioctl.h>
 #include <libutil.h>
 #endif
-
-#define MAX(a, b) (((a) > (b)) ? (a) : (b))
-#define MIN(a, b) (((a) < (b)) ? (a) : (b))
+#include <xen-tools/libs.h>
 
 /* Each 10 bits takes ~ 3 digits, plus one, plus one for nul terminator. */
 #define MAX_STRLEN(x) ((sizeof(x) * CHAR_BIT + CHAR_BIT-1) / 10 * 3 + 2)
@@ -75,12 +74,11 @@ static int log_time_guest_needts = 1;
 static int log_hv_fd = -1;
 
 static xengnttab_handle *xgt_handle = NULL;
+static xenforeignmemory_handle *xfm_handle;
 
 static struct pollfd  *fds;
 static unsigned int current_array_size;
 static unsigned int nr_fds;
-
-#define ROUNDUP(_x,_w) (((unsigned long)(_x)+(1UL<<(_w))-1) & ~((1UL<<(_w))-1))
 
 struct buffer {
 	char *data;
@@ -91,14 +89,14 @@ struct buffer {
 };
 
 struct console {
-	char *ttyname;
+	const char *ttyname;
 	int master_fd;
 	int master_pollfd_idx;
 	int slave_fd;
 	int log_fd;
 	struct buffer buffer;
 	char *xspath;
-	char *log_suffix;
+	const char *log_suffix;
 	int ring_ref;
 	xenevtchn_handle *xce_handle;
 	int xce_pollfd_idx;
@@ -113,9 +111,9 @@ struct console {
 };
 
 struct console_type {
-	char *xsname;
-	char *ttyname;
-	char *log_suffix;
+	const char *xsname;
+	const char *ttyname;
+	const char *log_suffix;
 	bool optional;
 	bool use_gnttab;
 };
@@ -679,7 +677,7 @@ static void console_unmap_interface(struct console *con)
 	if (xgt_handle && con->ring_ref == -1)
 		xengnttab_unmap(xgt_handle, con->interface, 1);
 	else
-		munmap(con->interface, XC_PAGE_SIZE);
+		xenforeignmemory_unmap(xfm_handle, con->interface, 1);
 	con->interface = NULL;
 	con->ring_ref = -1;
 }
@@ -726,11 +724,12 @@ static int console_create_ring(struct console *con)
 		con->ring_ref = -1;
 	}
 	if (!con->interface) {
+		xen_pfn_t pfn = ring_ref;
+
 		/* Fall back to xc_map_foreign_range */
-		con->interface = xc_map_foreign_range(
-			xc, dom->domid, XC_PAGE_SIZE,
-			PROT_READ|PROT_WRITE,
-			(unsigned long)ring_ref);
+		con->interface = xenforeignmemory_map(
+			xfm_handle, dom->domid,	PROT_READ|PROT_WRITE, 1,
+			&pfn, NULL);
 		if (con->interface == NULL) {
 			err = EINVAL;
 			goto out;
@@ -817,7 +816,8 @@ static int console_init(struct console *con, struct domain *dom, void **data)
 	int err = -1;
 	struct timespec ts;
 	struct console_type **con_type = (struct console_type **)data;
-	char *xsname, *xspath;
+	const char *xsname;
+	char *xspath;
 
 	if (clock_gettime(CLOCK_MONOTONIC, &ts) < 0) {
 		dolog(LOG_ERR, "Cannot get time of day %s:%s:L%d",
@@ -839,7 +839,7 @@ static int console_init(struct console *con, struct domain *dom, void **data)
 	con->log_suffix = (*con_type)->log_suffix;
 	con->optional = (*con_type)->optional;
 	con->use_gnttab = (*con_type)->use_gnttab;
-	xsname = (char *)(*con_type)->xsname;
+	xsname = (*con_type)->xsname;
 	xspath = xs_get_domain_path(xs, dom->domid);
 	s = realloc(xspath, strlen(xspath) +
 		    strlen(xsname) + 1);
@@ -1344,6 +1344,14 @@ void handle_io(void)
 		      errno, strerror(errno));
 	}
 
+	xfm_handle = xenforeignmemory_open(NULL, 0);
+	if (xfm_handle == NULL) {
+		dolog(LOG_ERR,
+		      "Failed to open xen foreign memory handle: %d (%s)",
+		      errno, strerror(errno));
+		goto out;
+	}
+
 	enum_domains();
 
 	for (;;) {
@@ -1464,6 +1472,10 @@ void handle_io(void)
 	if (xgt_handle != NULL) {
 		xengnttab_close(xgt_handle);
 		xgt_handle = NULL;
+	}
+	if (xfm_handle != NULL) {
+		xenforeignmemory_close(xfm_handle);
+		xfm_handle = NULL;
 	}
 	log_hv_evtchn = -1;
 }

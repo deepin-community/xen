@@ -5,6 +5,13 @@
 
 SHELL    := bash -e
 
+# This gives us DEB_VERSION_UPSTREAM and DEB_VERSION (used by our delta queue)
+include /usr/share/dpkg/pkg-info.mk
+export DEB_VERSION
+
+# DEB_MAINTAINER is used by our delta queue
+export DEB_MAINTAINER := $(shell sed -ne 's/^Maintainer: \(.*\)$$/\1/p' debian/control)
+
 # This influences dpkg-buildflags to specify better linker
 # options.  See https://wiki.debian.org/Hardening
 # Apparently some of these might incur silent breakage
@@ -19,15 +26,13 @@ SHELL    := bash -e
 # Inexplicably, if you tell make `export V=value' and `$(shell ...)'
 # it does not pass V to the shell.  WTF.  So we set a variable
 # dbmo which we include in the relevant $(shell ...) invocations.
-dbmo= DEB_BUILD_MAINT_OPTIONS="hardening=+all reproducible=+fixfilepath"
+dbmo= DEB_BUILD_MAINT_OPTIONS="hardening=+all"
 
 # Architecture handling.
 #
 # We need to explicitly specify the architecture because the Xen
 # upstream build system likes to use `uname' which can produce wrong
-# answers it other-bitness chroots, and because we need to build a
-# 64-bit hypervisor even on i386 (since there is no 32-bit hypervisor
-# anymore).
+# answers in other-bitness chroots.
 
 # Also there is terminological confusion.  The DEB_* variables follow
 # GNU GCC terminology:
@@ -42,12 +47,10 @@ include /usr/share/dpkg/architecture.mk
 # Debian nor GNU names.
 
 flavour_amd64 = amd64
-flavour_i386  = amd64
 flavour_armhf = armhf
 flavour_arm64 = arm64
 
 xen_arch_amd64 = x86_64
-xen_arch_i386  = x86_32
 xen_arch_armhf = arm32
 xen_arch_arm64 = arm64
 
@@ -67,7 +70,7 @@ flavour=$(flavour_$(DEB_HOST_ARCH))
 # (Everywhere else, it is handled dynamically.)
 #
 upstream_version := \
- $(shell dpkg-parsechangelog -SVersion | sed 's/\(\.[0-9]*\)\..*/\1/' )
+ $(shell echo $(DEB_VERSION_UPSTREAM) | sed 's/\(\.[0-9]*\)\..*/\1/' )
 
 # Many of the debhelper files are most conveniently provided as
 # templates which depend on the flavour and the upstream version.
@@ -164,12 +167,9 @@ export XEN_BUILD_TIME=$(shell LC_ALL=C date -u -d "@$(SOURCE_DATE_EPOCH)" "+%T")
 export SMBIOS_REL_DATE=$(shell LC_ALL=C date -u -d "@$(SOURCE_DATE_EPOCH)" "+%m/%d/%Y")
 export VGABIOS_REL_DATE=$(shell LC_ALL=C date -u -d "@$(SOURCE_DATE_EPOCH)" "+%d %b %Y")
 
-export PYBUILD_NAME=xen
-export PYBUILD_DISABLE=test
-export PYBUILD_SYSTEM=distutils
 
 %:
-	dh $@ --with=python3 --buildsystem=pybuild
+	dh $@ --with=python3
 
 # Without this, something on stretch passes CFLAGS in the environment
 # to the Xen build system, which then (with 4.11) chokes printing
@@ -209,22 +209,20 @@ override_dh_auto_configure:
 		--disable-blktap1 \
 		--disable-blktap2 \
 		--disable-qemu-traditional --disable-rombios \
-		--with-system-qemu=/usr/bin/qemu-system-i386 \
+		--with-system-qemu=/usr/libexec/xen-qemu-system-i386 \
 		--enable-ovmf --with-system-ovmf=/usr/share/ovmf/OVMF.fd \
 		--with-system-seabios=/usr/share/seabios/bios-256k.bin
 
 # tools/firmware/xen-dir is the `shim' used for booting PV guests
 # in an HVM container, for security (particularly, for meltdown/spectre
-# mitigation).  It's actually a hypervisor.  On i386 it is not built
-# by `make tools' because run that with XEN_COMPILE_ARCH=x86_32 which
-# is no longer a supported hypervisor architecture.  And we want to
-# build it with $(make_args_xen) not $(make_args_tools).  So do it
-# separately.
+# mitigation).  It's actually a hypervisor. It's only built for amd64.
+# Since we want to build it with $(make_args_xen) not $(make_args_tools),
+# do it separately.
 override_dh_auto_build:
 	$(MAKE) $(make_args_xen) xen
 	$(MAKE) $(make_args_tools) tools docs CONFIG_PV_SHIM=n
 	case $(flavour) in \
-	amd64|i386) \
+	amd64) \
 		$(MAKE) $(make_args_xen) -C tools/firmware/xen-dir ;; \
 	esac
 	touch debian/xen-tools-built.stamp
@@ -239,8 +237,7 @@ override_dh_auto_install: $(TEMPLATED_FILES)
 		install-{tools,docs} CONFIG_PV_SHIM=n
 	:
 	@# shim install target needs to be run separately because we
-	@# need to pass it the make_args_xen settings, in particular
-	@# on i386 bwe need to pass x86_64 here to actually build it.
+	@# need to pass it the make_args_xen settings.
 	@# Luckily this target, unlike the build, is a noop on
 	@# shimless arches, so it does not need to be conditional.
 	$(MAKE) $(make_args_xen) DESTDIR=$t $(make_args_xen) \
@@ -298,44 +295,38 @@ override_dh_python3:
 	dh_python3
 	dh_python3 -pxen-utils-$(upstream_version) \
 		usr/lib/xen-$(upstream_version)/bin
+	dh_python3 -pxen-utils-$(upstream_version) \
+		usr/lib/xen-$(upstream_version)/lib/python
 
 # We have two init scripts.  (There used to be xend too.)
 override_dh_installinit:
 	dh_installinit --name xen --no-start -- defaults
 	dh_installinit --name xendomains --no-start -- defaults
 
-# dh_strip in dh compat 10 and earlier (which we are at so this
-# package builds on stretch) looks at filenames and modes to decide
-# what to process.  hvmloader doesn't match, so we must trick it.
-# It is sufficient to make it executable.  And we have to undo
-# that again, then.  This all happens after dh_install so we operate
-# on the package-specific file.
+# We want to ship xen-shim-syms in a -dbg package, but if we just add a
+# xen-utils-V-dbg package for it, lintian will complain with the following
+# warning:
+# W: xen changes: package-builds-dbg-and-dbgsym-variants xen-utils-V-dbg xen-utils-V-dbgsym
+# So we disable the generation of an automatic dbgsym packages for xen-utils-V
+# and ship the automatically generated files in our xen-utils-V-dbg package.
+#
+# Don't strip the .note section from xen-shim. See also
+# debian/xen-utils-V.lintian-overrides.vsn-in
+#
+# Finally, don't strip anything in the -dbg packages
 override_dh_strip:
-	find debian/xen-utils-* -name hvmloader | xargs -r chmod -v +x
-	dh_strip
-	find debian/xen-utils-* -name hvmloader | xargs -r chmod -v -x
+	dh_strip --package=xen-utils-$(upstream_version) \
+		--dbg-package=xen-utils-$(upstream_version)-dbg \
+		--exclude=xen-shim
+	dh_strip --remaining-packages \
+		--no-package=xen-utils-$(upstream_version)-dbg \
+		--no-package=xen-hypervisor-$(upstream_version)-$(flavour)-dbg
 
 # Hardlink the various xenstore-* programs together.  This is an
 # argv[0]-using binary of which we can have only one copy.  We need to
 # do this late, because dh_strip breaks hardlinks.
-#
-# The debug files are fairly large, fairly rarely used,
-# and not compressed by the upstream build system.
 override_dh_compress:
 	rdfind -makehardlinks true -makeresultsfile false \
 		debian/xenstore-utils/usr/bin
 	:
 	dh_compress -Xusr/share/doc/xen/html
-	find debian/xen-hypervisor-*/usr/lib/debug -type f -print0 \
-		| xargs -0r gzip -9vn
-
-# By default, files in debian/tmp which are not handled by anything
-# in rules are ignored.  This makes them into errors.
-override_dh_missing:
-	dh_missing --fail-missing
-
-
-# We are dropping the config file /etc/default/xen which appeared in
-# earlier versions.  See ./ucf-remove-fixup for more details.
-override_dh_ucf:
-	dh_ucf

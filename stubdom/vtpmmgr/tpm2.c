@@ -126,7 +126,7 @@
     ptr = unpack_TPM_RSP_HEADER(ptr, \
           &(tag), &(paramSize), &(status));\
     if ((status) != TPM_SUCCESS){ \
-        vtpmlogerror(VTPM_LOG_TPM, "Failed with return code %s\n", tpm_get_error_name(status));\
+        vtpmlogerror(VTPM_LOG_TPM, "Failed with return code %s (%x)\n", tpm_get_error_name(status), (status));\
         goto abort_egress;\
     }\
 } while(0)
@@ -427,15 +427,22 @@ abort_egress:
 
 TPM_RC TPM2_GetRandom(UINT32 * bytesRequested, BYTE * randomBytes)
 {
+    UINT16 bytesReq;
     TPM_BEGIN(TPM_ST_NO_SESSIONS, TPM_CC_GetRandom);
 
-    ptr = pack_UINT16(ptr, (UINT16)*bytesRequested);
+    if (*bytesRequested > UINT16_MAX)
+        bytesReq = UINT16_MAX;
+    else
+        bytesReq = *bytesRequested;
+
+    ptr = pack_UINT16(ptr, bytesReq);
 
     TPM_TRANSMIT();
     TPM_UNPACK_VERIFY();
 
-    ptr = unpack_UINT16(ptr, (UINT16 *)bytesRequested);
-    ptr = unpack_TPM_BUFFER(ptr, randomBytes, *bytesRequested);
+    ptr = unpack_UINT16(ptr, &bytesReq);
+    *bytesRequested = bytesReq;
+    ptr = unpack_TPM_BUFFER(ptr, randomBytes, bytesReq);
 
 abort_egress:
     return status;

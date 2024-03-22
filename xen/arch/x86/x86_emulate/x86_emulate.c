@@ -488,6 +488,7 @@ static const struct ext0f38_table {
     [0x62] = { .simd_size = simd_packed_int, .two_op = 1, .d8s = d8s_bw },
     [0x63] = { .simd_size = simd_packed_int, .to_mem = 1, .two_op = 1, .d8s = d8s_bw },
     [0x64 ... 0x66] = { .simd_size = simd_packed_int, .d8s = d8s_vl },
+    [0x68] = { .simd_size = simd_packed_int, .d8s = d8s_vl },
     [0x70 ... 0x73] = { .simd_size = simd_packed_int, .d8s = d8s_vl },
     [0x75 ... 0x76] = { .simd_size = simd_packed_int, .d8s = d8s_vl },
     [0x77] = { .simd_size = simd_packed_fp, .d8s = d8s_vl },
@@ -515,7 +516,7 @@ static const struct ext0f38_table {
     [0x9d] = { .simd_size = simd_scalar_vexw, .d8s = d8s_dq },
     [0x9e] = { .simd_size = simd_packed_fp, .d8s = d8s_vl },
     [0x9f] = { .simd_size = simd_scalar_vexw, .d8s = d8s_dq },
-    [0xa0 ... 0xa3] = { .simd_size = simd_other, .vsib = 1, .d8s = d8s_dq },
+    [0xa0 ... 0xa3] = { .simd_size = simd_other, .to_mem = 1, .vsib = 1, .d8s = d8s_dq },
     [0xa6 ... 0xa8] = { .simd_size = simd_packed_fp, .d8s = d8s_vl },
     [0xa9] = { .simd_size = simd_scalar_vexw, .d8s = d8s_dq },
     [0xaa] = { .simd_size = simd_packed_fp, .d8s = d8s_vl },
@@ -1294,7 +1295,7 @@ static inline int mkec(uint8_t e, int32_t ec, ...)
    generate_exception_if((uint8_t)(state->ip -                          \
                                    ctxt->regs->r(ip)) > MAX_INST_LEN,   \
                          EXC_GP, 0);                                    \
-   rc = ops->insn_fetch(x86_seg_cs, _ip, &_x, (_size), ctxt);           \
+   rc = ops->insn_fetch(_ip, &_x, _size, ctxt);                         \
    if ( rc ) goto done;                                                 \
    _x;                                                                  \
 })
@@ -1362,7 +1363,7 @@ do {                                                                    \
         ip = (uint16_t)ip;                                              \
     else if ( !mode_64bit() )                                           \
         ip = (uint32_t)ip;                                              \
-    rc = ops->insn_fetch(x86_seg_cs, ip, NULL, 0, ctxt);                \
+    rc = ops->insn_fetch(ip, NULL, 0, ctxt);                            \
     if ( rc ) goto done;                                                \
     _regs.r(ip) = ip;                                                   \
     singlestep = _regs.eflags & X86_EFLAGS_TF;                          \
@@ -1922,7 +1923,7 @@ in_protmode(
 }
 
 static bool
-_amd_like(const struct cpuid_policy *cp)
+_amd_like(const struct cpu_policy *cp)
 {
     return cp->x86_vendor & (X86_VENDOR_AMD | X86_VENDOR_HYGON);
 }
@@ -1930,7 +1931,7 @@ _amd_like(const struct cpuid_policy *cp)
 static bool
 amd_like(const struct x86_emulate_ctxt *ctxt)
 {
-    return _amd_like(ctxt->cpuid);
+    return _amd_like(ctxt->cpu_policy);
 }
 
 #define vcpu_has_fpu()         (ctxt->cpuid->basic.fpu)
@@ -1969,6 +1970,7 @@ amd_like(const struct x86_emulate_ctxt *ctxt)
 #define vcpu_has_tbm()         (ctxt->cpuid->extd.tbm)
 #define vcpu_has_clzero()      (ctxt->cpuid->extd.clzero)
 #define vcpu_has_wbnoinvd()    (ctxt->cpuid->extd.wbnoinvd)
+#define vcpu_has_nscb()        (ctxt->cpuid->extd.nscb)
 
 #define vcpu_has_bmi1()        (ctxt->cpuid->feat.bmi1)
 #define vcpu_has_hle()         (ctxt->cpuid->feat.hle)
@@ -1999,14 +2001,16 @@ amd_like(const struct x86_emulate_ctxt *ctxt)
 #define vcpu_has_avx512_vnni() (ctxt->cpuid->feat.avx512_vnni)
 #define vcpu_has_avx512_bitalg() (ctxt->cpuid->feat.avx512_bitalg)
 #define vcpu_has_avx512_vpopcntdq() (ctxt->cpuid->feat.avx512_vpopcntdq)
-#define vcpu_has_tsxldtrk()    (ctxt->cpuid->feat.tsxldtrk)
 #define vcpu_has_rdpid()       (ctxt->cpuid->feat.rdpid)
 #define vcpu_has_movdiri()     (ctxt->cpuid->feat.movdiri)
 #define vcpu_has_movdir64b()   (ctxt->cpuid->feat.movdir64b)
 #define vcpu_has_enqcmd()      (ctxt->cpuid->feat.enqcmd)
 #define vcpu_has_avx512_4vnniw() (ctxt->cpuid->feat.avx512_4vnniw)
 #define vcpu_has_avx512_4fmaps() (ctxt->cpuid->feat.avx512_4fmaps)
+#define vcpu_has_avx512_vp2intersect() (ctxt->cpuid->feat.avx512_vp2intersect)
 #define vcpu_has_serialize()   (ctxt->cpuid->feat.serialize)
+#define vcpu_has_tsxldtrk()    (ctxt->cpuid->feat.tsxldtrk)
+#define vcpu_has_avx_vnni()    (ctxt->cpuid->feat.avx_vnni)
 #define vcpu_has_avx512_bf16() (ctxt->cpuid->feat.avx512_bf16)
 
 #define vcpu_must_have(feat) \
@@ -2074,7 +2078,7 @@ protmode_load_seg(
     struct x86_emulate_ctxt *ctxt,
     const struct x86_emulate_ops *ops)
 {
-    const struct cpuid_policy *cp = ctxt->cpuid;
+    const struct cpu_policy *cp = ctxt->cpu_policy;
     enum x86_segment sel_seg = (sel & 4) ? x86_seg_ldtr : x86_seg_gdtr;
     struct { uint32_t a, b; } desc, desc_hi = {};
     uint8_t dpl, rpl;
@@ -2099,7 +2103,7 @@ protmode_load_seg(
         case x86_seg_tr:
             goto raise_exn;
         }
-        if ( !_amd_like(cp) || !ops->read_segment ||
+        if ( !_amd_like(cp) || vcpu_has_nscb() || !ops->read_segment ||
              ops->read_segment(seg, sreg, ctxt) != X86EMUL_OKAY )
             memset(sreg, 0, sizeof(*sreg));
         else
@@ -2472,10 +2476,18 @@ static bool is_branch_step(struct x86_emulate_ctxt *ctxt,
                            const struct x86_emulate_ops *ops)
 {
     uint64_t debugctl;
+    int rc = X86EMUL_UNHANDLEABLE;
 
-    return ops->read_msr &&
-           ops->read_msr(MSR_IA32_DEBUGCTLMSR, &debugctl, ctxt) == X86EMUL_OKAY &&
-           (debugctl & IA32_DEBUGCTLMSR_BTF);
+    if ( !ops->read_msr ||
+         (rc = ops->read_msr(MSR_IA32_DEBUGCTLMSR, &debugctl,
+                             ctxt)) != X86EMUL_OKAY )
+    {
+        if ( rc == X86EMUL_EXCEPTION )
+            x86_emul_reset_event(ctxt);
+        debugctl = 0;
+    }
+
+    return debugctl & IA32_DEBUGCTLMSR_BTF;
 }
 
 static bool umip_active(struct x86_emulate_ctxt *ctxt,
@@ -2500,13 +2512,21 @@ static void adjust_bnd(struct x86_emulate_ctxt *ctxt,
 
     if ( !ops->read_xcr || ops->read_xcr(0, &xcr0, ctxt) != X86EMUL_OKAY ||
          !(xcr0 & X86_XCR0_BNDREGS) || !(xcr0 & X86_XCR0_BNDCSR) )
+    {
+        ASSERT(!ctxt->event_pending);
         return;
+    }
 
     if ( !mode_ring0() )
         bndcfg = read_bndcfgu();
     else if ( !ops->read_msr ||
-              ops->read_msr(MSR_IA32_BNDCFGS, &bndcfg, ctxt) != X86EMUL_OKAY )
+              (rc = ops->read_msr(MSR_IA32_BNDCFGS, &bndcfg,
+                                  ctxt)) != X86EMUL_OKAY )
+    {
+        if ( rc == X86EMUL_EXCEPTION )
+            x86_emul_reset_event(ctxt);
         return;
+    }
     if ( (bndcfg & IA32_BNDCFGS_ENABLE) && !(bndcfg & IA32_BNDCFGS_PRESERVE) )
     {
         /*
@@ -2521,7 +2541,7 @@ static void adjust_bnd(struct x86_emulate_ctxt *ctxt,
  done:;
 }
 
-int x86emul_unhandleable_rw(
+int cf_check x86emul_unhandleable_rw(
     enum x86_segment seg,
     unsigned long offset,
     void *p_data,
@@ -3244,7 +3264,7 @@ x86_decode(
             case 0x23: /* mov reg,dr */
                 /*
                  * Mov to/from cr/dr ignore the encoding of Mod, and behave as
-                 * if they were encoded as reg/reg instructions.  No futher
+                 * if they were encoded as reg/reg instructions.  No further
                  * disp/SIB bytes are fetched.
                  */
                 modrm_mod = 3;
@@ -4245,14 +4265,15 @@ x86_emulate(
         goto imul;
 
     case 0x6c ... 0x6d: /* ins %dx,%es:%edi */ {
-        unsigned long nr_reps = get_rep_prefix(false, true);
+        unsigned long nr_reps;
         unsigned int port = _regs.dx;
 
         dst.bytes = !(b & 1) ? 1 : (op_bytes == 8) ? 4 : op_bytes;
-        dst.mem.seg = x86_seg_es;
-        dst.mem.off = truncate_ea_and_reps(_regs.r(di), nr_reps, dst.bytes);
         if ( (rc = ioport_access_check(port, dst.bytes, ctxt, ops)) != 0 )
             goto done;
+        nr_reps = get_rep_prefix(false, true);
+        dst.mem.off = truncate_ea_and_reps(_regs.r(di), nr_reps, dst.bytes);
+        dst.mem.seg = x86_seg_es;
         /* Try the presumably most efficient approach first. */
         if ( !ops->rep_ins )
             nr_reps = 1;
@@ -4286,13 +4307,14 @@ x86_emulate(
     }
 
     case 0x6e ... 0x6f: /* outs %esi,%dx */ {
-        unsigned long nr_reps = get_rep_prefix(true, false);
+        unsigned long nr_reps;
         unsigned int port = _regs.dx;
 
         dst.bytes = !(b & 1) ? 1 : (op_bytes == 8) ? 4 : op_bytes;
-        ea.mem.off = truncate_ea_and_reps(_regs.r(si), nr_reps, dst.bytes);
         if ( (rc = ioport_access_check(port, dst.bytes, ctxt, ops)) != 0 )
             goto done;
+        nr_reps = get_rep_prefix(true, false);
+        ea.mem.off = truncate_ea_and_reps(_regs.r(si), nr_reps, dst.bytes);
         /* Try the presumably most efficient approach first. */
         if ( !ops->rep_outs )
             nr_reps = 1;
@@ -4737,7 +4759,7 @@ x86_emulate(
                    ? 8 : op_bytes;
         if ( (rc = read_ulong(x86_seg_ss, sp_post_inc(op_bytes + src.val),
                               &dst.val, op_bytes, ctxt, ops)) != 0 ||
-             (rc = ops->insn_fetch(x86_seg_cs, dst.val, NULL, 0, ctxt)) )
+             (rc = ops->insn_fetch(dst.val, NULL, 0, ctxt)) )
             goto done;
         _regs.r(ip) = dst.val;
         adjust_bnd(ctxt, ops, vex.pfx);
@@ -5625,14 +5647,14 @@ x86_emulate(
             break;
         case 2: /* call (near) */
             dst.val = _regs.r(ip);
-            if ( (rc = ops->insn_fetch(x86_seg_cs, src.val, NULL, 0, ctxt)) )
+            if ( (rc = ops->insn_fetch(src.val, NULL, 0, ctxt)) )
                 goto done;
             _regs.r(ip) = src.val;
             src.val = dst.val;
             adjust_bnd(ctxt, ops, vex.pfx);
             goto push;
         case 4: /* jmp (near) */
-            if ( (rc = ops->insn_fetch(x86_seg_cs, src.val, NULL, 0, ctxt)) )
+            if ( (rc = ops->insn_fetch(src.val, NULL, 0, ctxt)) )
                 goto done;
             _regs.r(ip) = src.val;
             dst.type = OP_NONE;
@@ -5813,6 +5835,39 @@ x86_emulate(
             }
             break;
 
+        case 0xee:
+            switch ( vex.pfx )
+            {
+            case vex_none: /* rdpkru */
+                if ( !ops->read_cr ||
+                     ops->read_cr(4, &cr4, ctxt) != X86EMUL_OKAY )
+                    cr4 = 0;
+                generate_exception_if(!(cr4 & X86_CR4_PKE), EXC_UD);
+                generate_exception_if(_regs.ecx, EXC_GP, 0);
+                _regs.r(ax) = rdpkru();
+                _regs.r(dx) = 0;
+                break;
+            default:
+                goto unimplemented_insn;
+            }
+            break;
+
+        case 0xef:
+            switch ( vex.pfx )
+            {
+            case vex_none: /* wrpkru */
+                if ( !ops->read_cr ||
+                     ops->read_cr(4, &cr4, ctxt) != X86EMUL_OKAY )
+                    cr4 = 0;
+                generate_exception_if(!(cr4 & X86_CR4_PKE), EXC_UD);
+                generate_exception_if(_regs.ecx | _regs.edx, EXC_GP, 0);
+                wrpkru(_regs.eax);
+                break;
+            default:
+                goto unimplemented_insn;
+            }
+            break;
+
         case 0xf8: /* swapgs */
             generate_exception_if(!mode_64bit(), EXC_UD);
             generate_exception_if(!mode_ring0(), EXC_GP, 0);
@@ -5829,8 +5884,10 @@ x86_emulate(
             if ( (rc = ops->write_segment(x86_seg_gs, &sreg,
                                           ctxt)) != X86EMUL_OKAY )
             {
-                /* Best effort unwind (i.e. no error checking). */
-                ops->write_msr(MSR_SHADOW_GS_BASE, msr_val, ctxt);
+                /* Best effort unwind (i.e. no real error checking). */
+                if ( ops->write_msr(MSR_SHADOW_GS_BASE, msr_val,
+                                    ctxt) == X86EMUL_EXCEPTION )
+                    x86_emul_reset_event(ctxt);
                 goto done;
             }
             break;
@@ -6828,7 +6885,8 @@ x86_emulate(
         }
         opc[2] = 0xc3;
 
-        invoke_stub(_PRE_EFLAGS("[eflags]", "[mask]", "[tmp]"),
+        _regs.eflags &= ~EFLAGS_MASK;
+        invoke_stub("",
                     _POST_EFLAGS("[eflags]", "[mask]", "[tmp]"),
                     [eflags] "+g" (_regs.eflags),
                     [tmp] "=&r" (dummy), "+m" (*mmvalp)
@@ -7364,7 +7422,6 @@ x86_emulate(
     case X86EMUL_OPC_EVEX_66(0x0f38, 0x0b): /* vpmulhrsw [xyz]mm/mem,[xyz]mm,[xyz]mm{k} */
     case X86EMUL_OPC_EVEX_66(0x0f38, 0x1c): /* vpabsb [xyz]mm/mem,[xyz]mm{k} */
     case X86EMUL_OPC_EVEX_66(0x0f38, 0x1d): /* vpabsw [xyz]mm/mem,[xyz]mm{k} */
-    case X86EMUL_OPC_EVEX_66(0x0f38, 0x66): /* vpblendm{b,w} [xyz]mm/mem,[xyz]mm,[xyz]mm{k} */
         host_and_vcpu_must_have(avx512bw);
         generate_exception_if(evex.brs, EXC_UD);
         elem_bytes = 1 << (b & 1);
@@ -7572,8 +7629,8 @@ x86_emulate(
 #ifndef X86EMUL_NO_SIMD
     case X86EMUL_OPC_VEX_66(0x0f3a, 0x08): /* vroundps $imm8,{x,y}mm/mem,{x,y}mm */
     case X86EMUL_OPC_VEX_66(0x0f3a, 0x09): /* vroundpd $imm8,{x,y}mm/mem,{x,y}mm */
-    case X86EMUL_OPC_VEX_66(0x0f3a, 0x0a): /* vroundss $imm8,{x,y}mm/mem,{x,y}mm,{x,y}mm */
-    case X86EMUL_OPC_VEX_66(0x0f3a, 0x0b): /* vroundsd $imm8,{x,y}mm/mem,{x,y}mm,{x,y}mm */
+    case X86EMUL_OPC_VEX_66(0x0f3a, 0x0a): /* vroundss $imm8,xmm/mem,xmm,xmm */
+    case X86EMUL_OPC_VEX_66(0x0f3a, 0x0b): /* vroundsd $imm8,xmm/mem,xmm,xmm */
     case X86EMUL_OPC_VEX_66(0x0f3a, 0x0c): /* vblendps $imm8,{x,y}mm/mem,{x,y}mm,{x,y}mm */
     case X86EMUL_OPC_VEX_66(0x0f3a, 0x0d): /* vblendpd $imm8,{x,y}mm/mem,{x,y}mm,{x,y}mm */
     case X86EMUL_OPC_VEX_66(0x0f3a, 0x40): /* vdpps $imm8,{x,y}mm/mem,{x,y}mm,{x,y}mm */
@@ -8076,7 +8133,8 @@ x86_emulate(
         opc[2] = 0xc3;
 
         copy_VEX(opc, vex);
-        invoke_stub(_PRE_EFLAGS("[eflags]", "[mask]", "[tmp]"),
+        _regs.eflags &= ~EFLAGS_MASK;
+        invoke_stub("",
                     _POST_EFLAGS("[eflags]", "[mask]", "[tmp]"),
                     [eflags] "+g" (_regs.eflags),
                     "=a" (dst.val), [tmp] "=&r" (dummy)
@@ -8210,7 +8268,10 @@ x86_emulate(
                     cr4 = X86_CR4_OSFXSR;
                 if ( !ops->read_msr ||
                      ops->read_msr(MSR_EFER, &msr_val, ctxt) != X86EMUL_OKAY )
+                {
+                    x86_emul_reset_event(ctxt);
                     msr_val = 0;
+                }
                 if ( !(cr4 & X86_CR4_OSFXSR) ||
                      (mode_64bit() && mode_ring0() && (msr_val & EFER_FFXSE)) )
                     op_bytes = offsetof(struct x86_fxsr, xmm[0]);
@@ -9460,6 +9521,14 @@ x86_emulate(
         generate_exception_if(vex.l, EXC_UD);
         goto simd_0f_avx;
 
+    case X86EMUL_OPC_VEX_66(0x0f38, 0x50): /* vpdpbusd [xy]mm/mem,[xy]mm,[xy]mm */
+    case X86EMUL_OPC_VEX_66(0x0f38, 0x51): /* vpdpbusds [xy]mm/mem,[xy]mm,[xy]mm */
+    case X86EMUL_OPC_VEX_66(0x0f38, 0x52): /* vpdpwssd [xy]mm/mem,[xy]mm,[xy]mm */
+    case X86EMUL_OPC_VEX_66(0x0f38, 0x53): /* vpdpwssds [xy]mm/mem,[xy]mm,[xy]mm */
+        host_and_vcpu_must_have(avx_vnni);
+        generate_exception_if(vex.w, EXC_UD);
+        goto simd_0f_avx;
+
     case X86EMUL_OPC_EVEX_66(0x0f38, 0x50): /* vpdpbusd [xyz]mm/mem,[xyz]mm,[xyz]mm{k} */
     case X86EMUL_OPC_EVEX_66(0x0f38, 0x51): /* vpdpbusds [xyz]mm/mem,[xyz]mm,[xyz]mm{k} */
     case X86EMUL_OPC_EVEX_66(0x0f38, 0x52): /* vpdpwssd [xyz]mm/mem,[xyz]mm,[xyz]mm{k} */
@@ -9512,6 +9581,9 @@ x86_emulate(
         /* fall through */
     case X86EMUL_OPC_EVEX_66(0x0f38, 0x54): /* vpopcnt{b,w} [xyz]mm/mem,[xyz]mm{k} */
         host_and_vcpu_must_have(avx512_bitalg);
+        /* fall through */
+    case X86EMUL_OPC_EVEX_66(0x0f38, 0x66): /* vpblendm{b,w} [xyz]mm/mem,[xyz]mm,[xyz]mm{k} */
+        host_and_vcpu_must_have(avx512bw);
         generate_exception_if(evex.brs, EXC_UD);
         elem_bytes = 1 << evex.w;
         goto avx512f_no_sae;
@@ -9553,6 +9625,12 @@ x86_emulate(
                 op_mask = ~0ULL >> (64 - n);
         }
         goto simd_zmm;
+
+    case X86EMUL_OPC_EVEX_F2(0x0f38, 0x68): /* vp2intersect{d,q} [xyz]mm/mem,[xyz]mm,k+1 */
+        host_and_vcpu_must_have(avx512_vp2intersect);
+        generate_exception_if(evex.opmsk || !evex.r || !evex.R, EXC_UD);
+        op_bytes = 16 << evex.lr;
+        goto avx512f_no_sae;
 
     case X86EMUL_OPC_EVEX_66(0x0f38, 0x70): /* vpshldvw [xyz]mm/mem,[xyz]mm,[xyz]mm{k} */
     case X86EMUL_OPC_EVEX_66(0x0f38, 0x72): /* vpshrdvw [xyz]mm/mem,[xyz]mm,[xyz]mm{k} */
@@ -10024,15 +10102,36 @@ x86_emulate(
 
         for ( i = 0; op_mask; ++i )
         {
-            long idx = b & 1 ? index.qw[i] : index.dw[i];
+            long idx = (b & 1 ? index.qw[i]
+                              : index.dw[i]) * (1 << state->sib_scale);
+            unsigned long offs = truncate_ea(ea.mem.off + idx);
+            unsigned int j, slot;
 
             if ( !(op_mask & (1 << i)) )
                 continue;
 
-            rc = ops->write(ea.mem.seg,
-                            truncate_ea(ea.mem.off +
-                                        idx * (1 << state->sib_scale)),
-                            (void *)mmvalp + i * op_bytes, op_bytes, ctxt);
+            /*
+             * hvmemul_linear_mmio_access() will find a cache slot based on
+             * linear address.  hvmemul_phys_mmio_access() will crash the
+             * domain if observing varying data getting written to the same
+             * cache slot.  Utilize that squashing earlier writes to fully
+             * overlapping addresses is permitted by the spec.  We can't,
+             * however, drop the writes altogether, to maintain correct
+             * faulting behavior.  Instead write the data from the last of
+             * the fully overlapping slots multiple times.
+             */
+            for ( j = (slot = i) + 1; j < n; ++j )
+            {
+                long idx2 = (b & 1 ? index.qw[j]
+                                   : index.dw[j]) * (1 << state->sib_scale);
+
+                if ( (op_mask & (1 << j)) &&
+                     truncate_ea(ea.mem.off + idx2) == offs )
+                    slot = j;
+            }
+
+            rc = ops->write(ea.mem.seg, offs,
+                            (void *)mmvalp + slot * op_bytes, op_bytes, ctxt);
             if ( rc != X86EMUL_OKAY )
             {
                 /* See comment in gather emulation. */
@@ -10424,6 +10523,7 @@ x86_emulate(
             goto done;
         if ( vex.pfx == vex_f2 ) /* enqcmd */
         {
+            generate_exception_if(mmvalp->data32[0], EXC_GP, 0);
             fail_if(!ops->read_msr);
             if ( (rc = ops->read_msr(MSR_PASID, &msr_val,
                                      ctxt)) != X86EMUL_OKAY )
@@ -10431,7 +10531,8 @@ x86_emulate(
             generate_exception_if(!(msr_val & PASID_VALID), EXC_GP, 0);
             mmvalp->data32[0] = MASK_EXTR(msr_val, PASID_PASID_MASK);
         }
-        mmvalp->data32[0] &= ~0x7ff00000;
+        else
+            generate_exception_if(mmvalp->data32[0] & 0x7ff00000, EXC_GP, 0);
         state->blk = blk_enqcmd;
         if ( (rc = ops->blk(x86_seg_es, src.val, mmvalp, 64, &_regs.eflags,
                             state, ctxt)) != X86EMUL_OKAY )
@@ -10501,8 +10602,8 @@ x86_emulate(
         host_and_vcpu_must_have(sse4_1);
         goto simd_0f3a_common;
 
-    case X86EMUL_OPC_EVEX_66(0x0f3a, 0x0a): /* vrndscaless $imm8,[xyz]mm/mem,[xyz]mm,[xyz]mm{k} */
-    case X86EMUL_OPC_EVEX_66(0x0f3a, 0x0b): /* vrndscalesd $imm8,[xyz]mm/mem,[xyz]mm,[xyz]mm{k} */
+    case X86EMUL_OPC_EVEX_66(0x0f3a, 0x0a): /* vrndscaless $imm8,xmm/mem,xmm,xmm{k} */
+    case X86EMUL_OPC_EVEX_66(0x0f3a, 0x0b): /* vrndscalesd $imm8,xmm/mem,xmm,xmm{k} */
         generate_exception_if(ea.type != OP_REG && evex.brs, EXC_UD);
         /* fall through */
     case X86EMUL_OPC_EVEX_66(0x0f3a, 0x08): /* vrndscaleps $imm8,[xyz]mm/mem,[xyz]mm{k} */
@@ -10988,7 +11089,7 @@ x86_emulate(
         break;
 
     case X86EMUL_OPC_EVEX_66(0x0f3a, 0x66): /* vfpclassp{s,d} $imm8,[xyz]mm/mem,k{k} */
-    case X86EMUL_OPC_EVEX_66(0x0f3a, 0x67): /* vfpclasss{s,d} $imm8,[xyz]mm/mem,k{k} */
+    case X86EMUL_OPC_EVEX_66(0x0f3a, 0x67): /* vfpclasss{s,d} $imm8,xmm/mem,k{k} */
         host_and_vcpu_must_have(avx512dq);
         generate_exception_if(!evex.r || !evex.R || evex.z, EXC_UD);
         if ( !(b & 1) )
@@ -11649,13 +11750,14 @@ int x86_emul_rmw(
         break;
 
     case rmw_xadd:
+        *eflags &= ~EFLAGS_MASK;
         switch ( state->op_bytes )
         {
             unsigned long dummy;
 
 #define XADD(sz, cst, mod) \
         case sz: \
-            asm ( _PRE_EFLAGS("[efl]", "[msk]", "[tmp]") \
+            asm ( "" \
                   COND_LOCK(xadd) " %"#mod"[reg], %[mem]; " \
                   _POST_EFLAGS("[efl]", "[msk]", "[tmp]") \
                   : [reg] "+" #cst (state->ea.val), \
@@ -12134,7 +12236,9 @@ int x86_emulate_wrapper(
      * An event being pending should exactly match returning
      * X86EMUL_EXCEPTION.  (If this trips, the chances are a codepath has
      * called hvm_inject_hw_exception() rather than using
-     * x86_emul_hw_exception().)
+     * x86_emul_hw_exception(), or the invocation of a hook has caused an
+     * exception to be raised, while the caller was only checking for
+     * success/failure.)
      */
     ASSERT(ctxt->event_pending == (rc == X86EMUL_EXCEPTION));
 
@@ -12146,8 +12250,7 @@ struct x86_emulate_state *
 x86_decode_insn(
     struct x86_emulate_ctxt *ctxt,
     int (*insn_fetch)(
-        enum x86_segment seg, unsigned long offset,
-        void *p_data, unsigned int bytes,
+        unsigned long offset, void *p_data, unsigned int bytes,
         struct x86_emulate_ctxt *ctxt))
 {
     static DEFINE_PER_CPU(struct x86_emulate_state, state);
@@ -12245,7 +12348,7 @@ x86_insn_operand_ea(const struct x86_emulate_state *state,
  * memory operand (like POP), but it does not mean e.g. segment selector
  * loads, where the descriptor table access is considered an implicit one.
  */
-bool
+bool cf_check
 x86_insn_is_mem_access(const struct x86_emulate_state *state,
                        const struct x86_emulate_ctxt *ctxt)
 {
@@ -12268,6 +12371,8 @@ x86_insn_is_mem_access(const struct x86_emulate_state *state,
          ... X86EMUL_OPC_F2(0x0f, 0x1f): /* NOP space */
         case X86EMUL_OPC(0x0f, 0xb9): /* UD1 */
         case X86EMUL_OPC(0x0f, 0xff): /* UD0 */
+        case X86EMUL_OPC_EVEX_66(0x0f38, 0xc6): /* V{GATH,SCATT}ERPF*D* */
+        case X86EMUL_OPC_EVEX_66(0x0f38, 0xc7): /* V{GATH,SCATT}ERPF*Q* */
             return false;
 
         case X86EMUL_OPC(0x0f, 0x01):
@@ -12335,7 +12440,7 @@ x86_insn_is_mem_access(const struct x86_emulate_state *state,
  * loads, where the (possible) descriptor table write is considered an
  * implicit access.
  */
-bool
+bool cf_check
 x86_insn_is_mem_write(const struct x86_emulate_state *state,
                       const struct x86_emulate_ctxt *ctxt)
 {
@@ -12362,6 +12467,14 @@ x86_insn_is_mem_write(const struct x86_emulate_state *state,
         case X86EMUL_OPC_F2(0x0f38, 0xf8): /* ENQCMD */
         case X86EMUL_OPC_F3(0x0f38, 0xf8): /* ENQCMDS */
             return true;
+
+        case X86EMUL_OPC_EVEX_F3(0x0f38, 0x10) ...
+             X86EMUL_OPC_EVEX_F3(0x0f38, 0x15): /* VPMOVUS* */
+        case X86EMUL_OPC_EVEX_F3(0x0f38, 0x20) ...
+             X86EMUL_OPC_EVEX_F3(0x0f38, 0x25): /* VPMOVS* */
+        case X86EMUL_OPC_EVEX_F3(0x0f38, 0x30) ...
+             X86EMUL_OPC_EVEX_F3(0x0f38, 0x35): /* VPMOV{D,Q,W}* */
+            return state->modrm_mod != 3;
         }
 
         return false;
@@ -12403,12 +12516,6 @@ x86_insn_is_mem_write(const struct x86_emulate_state *state,
     case X86EMUL_OPC(0x0f, 0xab):        /* BTS */
     case X86EMUL_OPC(0x0f, 0xb3):        /* BTR */
     case X86EMUL_OPC(0x0f, 0xbb):        /* BTC */
-    case X86EMUL_OPC_EVEX_F3(0x0f38, 0x10) ...
-         X86EMUL_OPC_EVEX_F3(0x0f38, 0x15): /* VPMOVUS* */
-    case X86EMUL_OPC_EVEX_F3(0x0f38, 0x20) ...
-         X86EMUL_OPC_EVEX_F3(0x0f38, 0x25): /* VPMOVS* */
-    case X86EMUL_OPC_EVEX_F3(0x0f38, 0x30) ...
-         X86EMUL_OPC_EVEX_F3(0x0f38, 0x35): /* VPMOV{D,Q,W}* */
         return true;
 
     case 0xd9:
@@ -12505,7 +12612,7 @@ x86_insn_is_mem_write(const struct x86_emulate_state *state,
     return false;
 }
 
-bool
+bool cf_check
 x86_insn_is_portio(const struct x86_emulate_state *state,
                    const struct x86_emulate_ctxt *ctxt)
 {
@@ -12520,7 +12627,7 @@ x86_insn_is_portio(const struct x86_emulate_state *state,
     return false;
 }
 
-bool
+bool cf_check
 x86_insn_is_cr_access(const struct x86_emulate_state *state,
                       const struct x86_emulate_ctxt *ctxt)
 {

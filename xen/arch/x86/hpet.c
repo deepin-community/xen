@@ -65,7 +65,7 @@ u8 __initdata hpet_flags;
 static bool __initdata force_hpet_broadcast;
 boolean_param("hpetbroadcast", force_hpet_broadcast);
 
-static int __init parse_hpet_param(const char *s)
+static int __init cf_check parse_hpet_param(const char *s)
 {
     const char *ss;
     int val, rc = 0;
@@ -105,10 +105,7 @@ custom_param("hpet", parse_hpet_param);
 static inline unsigned long div_sc(unsigned long ticks, unsigned long nsec,
                                    int shift)
 {
-    uint64_t tmp = ((uint64_t)ticks) << shift;
-
-    do_div(tmp, nsec);
-    return (unsigned long) tmp;
+    return ((uint64_t)ticks << shift) / nsec;
 }
 
 /*
@@ -196,7 +193,7 @@ static void evt_do_broadcast(cpumask_t *mask)
        cpumask_raise_softirq(mask, TIMER_SOFTIRQ);
 }
 
-static void handle_hpet_broadcast(struct hpet_event_channel *ch)
+static void cf_check handle_hpet_broadcast(struct hpet_event_channel *ch)
 {
     cpumask_t mask;
     s_time_t now, next_event;
@@ -240,8 +237,8 @@ again:
     }
 }
 
-static void hpet_interrupt_handler(int irq, void *data,
-        struct cpu_user_regs *regs)
+static void cf_check hpet_interrupt_handler(
+    int irq, void *data, struct cpu_user_regs *regs)
 {
     struct hpet_event_channel *ch = data;
 
@@ -256,7 +253,7 @@ static void hpet_interrupt_handler(int irq, void *data,
     ch->event_handler(ch);
 }
 
-static void hpet_msi_unmask(struct irq_desc *desc)
+static void cf_check hpet_msi_unmask(struct irq_desc *desc)
 {
     u32 cfg;
     struct hpet_event_channel *ch = desc->action->dev_id;
@@ -267,7 +264,7 @@ static void hpet_msi_unmask(struct irq_desc *desc)
     ch->msi.msi_attrib.host_masked = 0;
 }
 
-static void hpet_msi_mask(struct irq_desc *desc)
+static void cf_check hpet_msi_mask(struct irq_desc *desc)
 {
     u32 cfg;
     struct hpet_event_channel *ch = desc->action->dev_id;
@@ -296,17 +293,7 @@ static int hpet_msi_write(struct hpet_event_channel *ch, struct msi_msg *msg)
     return 0;
 }
 
-static void __maybe_unused
-hpet_msi_read(struct hpet_event_channel *ch, struct msi_msg *msg)
-{
-    msg->data = hpet_read32(HPET_Tn_ROUTE(ch->idx));
-    msg->address_lo = hpet_read32(HPET_Tn_ROUTE(ch->idx) + 4);
-    msg->address_hi = MSI_ADDR_BASE_HI;
-    if ( iommu_intremap )
-        iommu_read_msi_from_ire(&ch->msi, msg);
-}
-
-static unsigned int hpet_msi_startup(struct irq_desc *desc)
+static unsigned int cf_check hpet_msi_startup(struct irq_desc *desc)
 {
     hpet_msi_unmask(desc);
     return 0;
@@ -314,14 +301,15 @@ static unsigned int hpet_msi_startup(struct irq_desc *desc)
 
 #define hpet_msi_shutdown hpet_msi_mask
 
-static void hpet_msi_ack(struct irq_desc *desc)
+static void cf_check hpet_msi_ack(struct irq_desc *desc)
 {
     irq_complete_move(desc);
     move_native_irq(desc);
     ack_APIC_irq();
 }
 
-static void hpet_msi_set_affinity(struct irq_desc *desc, const cpumask_t *mask)
+static void cf_check hpet_msi_set_affinity(
+    struct irq_desc *desc, const cpumask_t *mask)
 {
     struct hpet_event_channel *ch = desc->action->dev_id;
     struct msi_msg msg = ch->msi.msg;
@@ -562,7 +550,7 @@ static void hpet_detach_channel(unsigned int cpu,
 
 void (*__read_mostly pv_rtc_handler)(uint8_t index, uint8_t value);
 
-static void handle_rtc_once(uint8_t index, uint8_t value)
+static void cf_check handle_rtc_once(uint8_t index, uint8_t value)
 {
     if ( index != RTC_REG_B )
         return;
@@ -575,7 +563,7 @@ static void handle_rtc_once(uint8_t index, uint8_t value)
     }
 }
 
-void __init hpet_broadcast_init(void)
+void __init cf_check hpet_broadcast_init(void)
 {
     u64 hpet_rate = hpet_setup();
     u32 hpet_id, cfg;
@@ -646,7 +634,7 @@ void __init hpet_broadcast_init(void)
         hpet_events->flags = HPET_EVT_LEGACY;
 }
 
-void hpet_broadcast_resume(void)
+void cf_check hpet_broadcast_resume(void)
 {
     u32 cfg;
     unsigned int i, n;
@@ -719,7 +707,7 @@ void hpet_disable_legacy_broadcast(void)
     smp_send_event_check_mask(&cpu_online_map);
 }
 
-void hpet_broadcast_enter(void)
+void cf_check hpet_broadcast_enter(void)
 {
     unsigned int cpu = smp_processor_id();
     struct hpet_event_channel *ch = per_cpu(cpu_bc_channel, cpu);
@@ -750,7 +738,7 @@ void hpet_broadcast_enter(void)
     spin_unlock(&ch->lock);
 }
 
-void hpet_broadcast_exit(void)
+void cf_check hpet_broadcast_exit(void)
 {
     unsigned int cpu = smp_processor_id();
     struct hpet_event_channel *ch = per_cpu(cpu_bc_channel, cpu);

@@ -3,6 +3,7 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
+#include <syslog.h>
 #include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -35,6 +36,7 @@ void barf(const char *fmt, ...)
 	va_end(arglist);
 
  	if (bytes >= 0) {
+		syslog(LOG_CRIT, "%s\n", str);
 		xprintf("%s\n", str);
 		free(str);
 	}
@@ -54,8 +56,26 @@ void barf_perror(const char *fmt, ...)
 	va_end(arglist);
 
  	if (bytes >= 0) {
+		syslog(LOG_CRIT, "%s: %s\n", str, strerror(err));
 		xprintf("%s: %s\n", str, strerror(err));
 		free(str);
 	}
 	exit(1);
+}
+
+const char *dump_state_align(FILE *fp)
+{
+	long len;
+	static char nul[8] = {};
+
+	len = ftell(fp);
+	if (len < 0)
+		return "Dump state align error";
+	len &= 7;
+	if (!len)
+		return NULL;
+
+	if (fwrite(nul, 8 - len, 1, fp) != 1)
+		return "Dump state align error";
+	return NULL;
 }

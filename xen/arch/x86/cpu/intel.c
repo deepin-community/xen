@@ -3,6 +3,8 @@
 #include <xen/string.h>
 #include <xen/bitops.h>
 #include <xen/smp.h>
+
+#include <asm/intel-family.h>
 #include <asm/processor.h>
 #include <asm/msr.h>
 #include <asm/uaccess.h>
@@ -13,6 +15,38 @@
 #include <asm/hvm/support.h>
 
 #include "cpu.h"
+
+/*
+ * MSR_MCU_OPT_CTRL is a collection of unrelated functionality, with separate
+ * enablement requirements, but which want to be consistent across the system.
+ */
+static uint32_t __read_mostly mcu_opt_ctrl_mask;
+static uint32_t __read_mostly mcu_opt_ctrl_val;
+
+void update_mcu_opt_ctrl(void)
+{
+    uint32_t mask = mcu_opt_ctrl_mask, lo, hi;
+
+    if ( !mask )
+        return;
+
+    rdmsr(MSR_MCU_OPT_CTRL, lo, hi);
+
+    lo &= ~mask;
+    lo |= mcu_opt_ctrl_val;
+
+    wrmsr(MSR_MCU_OPT_CTRL, lo, hi);
+}
+
+void __init set_in_mcu_opt_ctrl(uint32_t mask, uint32_t val)
+{
+    mcu_opt_ctrl_mask |= mask;
+
+    mcu_opt_ctrl_val &= ~mask;
+    mcu_opt_ctrl_val |= (val & mask);
+
+    update_mcu_opt_ctrl();
+}
 
 /*
  * Processors which have self-snooping capability can handle conflicting
@@ -144,7 +178,7 @@ static void __init probe_masking_msrs(void)
  * parameter of NULL is used to context switch to the default host state (by
  * the cpu bringup-code, crash path, etc).
  */
-static void intel_ctxt_switch_masking(const struct vcpu *next)
+static void cf_check intel_ctxt_switch_masking(const struct vcpu *next)
 {
 	struct cpuidmasks *these_masks = &this_cpu(cpuidmasks);
 	const struct domain *nextd = next ? next->domain : NULL;
@@ -254,7 +288,7 @@ static void __init noinline intel_init_levelling(void)
 		ctxt_switch_masking = intel_ctxt_switch_masking;
 }
 
-static void early_init_intel(struct cpuinfo_x86 *c)
+static void cf_check early_init_intel(struct cpuinfo_x86 *c)
 {
 	u64 misc_enable, disable;
 
@@ -270,14 +304,14 @@ static void early_init_intel(struct cpuinfo_x86 *c)
 	if (disable) {
 		wrmsrl(MSR_IA32_MISC_ENABLE, misc_enable & ~disable);
 		bootsym(trampoline_misc_enable_off) |= disable;
-		bootsym(trampoline_efer) |= EFER_NX;
+		bootsym(trampoline_efer) |= EFER_NXE;
 	}
 
 	if (disable & MSR_IA32_MISC_ENABLE_LIMIT_CPUID)
 		printk(KERN_INFO "revised cpuid level: %d\n",
 		       cpuid_eax(0));
 	if (disable & MSR_IA32_MISC_ENABLE_XD_DISABLE) {
-		write_efer(read_efer() | EFER_NX);
+		write_efer(read_efer() | EFER_NXE);
 		printk(KERN_INFO
 		       "re-enabled NX (Execute Disable) protection\n");
 	}
@@ -380,9 +414,9 @@ static int num_cpu_cores(struct cpuinfo_x86 *c)
 
 static void intel_log_freq(const struct cpuinfo_x86 *c)
 {
-    unsigned int eax, ebx, ecx, edx;
+    unsigned int eax, ebx, ecx, edx, factor;
     uint64_t msrval;
-    uint8_t max_ratio;
+    uint8_t max_ratio, min_ratio;
 
     if ( c->cpuid_level >= 0x15 )
     {
@@ -392,9 +426,8 @@ static void intel_log_freq(const struct cpuinfo_x86 *c)
             unsigned long long val = ecx;
 
             val *= ebx;
-            do_div(val, eax);
             printk("CPU%u: TSC: %u Hz * %u / %u = %Lu Hz\n",
-                   smp_processor_id(), ecx, ebx, eax, val);
+                   smp_processor_id(), ecx, ebx, eax, val / eax);
         }
         else if ( ecx | eax | ebx )
         {
@@ -423,32 +456,71 @@ static void intel_log_freq(const struct cpuinfo_x86 *c)
         }
     }
 
-    if ( rdmsr_safe(MSR_INTEL_PLATFORM_INFO, msrval) )
-        return;
-    max_ratio = msrval >> 8;
-
-    if ( max_ratio )
+    switch ( c->x86 )
     {
-        unsigned int factor = 10000;
-        uint8_t min_ratio = msrval >> 40;
+        static const unsigned short core_factors[] =
+            { 26667, 13333, 20000, 16667, 33333, 10000, 40000 };
 
-        if ( c->x86 == 6 )
-            switch ( c->x86_model )
-            {
-            case 0x1a: case 0x1e: case 0x1f: case 0x2e: /* Nehalem */
-            case 0x25: case 0x2c: case 0x2f: /* Westmere */
-                factor = 13333;
-                break;
-            }
+    case 6:
+        if ( rdmsr_safe(MSR_INTEL_PLATFORM_INFO, msrval) )
+            return;
+        max_ratio = msrval >> 8;
+        min_ratio = msrval >> 40;
+        if ( !max_ratio )
+            return;
 
-        printk("CPU%u: ", smp_processor_id());
-        if ( min_ratio )
-            printk("%u ... ", (factor * min_ratio + 50) / 100);
-        printk("%u MHz\n", (factor * max_ratio + 50) / 100);
+        switch ( c->x86_model )
+        {
+        case 0x0e: /* Core */
+        case 0x0f: case 0x16: case 0x17: case 0x1d: /* Core2 */
+            /*
+             * PLATFORM_INFO, while not documented for these, appears to exist
+             * in at least some cases, but what it holds doesn't match the
+             * scheme used by newer CPUs.  At a guess, the min and max fields
+             * look to be reversed, while the scaling factor is encoded in
+             * FSB_FREQ.
+             */
+            if ( min_ratio > max_ratio )
+                SWAP(min_ratio, max_ratio);
+            if ( rdmsr_safe(MSR_FSB_FREQ, msrval) ||
+                 (msrval &= 7) >= ARRAY_SIZE(core_factors) )
+                return;
+            factor = core_factors[msrval];
+            break;
+
+        case 0x1a: case 0x1e: case 0x1f: case 0x2e: /* Nehalem */
+        case 0x25: case 0x2c: case 0x2f: /* Westmere */
+            factor = 13333;
+            break;
+
+        default:
+            factor = 10000;
+            break;
+        }
+        break;
+
+    case 0xf:
+        if ( rdmsr_safe(MSR_IA32_EBC_FREQUENCY_ID, msrval) )
+            return;
+        max_ratio = msrval >> 24;
+        min_ratio = 0;
+        msrval >>= 16;
+        if ( (msrval &= 7) > 4 )
+            return;
+        factor = core_factors[msrval];
+        break;
+
+    default:
+        return;
     }
+
+    printk("CPU%u: ", smp_processor_id());
+    if ( min_ratio )
+        printk("%u ... ", (factor * min_ratio + 50) / 100);
+    printk("%u MHz\n", (factor * max_ratio + 50) / 100);
 }
 
-static void init_intel(struct cpuinfo_x86 *c)
+static void cf_check init_intel(struct cpuinfo_x86 *c)
 {
 	/* Detect the extended topology information if available */
 	detect_extended_topology(c);
@@ -456,9 +528,30 @@ static void init_intel(struct cpuinfo_x86 *c)
 	init_intel_cacheinfo(c);
 	if (c->cpuid_level > 9) {
 		unsigned eax = cpuid_eax(10);
+		unsigned int cnt = (eax >> 8) & 0xff;
+
 		/* Check for version and the number of counters */
-		if ((eax & 0xff) && (((eax>>8) & 0xff) > 1))
+		if ((eax & 0xff) && (cnt > 1) && (cnt <= 32)) {
+			uint64_t global_ctrl;
+			unsigned int cnt_mask = (1UL << cnt) - 1;
+
+			/*
+			 * On (some?) Sapphire/Emerald Rapids platforms each
+			 * package-BSP starts with all the enable bits for the
+			 * general-purpose PMCs cleared.  Adjust so counters
+			 * can be enabled from EVNTSEL.
+			 */
+			rdmsrl(MSR_CORE_PERF_GLOBAL_CTRL, global_ctrl);
+			if ((global_ctrl & cnt_mask) != cnt_mask) {
+				printk("CPU%u: invalid PERF_GLOBAL_CTRL: %#"
+				       PRIx64 " adjusting to %#" PRIx64 "\n",
+				       smp_processor_id(), global_ctrl,
+				       global_ctrl | cnt_mask);
+				wrmsrl(MSR_CORE_PERF_GLOBAL_CTRL,
+				       global_ctrl | cnt_mask);
+			}
 			__set_bit(X86_FEATURE_ARCH_PERFMON, c->x86_capability);
+		}
 	}
 
 	if ( !cpu_has(c, X86_FEATURE_XTOPOLOGY) )
@@ -486,6 +579,18 @@ static void init_intel(struct cpuinfo_x86 *c)
 	if ((opt_cpu_info && !(c->apicid & (c->x86_num_siblings - 1))) ||
 	    c == &boot_cpu_data )
 		intel_log_freq(c);
+
+	/*
+	 * The Gather Data Sampling microcode mitigation (August 2023) has an
+	 * adverse performance impact on the CLWB instruction on SKX/CLX/CPX.
+	 *
+	 * On this model, CLWB has equivalent behaviour to CLFLUSHOPT but the
+	 * latter is not impacted.  Hide CLWB to cause Xen to fall back to
+	 * using CLFLUSHOPT instead.
+	 */
+	if (c == &boot_cpu_data &&
+	    c->x86 == 6 && c->x86_model == INTEL_FAM6_SKYLAKE_X)
+		setup_clear_cpu_cap(X86_FEATURE_CLWB);
 }
 
 const struct cpu_dev intel_cpu_dev = {

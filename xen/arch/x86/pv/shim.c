@@ -34,8 +34,6 @@
 #include <public/arch-x86/cpuid.h>
 #include <public/hvm/params.h>
 
-#include <compat/grant_table.h>
-
 #undef virt_to_mfn
 #define virt_to_mfn(va) _mfn(__virt_to_mfn(va))
 
@@ -58,11 +56,6 @@ static DEFINE_SPINLOCK(balloon_lock);
 
 static struct platform_bad_page __initdata reserved_pages[2];
 
-static long pv_shim_event_channel_op(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg);
-static long pv_shim_grant_table_op(unsigned int cmd,
-                                   XEN_GUEST_HANDLE_PARAM(void) uop,
-                                   unsigned int count);
-
 /*
  * By default give the shim 1MB of free memory slack. Some users may wish to
  * tune this constants for better memory utilization. This can be achieved
@@ -80,7 +73,7 @@ static uint64_t __initdata shim_nrpages;
 static uint64_t __initdata shim_min_nrpages;
 static uint64_t __initdata shim_max_nrpages;
 
-static int __init parse_shim_mem(const char *s)
+static int __init cf_check parse_shim_mem(const char *s)
 {
     do {
         if ( !strncmp(s, "min:", 4) )
@@ -204,7 +197,7 @@ void __init pv_shim_setup_dom(struct domain *d, l4_pgentry_t *l4start,
                               unsigned long console_va, unsigned long vphysmap,
                               start_info_t *si)
 {
-    hypercall_table_t *rw_pv_hypercall_table;
+    bool compat = is_pv_32bit_domain(d);
     uint64_t param = 0;
     long rc;
 
@@ -217,7 +210,8 @@ void __init pv_shim_setup_dom(struct domain *d, l4_pgentry_t *l4start,
     {                                                                          \
         share_xen_page_with_guest(mfn_to_page(_mfn(param)), d, SHARE_rw);      \
         replace_va_mapping(d, l4start, va, _mfn(param));                       \
-        dom0_update_physmap(d, PFN_DOWN((va) - va_start), param, vphysmap);    \
+        dom0_update_physmap(compat,                                            \
+                            PFN_DOWN((va) - va_start), param, vphysmap);       \
     }                                                                          \
     else                                                                       \
     {                                                                          \
@@ -244,23 +238,10 @@ void __init pv_shim_setup_dom(struct domain *d, l4_pgentry_t *l4start,
         si->console.domU.mfn = mfn_x(console_mfn);
         share_xen_page_with_guest(mfn_to_page(console_mfn), d, SHARE_rw);
         replace_va_mapping(d, l4start, console_va, console_mfn);
-        dom0_update_physmap(d, (console_va - va_start) >> PAGE_SHIFT,
+        dom0_update_physmap(compat, (console_va - va_start) >> PAGE_SHIFT,
                             mfn_x(console_mfn), vphysmap);
         consoled_set_ring_addr(page);
     }
-
-    /*
-     * Locate pv_hypercall_table[] (usually .rodata) in the directmap (which
-     * is writeable) and insert some shim-specific hypercall handlers.
-     */
-    rw_pv_hypercall_table = __va(__pa(pv_hypercall_table));
-    rw_pv_hypercall_table[__HYPERVISOR_event_channel_op].native =
-        rw_pv_hypercall_table[__HYPERVISOR_event_channel_op].compat =
-        (hypercall_fn_t *)pv_shim_event_channel_op;
-
-    rw_pv_hypercall_table[__HYPERVISOR_grant_table_op].native =
-        rw_pv_hypercall_table[__HYPERVISOR_grant_table_op].compat =
-        (hypercall_fn_t *)pv_shim_grant_table_op;
 
     guest = d;
 
@@ -274,12 +255,12 @@ void __init pv_shim_setup_dom(struct domain *d, l4_pgentry_t *l4start,
 static void write_start_info(struct domain *d)
 {
     struct cpu_user_regs *regs = guest_cpu_user_regs();
-    start_info_t *si = map_domain_page(_mfn(is_pv_32bit_domain(d) ? regs->edx
-                                                                  : regs->rdx));
+    bool compat = is_pv_32bit_domain(d);
+    start_info_t *si = map_domain_page(_mfn(compat ? regs->edx : regs->rdx));
     uint64_t param;
 
     snprintf(si->magic, sizeof(si->magic), "xen-3.0-x86_%s",
-             is_pv_32bit_domain(d) ? "32p" : "64");
+             compat ? "32p" : "64");
     si->nr_pages = domain_tot_pages(d);
     si->shared_info = virt_to_maddr(d->shared_info);
     si->flags = 0;
@@ -294,8 +275,10 @@ static void write_start_info(struct domain *d)
                                           &si->console.domU.mfn) )
         BUG();
 
-    if ( is_pv_32bit_domain(d) )
+#ifdef CONFIG_PV32
+    if ( compat )
         xlat_start_info(si, XLAT_start_info_console_domU);
+#endif
 
     unmap_domain_page(si);
 }
@@ -429,7 +412,7 @@ int pv_shim_shutdown(uint8_t reason)
     return 0;
 }
 
-static long pv_shim_event_channel_op(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
+long pv_shim_event_channel_op(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
 {
     struct domain *d = current->domain;
     struct evtchn_close close;
@@ -448,7 +431,7 @@ static long pv_shim_event_channel_op(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
         if ( rc )                                                           \
             break;                                                          \
                                                                             \
-        spin_lock(&d->event_lock);                                          \
+        write_lock(&d->event_lock);                                         \
         rc = evtchn_allocate_port(d, op.port_field);                        \
         if ( rc )                                                           \
         {                                                                   \
@@ -457,7 +440,7 @@ static long pv_shim_event_channel_op(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
         }                                                                   \
         else                                                                \
             evtchn_reserve(d, op.port_field);                               \
-        spin_unlock(&d->event_lock);                                        \
+        write_unlock(&d->event_lock);                                       \
                                                                             \
         if ( !rc && __copy_to_guest(arg, &op, 1) )                          \
             rc = -EFAULT;                                                   \
@@ -585,11 +568,11 @@ static long pv_shim_event_channel_op(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
         if ( rc )
             break;
 
-        spin_lock(&d->event_lock);
+        write_lock(&d->event_lock);
         rc = evtchn_allocate_port(d, ipi.port);
         if ( rc )
         {
-            spin_unlock(&d->event_lock);
+            write_unlock(&d->event_lock);
 
             close.port = ipi.port;
             BUG_ON(xen_hypercall_event_channel_op(EVTCHNOP_close, &close));
@@ -598,7 +581,7 @@ static long pv_shim_event_channel_op(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
 
         evtchn_assign_vcpu(d, ipi.port, ipi.vcpu);
         evtchn_reserve(d, ipi.port);
-        spin_unlock(&d->event_lock);
+        write_unlock(&d->event_lock);
 
         if ( __copy_to_guest(arg, &ipi, 1) )
             rc = -EFAULT;
@@ -669,9 +652,17 @@ void pv_shim_inject_evtchn(unsigned int port)
     }
 }
 
-static long pv_shim_grant_table_op(unsigned int cmd,
-                                   XEN_GUEST_HANDLE_PARAM(void) uop,
-                                   unsigned int count)
+#ifdef CONFIG_PV32
+# include <compat/grant_table.h>
+#else
+# define compat_gnttab_setup_table gnttab_setup_table
+# undef compat_handle_okay
+# define compat_handle_okay guest_handle_okay
+#endif
+
+long pv_shim_grant_table_op(unsigned int cmd,
+                            XEN_GUEST_HANDLE_PARAM(void) uop,
+                            unsigned int count)
 {
     struct domain *d = current->domain;
     long rc = 0;
@@ -698,10 +689,13 @@ static long pv_shim_grant_table_op(unsigned int cmd,
             rc = -EFAULT;
             break;
         }
+
+#ifdef CONFIG_PV32
         if ( compat )
 #define XLAT_gnttab_setup_table_HNDL_frame_list(d, s)
             XLAT_gnttab_setup_table(&nat, &cmp);
 #undef XLAT_gnttab_setup_table_HNDL_frame_list
+#endif
 
         nat.status = GNTST_okay;
 
@@ -772,6 +766,7 @@ static long pv_shim_grant_table_op(unsigned int cmd,
             }
 
             ASSERT(grant_frames[i]);
+#ifdef CONFIG_PV32
             if ( compat )
             {
                 compat_pfn_t pfn = grant_frames[i];
@@ -783,8 +778,10 @@ static long pv_shim_grant_table_op(unsigned int cmd,
                     break;
                 }
             }
-            else if ( __copy_to_guest_offset(nat.frame_list, i,
-                                             &grant_frames[i], 1) )
+            else
+#endif
+            if ( __copy_to_guest_offset(nat.frame_list, i,
+                                        &grant_frames[i], 1) )
             {
                 nat.status = GNTST_bad_virt_addr;
                 rc = -EFAULT;
@@ -793,10 +790,12 @@ static long pv_shim_grant_table_op(unsigned int cmd,
         }
         spin_unlock(&grant_lock);
 
+#ifdef CONFIG_PV32
         if ( compat )
 #define XLAT_gnttab_setup_table_HNDL_frame_list(d, s)
             XLAT_gnttab_setup_table(&cmp, &nat);
 #undef XLAT_gnttab_setup_table_HNDL_frame_list
+#endif
 
         if ( unlikely(compat ? __copy_to_guest(uop, &cmp, 1)
                              : __copy_to_guest(uop, &nat, 1)) )
@@ -823,7 +822,30 @@ static long pv_shim_grant_table_op(unsigned int cmd,
     return rc;
 }
 
-long pv_shim_cpu_up(void *data)
+#ifndef CONFIG_GRANT_TABLE
+/* Thin wrapper(s) needed. */
+long do_grant_table_op(
+    unsigned int cmd, XEN_GUEST_HANDLE_PARAM(void) uop, unsigned int count)
+{
+    if ( !pv_shim )
+        return -ENOSYS;
+
+    return pv_shim_grant_table_op(cmd, uop, count);
+}
+
+#ifdef CONFIG_PV32
+int compat_grant_table_op(
+    unsigned int cmd, XEN_GUEST_HANDLE_PARAM(void) uop, unsigned int count)
+{
+    if ( !pv_shim )
+        return -ENOSYS;
+
+    return pv_shim_grant_table_op(cmd, uop, count);
+}
+#endif
+#endif
+
+long cf_check pv_shim_cpu_up(void *data)
 {
     struct vcpu *v = data;
     struct domain *d = v->domain;
@@ -861,7 +883,7 @@ long pv_shim_cpu_up(void *data)
     return 0;
 }
 
-long pv_shim_cpu_down(void *data)
+long cf_check pv_shim_cpu_down(void *data)
 {
     struct vcpu *v = data;
     long rc;
@@ -921,6 +943,9 @@ void pv_shim_online_memory(unsigned int nr, unsigned int order)
 {
     struct page_info *page, *tmp;
     PAGE_LIST_HEAD(list);
+
+    if ( !nr )
+        return;
 
     spin_lock(&balloon_lock);
     page_list_for_each_safe ( page, tmp, &balloon )

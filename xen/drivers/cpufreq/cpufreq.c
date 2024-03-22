@@ -65,7 +65,7 @@ enum cpufreq_controller cpufreq_controller = FREQCTL_xen;
 
 static int __init cpufreq_cmdline_parse(const char *s);
 
-static int __init setup_cpufreq_option(const char *str)
+static int __init cf_check setup_cpufreq_option(const char *str)
 {
     const char *arg = strpbrk(str, ",:");
     int choice;
@@ -111,7 +111,7 @@ struct cpufreq_governor *__find_governor(const char *governor)
         return NULL;
 
     list_for_each_entry(t, &cpufreq_governor_list, governor_list)
-        if (!strnicmp(governor, t->name, CPUFREQ_NAME_LEN))
+        if (!strncasecmp(governor, t->name, CPUFREQ_NAME_LEN))
             return t;
 
     return NULL;
@@ -632,7 +632,7 @@ static int __init cpufreq_cmdline_parse(const char *s)
     return rc;
 }
 
-static int cpu_callback(
+static int cf_check cpu_callback(
     struct notifier_block *nfb, unsigned long action, void *hcpu)
 {
     unsigned int cpu = (unsigned long)hcpu;
@@ -657,7 +657,7 @@ static struct notifier_block cpu_nfb = {
     .notifier_call = cpu_callback
 };
 
-static int __init cpufreq_presmp_init(void)
+static int __init cf_check cpufreq_presmp_init(void)
 {
     register_cpu_notifier(&cpu_nfb);
     return 0;

@@ -84,7 +84,7 @@ bool is_var_mtrr_overlapped(const struct mtrr_state *m)
     return false;
 }
 
-void mtrr_save_fixed_ranges(void *info)
+void cf_check mtrr_save_fixed_ranges(void *info)
 {
 	get_fixed_ranges(mtrr_state.fixed_ranges);
 }
@@ -224,7 +224,7 @@ static void __init print_mtrr_state(const char *level)
 		uint64_t syscfg, tom2;
 
 		rdmsrl(MSR_K8_SYSCFG, syscfg);
-		if (syscfg & (1 << 21)) {
+		if (syscfg & SYSCFG_MTRR_TOM2_EN) {
 			rdmsrl(MSR_K8_TOP_MEM2, tom2);
 			printk("%sTOM2: %012"PRIx64"%s\n", level, tom2,
 			       syscfg & (1 << 22) ? " (WB)" : "");
@@ -287,7 +287,8 @@ static void set_fixed_range(int msr, bool *changed, unsigned int *msrwords)
 	}
 }
 
-int generic_get_free_region(unsigned long base, unsigned long size, int replace_reg)
+int cf_check generic_get_free_region(
+    unsigned long base, unsigned long size, int replace_reg)
 /*  [SUMMARY] Get a free MTRR.
     <base> The starting (base) address of the region.
     <size> The size (in bytes) of the region.
@@ -309,8 +310,8 @@ int generic_get_free_region(unsigned long base, unsigned long size, int replace_
 	return -ENOSPC;
 }
 
-static void generic_get_mtrr(unsigned int reg, unsigned long *base,
-			     unsigned long *size, mtrr_type *type)
+static void cf_check generic_get_mtrr(
+    unsigned int reg, unsigned long *base, unsigned long *size, mtrr_type *type)
 {
 	uint64_t _mask, _base;
 
@@ -499,7 +500,7 @@ static void post_set(bool pge)
 	spin_unlock(&set_atomicity_lock);
 }
 
-static void generic_set_all(void)
+static void cf_check generic_set_all(void)
 {
 	unsigned long mask, count;
 	unsigned long flags;
@@ -522,8 +523,8 @@ static void generic_set_all(void)
 	}
 }
 
-static void generic_set_mtrr(unsigned int reg, unsigned long base,
-			     unsigned long size, mtrr_type type)
+static void cf_check generic_set_mtrr(
+    unsigned int reg, unsigned long base, unsigned long size, mtrr_type type)
 /*  [SUMMARY] Set variable MTRR register on the local CPU.
     <reg> The register to set.
     <base> The base address of the region.
@@ -566,26 +567,10 @@ static void generic_set_mtrr(unsigned int reg, unsigned long base,
 	local_irq_restore(flags);
 }
 
-int generic_validate_add_page(unsigned long base, unsigned long size, unsigned int type)
+int cf_check generic_validate_add_page(
+    unsigned long base, unsigned long size, unsigned int type)
 {
 	unsigned long lbase, last;
-
-	/*  For Intel PPro stepping <= 7, must be 4 MiB aligned 
-	    and not touch 0x70000000->0x7003FFFF */
-	if (is_cpu(INTEL) && boot_cpu_data.x86 == 6 &&
-	    boot_cpu_data.x86_model == 1 &&
-	    boot_cpu_data.x86_mask <= 7) {
-		if (base & ((1 << (22 - PAGE_SHIFT)) - 1)) {
-			printk(KERN_WARNING "mtrr: base(%#lx000) is not 4 MiB aligned\n", base);
-			return -EINVAL;
-		}
-		if (!(base + size < 0x70000 || base > 0x7003F) &&
-		    (type == MTRR_TYPE_WRCOMB
-		     || type == MTRR_TYPE_WRBACK)) {
-			printk(KERN_WARNING "mtrr: writable mtrr between 0x70000000 and 0x7003FFFF may hang the CPU.\n");
-			return -EINVAL;
-		}
-	}
 
 	/*  Check upper bits of base and last are equal and lower bits are 0
 	    for base and 1 for last  */
@@ -601,7 +586,7 @@ int generic_validate_add_page(unsigned long base, unsigned long size, unsigned i
 }
 
 
-static int generic_have_wrcomb(void)
+static int cf_check generic_have_wrcomb(void)
 {
 	unsigned long config;
 	rdmsrl(MSR_MTRRcap, config);

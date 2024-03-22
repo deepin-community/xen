@@ -5,19 +5,28 @@ l1_pgentry_t *map_guest_l1e(unsigned long linear, mfn_t *gl1mfn);
 
 int new_guest_cr3(mfn_t mfn);
 
-/* Read a PV guest's l1e that maps this linear address. */
-static inline l1_pgentry_t guest_get_eff_l1e(unsigned long linear)
+/*
+ * Read the guest's l1e that maps this address, from the kernel-mode
+ * page tables.
+ */
+static inline l1_pgentry_t guest_get_eff_kern_l1e(unsigned long linear)
 {
+    struct vcpu *curr = current;
+    bool user_mode = !(curr->arch.flags & TF_kernel_mode);
     l1_pgentry_t l1e;
 
-    ASSERT(!paging_mode_translate(current->domain));
-    ASSERT(!paging_mode_external(current->domain));
+    ASSERT(!paging_mode_translate(curr->domain));
+    ASSERT(!paging_mode_external(curr->domain));
+
+    if ( user_mode )
+        toggle_guest_pt(curr);
 
     if ( unlikely(!__addr_ok(linear)) ||
-         __copy_from_user(&l1e,
-                          &__linear_l1_table[l1_linear_offset(linear)],
-                          sizeof(l1_pgentry_t)) )
+         get_unsafe(l1e, &__linear_l1_table[l1_linear_offset(linear)]) )
         l1e = l1e_empty();
+
+    if ( user_mode )
+        toggle_guest_pt(curr);
 
     return l1e;
 }
@@ -43,29 +52,18 @@ static inline bool update_intpte(intpte_t *p, intpte_t old, intpte_t new,
 
 #ifndef PTE_UPDATE_WITH_CMPXCHG
     if ( !preserve_ad )
-    {
-        rv = paging_write_guest_entry(v, p, new, mfn);
-    }
+        paging_write_guest_entry(v, p, new, mfn);
     else
 #endif
     {
-        intpte_t t = old;
-
         for ( ; ; )
         {
-            intpte_t _new = new;
+            intpte_t _new = new, t;
 
             if ( preserve_ad )
                 _new |= old & (_PAGE_ACCESSED | _PAGE_DIRTY);
 
-            rv = paging_cmpxchg_guest_entry(v, p, &t, _new, mfn);
-            if ( unlikely(rv == 0) )
-            {
-                gdprintk(XENLOG_WARNING,
-                         "Failed to update %" PRIpte " -> %" PRIpte
-                         ": saw %" PRIpte "\n", old, _new, t);
-                break;
-            }
+            t = paging_cmpxchg_guest_entry(v, p, old, _new, mfn);
 
             if ( t == old )
                 break;
@@ -110,8 +108,8 @@ static always_inline l1_pgentry_t adjust_guest_l1e(l1_pgentry_t l1e,
     return l1e;
 }
 
-static inline l2_pgentry_t adjust_guest_l2e(l2_pgentry_t l2e,
-                                            const struct domain *d)
+static always_inline l2_pgentry_t adjust_guest_l2e(l2_pgentry_t l2e,
+                                                   const struct domain *d)
 {
     if ( likely(l2e_get_flags(l2e) & _PAGE_PRESENT) &&
          likely(!is_pv_32bit_domain(d)) )
@@ -130,8 +128,8 @@ static always_inline l3_pgentry_t adjust_guest_l3e(l3_pgentry_t l3e,
     return l3e;
 }
 
-static inline l3_pgentry_t unadjust_guest_l3e(l3_pgentry_t l3e,
-                                              const struct domain *d)
+static always_inline l3_pgentry_t unadjust_guest_l3e(l3_pgentry_t l3e,
+                                                     const struct domain *d)
 {
     if ( unlikely(is_pv_32bit_domain(d)) &&
          likely(l3e_get_flags(l3e) & _PAGE_PRESENT) )

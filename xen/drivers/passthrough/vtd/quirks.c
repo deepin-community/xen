@@ -100,6 +100,69 @@ static void __init cantiga_b3_errata_init(void)
         is_cantiga_b3 = 1;
 }
 
+/*
+ * QUIRK to work around certain BIOSes enabling the ISOCH DMAR unit for the
+ * Azalia sound device, but not giving it any TLB entries, causing it to
+ * deadlock.
+ */
+bool is_azalia_tlb_enabled(const struct acpi_drhd_unit *drhd)
+{
+    pci_sbdf_t sbdf;
+    unsigned int vtisochctrl;
+
+    /* Only dedicated units are of interest. */
+    if ( drhd->include_all || drhd->scope.devices_cnt != 1 )
+        return true;
+
+    /* Check for the specific device. */
+    sbdf = PCI_SBDF(drhd->segment, drhd->scope.devices[0]);
+    if ( pci_conf_read16(sbdf, PCI_VENDOR_ID) != PCI_VENDOR_ID_INTEL ||
+         pci_conf_read16(sbdf, PCI_DEVICE_ID) != 0x3a3e )
+        return true;
+
+    /* Check for the corresponding System Management Registers device. */
+    sbdf = PCI_SBDF(drhd->segment, 0, 0x14, 0);
+    if ( pci_conf_read16(sbdf, PCI_VENDOR_ID) != PCI_VENDOR_ID_INTEL ||
+         pci_conf_read16(sbdf, PCI_DEVICE_ID) != 0x342e )
+        return true;
+
+    vtisochctrl = pci_conf_read32(sbdf, 0x188);
+    if ( vtisochctrl == 0xffffffff )
+    {
+        printk(XENLOG_WARNING VTDPREFIX
+               " Cannot access VTISOCHCTRL at this time\n");
+        return true;
+    }
+
+    /*
+     * If Azalia DMA is routed to the non-isoch DMAR unit, that's fine in
+     * principle, but not consistent with the ACPI tables.
+     */
+    if ( vtisochctrl & 1 )
+    {
+        printk(XENLOG_WARNING VTDPREFIX
+               " Inconsistency between chipset registers and ACPI tables\n");
+        return true;
+    }
+
+    /* Drop all bits other than the number of TLB entries. */
+    vtisochctrl &= 0x1c;
+
+    /* If we have at least the recommended number of TLB entries, fine. */
+    if ( vtisochctrl >= 16 )
+        return true;
+
+    /* Zero TLB entries? */
+    if ( !vtisochctrl )
+        return false;
+
+    printk(XENLOG_WARNING VTDPREFIX
+           " Recommended TLB entries for ISOCH unit is 16; firmware set %u\n",
+           vtisochctrl);
+
+    return true;
+}
+
 /* check for Sandybridge IGD device ID's */
 static void __init snb_errata_init(void)
 {
@@ -245,7 +308,7 @@ void vtd_ops_postamble_quirk(struct vtd_iommu *iommu)
     }
 }
 
-static int __init parse_snb_timeout(const char *s)
+static int __init cf_check parse_snb_timeout(const char *s)
 {
     int t;
     const char *q = NULL;
@@ -344,20 +407,24 @@ void __init platform_quirks_init(void)
  */
 
 static int __must_check map_me_phantom_function(struct domain *domain,
-                                                u32 dev, int map)
+                                                unsigned int dev,
+                                                domid_t domid,
+                                                paddr_t pgd_maddr,
+                                                unsigned int mode)
 {
     struct acpi_drhd_unit *drhd;
     struct pci_dev *pdev;
     int rc;
 
     /* find ME VT-d engine base on a real ME device */
-    pdev = pci_get_pdev(0, 0, PCI_DEVFN(dev, 0));
+    pdev = pci_get_pdev(NULL, PCI_SBDF(0, 0, dev, 0));
     drhd = acpi_find_matched_drhd_unit(pdev);
 
     /* map or unmap ME phantom function */
-    if ( map )
+    if ( !(mode & UNMAP_ME_PHANTOM_FUNC) )
         rc = domain_context_mapping_one(domain, drhd->iommu, 0,
-                                        PCI_DEVFN(dev, 7), NULL);
+                                        PCI_DEVFN(dev, 7), NULL,
+                                        domid, pgd_maddr, mode);
     else
         rc = domain_context_unmap_one(domain, drhd->iommu, 0,
                                       PCI_DEVFN(dev, 7));
@@ -365,7 +432,8 @@ static int __must_check map_me_phantom_function(struct domain *domain,
     return rc;
 }
 
-int me_wifi_quirk(struct domain *domain, u8 bus, u8 devfn, int map)
+int me_wifi_quirk(struct domain *domain, uint8_t bus, uint8_t devfn,
+                  domid_t domid, paddr_t pgd_maddr, unsigned int mode)
 {
     u32 id;
     int rc = 0;
@@ -378,7 +446,7 @@ int me_wifi_quirk(struct domain *domain, u8 bus, u8 devfn, int map)
             return 0;
 
         /* if device is WLAN device, map ME phantom device 0:3.7 */
-        id = pci_conf_read32(PCI_SBDF3(0, bus, devfn), 0);
+        id = pci_conf_read32(PCI_SBDF(0, bus, devfn), 0);
         switch (id)
         {
             case 0x42328086:
@@ -389,7 +457,7 @@ int me_wifi_quirk(struct domain *domain, u8 bus, u8 devfn, int map)
             case 0x423b8086:
             case 0x423c8086:
             case 0x423d8086:
-                rc = map_me_phantom_function(domain, 3, map);
+                rc = map_me_phantom_function(domain, 3, domid, pgd_maddr, mode);
                 break;
             default:
                 break;
@@ -402,7 +470,7 @@ int me_wifi_quirk(struct domain *domain, u8 bus, u8 devfn, int map)
             return 0;
 
         /* if device is WLAN device, map ME phantom device 0:22.7 */
-        id = pci_conf_read32(PCI_SBDF3(0, bus, devfn), 0);
+        id = pci_conf_read32(PCI_SBDF(0, bus, devfn), 0);
         switch (id)
         {
             case 0x00878086:        /* Kilmer Peak */
@@ -415,7 +483,7 @@ int me_wifi_quirk(struct domain *domain, u8 bus, u8 devfn, int map)
             case 0x42388086:        /* Puma Peak */
             case 0x422b8086:
             case 0x422c8086:
-                rc = map_me_phantom_function(domain, 22, map);
+                rc = map_me_phantom_function(domain, 22, domid, pgd_maddr, mode);
                 break;
             default:
                 break;
@@ -429,8 +497,6 @@ void pci_vtd_quirk(const struct pci_dev *pdev)
 {
     int seg = pdev->seg;
     int bus = pdev->bus;
-    int dev = PCI_SLOT(pdev->devfn);
-    int func = PCI_FUNC(pdev->devfn);
     int pos;
     bool_t ff;
     u32 val, val2;
@@ -453,9 +519,8 @@ void pci_vtd_quirk(const struct pci_dev *pdev)
     case 0x3728: /* Xeon C5500/C3500 (JasperForest) */
     case 0x3c28: /* Sandybridge */
         val = pci_conf_read32(pdev->sbdf, 0x1AC);
-        pci_conf_write32(pdev->sbdf, 0x1AC, val | (1 << 31));
-        printk(XENLOG_INFO "Masked VT-d error signaling on %04x:%02x:%02x.%u\n",
-               seg, bus, dev, func);
+        pci_conf_write32(pdev->sbdf, 0x1AC, val | (1U << 31));
+        printk(XENLOG_INFO "Masked VT-d error signaling on %pp\n", &pdev->sbdf);
         break;
 
     /* Tylersburg (EP)/Boxboro (MP) chipsets (NHM-EP/EX, WSM-EP/EX) */
@@ -490,8 +555,7 @@ void pci_vtd_quirk(const struct pci_dev *pdev)
             ff = pcie_aer_get_firmware_first(pdev);
         if ( !pos )
         {
-            printk(XENLOG_WARNING "%04x:%02x:%02x.%u without AER capability?\n",
-                   seg, bus, dev, func);
+            printk(XENLOG_WARNING "%pp without AER capability?\n", &pdev->sbdf);
             break;
         }
 
@@ -514,8 +578,7 @@ void pci_vtd_quirk(const struct pci_dev *pdev)
         val = pci_conf_read32(pdev->sbdf, 0x20c);
         pci_conf_write32(pdev->sbdf, 0x20c, val | (1 << 4));
 
-        printk(XENLOG_INFO "%s UR signaling on %04x:%02x:%02x.%u\n",
-               action, seg, bus, dev, func);
+        printk(XENLOG_INFO "%s UR signaling on %pp\n", action, &pdev->sbdf);
         break;
 
     case 0x0040: case 0x0044: case 0x0048: /* Nehalem/Westmere */
@@ -540,16 +603,15 @@ void pci_vtd_quirk(const struct pci_dev *pdev)
             {
                 __set_bit(0x1c8 * 8 + 20, va);
                 iounmap(va);
-                printk(XENLOG_INFO "Masked UR signaling on %04x:%02x:%02x.%u\n",
-                       seg, bus, dev, func);
+                printk(XENLOG_INFO "Masked UR signaling on %pp\n", &pdev->sbdf);
             }
             else
-                printk(XENLOG_ERR "Could not map %"PRIpaddr" for %04x:%02x:%02x.%u\n",
-                       pa, seg, bus, dev, func);
+                printk(XENLOG_ERR "Could not map %"PRIpaddr" for %pp\n",
+                       pa, &pdev->sbdf);
         }
         else
-            printk(XENLOG_WARNING "Bogus DMIBAR %#"PRIx64" on %04x:%02x:%02x.%u\n",
-                   bar, seg, bus, dev, func);
+            printk(XENLOG_WARNING "Bogus DMIBAR %#"PRIx64" on %pp\n",
+                   bar, &pdev->sbdf);
         break;
     }
 }

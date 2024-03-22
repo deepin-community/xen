@@ -35,7 +35,7 @@ static inline int avtab_hash(struct avtab_key *keyp, u16 mask)
 }
 
 static struct avtab_node* avtab_insert_node(struct avtab *h, int hvalue,
-    struct avtab_node * prev, struct avtab_node * cur, struct avtab_key *key, 
+    struct avtab_node * prev, struct avtab_node * cur, struct avtab_key *key,
                                                     struct avtab_datum *datum)
 {
     struct avtab_node *newnode = xzalloc(struct avtab_node);
@@ -59,7 +59,7 @@ static struct avtab_node* avtab_insert_node(struct avtab *h, int hvalue,
     return newnode;
 }
 
-static int avtab_insert(struct avtab *h, struct avtab_key *key, 
+static int avtab_insert(struct avtab *h, struct avtab_key *key,
                                                     struct avtab_datum *datum)
 {
     int hvalue;
@@ -100,7 +100,7 @@ static int avtab_insert(struct avtab *h, struct avtab_key *key,
  * key/specified mask into the table, as needed by the conditional avtab.
  * It also returns a pointer to the node inserted.
  */
-struct avtab_node * avtab_insert_nonunique(struct avtab * h, 
+struct avtab_node * avtab_insert_nonunique(struct avtab * h,
                             struct avtab_key * key, struct avtab_datum * datum)
 {
     int hvalue;
@@ -110,7 +110,7 @@ struct avtab_node * avtab_insert_nonunique(struct avtab * h,
     if ( !h || !h->htable )
         return NULL;
     hvalue = avtab_hash(key, h->mask);
-    for ( prev = NULL, cur = h->htable[hvalue]; cur; 
+    for ( prev = NULL, cur = h->htable[hvalue]; cur;
                                                 prev = cur, cur = cur->next )
     {
         if ( key->source_type == cur->key.source_type &&
@@ -199,7 +199,7 @@ struct avtab_node* avtab_search_node(struct avtab *h, struct avtab_key *key)
     return NULL;
 }
 
-struct avtab_node* avtab_search_node_next(struct avtab_node *node, 
+struct avtab_node* avtab_search_node_next(struct avtab_node *node,
                                                                 int specified)
 {
     struct avtab_node *cur;
@@ -349,7 +349,7 @@ int avtab_read_item(struct avtab *a, void *fp, struct policydb *pol,
     struct avtab_key key;
     struct avtab_datum datum;
     int i, rc;
-    unsigned set;
+    unsigned int set;
 
     memset(&key, 0, sizeof(struct avtab_key));
     memset(&datum, 0, sizeof(struct avtab_datum));
@@ -482,8 +482,8 @@ int avtab_read_item(struct avtab *a, void *fp, struct policydb *pol,
     return insertf(a, &key, &datum, p);
 }
 
-static int avtab_insertf(struct avtab *a, struct avtab_key *k,
-                                                struct avtab_datum *d, void *p)
+static int cf_check avtab_insertf(
+    struct avtab *a, struct avtab_key *k, struct avtab_datum *d, void *p)
 {
     return avtab_insert(a, k, d);
 }

@@ -1,4 +1,5 @@
 #include <xen/errno.h>
+#include <xen/gunzip.h>
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/mm.h>
@@ -13,25 +14,21 @@ static memptr __initdata free_mem_end_ptr;
 #define WSIZE           0x80000000
 
 static unsigned char *__initdata inbuf;
-static unsigned __initdata insize;
+static unsigned int __initdata insize;
 
 /* Index of next byte to be processed in inbuf: */
-static unsigned __initdata inptr;
+static unsigned int __initdata inptr;
 
 /* Bytes in output buffer: */
-static unsigned __initdata outcnt;
+static unsigned int __initdata outcnt;
 
 #define OF(args)        args
-#define STATIC          static
 
 #define memzero(s, n)   memset((s), 0, (n))
 
 typedef unsigned char   uch;
 typedef unsigned short  ush;
 typedef unsigned long   ulg;
-
-#define INIT            __init
-#define INITDATA        __initdata
 
 #define get_byte()      (inptr < insize ? inbuf[inptr++] : fill_inbuf())
 
@@ -76,7 +73,7 @@ static __init void flush_window(void)
      * compute the crc.
      */
     unsigned long c = crc;
-    unsigned n;
+    unsigned int n;
     unsigned char *in, ch;
 
     in = window;
@@ -114,11 +111,16 @@ __init int perform_gunzip(char *output, char *image, unsigned long image_len)
     window = (unsigned char *)output;
 
     free_mem_ptr = (unsigned long)alloc_xenheap_pages(HEAPORDER, 0);
+    if ( !free_mem_ptr )
+        return -ENOMEM;
+
     free_mem_end_ptr = free_mem_ptr + (PAGE_SIZE << HEAPORDER);
+    init_allocator();
 
     inbuf = (unsigned char *)image;
     insize = image_len;
     inptr = 0;
+    bytes_out = 0;
 
     makecrc();
 

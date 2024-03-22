@@ -2,6 +2,8 @@
 /* Modified for i386/x86-64 Xen by Keir Fraser */
 
 #include <xen/cache.h>
+#include <xen/lib.h>
+#include <xen/xen.lds.h>
 #include <asm/page.h>
 #undef ENTRY
 #undef ALIGN
@@ -18,7 +20,11 @@ ENTRY(efi_start)
 #else /* !EFI */
 
 #define FORMAT "elf64-x86-64"
-#define DECL_SECTION(x) x : AT(ADDR(#x) - __XEN_VIRT_START)
+#ifdef CONFIG_LD_IS_GNU
+# define DECL_SECTION(x) x : AT(ADDR(#x) - __XEN_VIRT_START)
+#else
+# define DECL_SECTION(x) x : AT(ADDR(x) - __XEN_VIRT_START)
+#endif
 
 ENTRY(start_pa)
 
@@ -30,17 +36,25 @@ ENTRY(start_pa)
 # define SECTION_ALIGN PAGE_SIZE
 #endif
 
+#ifndef HAVE_LD_SORT_BY_INIT_PRIORITY
+# define SORT_BY_INIT_PRIORITY SORT
+#endif
+
 OUTPUT_FORMAT(FORMAT, FORMAT, FORMAT)
 
 OUTPUT_ARCH(i386:x86-64)
 
+#ifndef EFI
 PHDRS
 {
   text PT_LOAD ;
-#if (defined(BUILD_ID) || defined (CONFIG_PVH_GUEST)) && !defined(EFI)
   note PT_NOTE ;
-#endif
 }
+#define PHDR(x) :x
+#else
+#define PHDR(x)
+#endif
+
 SECTIONS
 {
 #if !defined(EFI)
@@ -67,9 +81,7 @@ SECTIONS
   _start = .;
   DECL_SECTION(.text) {
         _stext = .;            /* Text and read-only data */
-       *(.text)
-       *(.text.__x86_indirect_thunk_*)
-       *(.text.page_aligned)
+       *(.text.header)
 
        . = ALIGN(PAGE_SIZE);
        _stextentry = .;
@@ -77,13 +89,23 @@ SECTIONS
        . = ALIGN(PAGE_SIZE);
        _etextentry = .;
 
+       *(.text.kexec)          /* Page aligned in the object file. */
+       kexec_reloc_end = .;
+
        *(.text.cold)
-       *(.text.unlikely)
+       *(.text.unlikely .text.*_unlikely .text.unlikely.*)
+
+       *(.text.page_aligned)
+       *(.text)
+#ifdef CONFIG_CC_SPLIT_SECTIONS
+       *(.text.*)
+#endif
+       *(.text.__x86_indirect_thunk_*)
+
        *(.fixup)
-       *(.text.kexec)
        *(.gnu.warning)
        _etext = .;             /* End of text section */
-  } :text = 0x9090
+  } PHDR(text) = 0x9090
 
   . = ALIGN(SECTION_ALIGN);
   __2M_text_end = .;
@@ -91,6 +113,24 @@ SECTIONS
   __2M_rodata_start = .;       /* Start of 2M superpages, mapped RO. */
   DECL_SECTION(.rodata) {
        _srodata = .;
+
+       __ro_after_init_start = .;
+       *(.data.ro_after_init)
+
+       . = ALIGN(8);
+       /* Exception table */
+       __start___ex_table = .;
+       *(.ex_table)
+       __stop___ex_table = .;
+
+       /* Pre-exception table */
+       __start___pre_ex_table = .;
+       *(.ex_table.pre)
+       __stop___pre_ex_table = .;
+
+       . = ALIGN(PAGE_SIZE);
+       __ro_after_init_end = .;
+
        /* Bug frames table */
        __start_bug_frames = .;
        *(.bug_frames.0)
@@ -117,29 +157,17 @@ SECTIONS
        *(.note.gnu.build-id)
        __note_gnu_build_id_end = .;
 #endif
-       . = ALIGN(8);
-       /* Exception table */
-       __start___ex_table = .;
-       *(.ex_table)
-       __stop___ex_table = .;
-
-       /* Pre-exception table */
-       __start___pre_ex_table = .;
-       *(.ex_table.pre)
-       __stop___pre_ex_table = .;
-
-#if defined(CONFIG_HAS_VPCI) && defined(CONFIG_LATE_HWDOM)
-       . = ALIGN(POINTER_ALIGN);
-       __start_vpci_array = .;
-       *(SORT(.data.vpci.*))
-       __end_vpci_array = .;
-#endif
-  } :text
+       VPCI_ARRAY
+  } PHDR(text)
 
 #if defined(CONFIG_PVH_GUEST) && !defined(EFI)
+  /*
+   * In principle this should be fine to live in .note (below), but let's keep
+   * it separate in case anyone decided to find these notes by section name.
+   */
   DECL_SECTION(.note.Xen) {
       *(.note.Xen)
-  } :note :text
+  } PHDR(note) PHDR(text)
 #endif
 
 #if defined(BUILD_ID)
@@ -154,26 +182,21 @@ SECTIONS
        __note_gnu_build_id_start = .;
        *(.note.gnu.build-id)
        __note_gnu_build_id_end = .;
-  } :note :text
+  } PHDR(note) PHDR(text)
 #elif defined(BUILD_ID_EFI)
   DECL_SECTION(.buildid) {
        __note_gnu_build_id_start = .;
        *(.buildid)
        __note_gnu_build_id_end = .;
-  } :text
+  }
 #endif
 #endif
 
-/*
- * ELF builds are linked to a fixed virtual address, and in principle
- * shouldn't have a .reloc section.  However, due to the way EFI support is
- * currently implemented, retaining the .reloc section is necessary.
- */
-#if defined(XEN_BUILD_EFI) && !defined(EFI)
-  . = ALIGN(4);
-  DECL_SECTION(.reloc) {
-    *(.reloc)
-  } :text
+#ifndef EFI
+  /* Retain these just for the purpose of possible analysis tools. */
+  DECL_SECTION(.note) {
+       *(.note.*)
+  } PHDR(note) PHDR(text)
 #endif
 
   _erodata = .;
@@ -191,20 +214,28 @@ SECTIONS
 #endif
        _sinittext = .;
        *(.init.text)
+       *(.text.startup)
+       _einittext = .;
        /*
         * Here are the replacement instructions. The linker sticks them
         * as binary blobs. The .altinstructions has enough data to get
         * the address and the length of them to patch the kernel safely.
         */
        *(.altinstr_replacement)
-       _einittext = .;
 
 #ifdef EFI /* EFI wants to merge all of .init.*  ELF doesn't. */
        . = ALIGN(SMP_CACHE_BYTES);
 #else
-  } :text
+  } PHDR(text)
   DECL_SECTION(.init.data) {
 #endif
+       *(.init.bss.stack_aligned)
+
+       . = ALIGN(POINTER_ALIGN);
+       __initdata_cf_clobber_start = .;
+       *(.init.data.cf_clobber)
+       *(.init.rodata.cf_clobber)
+       __initdata_cf_clobber_end = .;
 
        *(.init.rodata)
        *(.init.rodata.*)
@@ -240,27 +271,44 @@ SECTIONS
         *(.altinstructions)
         __alt_instructions_end = .;
 
-#ifdef CONFIG_DEBUG_LOCK_PROFILE
-       . = ALIGN(POINTER_ALIGN);
-       __lock_profile_start = .;
-       *(.lockprofile.data)
-       __lock_profile_end = .;
-#endif
+       LOCK_PROFILE_DATA
 
        . = ALIGN(8);
        __ctors_start = .;
-       *(.ctors)
+       *(SORT_BY_INIT_PRIORITY(.init_array.*))
+       *(SORT_BY_INIT_PRIORITY(.ctors.*))
        *(.init_array)
-       *(SORT(.init_array.*))
+       *(.ctors)
        __ctors_end = .;
+  } PHDR(text)
 
-#if defined(CONFIG_HAS_VPCI) && !defined(CONFIG_LATE_HWDOM)
-       . = ALIGN(POINTER_ALIGN);
-       __start_vpci_array = .;
-       *(SORT(.data.vpci.*))
-       __end_vpci_array = .;
+#ifndef EFI
+  /*
+   * With --orphan-sections=warn (or =error) we need to handle certain linker
+   * generated sections.  These are all expected to be empty; respective
+   * ASSERT()s can be found towards the end of this file.  Put them in the
+   * text program header, just to be on the safe side against e.g. a linker
+   * otherwise chosing to put them in a separate one.
+   */
+  DECL_SECTION(.got) {
+       *(.got)
+  } PHDR(text)
+  DECL_SECTION(.got.plt) {
+       *(.got.plt)
+  } PHDR(text)
+  DECL_SECTION(.igot.plt) {
+       *(.igot.plt)
+  } PHDR(text)
+  DECL_SECTION(.iplt) {
+       *(.iplt)
+  } PHDR(text)
+  DECL_SECTION(.plt) {
+       *(.plt)
+  } PHDR(text)
+  DECL_SECTION(.rela) {
+       *(.rela.*)
+  } PHDR(text)
 #endif
-  } :text
 
   . = ALIGN(SECTION_ALIGN);
   __init_end = .;
@@ -275,25 +323,16 @@ SECTIONS
        *(.data.schedulers)
        __end_schedulers_array = .;
 
-#ifdef CONFIG_HYPFS
-       . = ALIGN(8);
-       __paramhypfs_start = .;
-       *(.data.paramhypfs)
-       __paramhypfs_end = .;
-#endif
-  } :text
+       HYPFS_PARAM
+  } PHDR(text)
 
   DECL_SECTION(.data) {
        *(.data.page_aligned)
-       *(.data)
-       *(.data.rel)
-       *(.data.rel.*)
-       CONSTRUCTORS
-  } :text
+       *(.data .data.*)
+  } PHDR(text)
 
   DECL_SECTION(.bss) {
        __bss_start = .;
-       *(.bss.stack_aligned)
        *(.bss.page_aligned*)
        . = ALIGN(PAGE_SIZE);
        __per_cpu_start = .;
@@ -303,58 +342,55 @@ SECTIONS
        *(.bss.percpu.read_mostly)
        . = ALIGN(SMP_CACHE_BYTES);
        __per_cpu_data_end = .;
-       *(.bss)
+       *(.bss .bss.*)
        . = ALIGN(POINTER_ALIGN);
        __bss_end = .;
-  } :text
+  } PHDR(text)
   _end = . ;
 
-  . = ALIGN(SECTION_ALIGN);
-  __2M_rwdata_end = .;
+  __2M_rwdata_end = ALIGN(SECTION_ALIGN);
 
 #ifdef EFI
-  . = ALIGN(4);
-  DECL_SECTION(.reloc) {
+  .reloc ALIGN(4) : {
+    __base_relocs_start = .;
     *(.reloc)
-  } :text
-  /* Trick the linker into setting the image size to exactly 16Mb. */
-  . = ALIGN(__section_alignment__);
-  DECL_SECTION(.pad) {
-    . = ALIGN(MB(16));
-  } :text
+    __base_relocs_end = .;
+  }
+#elif defined(XEN_BUILD_EFI)
+  /*
+   * Due to the way EFI support is currently implemented, these two symbols
+   * need to be defined.  Their precise values shouldn't matter (the consuming
+   * function doesn't get called), but to be on the safe side both values would
+   * better match.  Of course the need to be reachable by the relocations
+   * referencing them.
+   */
+  PROVIDE(__base_relocs_start = .);
+  PROVIDE(__base_relocs_end = .);
+#else
+  efi = .;
 #endif
 
-#ifndef XEN_BUILD_EFI
-  efi = .;
+  DWARF2_DEBUG_SECTIONS
+
+#ifdef EFI
+  /* Trick the linker into setting the image size to no less than 16Mb. */
+  __image_end__ = .;
+  .pad ALIGN(__section_alignment__) : {
+    . = __image_end__ < __image_base__ + MB(16) ? ALIGN(MB(16)) : .;
+  }
 #endif
 
 #ifdef CONFIG_HYPERV_GUEST
   hv_hcall_page = ABSOLUTE(HV_HCALL_PAGE - XEN_VIRT_START + __XEN_VIRT_START);
 #endif
 
-  /* Sections to be discarded */
-  /DISCARD/ : {
-       *(.exit.text)
-       *(.exit.data)
-       *(.exitcall.exit)
-       *(.discard)
-       *(.discard.*)
-       *(.eh_frame)
-#ifdef EFI
-       *(.comment)
-       *(.comment.*)
-       *(.note.Xen)
-#endif
-  }
+  DISCARD_SECTIONS
 
-  /* Stabs debugging sections.  */
-  .stab 0 : { *(.stab) }
-  .stabstr 0 : { *(.stabstr) }
-  .stab.excl 0 : { *(.stab.excl) }
-  .stab.exclstr 0 : { *(.stab.exclstr) }
-  .stab.index 0 : { *(.stab.index) }
-  .stab.indexstr 0 : { *(.stab.indexstr) }
-  .comment 0 : { *(.comment) }
+#ifndef EFI
+  STABS_DEBUG_SECTIONS
+
+  ELF_DETAILS_SECTIONS
+#endif
 }
 
 ASSERT(__2M_rwdata_end <= XEN_VIRT_END - XEN_VIRT_START + __XEN_VIRT_START -
@@ -363,7 +399,7 @@ ASSERT(__2M_rwdata_end <= XEN_VIRT_END - XEN_VIRT_START + __XEN_VIRT_START -
        "Xen image overlaps stubs area")
 
 #ifdef CONFIG_KEXEC
-ASSERT(kexec_reloc_size - kexec_reloc <= PAGE_SIZE, "kexec_reloc is too large")
+ASSERT(kexec_reloc_end - kexec_reloc <= PAGE_SIZE, "kexec_reloc is too large")
 #endif
 
 /* The Multiboot setup paths relies on this to simplify superpage PTE creation. */
@@ -386,6 +422,21 @@ ASSERT(IS_ALIGNED(trampoline_start, 4), "trampoline_start misaligned")
 ASSERT(IS_ALIGNED(trampoline_end,   4), "trampoline_end misaligned")
 ASSERT(IS_ALIGNED(__bss_start,      8), "__bss_start misaligned")
 ASSERT(IS_ALIGNED(__bss_end,        8), "__bss_end misaligned")
+
+#ifndef EFI
+ASSERT(!SIZEOF(.got),      ".got non-empty")
+/*
+ * At least GNU ld 2.30 and earlier fail to discard the generic part of
+ * .got.plt when no actual entries were allocated. Permit this case alongside
+ * the section being empty.
+ */
+ASSERT(!SIZEOF(.got.plt) || SIZEOF(.got.plt) == 3 * 8,
+       "unexpected .got.plt size")
+ASSERT(!SIZEOF(.igot.plt), ".igot.plt non-empty")
+ASSERT(!SIZEOF(.iplt),     ".iplt non-empty")
+ASSERT(!SIZEOF(.plt),      ".plt non-empty")
+ASSERT(!SIZEOF(.rela),     "leftover relocations")
+#endif
 
 ASSERT((trampoline_end - trampoline_start) < TRAMPOLINE_SPACE - MBI_SPACE_MIN,
     "not enough room for trampoline and mbi data")

@@ -1,0 +1,47 @@
+From: Michael Tokarev <mjt@tls.msk.ru>
+Date: Sun, 24 Apr 2022 12:26:38 +0300
+Subject: give meaningful error message if qemu device model is unavailable
+
+There's no sense to switch to qemu-xen-traditional device model
+if that one is not enabled in the first place. This way we'll
+have a chance later to print a message suggesting to install the
+missing qemu package if we *actually* need qemu for the device model.
+---
+ tools/libs/light/libxl_create.c | 2 ++
+ tools/libs/light/libxl_dm.c     | 3 +++
+ 2 files changed, 5 insertions(+)
+
+diff --git a/tools/libs/light/libxl_create.c b/tools/libs/light/libxl_create.c
+index dbee32b..6567e84 100644
+--- a/tools/libs/light/libxl_create.c
++++ b/tools/libs/light/libxl_create.c
+@@ -110,6 +110,7 @@ int libxl__domain_build_info_setdefault(libxl__gc *gc,
+             b_info->device_model_version =
+                 LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN;
+         }
++#if HAVE_QEMU_TRADITIONAL
+         if (b_info->device_model_version
+                 == LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN) {
+             const char *dm;
+@@ -129,6 +130,7 @@ int libxl__domain_build_info_setdefault(libxl__gc *gc,
+                 }
+             }
+         }
++#endif
+     }
+ 
+     if (b_info->blkdev_start == NULL)
+diff --git a/tools/libs/light/libxl_dm.c b/tools/libs/light/libxl_dm.c
+index 14b5931..bb2736e 100644
+--- a/tools/libs/light/libxl_dm.c
++++ b/tools/libs/light/libxl_dm.c
+@@ -2897,6 +2897,9 @@ void libxl__spawn_local_dm(libxl__egc *egc, libxl__dm_spawn_state *dmss)
+     }
+     if (access(dm, X_OK) < 0) {
+         LOGED(ERROR, domid, "device model %s is not executable", dm);
++        if (strcmp(dm, QEMU_XEN_PATH) == 0) {
++           LOGD(ERROR, domid, "Please install the qemu-system-xen package for this domain to work");
++        }
+         rc = ERROR_FAIL;
+         goto out;
+     }

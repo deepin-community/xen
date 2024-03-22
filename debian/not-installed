@@ -13,7 +13,7 @@ etc/init.d/xendomains
 # as installed. See bug #831786. Fool dh_missing by pretending
 # they're not installed at all, for now.
 etc/default/xencommons
-etc/bash_completion.d/xl.sh
+etc/bash_completion.d/xl
 
 # This is all handled by debian/shuffle-boot-files,
 # which dh_missing does not know about.

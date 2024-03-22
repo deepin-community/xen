@@ -305,11 +305,11 @@ typedef struct {
 
 /* Extract symbol info - st_info */
 #define ELF32_ST_BIND(x)	((x) >> 4)
-#define ELF32_ST_TYPE(x)	(((unsigned int) x) & 0xf)
+#define ELF32_ST_TYPE(x)	(((unsigned int)(x)) & 0xf)
 #define ELF32_ST_INFO(b,t)	(((b) << 4) + ((t) & 0xf))
 
 #define ELF64_ST_BIND(x)	((x) >> 4)
-#define ELF64_ST_TYPE(x)	(((unsigned int) x) & 0xf)
+#define ELF64_ST_TYPE(x)	(((unsigned int)(x)) & 0xf)
 #define ELF64_ST_INFO(b,t)	(((b) << 4) + ((t) & 0xf))
 
 /* Symbol Binding - ELF32_ST_BIND - st_info */
@@ -436,6 +436,13 @@ typedef struct {
 #define R_AARCH64_MOVW_PREL_G2_NC	292
 #define R_AARCH64_MOVW_PREL_G3		293
 
+/*
+ * Relocation definitions required by the rombios hvmloader relocation
+ * code.
+ */
+#define R_386_32           1            /* Direct 32 bit  */
+#define R_386_PC32         2            /* PC relative 32 bit */
+
 /* Program Header */
 typedef struct {
 	Elf32_Word	p_type;		/* segment type */
@@ -554,8 +561,8 @@ typedef struct {
 #endif
 
 #if defined(ELFSIZE) && (ELFSIZE == 32)
-#define PRIxElfAddr	"08x"
-#define PRIuElfWord	"8u"
+#define PRIxElfAddr 	PRIx32
+#define PRIuElfWord 	PRIu32
 
 #define Elf_Ehdr	Elf32_Ehdr
 #define Elf_Phdr	Elf32_Phdr

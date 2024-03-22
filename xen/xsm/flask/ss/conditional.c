@@ -189,14 +189,14 @@ int cond_init_bool_indexes(struct policydb *p)
     return 0;
 }
 
-int cond_destroy_bool(void *key, void *datum, void *p)
+int cf_check cond_destroy_bool(void *key, void *datum, void *p)
 {
     xfree(key);
     xfree(datum);
     return 0;
 }
 
-int cond_index_bool(void *key, void *datum, void *datap)
+int cf_check cond_index_bool(void *key, void *datum, void *datap)
 {
     struct policydb *p;
     struct cond_bool_datum *booldatum;
@@ -220,7 +220,7 @@ static int bool_isvalid(struct cond_bool_datum *b)
     return 1;
 }
 
-int cond_read_bool(struct policydb *p, struct hashtab *h, void *fp)
+int cf_check cond_read_bool(struct policydb *p, struct hashtab *h, void *fp)
 {
     char *key = NULL;
     struct cond_bool_datum *booldatum;
@@ -268,8 +268,8 @@ struct cond_insertf_data
     struct cond_av_list *tail;
 };
 
-static int cond_insertf(struct avtab *a, struct avtab_key *k, 
-                                            struct avtab_datum *d, void *ptr)
+static int cf_check cond_insertf(
+    struct avtab *a, struct avtab_key *k, struct avtab_datum *d, void *ptr)
 {
     struct cond_insertf_data *data = ptr;
     struct policydb *p = data->p;
@@ -452,7 +452,7 @@ static int cond_read_node(struct policydb *p, struct cond_node *node, void *fp)
             goto err;
         }
 
-        if ( i == 0 ) 
+        if ( i == 0 )
             node->expr = expr;
         else
             last->next = expr;
@@ -513,7 +513,7 @@ err:
 /* Determine whether additional permissions are granted by the conditional
  * av table, and if so, add them to the result
  */
-void cond_compute_av(struct avtab *ctab, struct avtab_key *key, 
+void cond_compute_av(struct avtab *ctab, struct avtab_key *key,
                                                         struct av_decision *avd)
 {
     struct avtab_node *node;

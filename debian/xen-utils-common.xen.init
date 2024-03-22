@@ -58,9 +58,9 @@ XENCONSOLED_PIDFILE="/run/xenconsoled.pid"
 CXENSTORED="$ROOT"/bin/xenstored
 OXENSTORED="$ROOT"/bin/oxenstored
 XENSTORED_PIDFILE="/run/xenstore.pid"
-QEMU=/usr/bin/qemu-system-i386
+QEMU=/usr/libexec/xen-qemu-system-i386
 QEMU_PIDFILE="/run/qemu-dom0.pid"
-QEMU_ARGS="-xen-domid 0 -xen-attach -name dom0 -nographic -M xenpv -daemonize -monitor /dev/null -serial /dev/null -parallel /dev/null"
+QEMU_ARGS="-xen-domid 0 -xen-attach -name dom0 -nographic -M xenpv -daemonize -monitor none -serial none -parallel none"
 
 modules_setup()
 {

@@ -44,7 +44,7 @@ enum guest_type {
     XEN_NONE = 3
 };
 
-static char *type;
+static const char *type;
 static char *ver;
 
 static void cpuid(uint32_t idx, uint32_t *regs, int pv_context)
@@ -52,17 +52,19 @@ static void cpuid(uint32_t idx, uint32_t *regs, int pv_context)
 #ifdef __i386__
     /* Use the stack to avoid reg constraint failures with some gcc flags */
     asm volatile (
-        "push %%eax; push %%ebx; push %%ecx; push %%edx\n\t"
-        "test %1,%1 ; jz 1f ; ud2a ; .ascii \"xen\" ; 1: cpuid\n\t"
-        "mov %%eax,(%2); mov %%ebx,4(%2)\n\t"
-        "mov %%ecx,8(%2); mov %%edx,12(%2)\n\t"
-        "pop %%edx; pop %%ecx; pop %%ebx; pop %%eax\n\t"
-        : : "a" (idx), "c" (pv_context), "S" (regs) : "memory" );
+        "push %%ebx; push %%edx\n\t"
+        "test %[pv],%[pv] ; jz 1f ; ud2a ; .ascii \"xen\" ; 1: cpuid\n\t"
+        "mov %%eax,(%[regs]); mov %%ebx,4(%[regs])\n\t"
+        "mov %%ecx,8(%[regs]); mov %%edx,12(%[regs])\n\t"
+        "pop %%edx; pop %%ebx\n\t"
+        : "+a" (idx), "=c" (idx /* dummy */)
+        : "c" (0), [pv] "r" (pv_context), [regs] "SD" (regs)
+        : "memory" );
 #else
     asm volatile (
-        "test %5,%5 ; jz 1f ; ud2a ; .ascii \"xen\" ; 1: cpuid\n\t"
+        "test %[pv],%[pv] ; jz 1f ; ud2a ; .ascii \"xen\" ; 1: cpuid\n\t"
         : "=a" (regs[0]), "=b" (regs[1]), "=c" (regs[2]), "=d" (regs[3])
-        : "0" (idx), "1" (pv_context), "2" (0) );
+        : "0" (idx), "2" (0), [pv] "r" (pv_context) );
 #endif
 }
 
@@ -83,11 +85,31 @@ static int check_for_xen(int pv_context)
 
         if ( !strcmp("XenVMMXenVMM", signature) && (regs[0] >= (base + 2)) )
             goto found;
+
+        /* Higher base addresses are possible only with HVM. */
+        if ( pv_context )
+            break;
     }
 
     return 0;
 
  found:
+    /*
+     * On CPUID faulting capable hardware even un-escaped CPUID will return
+     * the hypervisor leaves. Need to further distinguish modes.
+     */
+    if ( !pv_context )
+    {
+        /*
+         * XEN_CPUID_FEAT1_MMU_PT_UPDATE_PRESERVE_AD is a PV-only feature
+         * pre-dating CPUID faulting support in Xen. Hence we can use it to
+         * tell whether we shouldn't report "success" to our caller here.
+         */
+        cpuid(base + 2, regs, 0);
+        if ( regs[2] & (1u << 0) )
+            return 0;
+    }
+
     cpuid(base + 1, regs, pv_context);
     if ( regs[0] )
     {

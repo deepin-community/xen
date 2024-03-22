@@ -214,13 +214,10 @@ static int write_msi_msg(struct msi_desc *entry, struct msi_msg *msg)
         pci_conf_write32(dev->sbdf, msi_lower_address_reg(pos),
                          msg->address_lo);
         if ( entry->msi_attrib.is_64 )
-        {
             pci_conf_write32(dev->sbdf, msi_upper_address_reg(pos),
                              msg->address_hi);
-            pci_conf_write16(dev->sbdf, msi_data_reg(pos, 1), msg->data);
-        }
-        else
-            pci_conf_write16(dev->sbdf, msi_data_reg(pos, 0), msg->data);
+        pci_conf_write16(dev->sbdf, msi_data_reg(pos, entry->msi_attrib.is_64),
+                         msg->data);
         break;
     }
     case PCI_CAP_ID_MSIX:
@@ -244,7 +241,7 @@ static int write_msi_msg(struct msi_desc *entry, struct msi_msg *msg)
     return 0;
 }
 
-void set_msi_affinity(struct irq_desc *desc, const cpumask_t *mask)
+void cf_check set_msi_affinity(struct irq_desc *desc, const cpumask_t *mask)
 {
     struct msi_msg msg;
     unsigned int dest;
@@ -379,8 +376,8 @@ static bool msi_set_mask_bit(struct irq_desc *desc, bool host, bool guest)
             {
                 pdev->msix->warned = domid;
                 printk(XENLOG_G_WARNING
-                       "cannot mask IRQ %d: masking MSI-X on Dom%d's %04x:%02x:%02x.%u\n",
-                       desc->irq, domid, seg, bus, slot, func);
+                       "cannot mask IRQ %d: masking MSI-X on Dom%d's %pp\n",
+                       desc->irq, domid, &pdev->sbdf);
             }
         }
         pdev->msix->host_maskall = maskall;
@@ -419,14 +416,14 @@ static int msi_get_mask_bit(const struct msi_desc *entry)
     return -1;
 }
 
-void mask_msi_irq(struct irq_desc *desc)
+void cf_check mask_msi_irq(struct irq_desc *desc)
 {
     if ( unlikely(!msi_set_mask_bit(desc, 1,
                                     desc->msi_desc->msi_attrib.guest_masked)) )
         BUG_ON(!(desc->status & IRQ_DISABLED));
 }
 
-void unmask_msi_irq(struct irq_desc *desc)
+void cf_check unmask_msi_irq(struct irq_desc *desc)
 {
     if ( unlikely(!msi_set_mask_bit(desc, 0,
                                     desc->msi_desc->msi_attrib.guest_masked)) )
@@ -438,26 +435,26 @@ void guest_mask_msi_irq(struct irq_desc *desc, bool mask)
     msi_set_mask_bit(desc, desc->msi_desc->msi_attrib.host_masked, mask);
 }
 
-static unsigned int startup_msi_irq(struct irq_desc *desc)
+static unsigned int cf_check startup_msi_irq(struct irq_desc *desc)
 {
     if ( unlikely(!msi_set_mask_bit(desc, 0, !!(desc->status & IRQ_GUEST))) )
         WARN();
     return 0;
 }
 
-static void shutdown_msi_irq(struct irq_desc *desc)
+static void cf_check shutdown_msi_irq(struct irq_desc *desc)
 {
     if ( unlikely(!msi_set_mask_bit(desc, 1, 1)) )
         BUG_ON(!(desc->status & IRQ_DISABLED));
 }
 
-void ack_nonmaskable_msi_irq(struct irq_desc *desc)
+void cf_check ack_nonmaskable_msi_irq(struct irq_desc *desc)
 {
     irq_complete_move(desc);
     move_native_irq(desc);
 }
 
-static void ack_maskable_msi_irq(struct irq_desc *desc)
+static void cf_check ack_maskable_msi_irq(struct irq_desc *desc)
 {
     ack_nonmaskable_msi_irq(desc);
     ack_APIC_irq(); /* ACKTYPE_NONE */
@@ -686,7 +683,8 @@ static u64 read_pci_mem_bar(u16 seg, u8 bus, u8 slot, u8 func, u8 bir, int vf)
 
     if ( vf >= 0 )
     {
-        struct pci_dev *pdev = pci_get_pdev(seg, bus, PCI_DEVFN(slot, func));
+        struct pci_dev *pdev = pci_get_pdev(NULL,
+                                            PCI_SBDF(seg, bus, slot, func));
         unsigned int pos = pci_find_ext_capability(seg, bus,
                                                    PCI_DEVFN(slot, func),
                                                    PCI_EXT_CAP_ID_SRIOV);
@@ -842,7 +840,7 @@ static int msix_capability_init(struct pci_dev *dev,
             pbus = dev->info.physfn.bus;
             pslot = PCI_SLOT(dev->info.physfn.devfn);
             pfunc = PCI_FUNC(dev->info.physfn.devfn);
-            vf = PCI_BDF2(dev->bus, dev->devfn);
+            vf = dev->sbdf.bdf;
         }
 
         table_paddr = read_pci_mem_bar(seg, pbus, pslot, pfunc, bir, vf);
@@ -952,11 +950,11 @@ static int msix_capability_init(struct pci_dev *dev,
             struct domain *d = dev->domain ?: currd;
 
             if ( !is_hardware_domain(currd) || d != currd )
-                printk("%s use of MSI-X on %04x:%02x:%02x.%u by Dom%d\n",
+                printk("%s use of MSI-X on %pp by %pd\n",
                        is_hardware_domain(currd)
                        ? XENLOG_WARNING "Potentially insecure"
                        : XENLOG_ERR "Insecure",
-                       seg, bus, slot, func, d->domain_id);
+                       &dev->sbdf, d);
             if ( !is_hardware_domain(d) &&
                  /* Assume a domain without memory has no mappings yet. */
                  (!is_hardware_domain(currd) || domain_tot_pages(d)) )
@@ -1003,25 +1001,22 @@ static int __pci_enable_msi(struct msi_info *msi, struct msi_desc **desc)
     struct msi_desc *old_desc;
 
     ASSERT(pcidevs_locked());
-    pdev = pci_get_pdev(msi->seg, msi->bus, msi->devfn);
+    pdev = pci_get_pdev(NULL, msi->sbdf);
     if ( !pdev )
         return -ENODEV;
 
     old_desc = find_msi_entry(pdev, msi->irq, PCI_CAP_ID_MSI);
     if ( old_desc )
     {
-        printk(XENLOG_ERR "irq %d already mapped to MSI on %04x:%02x:%02x.%u\n",
-               msi->irq, msi->seg, msi->bus,
-               PCI_SLOT(msi->devfn), PCI_FUNC(msi->devfn));
+        printk(XENLOG_ERR "irq %d already mapped to MSI on %pp\n",
+               msi->irq, &pdev->sbdf);
         return -EEXIST;
     }
 
     old_desc = find_msi_entry(pdev, -1, PCI_CAP_ID_MSIX);
     if ( old_desc )
     {
-        printk(XENLOG_WARNING "MSI-X already in use on %04x:%02x:%02x.%u\n",
-               msi->seg, msi->bus,
-               PCI_SLOT(msi->devfn), PCI_FUNC(msi->devfn));
+        printk(XENLOG_WARNING "MSI-X already in use on %pp\n", &pdev->sbdf);
         __pci_disable_msix(old_desc);
     }
 
@@ -1058,12 +1053,10 @@ static void __pci_disable_msi(struct msi_desc *entry)
 static int __pci_enable_msix(struct msi_info *msi, struct msi_desc **desc)
 {
     struct pci_dev *pdev;
-    u8 slot = PCI_SLOT(msi->devfn);
-    u8 func = PCI_FUNC(msi->devfn);
     struct msi_desc *old_desc;
 
     ASSERT(pcidevs_locked());
-    pdev = pci_get_pdev(msi->seg, msi->bus, msi->devfn);
+    pdev = pci_get_pdev(NULL, msi->sbdf);
     if ( !pdev || !pdev->msix )
         return -ENODEV;
 
@@ -1073,16 +1066,15 @@ static int __pci_enable_msix(struct msi_info *msi, struct msi_desc **desc)
     old_desc = find_msi_entry(pdev, msi->irq, PCI_CAP_ID_MSIX);
     if ( old_desc )
     {
-        printk(XENLOG_ERR "irq %d already mapped to MSI-X on %04x:%02x:%02x.%u\n",
-               msi->irq, msi->seg, msi->bus, slot, func);
+        printk(XENLOG_ERR "irq %d already mapped to MSI-X on %pp\n",
+               msi->irq, &pdev->sbdf);
         return -EEXIST;
     }
 
     old_desc = find_msi_entry(pdev, -1, PCI_CAP_ID_MSI);
     if ( old_desc )
     {
-        printk(XENLOG_WARNING "MSI already in use on %04x:%02x:%02x.%u\n",
-               msi->seg, msi->bus, slot, func);
+        printk(XENLOG_WARNING "MSI already in use on %pp\n", &pdev->sbdf);
         __pci_disable_msi(old_desc);
     }
 
@@ -1134,9 +1126,8 @@ static void __pci_disable_msix(struct msi_desc *entry)
         writel(1, entry->mask_base + PCI_MSIX_ENTRY_VECTOR_CTRL_OFFSET);
     else if ( !(control & PCI_MSIX_FLAGS_MASKALL) )
     {
-        printk(XENLOG_WARNING
-               "cannot disable IRQ %d: masking MSI-X on %04x:%02x:%02x.%u\n",
-               entry->irq, seg, bus, slot, func);
+        printk(XENLOG_WARNING "cannot disable IRQ %d: masking MSI-X on %pp\n",
+               entry->irq, &dev->sbdf);
         maskall = true;
     }
     dev->msix->host_maskall = maskall;
@@ -1156,7 +1147,7 @@ int pci_prepare_msix(u16 seg, u8 bus, u8 devfn, bool off)
         return 0;
 
     pcidevs_lock();
-    pdev = pci_get_pdev(seg, bus, devfn);
+    pdev = pci_get_pdev(NULL, PCI_SBDF(seg, bus, devfn));
     if ( !pdev )
         rc = -ENODEV;
     else if ( pdev->msix->used_entries != !!off )
@@ -1312,7 +1303,6 @@ int pci_restore_msi_state(struct pci_dev *pdev)
     struct msi_desc *entry, *tmp;
     struct irq_desc *desc;
     struct msi_msg msg;
-    u8 slot = PCI_SLOT(pdev->devfn), func = PCI_FUNC(pdev->devfn);
     unsigned int type = 0, pos = 0;
     u16 control = 0;
 
@@ -1341,9 +1331,8 @@ int pci_restore_msi_state(struct pci_dev *pdev)
         if (desc->msi_desc != entry)
         {
     bogus:
-            dprintk(XENLOG_ERR,
-                    "Restore MSI for %04x:%02x:%02x:%u entry %u not set?\n",
-                    pdev->seg, pdev->bus, slot, func, i);
+            dprintk(XENLOG_ERR, "Restore MSI for %pp entry %u not set?\n",
+                    &pdev->sbdf, i);
             spin_unlock_irqrestore(&desc->lock, flags);
             if ( type == PCI_CAP_ID_MSIX )
                 pci_conf_write16(pdev->sbdf, msix_control_reg(pos),
@@ -1423,7 +1412,7 @@ void __init early_msi_init(void)
         return;
 }
 
-static void dump_msi(unsigned char key)
+static void cf_check dump_msi(unsigned char key)
 {
     unsigned int irq;
 
@@ -1497,7 +1486,7 @@ static void dump_msi(unsigned char key)
     vpci_dump_msi();
 }
 
-static int __init msi_setup_keyhandler(void)
+static int __init cf_check msi_setup_keyhandler(void)
 {
     register_keyhandler('M', dump_msi, "dump MSI state", 1);
     return 0;

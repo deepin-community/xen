@@ -22,6 +22,11 @@
 
 enum system_state system_state = SYS_STATE_early_boot;
 
+#ifdef CONFIG_HAS_DIT
+bool __ro_after_init opt_dit = IS_ENABLED(CONFIG_DIT_DEFAULT);
+boolean_param("dit", opt_dit);
+#endif
+
 xen_commandline_t saved_cmdline;
 static const char __initconst opt_builtin_cmdline[] = CONFIG_CMDLINE;
 
@@ -272,9 +277,9 @@ int parse_bool(const char *s, const char *e)
 int parse_boolean(const char *name, const char *s, const char *e)
 {
     size_t slen, nlen;
-    int val = !!strncmp(s, "no-", 3);
+    bool has_neg_prefix = !strncmp(s, "no-", 3);
 
-    if ( !val )
+    if ( has_neg_prefix )
         s += 3;
 
     slen = e ? ({ ASSERT(e >= s); e - s; }) : strlen(s);
@@ -286,11 +291,23 @@ int parse_boolean(const char *name, const char *s, const char *e)
 
     /* Exact, unadorned name?  Result depends on the 'no-' prefix. */
     if ( slen == nlen )
-        return val;
+        return !has_neg_prefix;
+
+    /* Inexact match with a 'no-' prefix?  Not valid. */
+    if ( has_neg_prefix )
+        return -1;
 
     /* =$SOMETHING?  Defer to the regular boolean parsing. */
     if ( s[nlen] == '=' )
-        return parse_bool(&s[nlen + 1], e);
+    {
+        int b = parse_bool(&s[nlen + 1], e);
+
+        if ( b >= 0 )
+            return b;
+
+        /* Not a boolean, but the name matched.  Signal specially. */
+        return -2;
+    }
 
     /* Unrecognised.  Give up. */
     return -1;
@@ -326,6 +343,8 @@ unsigned int tainted;
  *  'E' - An error (e.g. a machine check exceptions) has been injected.
  *  'H' - HVM forced emulation prefix is permitted.
  *  'M' - Machine had a machine check experience.
+ *  'U' - Platform is unsecure (usually due to an errata on the platform).
+ *  'S' - Out of spec CPU (Incompatible features on one or more cores).
  *
  *      The string is overwritten by the next call to print_taint().
  */
@@ -333,11 +352,13 @@ char *print_tainted(char *str)
 {
     if ( tainted )
     {
-        snprintf(str, TAINT_STRING_MAX_LEN, "Tainted: %c%c%c%c",
+        snprintf(str, TAINT_STRING_MAX_LEN, "Tainted: %c%c%c%c%c%c",
+                 tainted & TAINT_MACHINE_UNSECURE ? 'U' : ' ',
                  tainted & TAINT_MACHINE_CHECK ? 'M' : ' ',
                  tainted & TAINT_SYNC_CONSOLE ? 'C' : ' ',
                  tainted & TAINT_ERROR_INJECT ? 'E' : ' ',
-                 tainted & TAINT_HVM_FEP ? 'H' : ' ');
+                 tainted & TAINT_HVM_FEP ? 'H' : ' ',
+                 tainted & TAINT_CPU_OUT_OF_SPEC ? 'S' : ' ');
     }
     else
     {
@@ -389,7 +410,7 @@ static HYPFS_STRING_INIT(extra, "extra");
 static HYPFS_STRING_INIT(config, "config");
 #endif
 
-static int __init buildinfo_init(void)
+static int __init cf_check buildinfo_init(void)
 {
     hypfs_add_dir(&hypfs_root, &buildinfo, true);
 
@@ -427,7 +448,7 @@ __initcall(buildinfo_init);
 
 static HYPFS_DIR_INIT(params, "params");
 
-static int __init param_init(void)
+static int __init cf_check param_init(void)
 {
     struct param_hypfs *param;
 
@@ -558,6 +579,10 @@ DO(xen_version)(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
                              (1U << XENFEAT_hvm_callback_vector) |
                              (has_pirq(d) ? (1U << XENFEAT_hvm_pirqs) : 0);
 #endif
+            if ( !paging_mode_translate(d) || is_domain_direct_mapped(d) )
+                fi.submap |= (1U << XENFEAT_direct_mapped);
+            else
+                fi.submap |= (1U << XENFEAT_not_direct_mapped);
             break;
         default:
             return -EINVAL;

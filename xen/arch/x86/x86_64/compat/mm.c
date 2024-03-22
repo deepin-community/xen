@@ -1,4 +1,5 @@
 #include <xen/event.h>
+#include <xen/hypercall.h>
 #include <xen/mem_access.h>
 #include <xen/multicall.h>
 #include <compat/memory.h>
@@ -103,6 +104,9 @@ int compat_arch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
             .max_mfn = MACH2PHYS_COMPAT_NR_ENTRIES(d) - 1
         };
 
+        if ( !opt_pv32 )
+            return -EOPNOTSUPP;
+
         if ( copy_to_guest(arg, &mapping, 1) )
             rc = -EFAULT;
 
@@ -114,6 +118,9 @@ int compat_arch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
     {
         unsigned long limit;
         compat_pfn_t last_mfn;
+
+        if ( !opt_pv32 )
+            return -EOPNOTSUPP;
 
         if ( copy_from_guest(&xmml, arg, 1) )
             return -EFAULT;
@@ -149,8 +156,10 @@ int compat_arch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
     case XENMEM_get_sharing_shared_pages:
         return mem_sharing_get_nr_shared_mfns();
 
+#ifdef CONFIG_MEM_PAGING
     case XENMEM_paging_op:
         return mem_paging_memop(guest_handle_cast(arg, xen_mem_paging_op_t));
+#endif
 
 #ifdef CONFIG_MEM_SHARING
     case XENMEM_sharing_op:
@@ -168,10 +177,9 @@ int compat_arch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
 #ifdef CONFIG_PV
 DEFINE_XEN_GUEST_HANDLE(mmuext_op_compat_t);
 
-int compat_mmuext_op(XEN_GUEST_HANDLE_PARAM(void) arg,
-                     unsigned int count,
-                     XEN_GUEST_HANDLE_PARAM(uint) pdone,
-                     unsigned int foreigndom)
+int compat_mmuext_op(
+    XEN_GUEST_HANDLE_PARAM(void) arg, unsigned int count,
+    XEN_GUEST_HANDLE_PARAM(uint) pdone, unsigned int foreigndom)
 {
     unsigned int i, preempt_mask;
     int rc = 0;

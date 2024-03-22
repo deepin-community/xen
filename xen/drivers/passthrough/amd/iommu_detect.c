@@ -60,14 +60,17 @@ void __init get_iommu_features(struct amd_iommu *iommu)
     const struct amd_iommu *first;
     ASSERT( iommu->mmio_base );
 
-    if ( !iommu_has_cap(iommu, PCI_CAP_EFRSUP_SHIFT) )
+    if ( !(amd_iommu_acpi_info & ACPI_IVRS_EFR_SUP) )
     {
-        iommu->features.raw = 0;
-        return;
-    }
+        if ( !iommu_has_cap(iommu, PCI_CAP_EFRSUP_SHIFT) )
+            return;
 
-    iommu->features.raw =
-        readq(iommu->mmio_base + IOMMU_EXT_FEATURE_MMIO_OFFSET);
+        iommu->features.raw =
+            readq(iommu->mmio_base + IOMMU_EXT_FEATURE_MMIO_OFFSET);
+
+        if ( 4 + iommu->features.flds.hats < amd_iommu_max_paging_mode )
+            amd_iommu_max_paging_mode = 4 + iommu->features.flds.hats;
+    }
 
     /* Don't log the same set of features over and over. */
     first = list_first_entry(&amd_iommu_head, struct amd_iommu, list);
@@ -138,21 +141,21 @@ int __init amd_iommu_detect_one_acpi(
 
     if ( ivhd_block->header.length < sizeof(*ivhd_block) )
     {
-        AMD_IOMMU_DEBUG("Invalid IVHD Block Length!\n");
+        AMD_IOMMU_ERROR("invalid IVHD block length\n");
         return -ENODEV;
     }
 
     if ( !ivhd_block->header.device_id ||
         !ivhd_block->capability_offset || !ivhd_block->base_address)
     {
-        AMD_IOMMU_DEBUG("Invalid IVHD Block!\n");
+        AMD_IOMMU_ERROR("invalid IVHD block\n");
         return -ENODEV;
     }
 
     iommu = xzalloc(struct amd_iommu);
     if ( !iommu )
     {
-        AMD_IOMMU_DEBUG("Error allocating amd_iommu\n");
+        AMD_IOMMU_ERROR("cannot allocate amd_iommu\n");
         return -ENOMEM;
     }
 
@@ -163,6 +166,46 @@ int __init amd_iommu_detect_one_acpi(
     iommu->bdf = ivhd_block->header.device_id;
     iommu->cap_offset = ivhd_block->capability_offset;
     iommu->mmio_base_phys = ivhd_block->base_address;
+
+    if ( ivhd_type != ACPI_IVRS_TYPE_HARDWARE )
+        iommu->features.raw = ivhd_block->efr_image;
+    else if ( amd_iommu_acpi_info & ACPI_IVRS_EFR_SUP )
+    {
+        union {
+            uint32_t raw;
+            struct {
+                unsigned int xt_sup:1;
+                unsigned int nx_sup:1;
+                unsigned int gt_sup:1;
+                unsigned int glx_sup:2;
+                unsigned int ia_sup:1;
+                unsigned int ga_sup:1;
+                unsigned int he_sup:1;
+                unsigned int pas_max:5;
+                unsigned int pn_counters:4;
+                unsigned int pn_banks:6;
+                unsigned int msi_num_ppr:5;
+                unsigned int gats:2;
+                unsigned int hats:2;
+            };
+        } attr = { .raw = ivhd_block->iommu_attr };
+
+        iommu->features.flds.xt_sup = attr.xt_sup;
+        iommu->features.flds.nx_sup = attr.nx_sup;
+        iommu->features.flds.gt_sup = attr.gt_sup;
+        iommu->features.flds.glx_sup = attr.glx_sup;
+        iommu->features.flds.ia_sup = attr.ia_sup;
+        iommu->features.flds.ga_sup = attr.ga_sup;
+        iommu->features.flds.pas_max = attr.pas_max;
+        iommu->features.flds.gats = attr.gats;
+        iommu->features.flds.hats = attr.hats;
+    }
+    else if ( list_empty(&amd_iommu_head) )
+        AMD_IOMMU_DEBUG("EFRSup not set in ACPI table; will fall back to hardware\n");
+
+    if ( (amd_iommu_acpi_info & ACPI_IVRS_EFR_SUP) &&
+         4 + iommu->features.flds.hats < amd_iommu_max_paging_mode )
+        amd_iommu_max_paging_mode = 4 + iommu->features.flds.hats;
 
     /* override IOMMU HT flags */
     iommu->ht_flags = ivhd_block->header.flags;
@@ -180,18 +223,25 @@ int __init amd_iommu_detect_one_acpi(
     if ( rt )
         goto out;
 
+    iommu->domid_map = iommu_init_domid(DOMID_INVALID);
+    rt = -ENOMEM;
+    if ( !iommu->domid_map )
+        goto out;
+
     rt = pci_ro_device(iommu->seg, bus, PCI_DEVFN(dev, func));
     if ( rt )
-        printk(XENLOG_ERR
-               "Could not mark config space of %04x:%02x:%02x.%u read-only (%d)\n",
-               iommu->seg, bus, dev, func, rt);
+        printk(XENLOG_ERR "Could not mark config space of %pp read-only (%d)\n",
+               &PCI_SBDF(iommu->seg, iommu->bdf), rt);
 
     list_add_tail(&iommu->list, &amd_iommu_head);
     rt = 0;
 
  out:
     if ( rt )
+    {
+        xfree(iommu->domid_map);
         xfree(iommu);
+    }
 
     return rt;
 }

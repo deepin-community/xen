@@ -48,9 +48,9 @@
 #define RW_STATE_WORD0 3
 #define RW_STATE_WORD1 4
 
-static int handle_pit_io(
+static int cf_check handle_pit_io(
     int dir, unsigned int port, unsigned int bytes, uint32_t *val);
-static int handle_speaker_io(
+static int cf_check handle_speaker_io(
     int dir, unsigned int port, unsigned int bytes, uint32_t *val);
 
 #define get_guest_time(v) \
@@ -156,7 +156,7 @@ static int pit_get_gate(PITState *pit, int channel)
     return pit->hw.channels[channel].gate;
 }
 
-static void pit_time_fired(struct vcpu *v, void *priv)
+static void cf_check pit_time_fired(struct vcpu *v, void *priv)
 {
     uint64_t *count_load_time = priv;
     TRACE_0D(TRC_HVM_EMUL_PIT_TIMER_CB);
@@ -391,7 +391,7 @@ void pit_stop_channel0_irq(PITState *pit)
     spin_unlock(&pit->lock);
 }
 
-static int pit_save(struct vcpu *v, hvm_domain_context_t *h)
+static int cf_check pit_save(struct vcpu *v, hvm_domain_context_t *h)
 {
     struct domain *d = v->domain;
     PITState *pit = domain_vpit(d);
@@ -409,7 +409,7 @@ static int pit_save(struct vcpu *v, hvm_domain_context_t *h)
     return rc;
 }
 
-static int pit_load(struct domain *d, hvm_domain_context_t *h)
+static int cf_check pit_load(struct domain *d, hvm_domain_context_t *h)
 {
     PITState *pit = domain_vpit(d);
     int i, rc = 0;
@@ -505,7 +505,7 @@ void pit_deinit(struct domain *d)
 }
 
 /* the intercept action for PIT DM retval:0--not handled; 1--handled */  
-static int handle_pit_io(
+static int cf_check handle_pit_io(
     int dir, unsigned int port, unsigned int bytes, uint32_t *val)
 {
     struct PITState *vpit = vcpu_vpit(current);
@@ -548,7 +548,7 @@ static uint32_t speaker_ioport_read(
             (pit_get_out(pit, 2) << 5) | (refresh_clock << 4));
 }
 
-static int handle_speaker_io(
+static int cf_check handle_speaker_io(
     int dir, unsigned int port, uint32_t bytes, uint32_t *val)
 {
     struct PITState *vpit = vcpu_vpit(current);

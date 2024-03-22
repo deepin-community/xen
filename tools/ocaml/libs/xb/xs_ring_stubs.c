@@ -35,7 +35,7 @@
 #include <sys/mman.h>
 #include "mmap_stubs.h"
 
-#define GET_C_STRUCT(a) ((struct mmap_interface *) a)
+#define GET_C_STRUCT(a) ((struct mmap_interface *)Data_abstract_val(a))
 
 /*
  * Bytes_val has been introduced by Ocaml 4.06.1. So define our own version
@@ -112,7 +112,7 @@ CAMLprim value ml_interface_write(value ml_interface,
 	CAMLlocal1(ml_result);
 
 	struct mmap_interface *interface = GET_C_STRUCT(ml_interface);
-	const unsigned char *buffer = Bytes_val(ml_buffer);
+	const char *buffer = String_val(ml_buffer);
 	int len = Int_val(ml_len);
 	int result;
 

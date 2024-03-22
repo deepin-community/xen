@@ -75,7 +75,7 @@
 #define GET_CC7_RES(val)  GET_HW_RES_IN_NS(0x3FE, val) /* SNB onwards */
 #define PHI_CC6_RES(val)  GET_HW_RES_IN_NS(0x3FF, val) /* Xeon Phi only */
 
-static void lapic_timer_nop(void) { }
+static void cf_check lapic_timer_nop(void) { }
 void (*__read_mostly lapic_timer_off)(void);
 void (*__read_mostly lapic_timer_on)(void);
 
@@ -106,7 +106,7 @@ void (*__read_mostly pm_idle_save)(void);
 unsigned int max_cstate __read_mostly = UINT_MAX;
 unsigned int max_csubstate __read_mostly = UINT_MAX;
 
-static int __init parse_cstate(const char *s)
+static int __init cf_check parse_cstate(const char *s)
 {
     max_cstate = simple_strtoul(s, &s, 0);
     if ( *s == ',' )
@@ -145,7 +145,7 @@ struct hw_residencies
     uint64_t cc7;
 };
 
-static void do_get_hw_residencies(void *arg)
+static void cf_check do_get_hw_residencies(void *arg)
 {
     struct cpuinfo_x86 *c = &current_cpu_data;
     struct hw_residencies *hw_res = arg;
@@ -310,12 +310,27 @@ static char* acpi_cstate_method_name[] =
     "HALT"
 };
 
-static uint64_t get_stime_tick(void) { return (uint64_t)NOW(); }
-static uint64_t stime_ticks_elapsed(uint64_t t1, uint64_t t2) { return t2 - t1; }
-static uint64_t stime_tick_to_ns(uint64_t ticks) { return ticks; }
+static uint64_t cf_check get_stime_tick(void)
+{
+    return NOW();
+}
 
-static uint64_t get_acpi_pm_tick(void) { return (uint64_t)inl(pmtmr_ioport); }
-static uint64_t acpi_pm_ticks_elapsed(uint64_t t1, uint64_t t2)
+static uint64_t cf_check stime_ticks_elapsed(uint64_t t1, uint64_t t2)
+{
+    return t2 - t1;
+}
+
+static uint64_t cf_check stime_tick_to_ns(uint64_t ticks)
+{
+    return ticks;
+}
+
+static uint64_t cf_check get_acpi_pm_tick(void)
+{
+    return inl(pmtmr_ioport);
+}
+
+static uint64_t cf_check acpi_pm_ticks_elapsed(uint64_t t1, uint64_t t2)
 {
     if ( t2 >= t1 )
         return (t2 - t1);
@@ -377,7 +392,7 @@ static void print_acpi_power(uint32_t cpu, struct acpi_processor_power *power)
     print_hw_residencies(cpu);
 }
 
-static void dump_cx(unsigned char key)
+static void cf_check dump_cx(unsigned char key)
 {
     unsigned int cpu;
 
@@ -410,7 +425,7 @@ static void dump_cx(unsigned char key)
     }
 }
 
-static int __init cpu_idle_key_init(void)
+static int __init cf_check cpu_idle_key_init(void)
 {
     register_keyhandler('c', dump_cx, "dump ACPI Cx structures", 1);
     return 0;
@@ -664,7 +679,7 @@ void update_idle_stats(struct acpi_processor_power *power,
     spin_unlock(&power->stat_lock);
 }
 
-static void acpi_processor_idle(void)
+static void cf_check acpi_processor_idle(void)
 {
     unsigned int cpu = smp_processor_id();
     struct acpi_processor_power *power = processor_powers[cpu];
@@ -869,7 +884,7 @@ static void acpi_processor_idle(void)
         cpuidle_current_governor->reflect(power);
 }
 
-void acpi_dead_idle(void)
+void cf_check acpi_dead_idle(void)
 {
     struct acpi_processor_power *power;
     struct acpi_processor_cx *cx;
@@ -1622,7 +1637,7 @@ bool cpuidle_using_deep_cstate(void)
                                                                : ACPI_STATE_C1);
 }
 
-static int cpu_callback(
+static int cf_check cpu_callback(
     struct notifier_block *nfb, unsigned long action, void *hcpu)
 {
     unsigned int cpu = (unsigned long)hcpu;
@@ -1655,7 +1670,7 @@ static struct notifier_block cpu_nfb = {
     .notifier_call = cpu_callback
 };
 
-static int __init cpuidle_presmp_init(void)
+static int __init cf_check cpuidle_presmp_init(void)
 {
     void *cpu = (void *)(long)smp_processor_id();
 

@@ -1,25 +1,8 @@
+/* SPDX-License-Identifier: MIT */
 /******************************************************************************
  * domctl.h
  *
  * Domain management operations. For use by node control stack.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to
- * deal in the Software without restriction, including without limitation the
- * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
- * sell copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in
- * all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
  *
  * Copyright (c) 2002-2003, B Dragovic
  * Copyright (c) 2002-2006, K Fraser
@@ -38,7 +21,7 @@
 #include "hvm/save.h"
 #include "memory.h"
 
-#define XEN_DOMCTL_INTERFACE_VERSION 0x00000012
+#define XEN_DOMCTL_INTERFACE_VERSION 0x00000015
 
 /*
  * NB. xen_domctl.domain is an IN/OUT parameter for this operation.
@@ -68,9 +51,13 @@ struct xen_domctl_createdomain {
  /* Should this domain be permitted to use the IOMMU? */
 #define _XEN_DOMCTL_CDF_iommu         5
 #define XEN_DOMCTL_CDF_iommu          (1U<<_XEN_DOMCTL_CDF_iommu)
+#define _XEN_DOMCTL_CDF_nested_virt   6
+#define XEN_DOMCTL_CDF_nested_virt    (1U << _XEN_DOMCTL_CDF_nested_virt)
+/* Should we expose the vPMU to the guest? */
+#define XEN_DOMCTL_CDF_vpmu           (1U << 7)
 
 /* Max XEN_DOMCTL_CDF_* constant.  Used for ABI checking. */
-#define XEN_DOMCTL_CDF_MAX XEN_DOMCTL_CDF_iommu
+#define XEN_DOMCTL_CDF_MAX XEN_DOMCTL_CDF_vpmu
 
     uint32_t flags;
 
@@ -93,6 +80,18 @@ struct xen_domctl_createdomain {
     int32_t max_grant_frames;
     int32_t max_maptrack_frames;
 
+/* Grant version, use low 4 bits. */
+#define XEN_DOMCTL_GRANT_version_mask    0xf
+#define XEN_DOMCTL_GRANT_version(v)      ((v) & XEN_DOMCTL_GRANT_version_mask)
+
+    uint32_t grant_opts;
+
+    /* Per-vCPU buffer size in bytes.  0 to disable. */
+    uint32_t vmtrace_size;
+
+    /* CPU pool to use; specify 0 or a specific existing pool */
+    uint32_t cpupool_id;
+
     struct xen_arch_domainconfig arch;
 };
 
@@ -100,6 +99,7 @@ struct xen_domctl_createdomain {
 struct xen_domctl_getdomaininfo {
     /* OUT variables. */
     domid_t  domain;              /* Also echoed in domctl.domain */
+    uint16_t pad1;
  /* Domain is scheduled to die. */
 #define _XEN_DOMINF_dying     0
 #define XEN_DOMINF_dying      (1U<<_XEN_DOMINF_dying)
@@ -144,6 +144,8 @@ struct xen_domctl_getdomaininfo {
     uint32_t ssidref;
     xen_domain_handle_t handle;
     uint32_t cpupool;
+    uint8_t gpaddr_bits; /* Guest physical address space size. */
+    uint8_t pad2[7];
     struct xen_arch_domainconfig arch_config;
 };
 typedef struct xen_domctl_getdomaininfo xen_domctl_getdomaininfo_t;
@@ -195,7 +197,10 @@ struct xen_domctl_getpageframeinfo3 {
  /* Return the bitmap but do not modify internal copy. */
 #define XEN_DOMCTL_SHADOW_OP_PEEK        12
 
-/* Memory allocation accessors. */
+/*
+ * Memory allocation accessors.  These APIs are broken and will be removed.
+ * Use XEN_DOMCTL_{get,set}_paging_mempool_size instead.
+ */
 #define XEN_DOMCTL_SHADOW_OP_GET_ALLOCATION   30
 #define XEN_DOMCTL_SHADOW_OP_SET_ALLOCATION   31
 
@@ -436,8 +441,9 @@ struct xen_domctl_setdebugging {
 
 /* XEN_DOMCTL_irq_permission */
 struct xen_domctl_irq_permission {
-    uint8_t pirq;
+    uint32_t pirq;
     uint8_t allow_access;    /* flag to specify enable/disable of IRQ access */
+    uint8_t pad[3];
 };
 
 
@@ -673,12 +679,10 @@ struct xen_domctl_set_target {
  * Query or set the CPUID and MSR policies for a specific domain.
  */
 struct xen_domctl_cpu_policy {
-    uint32_t nr_leaves; /* IN/OUT: Number of leaves in/written to
-                         * 'cpuid_policy'. */
-    uint32_t nr_msrs;   /* IN/OUT: Number of MSRs in/written to
-                         * 'msr_policy' */
-    XEN_GUEST_HANDLE_64(xen_cpuid_leaf_t) cpuid_policy; /* IN/OUT */
-    XEN_GUEST_HANDLE_64(xen_msr_entry_t) msr_policy;    /* IN/OUT */
+    uint32_t nr_leaves; /* IN/OUT: Number of leaves in/written to 'leaves' */
+    uint32_t nr_msrs;   /* IN/OUT: Number of MSRs in/written to 'msrs' */
+    XEN_GUEST_HANDLE_64(xen_cpuid_leaf_t) leaves; /* IN/OUT */
+    XEN_GUEST_HANDLE_64(xen_msr_entry_t)  msrs;   /* IN/OUT */
 
     /*
      * OUT, set_policy only.  Written in some (but not all) error cases to
@@ -728,11 +732,6 @@ struct xen_domctl_hvmcontext_partial {
     uint32_t instance;                  /* IN: Instance of that type */
     uint64_aligned_t bufsz;             /* IN: size of buffer */
     XEN_GUEST_HANDLE_64(uint8) buffer;  /* OUT: buffer to write record into */
-};
-
-/* XEN_DOMCTL_disable_migrate */
-struct xen_domctl_disable_migrate {
-    uint32_t disable; /* IN: 1: disable migration and restore */
 };
 
 
@@ -931,6 +930,22 @@ struct xen_domctl_cacheflush {
     xen_pfn_t start_pfn, nr_pfns;
 };
 
+/*
+ * XEN_DOMCTL_get_paging_mempool_size / XEN_DOMCTL_set_paging_mempool_size.
+ *
+ * Get or set the paging memory pool size.  The size is in bytes.
+ *
+ * This is a dedicated pool of memory for Xen to use while managing the guest,
+ * typically containing pagetables.  As such, there is an implementation
+ * specific minimum granularity.
+ *
+ * The set operation can fail mid-way through the request (e.g. Xen running
+ * out of memory, no free memory to reclaim from the pool, etc.).
+ */
+struct xen_domctl_paging_mempool {
+    uint64_aligned_t size; /* Size in bytes. */
+};
+
 #if defined(__i386__) || defined(__x86_64__)
 struct xen_domctl_vcpu_msr {
     uint32_t         index;
@@ -1045,6 +1060,7 @@ struct xen_domctl_psr_cmt_op {
 #define XEN_DOMCTL_MONITOR_EVENT_EMUL_UNIMPLEMENTED    10
 /* Enabled by default */
 #define XEN_DOMCTL_MONITOR_EVENT_INGUEST_PAGEFAULT     11
+#define XEN_DOMCTL_MONITOR_EVENT_VMEXIT                12
 
 struct xen_domctl_monitor_op {
     uint32_t op; /* XEN_DOMCTL_MONITOR_OP_* */
@@ -1095,6 +1111,11 @@ struct xen_domctl_monitor_op {
             /* Pause vCPU until response */
             uint8_t sync;
         } debug_exception;
+
+        struct {
+            /* Send event and don't process vmexit */
+            uint8_t sync;
+        } vmexit;
     } u;
 };
 
@@ -1134,6 +1155,39 @@ struct xen_domctl_vuart_op {
                                  *       ring buffer events.
                                  */
 };
+
+/* XEN_DOMCTL_vmtrace_op: Perform VM tracing operations. */
+struct xen_domctl_vmtrace_op {
+    uint32_t cmd;           /* IN */
+    uint32_t vcpu;          /* IN */
+    uint64_aligned_t key;   /* IN     - @cmd specific data. */
+    uint64_aligned_t value; /* IN/OUT - @cmd specific data. */
+
+    /*
+     * General enable/disable of tracing.
+     *
+     * XEN_DOMCTL_vmtrace_reset_and_enable is provided as optimisation for
+     * common usecases, which want to reset status and position information
+     * when turning tracing back on.
+     */
+#define XEN_DOMCTL_vmtrace_enable             1
+#define XEN_DOMCTL_vmtrace_disable            2
+#define XEN_DOMCTL_vmtrace_reset_and_enable   3
+
+    /* Obtain the current output position within the buffer.  Fills @value. */
+#define XEN_DOMCTL_vmtrace_output_position    4
+
+    /*
+     * Get/Set platform specific configuration.
+     *
+     * For Intel Processor Trace, @key/@value are interpreted as MSR
+     * reads/writes to MSR_RTIT_*, filtered to a safe subset.
+     */
+#define XEN_DOMCTL_vmtrace_get_option         5
+#define XEN_DOMCTL_vmtrace_set_option         6
+};
+typedef struct xen_domctl_vmtrace_op xen_domctl_vmtrace_op_t;
+DEFINE_XEN_GUEST_HANDLE(xen_domctl_vmtrace_op_t);
 
 struct xen_domctl {
     uint32_t cmd;
@@ -1194,7 +1248,7 @@ struct xen_domctl {
 #define XEN_DOMCTL_gethvmcontext_partial         55
 #define XEN_DOMCTL_vm_event_op                   56
 #define XEN_DOMCTL_mem_sharing_op                57
-#define XEN_DOMCTL_disable_migrate               58
+/* #define XEN_DOMCTL_disable_migrate            58 - Obsolete */
 #define XEN_DOMCTL_gettscinfo                    59
 #define XEN_DOMCTL_settscinfo                    60
 #define XEN_DOMCTL_getpageframeinfo3             61
@@ -1219,12 +1273,16 @@ struct xen_domctl {
 #define XEN_DOMCTL_vuart_op                      81
 #define XEN_DOMCTL_get_cpu_policy                82
 #define XEN_DOMCTL_set_cpu_policy                83
+#define XEN_DOMCTL_vmtrace_op                    84
+#define XEN_DOMCTL_get_paging_mempool_size       85
+#define XEN_DOMCTL_set_paging_mempool_size       86
 #define XEN_DOMCTL_gdbsx_guestmemio            1000
 #define XEN_DOMCTL_gdbsx_pausevcpu             1001
 #define XEN_DOMCTL_gdbsx_unpausevcpu           1002
 #define XEN_DOMCTL_gdbsx_domstatus             1003
     uint32_t interface_version; /* XEN_DOMCTL_INTERFACE_VERSION */
     domid_t  domain;
+    uint16_t _pad[3];
     union {
         struct xen_domctl_createdomain      createdomain;
         struct xen_domctl_getdomaininfo     getdomaininfo;
@@ -1244,7 +1302,6 @@ struct xen_domctl {
         struct xen_domctl_ioport_permission ioport_permission;
         struct xen_domctl_hypercall_init    hypercall_init;
         struct xen_domctl_settimeoffset     settimeoffset;
-        struct xen_domctl_disable_migrate   disable_migrate;
         struct xen_domctl_tsc_info          tsc_info;
         struct xen_domctl_hvmcontext        hvmcontext;
         struct xen_domctl_hvmcontext_partial hvmcontext_partial;
@@ -1279,6 +1336,8 @@ struct xen_domctl {
         struct xen_domctl_monitor_op        monitor_op;
         struct xen_domctl_psr_alloc         psr_alloc;
         struct xen_domctl_vuart_op          vuart_op;
+        struct xen_domctl_vmtrace_op        vmtrace_op;
+        struct xen_domctl_paging_mempool    paging_mempool;
         uint8_t                             pad[128];
     } u;
 };

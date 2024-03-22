@@ -24,9 +24,15 @@ type config =
 	pidfile: string option; (* old xenstored compatibility *)
 	tracefile: string option; (* old xenstored compatibility *)
 	restart: bool;
+	live_reload: bool;
 	disable_socket: bool;
-	use_select: bool;
+	config_test: bool;
 }
+
+let get_config_filename config_file =
+	match config_file with
+	| Some name -> name
+	| None	    -> Define.default_config_dir ^ "/oxenstored.conf"
 
 let do_argv =
 	let pidfile = ref "" and tracefile = ref "" (* old xenstored compatibility *)
@@ -36,8 +42,11 @@ let do_argv =
 	and reraise_top_level = ref false
 	and config_file = ref ""
 	and restart = ref false
+	and live_reload = ref false
 	and disable_socket = ref false
-	and use_select = ref false in
+	and config_test = ref false
+	and help = ref false
+	in
 
 	let speclist =
 		[ ("--no-domain-init", Arg.Unit (fun () -> domain_init := false),
@@ -53,11 +62,28 @@ let do_argv =
 		  ("--pid-file", Arg.Set_string pidfile, ""); (* for compatibility *)
 		  ("-T", Arg.Set_string tracefile, ""); (* for compatibility *)
 		  ("--restart", Arg.Set restart, "Read database on starting");
+		  ("--live", Arg.Set live_reload, "Read live dump on startup");
+		  ("--config-test", Arg.Set config_test, "Test validity of config file");
 		  ("--disable-socket", Arg.Unit (fun () -> disable_socket := true), "Disable socket");
-		  ("--use-select", Arg.Unit (fun () -> use_select := true), "Use select instead of poll"); (* for backward compatibility and testing *)
+		  ("--help", Arg.Set help, "Display this list of options")
 		] in
-	let usage_msg = "usage : xenstored [--config-file <filename>] [--no-domain-init] [--help] [--no-fork] [--reraise-top-level] [--restart] [--disable-socket] [--use-select]" in
+	let usage_msg = "usage : xenstored [--config-file <filename>] [--no-domain-init] [--help] [--no-fork] [--reraise-top-level] [--restart] [--disable-socket]" in
 	Arg.parse speclist (fun _ -> ()) usage_msg;
+	let () =
+		if !help then begin
+			if !live_reload then
+				(*
+				 * Transform --live --help into --config-test for backward compat with
+				 * running code during live update.
+				 * Caller will validate config and exit
+				 *)
+				config_test := true
+			else begin
+				Arg.usage_string speclist usage_msg |> print_endline;
+				exit 0
+			end
+		end
+	in
 	{
 		domain_init = !domain_init;
 		activate_access_log = !activate_access_log;
@@ -67,6 +93,7 @@ let do_argv =
 		pidfile = if !pidfile <> "" then Some !pidfile else None;
 		tracefile = if !tracefile <> "" then Some !tracefile else None;
 		restart = !restart;
+		live_reload = !live_reload;
 		disable_socket = !disable_socket;
-		use_select = !use_select;
+		config_test = !config_test;
 	}

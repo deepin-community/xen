@@ -34,13 +34,13 @@ int pv_emul_read_descriptor(unsigned int sel, const struct vcpu *v,
     if ( sel < 4 ||
          /*
           * Don't apply the GDT limit here, as the selector may be a Xen
-          * provided one. __get_user() will fail (without taking further
+          * provided one. get_unsafe() will fail (without taking further
           * action) for ones falling in the gap between guest populated
           * and Xen ones.
           */
          ((sel & 4) && (sel >> 3) >= v->arch.pv.ldt_ents) )
         desc.b = desc.a = 0;
-    else if ( __get_user(desc, gdt_ldt_desc_ptr(sel)) )
+    else if ( get_unsafe(desc, gdt_ldt_desc_ptr(sel)) )
         return 0;
     if ( !insn_fetch )
         desc.b &= ~_SEGMENT_L;
@@ -87,6 +87,46 @@ void pv_emul_instruction_done(struct cpu_user_regs *regs, unsigned long rip)
     {
         current->arch.dr6 |= DR_STEP | DR_STATUS_RESERVED_ONE;
         pv_inject_hw_exception(TRAP_debug, X86_EVENT_NO_EC);
+    }
+}
+
+uint64_t pv_get_reg(struct vcpu *v, unsigned int reg)
+{
+    const struct vcpu_msrs *msrs = v->arch.msrs;
+    struct domain *d = v->domain;
+
+    ASSERT(v == current || !vcpu_runnable(v));
+
+    switch ( reg )
+    {
+    case MSR_SPEC_CTRL:
+        return msrs->spec_ctrl.raw;
+
+    default:
+        printk(XENLOG_G_ERR "%s(%pv, 0x%08x) Bad register\n",
+               __func__, v, reg);
+        domain_crash(d);
+        return 0;
+    }
+}
+
+void pv_set_reg(struct vcpu *v, unsigned int reg, uint64_t val)
+{
+    struct vcpu_msrs *msrs = v->arch.msrs;
+    struct domain *d = v->domain;
+
+    ASSERT(v == current || !vcpu_runnable(v));
+
+    switch ( reg )
+    {
+    case MSR_SPEC_CTRL:
+        msrs->spec_ctrl.raw = val;
+        break;
+
+    default:
+        printk(XENLOG_G_ERR "%s(%pv, 0x%08x, 0x%016"PRIx64") Bad register\n",
+               __func__, v, reg, val);
+        domain_crash(d);
     }
 }
 

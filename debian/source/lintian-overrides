@@ -1,0 +1,5 @@
+# We install the hypervisor and shim debug files in our own -dbg packages.
+# Those files are not installed by the automatic -dbgsym packages, so we can't
+# use these.
+xen source: debian-control-has-obsolete-dbg-package *xen-hypervisor-*-dbg*
+xen source: debian-control-has-obsolete-dbg-package *xen-utils-*-dbg*

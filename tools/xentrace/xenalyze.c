@@ -356,7 +356,7 @@ void parse_symbol_file(char *fn) {
 char * find_symbol(unsigned long long addr) {
     struct symbol_struct * p=G.symbols;
     int i;
-    char * lastname="ZERO";
+    const char * lastname="ZERO";
     unsigned long long offset=addr;
     static char name[144];
 
@@ -495,7 +495,7 @@ struct {
 
 #define HVM_VMX_EXIT_REASON_MAX (EXIT_REASON_XSETBV+1)
 
-char * hvm_vmx_exit_reason_name[HVM_VMX_EXIT_REASON_MAX] = {
+const char * hvm_vmx_exit_reason_name[HVM_VMX_EXIT_REASON_MAX] = {
     [EXIT_REASON_EXCEPTION_NMI]="EXCEPTION_NMI",
     [EXIT_REASON_EXTERNAL_INTERRUPT]="EXTERNAL_INTERRUPT",
     [EXIT_REASON_TRIPLE_FAULT]="TRIPLE_FAULT",
@@ -698,7 +698,7 @@ enum VMEXIT_EXITCODE
 };
 
 #define HVM_SVM_EXIT_REASON_MAX 1025
-char * hvm_svm_exit_reason_name[HVM_SVM_EXIT_REASON_MAX] = {
+const char * hvm_svm_exit_reason_name[HVM_SVM_EXIT_REASON_MAX] = {
     /* 0-15 */
     "VMEXIT_CR0_READ",
     "VMEXIT_CR1_READ",
@@ -875,7 +875,7 @@ char * hvm_svm_exit_reason_name[HVM_SVM_EXIT_REASON_MAX] = {
 #define EXTERNAL_INTERRUPT_MAX 256
 
 /* Stringify numbers */
-char * hvm_extint_vector_name[EXTERNAL_INTERRUPT_MAX] = {
+const char * hvm_extint_vector_name[EXTERNAL_INTERRUPT_MAX] = {
     [SPURIOUS_APIC_VECTOR] = "SPURIOS_APIC",
     [ERROR_APIC_VECTOR] =    "ERROR_APIC",
     [INVALIDATE_TLB_VECTOR]= "INVALIDATE_TLB",
@@ -887,7 +887,7 @@ char * hvm_extint_vector_name[EXTERNAL_INTERRUPT_MAX] = {
 
 #define HVM_TRAP_MAX 20
 
-char * hvm_trap_name[HVM_TRAP_MAX] = {
+const char * hvm_trap_name[HVM_TRAP_MAX] = {
     [0] =  "Divide",
     [1] =  "RESERVED",
     [2] =  "NMI",
@@ -947,7 +947,7 @@ enum {
     HVM_EVENT_VLAPIC,
     HVM_EVENT_HANDLER_MAX
 };
-char * hvm_event_handler_name[HVM_EVENT_HANDLER_MAX] = {
+const char * hvm_event_handler_name[HVM_EVENT_HANDLER_MAX] = {
     "(no handler)",
     "pf_xen",
     "pf_inject",
@@ -1001,7 +1001,7 @@ enum {
     GUEST_INTERRUPT_CASE_MAX,
 };
 
-char *guest_interrupt_case_name[] = {
+const char *guest_interrupt_case_name[] = {
     [GUEST_INTERRUPT_CASE_WAKE_TO_HALT_ALONE]="wake to halt alone",
     /* This interrupt woke, maybe another interrupt before halt */
     [GUEST_INTERRUPT_CASE_WAKE_TO_HALT_ANY]  ="wake to halt any  ",
@@ -1009,7 +1009,7 @@ char *guest_interrupt_case_name[] = {
     [GUEST_INTERRUPT_CASE_INTERRUPT_TO_HALT] ="intr to halt      ",
 };
 
-char *hvm_vol_name[HVM_VOL_MAX] = {
+const char *hvm_vol_name[HVM_VOL_MAX] = {
     [HVM_VOL_VMENTRY]="vmentry",
     [HVM_VOL_VMEXIT] ="vmexit",
     [HVM_VOL_HANDLER]="handler",
@@ -1056,7 +1056,7 @@ enum {
     HYPERCALL_MAX
 };
 
-char *hypercall_name[HYPERCALL_MAX] = {
+const char *hypercall_name[HYPERCALL_MAX] = {
     [HYPERCALL_set_trap_table]="set_trap_table",
     [HYPERCALL_mmu_update]="mmu_update",
     [HYPERCALL_set_gdt]="set_gdt",
@@ -1114,7 +1114,7 @@ enum {
     PF_XEN_EMUL_MAX,
 };
 
-char * pf_xen_emul_name[PF_XEN_EMUL_MAX] = {
+const char * pf_xen_emul_name[PF_XEN_EMUL_MAX] = {
     [PF_XEN_EMUL_LVL_0]="non-linmap",
     [PF_XEN_EMUL_LVL_1]="linmap l1",
     [PF_XEN_EMUL_LVL_2]="linmap l2",
@@ -1140,7 +1140,7 @@ enum {
     PF_XEN_NON_EMUL_MAX,
 };
 
-char * pf_xen_non_emul_name[PF_XEN_NON_EMUL_MAX] = {
+const char * pf_xen_non_emul_name[PF_XEN_NON_EMUL_MAX] = {
     [PF_XEN_NON_EMUL_VA_USER]="va user",
     [PF_XEN_NON_EMUL_VA_KERNEL]="va kernel",
     [PF_XEN_NON_EMUL_EIP_USER]="eip user",
@@ -1160,7 +1160,7 @@ enum {
     PF_XEN_FIXUP_MAX,
 };
 
-char * pf_xen_fixup_name[PF_XEN_FIXUP_MAX] = {
+const char * pf_xen_fixup_name[PF_XEN_FIXUP_MAX] = {
     [PF_XEN_FIXUP_PREALLOC_UNPIN] = "unpin",
     [PF_XEN_FIXUP_PREALLOC_UNHOOK] = "unhook",
     [PF_XEN_FIXUP_UNSYNC] = "unsync",
@@ -1195,7 +1195,7 @@ enum {
 #define SHADOW_RESYNC_FULL    14
 #define SHADOW_RESYNC_ONLY    15
 
-char * pf_xen_name[PF_XEN_MAX] = {
+const char * pf_xen_name[PF_XEN_MAX] = {
     [PF_XEN_NOT_SHADOW]="propagate",
     [PF_XEN_FAST_PROPAGATE]="fast propagate",
     [PF_XEN_FAST_MMIO]="fast mmio",
@@ -1304,7 +1304,7 @@ struct hvm_data {
     struct vcpu_data *v; /* up-pointer */
 
     /* SVM / VMX compatibility. FIXME - should be global */
-    char ** exit_reason_name;
+    const char ** exit_reason_name;
     int exit_reason_max;
     struct hvm_summary_handler_node *exit_reason_summary_handler_list[HVM_EXIT_REASON_MAX];
 
@@ -1377,7 +1377,7 @@ struct hvm_data {
     tsc_t exit_tsc, arc_cycles, entry_tsc;
     unsigned long long rip;
     unsigned exit_reason, event_handler;
-    int short_summary_done:1, prealloc_unpin:1, wrmap_bf:1;
+    unsigned int short_summary_done:1, prealloc_unpin:1, wrmap_bf:1;
 
     /* Immediate processing */
     void *d;
@@ -1408,7 +1408,7 @@ enum {
     HVM_SHORT_SUMMARY_MAX,
 };
 
-char *hvm_short_summary_name[HVM_SHORT_SUMMARY_MAX] = {
+const char *hvm_short_summary_name[HVM_SHORT_SUMMARY_MAX] = {
     [HVM_SHORT_SUMMARY_EMULATE]  ="emulate",
     [HVM_SHORT_SUMMARY_UNSYNC]   ="unsync",
     [HVM_SHORT_SUMMARY_FIXUP]    ="fixup",
@@ -1478,7 +1478,7 @@ enum {
     PV_MAX
 };
 
-char *pv_name[PV_MAX] = {
+const char *pv_name[PV_MAX] = {
     [PV_HYPERCALL]="hypercall",
     [PV_TRAP]="trap",
     [PV_PAGE_FAULT]="page_fault",
@@ -1527,7 +1527,7 @@ int runstate_graph[RUNSTATE_MAX] =
     [RUNSTATE_INIT]=-2,
 };
 
-char * runstate_name[RUNSTATE_MAX]={
+const char * runstate_name[RUNSTATE_MAX]={
     [RUNSTATE_RUNNING]= "running",
     [RUNSTATE_RUNNABLE]="runnable",
     [RUNSTATE_BLOCKED]= "blocked", /* to be blocked */
@@ -1545,7 +1545,7 @@ enum {
     RUNNABLE_STATE_MAX
 };
 
-char * runnable_state_name[RUNNABLE_STATE_MAX]={
+const char * runnable_state_name[RUNNABLE_STATE_MAX]={
     [RUNNABLE_STATE_INVALID]="invalid", /* Should never show up */
     [RUNNABLE_STATE_WAKE]="wake",
     [RUNNABLE_STATE_PREEMPT]="preempt",
@@ -1565,7 +1565,7 @@ enum {
     MEM_MAX
 };
 
-char *mem_name[MEM_MAX] = {
+const char *mem_name[MEM_MAX] = {
     [MEM_PAGE_GRANT_MAP]         = "grant-map",
     [MEM_PAGE_GRANT_UNMAP]       = "grant-unmap",
     [MEM_PAGE_GRANT_TRANSFER]    = "grant-transfer",
@@ -1681,7 +1681,7 @@ enum {
     DOMAIN_RUNSTATE_MAX
 };
 
-char * domain_runstate_name[] = {
+const char * domain_runstate_name[] = {
     [DOMAIN_RUNSTATE_BLOCKED]="blocked",
     [DOMAIN_RUNSTATE_PARTIAL_RUN]="partial run",
     [DOMAIN_RUNSTATE_FULL_RUN]="full run",
@@ -1698,7 +1698,7 @@ enum {
     POD_RECLAIM_CONTEXT_MAX
 };
 
-char * pod_reclaim_context_name[] = {
+const char * pod_reclaim_context_name[] = {
     [POD_RECLAIM_CONTEXT_UNKNOWN]="unknown",
     [POD_RECLAIM_CONTEXT_FAULT]="fault",
     [POD_RECLAIM_CONTEXT_BALLOON]="balloon",
@@ -1756,7 +1756,7 @@ enum {
     TOPLEVEL_MAX=TOPLEVEL_HW+1,
 };
 
-char * toplevel_name[TOPLEVEL_MAX] = {
+const char * toplevel_name[TOPLEVEL_MAX] = {
     [TOPLEVEL_GEN]="gen",
     [TOPLEVEL_SCHED]="sched",
     [TOPLEVEL_DOM0OP]="dom0op",
@@ -2263,7 +2263,7 @@ static inline void clear_interval_cycles(struct interval_element *e) {
     e->instructions = 0;
 }
 
-static inline void print_cpu_affinity(struct cycle_summary *s, char *p) {
+static inline void print_cpu_affinity(struct cycle_summary *s, const char *p) {
     if(s->count) {
         long long avg;
 
@@ -2326,7 +2326,8 @@ static inline void print_cycle_percent_summary(struct cycle_summary *s,
     }
 }
 
-static inline void print_cycle_summary(struct cycle_summary *s, char *p) {
+static inline void print_cycle_summary(struct cycle_summary *s,
+                                       const char *p) {
     if(s->count) {
         long long avg;
 
@@ -2938,7 +2939,7 @@ void hvm_update_short_summary(struct hvm_data *h, int element) {
 }
 
 void hvm_short_summary(struct hvm_short_summary_struct *hss,
-                       tsc_t total, char *prefix) {
+                       tsc_t total, const char *prefix) {
     char desc[80];
     int i;
 
@@ -3352,7 +3353,7 @@ void hvm_pf_xen_process(struct record_info *ri, struct hvm_data *h) {
          fprintf(warn, "%s: Strange, postprocess already set\n", __func__);
 }
 
-char * hvm_vlapic_icr_dest_shorthand_name[4] = {
+const char * hvm_vlapic_icr_dest_shorthand_name[4] = {
     "dest_field", "self", "all-inc", "all-exc"
 };
 
@@ -3800,7 +3801,7 @@ void update_io_address(struct io_address ** list, unsigned int pa, int dir,
     update_cycles(&p->summary[dir], arc_cycles);
 }
 
-void hvm_io_address_summary(struct io_address *list, char * s) {
+void hvm_io_address_summary(struct io_address *list, const char * s) {
     if(!list)
         return;
 
@@ -4484,7 +4485,7 @@ void hvm_intr_window_process(struct record_info *ri, struct hvm_data *h)
         int32_t intr;
     } *r = (typeof(r))h->d;
 
-    char *intsrc_name[] = {
+    const char *intsrc_name[] = {
         "none",
         "pic",
         "lapic",
@@ -4687,14 +4688,15 @@ void hvm_generic_postprocess(struct hvm_data *h)
     }
 }
 
-void hvm_generic_dump(struct record_info *ri, char * prefix)
+void hvm_generic_dump(struct record_info *ri, const char * prefix)
 {
     struct {
         unsigned vcpu:16, domain:16;
         unsigned d[4];
     } *cr = (typeof(cr))ri->d;
 
-    char *evt_string, evt_number[256];
+    const char *evt_string;
+    char evt_number[256];
     int i, evt, is_64 = 0;
 
     evt = ri->event - TRC_HVM_HANDLER;
@@ -6042,10 +6044,11 @@ void shadow_propagate_process(struct record_info *ri, struct hvm_data *h)
         fprintf(warn, "%s: Strange, postprocess already set\n", __func__);
 }
 
-void shadow_fault_generic_dump(unsigned int event, uint32_t *d, char *prefix,
-                         char * dump_header)
+void shadow_fault_generic_dump(unsigned int event, uint32_t *d,
+                               const char *prefix, const char * dump_header)
 {
-    char *evt_string, evt_number[10];
+    const char *evt_string;
+    char evt_number[10];
     union shadow_event sevt = { .event = event };
     int i;
 
@@ -6882,39 +6885,86 @@ void vcpu_next_update(struct pcpu_info *p, struct vcpu_data *next, tsc_t tsc)
     p->lost_record.seen_valid_schedule = 1;
 }
 
-/* If current is the default domain, we're fixing up from something
- * like start-of-day.  Update what we can. */
-void vcpu_start(struct pcpu_info *p, struct vcpu_data *v) {
-    /* If vcpus are created, or first show up, in a "dead zone", this will
-     * fail. */
-    if( !p->current || p->current->d->did != DEFAULT_DOMAIN) {
-        fprintf(stderr, "Strange, p->current not default domain!\n");
-        error(ERR_FILE, NULL);
+/* 
+ * If the vcpu in question is in state INIT, we're fixing up from something
+ * like start-of-day.  Update what we can.
+ */
+void vcpu_start(struct pcpu_info *p, struct vcpu_data *v,
+                int old_runstate, int new_runstate, tsc_t ri_tsc) {
+    tsc_t tsc;
+
+    /*
+     * 
+     * Cases:
+     * running -> running:
+     *  v -> running, using p->first_tsc
+     * {runnable, blocked} -> running:
+     *  v -> running, using ri->tsc
+     * running -> {runnable, blocked}:
+     *  Leave v INIT, but clear p->current in case another vcpu is scheduled
+     * blocked -> runnable:
+     *  Leave INIT, and also leave p->current, since we still don't know who's scheduled here
+     */
+
+    /* 
+     * NB that a vcpu won't come out of INIT until it starts running somewhere.  
+     * If this event is pcpu that has already seen a scheduling event, p->current
+     * should be null; if this is the first scheduling event on this pcpu, 
+     * p->current should be the default domain.
+     */
+    if( old_runstate == RUNSTATE_RUNNING ) {
+        if ( !p->current ||  p->current->d->did != DEFAULT_DOMAIN) {
+            fprintf(stderr, "Strange, p->current not default domain!\n");
+            error(ERR_FILE, NULL);
+            return;
+
+        }
+        
+        if(!p->first_tsc) {
+            fprintf(stderr, "Strange, p%d first_tsc 0!\n", p->pid);
+            error(ERR_FILE, NULL);
+        }
+
+        if(p->first_tsc <= p->current->runstate.tsc) {
+            fprintf(stderr, "Strange, first_tsc %llx < default_domain runstate tsc %llx!\n",
+                    p->first_tsc,
+                    p->current->runstate.tsc);
+            error(ERR_FILE, NULL);
+        }
+    
+        /* Change default domain to 'queued' */
+        runstate_update(p->current, RUNSTATE_QUEUED, p->first_tsc);
+
+        /* 
+         * Set current to NULL, so that if another vcpu (not in INIT)
+         * is scheduled here, we don't trip over the check in
+         * vcpu_next_update()
+         */
+        p->current = NULL;
+    }
+
+    /* TSC skew at start-of-day is hard to deal with.  Don't
+     * bring a vcpu out of INIT until it's seen to be actually
+     * running somewhere. */
+    if ( new_runstate != RUNSTATE_RUNNING ) {
+        fprintf(warn, "First schedule for d%dv%d doesn't take us into a running state; leaving INIT\n",
+                v->d->did, v->vid);
+
         return;
     }
 
-    if(!p->first_tsc) {
-        fprintf(stderr, "Strange, p%d first_tsc 0!\n", p->pid);
-        error(ERR_FILE, NULL);
+    tsc = ri_tsc;
+    if ( old_runstate == RUNSTATE_RUNNING ) {
+        /* FIXME: Copy over data from the default domain this interval */
+        fprintf(warn, "Using first_tsc for d%dv%d (%lld cycles)\n",
+                v->d->did, v->vid, p->last_tsc - p->first_tsc);
+
+        tsc = p->first_tsc;
     }
-
-    if(p->first_tsc <= p->current->runstate.tsc) {
-        fprintf(stderr, "Strange, first_tsc %llx < default_domain runstate tsc %llx!\n",
-                p->first_tsc,
-                p->current->runstate.tsc);
-        error(ERR_FILE, NULL);
-    }
-
-    /* Change default domain to 'queued' */
-    runstate_update(p->current, RUNSTATE_QUEUED, p->first_tsc);
-
-    /* FIXME: Copy over data from the default domain this interval */
-    fprintf(warn, "Using first_tsc for d%dv%d (%lld cycles)\n",
-            v->d->did, v->vid, p->last_tsc - p->first_tsc);
 
     /* Simulate the time since the first tsc */
-    runstate_update(v, RUNSTATE_RUNNING, p->first_tsc);
-    p->time.tsc = p->first_tsc;
+    runstate_update(v, RUNSTATE_RUNNING, tsc);
+    p->time.tsc = tsc;
     p->current = v;
     pcpu_string_draw(p);
     v->p = p;
@@ -7017,6 +7067,13 @@ void sched_runstate_process(struct pcpu_info *p)
      * be reset, it will be reset below. */
     last_oldstate = v->runstate.last_oldstate;
     v->runstate.last_oldstate.wrong = RUNSTATE_INIT;
+
+    /* Handle all "start-of-day" issues in one place.  This can be
+     * done before any of the other tracks or sanity checks. */
+    if ( v->runstate.state == RUNSTATE_INIT ) {
+        vcpu_start(p, v, sevt.old_runstate, sevt.new_runstate, ri->tsc);
+        return;
+    }
 
     /* Close vmexits when the putative reason for blocking / &c stops.
      * This way, we don't account cpu contention to some other overhead. */
@@ -7187,32 +7244,27 @@ update:
      * or stopping actually running on a physical cpu. */
     if ( type == CONTINUE )
     {
-        if( v->runstate.state == RUNSTATE_INIT ) {
-            /* Start-of-day; account first tsc -> now to v */
-            vcpu_start(p, v);
-        } else {
-            /* Continue running.  First, do some sanity checks */
-            if ( v->runstate.state == RUNSTATE_LOST ) {
-                fprintf(warn, "WARNING: continue with d%dv%d in RUNSTATE_LOST.  Resetting current.\n",
-                        v->d->did, v->vid);
-                if ( p->current )
-                    vcpu_prev_update(p, p->current, ri->tsc, RUNSTATE_LOST);
-                vcpu_next_update(p, v, ri->tsc);
-            }
-            else if( v->runstate.state != RUNSTATE_RUNNING ) {
-                /* This should never happen. */
-                fprintf(warn, "FATAL: sevt.old_runstate running, but d%dv%d runstate %s!\n",
-                        v->d->did, v->vid, runstate_name[v->runstate.state]);
-                error(ERR_FILE, NULL);
-            } else if ( v->p != p ) {
-                fprintf(warn, "FATAL: continue on p%d, but d%dv%d p%d!\n",
-                        p->pid, v->d->did, v->vid,
-                        v->p ? v->p->pid : -1);
-                error(ERR_FILE, NULL);
-            }
-
-            runstate_update(v, RUNSTATE_RUNNING, ri->tsc);
+        /* Continue running.  First, do some sanity checks */
+        if ( v->runstate.state == RUNSTATE_LOST ) {
+            fprintf(warn, "WARNING: continue with d%dv%d in RUNSTATE_LOST.  Resetting current.\n",
+                    v->d->did, v->vid);
+            if ( p->current )
+                vcpu_prev_update(p, p->current, ri->tsc, RUNSTATE_LOST);
+            vcpu_next_update(p, v, ri->tsc);
         }
+        else if( v->runstate.state != RUNSTATE_RUNNING ) {
+            /* This should never happen. */
+            fprintf(warn, "FATAL: sevt.old_runstate running, but d%dv%d runstate %s!\n",
+                    v->d->did, v->vid, runstate_name[v->runstate.state]);
+            error(ERR_FILE, NULL);
+        } else if ( v->p != p ) {
+            fprintf(warn, "FATAL: continue on p%d, but d%dv%d p%d!\n",
+                    p->pid, v->d->did, v->vid,
+                    v->p ? v->p->pid : -1);
+            error(ERR_FILE, NULL);
+        }
+
+        runstate_update(v, RUNSTATE_RUNNING, ri->tsc);
     }
     else if ( sevt.old_runstate == RUNSTATE_RUNNING
               || v->runstate.state == RUNSTATE_RUNNING )
@@ -7229,10 +7281,7 @@ update:
          *   # (should never happen)
          */
         if( sevt.old_runstate == RUNSTATE_RUNNING ) {
-            if( v->runstate.state == RUNSTATE_INIT ) {
-                /* Start-of-day; account first tsc -> now to v */
-                vcpu_start(p, v);
-            } else if( v->runstate.state != RUNSTATE_RUNNING
+            if( v->runstate.state != RUNSTATE_RUNNING
                        && v->runstate.state != RUNSTATE_LOST ) {
                 /* This should never happen. */
                 fprintf(warn, "FATAL: sevt.old_runstate running, but d%dv%d runstate %s!\n",
@@ -7261,11 +7310,8 @@ update:
 
         vcpu_next_update(p, v, ri->tsc);
     }
-    else if ( v->runstate.state != RUNSTATE_INIT )
+    else
     {
-        /* TSC skew at start-of-day is hard to deal with.  Don't
-         * bring a vcpu out of INIT until it's seen to be actually
-         * running somewhere. */
         runstate_update(v, sevt.new_runstate, ri->tsc);
     }
 
@@ -8232,13 +8278,13 @@ void mem_set_p2m_entry_process(struct pcpu_info *p)
 
     struct {
         uint64_t gfn, mfn;
-        int p2mt;
-        int d:16,order:16;
+        uint32_t p2mt;
+        uint16_t d, order;
     } *r = (typeof(r))ri->d;
 
     if ( opt.dump_all )
     {
-        printf(" %s set_p2m_entry d%d o%d t %d g %llx m %llx\n",
+        printf(" %s set_p2m_entry d%u o%u t %u g %llx m %llx\n",
                ri->dump_header,
                r->d, r->order,
                r->p2mt,
@@ -8643,7 +8689,7 @@ void dump_generic(FILE * f, struct record_info *ri)
     fprintf(f, " ]\n");
 }
 
-void dump_raw(char * s, struct record_info *ri)
+void dump_raw(const char * s, struct record_info *ri)
 {
     int i;
 

@@ -29,12 +29,14 @@
 #include <xen/lib.h>
 #include <xen/err.h>
 #include <xen/errno.h>
+#include <xen/hypercall.h>
 #include <xen/mm.h>
 #include <xen/param.h>
 #include <xen/console.h>
 #include <xen/shutdown.h>
 #include <xen/guest_access.h>
 #include <asm/regs.h>
+#include <xen/debugger.h>
 #include <xen/delay.h>
 #include <xen/event.h>
 #include <xen/spinlock.h>
@@ -57,19 +59,19 @@
 #include <xen/bitops.h>
 #include <asm/desc.h>
 #include <asm/debugreg.h>
+#include <asm/gdbsx.h>
 #include <asm/smp.h>
 #include <asm/flushtlb.h>
 #include <asm/uaccess.h>
 #include <asm/i387.h>
 #include <asm/xstate.h>
-#include <asm/debugger.h>
 #include <asm/msr.h>
 #include <asm/nmi.h>
+#include <asm/xenoprof.h>
 #include <asm/shared.h>
 #include <asm/x86_emulate.h>
 #include <asm/traps.h>
 #include <asm/hvm/vpt.h>
-#include <asm/hypercall.h>
 #include <asm/mce.h>
 #include <asm/apic.h>
 #include <asm/mc146818rtc.h>
@@ -79,8 +81,11 @@
 #include <public/hvm/params.h>
 #include <asm/cpuid.h>
 #include <xsm/xsm.h>
+#include <asm/mach-default/irq_vectors.h>
 #include <asm/pv/traps.h>
+#include <asm/pv/trace.h>
 #include <asm/pv/mm.h>
+#include <asm/shstk.h>
 
 /*
  * opt_nmi: one of 'ignore', 'dom0', or 'fatal'.
@@ -121,46 +126,16 @@ DEFINE_PER_CPU_PAGE_ALIGNED(struct tss_page, tss_page);
 static int debug_stack_lines = 20;
 integer_param("debug_stack_lines", debug_stack_lines);
 
-static bool opt_ler;
+static bool __ro_after_init opt_ler;
 boolean_param("ler", opt_ler);
 
 /* LastExceptionFromIP on this hardware.  Zero if LER is not in use. */
-unsigned int __read_mostly ler_msr;
+unsigned int __ro_after_init ler_msr;
 
 const unsigned int nmi_cpu;
 
 #define stack_words_per_line 4
 #define ESP_BEFORE_EXCEPTION(regs) ((unsigned long *)regs->rsp)
-
-static void do_trap(struct cpu_user_regs *regs);
-static void do_reserved_trap(struct cpu_user_regs *regs);
-
-void (* const exception_table[TRAP_nr])(struct cpu_user_regs *regs) = {
-    [TRAP_divide_error]                 = do_trap,
-    [TRAP_debug]                        = do_debug,
-    [TRAP_nmi]                          = (void *)do_nmi,
-    [TRAP_int3]                         = do_int3,
-    [TRAP_overflow]                     = do_trap,
-    [TRAP_bounds]                       = do_trap,
-    [TRAP_invalid_op]                   = do_invalid_op,
-    [TRAP_no_device]                    = do_device_not_available,
-    [TRAP_double_fault]                 = do_reserved_trap,
-    [TRAP_copro_seg]                    = do_reserved_trap,
-    [TRAP_invalid_tss]                  = do_trap,
-    [TRAP_no_segment]                   = do_trap,
-    [TRAP_stack_error]                  = do_trap,
-    [TRAP_gp_fault]                     = do_general_protection,
-    [TRAP_page_fault]                   = do_page_fault,
-    [TRAP_spurious_int]                 = do_reserved_trap,
-    [TRAP_copro_error]                  = do_trap,
-    [TRAP_alignment_check]              = do_trap,
-    [TRAP_machine_check]                = (void *)do_machine_check,
-    [TRAP_simd_error]                   = do_trap,
-    [TRAP_virtualisation]               = do_reserved_trap,
-    [X86_EXC_CP]                        = do_entry_CP,
-    [X86_EXC_CP + 1 ...
-     (ARRAY_SIZE(exception_table) - 1)] = do_reserved_trap,
-};
 
 void show_code(const struct cpu_user_regs *regs)
 {
@@ -251,7 +226,6 @@ static void compat_show_guest_stack(struct vcpu *v,
         struct vcpu *vcpu;
         unsigned long mfn;
 
-        ASSERT(guest_kernel_mode(v, regs));
         mfn = read_cr3() >> PAGE_SHIFT;
         for_each_vcpu( v->domain, vcpu )
             if ( pagetable_get_pfn(vcpu->arch.guest_table) == mfn )
@@ -266,13 +240,17 @@ static void compat_show_guest_stack(struct vcpu *v,
             }
             mask = PAGE_SIZE;
         }
+        else if ( !guest_kernel_mode(v, regs) )
+            mask = PAGE_SIZE;
     }
 
     for ( i = 0; i < debug_stack_lines * 8; i++ )
     {
         if ( (((long)stack - 1) ^ ((long)(stack + 1) - 1)) & mask )
             break;
-        if ( __get_user(addr, stack) )
+        if ( stack_page )
+            addr = *stack;
+        else if ( __get_guest(addr, stack) )
         {
             if ( i != 0 )
                 printk("\n    ");
@@ -321,11 +299,13 @@ static void show_guest_stack(struct vcpu *v, const struct cpu_user_regs *regs)
 
     if ( v != current )
     {
-        struct vcpu *vcpu;
+        if ( !guest_kernel_mode(v, regs) )
+        {
+            printk("User mode stack\n");
+            return;
+        }
 
-        ASSERT(guest_kernel_mode(v, regs));
-        vcpu = maddr_get_owner(read_cr3()) == v->domain ? v : NULL;
-        if ( !vcpu )
+        if ( maddr_get_owner(read_cr3()) != v->domain )
         {
             stack_page = stack = do_page_walk(v, (unsigned long)stack);
             if ( (unsigned long)stack < PAGE_SIZE )
@@ -341,7 +321,9 @@ static void show_guest_stack(struct vcpu *v, const struct cpu_user_regs *regs)
     {
         if ( (((long)stack - 1) ^ ((long)(stack + 1) - 1)) & mask )
             break;
-        if ( __get_user(addr, stack) )
+        if ( stack_page )
+            addr = *stack;
+        else if ( __get_guest(addr, stack) )
         {
             if ( i != 0 )
                 printk("\n    ");
@@ -360,6 +342,71 @@ static void show_guest_stack(struct vcpu *v, const struct cpu_user_regs *regs)
     if ( i == 0 )
         printk("Stack empty.");
     printk("\n");
+}
+
+static void show_hvm_stack(struct vcpu *v, const struct cpu_user_regs *regs)
+{
+#ifdef CONFIG_HVM
+    unsigned long sp = regs->rsp, addr;
+    unsigned int i, bytes, words_per_line, pfec = PFEC_page_present;
+    struct segment_register ss, cs;
+
+    hvm_get_segment_register(v, x86_seg_ss, &ss);
+    hvm_get_segment_register(v, x86_seg_cs, &cs);
+
+    if ( hvm_long_mode_active(v) && cs.l )
+        i = 16, bytes = 8;
+    else
+    {
+        sp = ss.db ? (uint32_t)sp : (uint16_t)sp;
+        i = ss.db ? 8 : 4;
+        bytes = cs.db ? 4 : 2;
+    }
+
+    if ( bytes == 8 || (ss.db && !ss.base) )
+        printk("Guest stack trace from sp=%0*lx:", i, sp);
+    else
+        printk("Guest stack trace from ss:sp=%04x:%0*lx:", ss.sel, i, sp);
+
+    if ( !hvm_vcpu_virtual_to_linear(v, x86_seg_ss, &ss, sp, bytes,
+                                     hvm_access_read, &cs, &addr) )
+    {
+        printk(" Guest-inaccessible memory\n");
+        return;
+    }
+
+    if ( ss.dpl == 3 )
+        pfec |= PFEC_user_mode;
+
+    words_per_line = stack_words_per_line * (sizeof(void *) / bytes);
+    for ( i = 0; i < debug_stack_lines * words_per_line; )
+    {
+        unsigned long val = 0;
+
+        if ( (addr ^ (addr + bytes - 1)) & PAGE_SIZE )
+            break;
+
+        if ( !(i++ % words_per_line) )
+            printk("\n  ");
+
+        if ( hvm_copy_from_vcpu_linear(&val, addr, bytes, v,
+                                       pfec) != HVMTRANS_okay )
+        {
+            printk(" Fault while accessing guest memory.");
+            break;
+        }
+
+        printk(" %0*lx", 2 * bytes, val);
+
+        addr += bytes;
+        if ( !(addr & (PAGE_SIZE - 1)) )
+            break;
+    }
+
+    if ( !i )
+        printk(" Stack empty.");
+    printk("\n");
+#endif
 }
 
 /*
@@ -543,7 +590,7 @@ static void show_trace(const struct cpu_user_regs *regs)
     printk("\n");
 }
 
-void show_stack(const struct cpu_user_regs *regs)
+static void show_stack(const struct cpu_user_regs *regs)
 {
     unsigned long *stack = ESP_BEFORE_EXCEPTION(regs), *stack_bottom, addr;
     int i;
@@ -574,15 +621,12 @@ void show_stack_overflow(unsigned int cpu, const struct cpu_user_regs *regs)
 {
     unsigned long esp = regs->rsp;
     unsigned long curr_stack_base = esp & ~(STACK_SIZE - 1);
-#ifdef MEMORY_GUARD
     unsigned long esp_top, esp_bottom;
-#endif
 
     if ( _p(curr_stack_base) != stack_base[cpu] )
         printk("Current stack base %p differs from expected %p\n",
                _p(curr_stack_base), stack_base[cpu]);
 
-#ifdef MEMORY_GUARD
     esp_bottom = (esp | (STACK_SIZE - 1)) + 1;
     esp_top    = esp_bottom - PRIMARY_STACK_SIZE;
 
@@ -610,7 +654,6 @@ void show_stack_overflow(unsigned int cpu, const struct cpu_user_regs *regs)
     _show_trace(esp, regs->rbp);
 
     printk("\n");
-#endif
 }
 
 void show_execution_state(const struct cpu_user_regs *regs)
@@ -625,9 +668,20 @@ void show_execution_state(const struct cpu_user_regs *regs)
     console_unlock_recursive_irqrestore(flags);
 }
 
+void cf_check show_execution_state_nonconst(struct cpu_user_regs *regs)
+{
+    show_execution_state(regs);
+}
+
 void vcpu_show_execution_state(struct vcpu *v)
 {
-    unsigned long flags;
+    unsigned long flags = 0;
+
+    if ( test_bit(_VPF_down, &v->pause_flags) )
+    {
+        printk("*** %pv is offline ***\n", v);
+        return;
+    }
 
     printk("*** Dumping Dom%d vcpu#%d state: ***\n",
            v->domain->domain_id, v->vcpu_id);
@@ -640,14 +694,48 @@ void vcpu_show_execution_state(struct vcpu *v)
 
     vcpu_pause(v); /* acceptably dangerous */
 
+#ifdef CONFIG_HVM
+    /*
+     * For VMX special care is needed: Reading some of the register state will
+     * require VMCS accesses. Engaging foreign VMCSes involves acquiring of a
+     * lock, which check_lock() would object to when done from an IRQs-disabled
+     * region. Despite this being a layering violation, engage the VMCS right
+     * here. This then also avoids doing so several times in close succession.
+     */
+    if ( cpu_has_vmx && is_hvm_vcpu(v) )
+    {
+        ASSERT(!in_irq());
+        vmx_vmcs_enter(v);
+    }
+#endif
+
     /* Prevent interleaving of output. */
     flags = console_lock_recursive_irqsave();
 
     vcpu_show_registers(v);
-    if ( guest_kernel_mode(v, &v->arch.user_regs) )
-        show_guest_stack(v, &v->arch.user_regs);
 
-    console_unlock_recursive_irqrestore(flags);
+    if ( is_hvm_vcpu(v) )
+    {
+        /*
+         * Stop interleaving prevention: The necessary P2M lookups involve
+         * locking, which has to occur with IRQs enabled.
+         */
+        console_unlock_recursive_irqrestore(flags);
+
+        show_hvm_stack(v, &v->arch.user_regs);
+    }
+    else
+    {
+        if ( guest_kernel_mode(v, &v->arch.user_regs) )
+            show_guest_stack(v, &v->arch.user_regs);
+
+        console_unlock_recursive_irqrestore(flags);
+    }
+
+#ifdef CONFIG_HVM
+    if ( cpu_has_vmx && is_hvm_vcpu(v) )
+        vmx_vmcs_exit(v);
+#endif
 
     vcpu_unpause(v);
 }
@@ -656,36 +744,27 @@ static cpumask_t show_state_mask;
 static bool opt_show_all;
 boolean_param("async-show-all", opt_show_all);
 
-static int nmi_show_execution_state(const struct cpu_user_regs *regs, int cpu)
+static int cf_check nmi_show_execution_state(
+    const struct cpu_user_regs *regs, int cpu)
 {
     if ( !cpumask_test_cpu(cpu, &show_state_mask) )
         return 0;
 
     if ( opt_show_all )
         show_execution_state(regs);
+    else if ( guest_mode(regs) )
+        printk(XENLOG_ERR "CPU%d\t%pv\t%04x:%p in guest\n",
+               cpu, current, regs->cs, _p(regs->rip));
     else
-        printk(XENLOG_ERR "CPU%d @ %04x:%08lx (%pS)\n", cpu, regs->cs,
-               regs->rip, guest_mode(regs) ? NULL : _p(regs->rip));
+        printk(XENLOG_ERR "CPU%d\t%pv\t%04x:%p in Xen: %pS\n",
+               cpu, current, regs->cs, _p(regs->rip), _p(regs->rip));
+
     cpumask_clear_cpu(cpu, &show_state_mask);
 
     return 1;
 }
 
-const char *trapstr(unsigned int trapnr)
-{
-    static const char * const strings[] = {
-        "divide error", "debug", "nmi", "bkpt", "overflow", "bounds",
-        "invalid opcode", "device not available", "double fault",
-        "coprocessor segment", "invalid tss", "segment not found",
-        "stack error", "general protection fault", "page fault",
-        "spurious interrupt", "coprocessor error", "alignment check",
-        "machine check", "simd error", "virtualisation exception"
-    };
-
-    return trapnr < ARRAY_SIZE(strings) ? strings[trapnr] : "???";
-}
-
-static const char *vec_name(unsigned int vec)
+const char *vector_name(unsigned int vec)
 {
     static const char names[][4] = {
 #define P(x) [X86_EXC_ ## x] = "#" #x
@@ -755,24 +834,25 @@ void fatal_trap(const struct cpu_user_regs *regs, bool show_remote)
                     msecs = 10;
                 }
             }
+            if ( pending )
+                printk("Non-responding CPUs: {%*pbl}\n",
+                       CPUMASK_PR(&show_state_mask));
         }
     }
 
     panic("FATAL TRAP: vec %u, %s[%04x]%s\n",
-          trapnr, vec_name(trapnr), regs->error_code,
+          trapnr, vector_name(trapnr), regs->error_code,
           (regs->eflags & X86_EFLAGS_IF) ? "" : " IN INTERRUPT CONTEXT");
 }
 
-static void do_reserved_trap(struct cpu_user_regs *regs)
+void do_unhandled_trap(struct cpu_user_regs *regs)
 {
     unsigned int trapnr = regs->entry_vector;
 
     if ( debugger_trap_fatal(trapnr, regs) )
         return;
 
-    show_execution_state(regs);
-    panic("FATAL RESERVED TRAP: vec %u, %s[%04x]\n",
-          trapnr, vec_name(trapnr), regs->error_code);
+    fatal_trap(regs, false);
 }
 
 static void fixup_exception_return(struct cpu_user_regs *regs,
@@ -782,8 +862,7 @@ static void fixup_exception_return(struct cpu_user_regs *regs,
     {
         unsigned long ssp, *ptr, *base;
 
-        asm ( "rdsspq %0" : "=r" (ssp) : "0" (1) );
-        if ( ssp == 1 )
+        if ( (ssp = rdssp()) == SSP_NO_SHSTK )
             goto shstk_done;
 
         ptr = _p(ssp);
@@ -812,9 +891,7 @@ static void fixup_exception_return(struct cpu_user_regs *regs,
              */
             if ( ptr[0] == regs->rip && ptr[1] == regs->cs )
             {
-                asm ( "wrssq %[fix], %[stk]"
-                      : [stk] "=m" (ptr[0])
-                      : [fix] "r" (fixup) );
+                wrss(fixup, ptr);
                 goto shstk_done;
             }
         }
@@ -846,7 +923,7 @@ static bool extable_fixup(struct cpu_user_regs *regs, bool print)
      */
     if ( IS_ENABLED(CONFIG_DEBUG) && print )
         printk(XENLOG_GUEST XENLOG_WARNING "Fixup %s[%04x]: %p [%ps] -> %p\n",
-               vec_name(regs->entry_vector), regs->error_code,
+               vector_name(regs->entry_vector), regs->error_code,
                _p(regs->rip), _p(regs->rip), _p(fixup));
 
     fixup_exception_return(regs, fixup);
@@ -855,15 +932,12 @@ static bool extable_fixup(struct cpu_user_regs *regs, bool print)
     return true;
 }
 
-static void do_trap(struct cpu_user_regs *regs)
+void do_trap(struct cpu_user_regs *regs)
 {
     unsigned int trapnr = regs->entry_vector;
 
     if ( regs->error_code & X86_XEC_EXT )
         goto hardware_trap;
-
-    if ( debugger_trap_entry(trapnr, regs) )
-        return;
 
     ASSERT(trapnr < 32);
 
@@ -882,10 +956,7 @@ static void do_trap(struct cpu_user_regs *regs)
     if ( debugger_trap_fatal(trapnr, regs) )
         return;
 
-    show_execution_state(regs);
-    panic("FATAL TRAP: vector = %d (%s)\n"
-          "[error_code=%04x]\n",
-          trapnr, trapstr(trapnr), regs->error_code);
+    fatal_trap(regs, false);
 }
 
 int guest_rdmsr_xen(const struct vcpu *v, uint32_t idx, uint64_t *val)
@@ -964,7 +1035,7 @@ void cpuid_hypervisor_leaves(const struct vcpu *v, uint32_t leaf,
                              uint32_t subleaf, struct cpuid_leaf *res)
 {
     const struct domain *d = v->domain;
-    const struct cpuid_policy *p = d->arch.cpuid;
+    const struct cpu_policy *p = d->arch.cpu_policy;
     uint32_t base = is_viridian_domain(d) ? 0x40000100 : 0x40000000;
     uint32_t idx  = leaf - base;
     unsigned int limit = is_viridian_domain(d) ? p->hv2_limit : p->hv_limit;
@@ -1053,8 +1124,15 @@ void cpuid_hypervisor_leaves(const struct vcpu *v, uint32_t leaf,
             res->a |= XEN_HVM_CPUID_X2APIC_VIRT;
 
         /*
-         * Indicate that memory mapped from other domains (either grants or
-         * foreign pages) has valid IOMMU entries.
+         * 1) Xen 4.10 and older was broken WRT grant maps requesting a DMA
+         * mapping, and forgot to honour the guest's request.
+         * 2) 4.11 (and presumably backports) fixed the bug, so the map
+         * hypercall actually did what the guest asked.
+         * 3) To work around the bug, guests must bounce buffer all DMA that
+         * would otherwise use a grant map, because it doesn't know whether the
+         * DMA is originating from an emulated or a real device.
+         * 4) This flag tells guests it is safe not to bounce-buffer all DMA to
+         * work around the bug.
          */
         res->a |= XEN_HVM_CPUID_IOMMU_MAPPINGS;
 
@@ -1065,6 +1143,12 @@ void cpuid_hypervisor_leaves(const struct vcpu *v, uint32_t leaf,
         /* Indicate presence of domain id and set it in ecx */
         res->a |= XEN_HVM_CPUID_DOMID_PRESENT;
         res->c = d->domain_id;
+
+        /*
+         * Per-vCPU event channel upcalls are implemented and work
+         * correctly with PIRQs routed over event channels.
+         */
+        res->a |= XEN_HVM_CPUID_UPCALL_VECTOR;
 
         break;
 
@@ -1089,9 +1173,6 @@ void do_invalid_op(struct cpu_user_regs *regs)
     int id = -1, lineno;
     const struct virtual_region *region;
 
-    if ( debugger_trap_entry(TRAP_invalid_op, regs) )
-        return;
-
     if ( likely(guest_mode(regs)) )
     {
         if ( pv_emulate_invalid_op(regs) )
@@ -1100,7 +1181,7 @@ void do_invalid_op(struct cpu_user_regs *regs)
     }
 
     if ( !is_active_kernel_text(regs->rip) ||
-         __copy_from_user(bug_insn, eip, sizeof(bug_insn)) ||
+         copy_from_unsafe(bug_insn, eip, sizeof(bug_insn)) ||
          memcmp(bug_insn, "\xf\xb", sizeof(bug_insn)) )
         goto die;
 
@@ -1196,8 +1277,7 @@ void do_invalid_op(struct cpu_user_regs *regs)
 
 void do_int3(struct cpu_user_regs *regs)
 {
-    if ( debugger_trap_entry(TRAP_int3, regs) )
-        return;
+    struct vcpu *curr = current;
 
     if ( !guest_mode(regs) )
     {
@@ -1208,6 +1288,13 @@ void do_int3(struct cpu_user_regs *regs)
             printk(XENLOG_DEBUG "Hit embedded breakpoint at %p [%ps]\n",
                    _p(regs->rip), _p(regs->rip));
 
+        return;
+    }
+
+    if ( guest_kernel_mode(curr, regs) && curr->domain->debugger_attached )
+    {
+        curr->arch.gdbsx_vcpu_event = TRAP_int3;
+        domain_pause_for_debugger();
         return;
     }
 
@@ -1469,7 +1556,7 @@ static int fixup_page_fault(unsigned long addr, struct cpu_user_regs *regs)
     {
         int ret = paging_fault(addr, regs);
 
-        if ( ret == EXCRET_fault_fixed )
+        if ( IS_ENABLED(CONFIG_PV) && ret == EXCRET_fault_fixed )
             trace_trap_two_addr(TRC_PV_PAGING_FIXUP, regs->rip, addr);
         return ret;
     }
@@ -1486,9 +1573,6 @@ void do_page_fault(struct cpu_user_regs *regs)
 
     /* fixup_page_fault() might change regs->error_code, so cache it here. */
     error_code = regs->error_code;
-
-    if ( debugger_trap_entry(TRAP_page_fault, regs) )
-        return;
 
     perfc_incr(page_faults);
 
@@ -1588,9 +1672,6 @@ void do_general_protection(struct cpu_user_regs *regs)
     struct vcpu *v = current;
 #endif
 
-    if ( debugger_trap_entry(TRAP_gp_fault, regs) )
-        return;
-
     if ( regs->error_code & X86_XEC_EXT )
         goto hardware_gp;
 
@@ -1664,10 +1745,18 @@ void do_general_protection(struct cpu_user_regs *regs)
     panic("GENERAL PROTECTION FAULT\n[error_code=%04x]\n", regs->error_code);
 }
 
-static void pci_serr_softirq(void)
+static bool pci_serr_cont;
+
+static bool pci_serr_nmicont(void)
 {
+    if ( !pci_serr_cont )
+        return false;
+
+    pci_serr_cont = false;
     printk("\n\nNMI - PCI system error (SERR)\n");
     outb(inb(0x61) & 0x0b, 0x61); /* re-enable the PCI SERR error line. */
+
+    return true;
 }
 
 static void nmi_hwdom_report(unsigned int reason_idx)
@@ -1692,9 +1781,9 @@ static void pci_serr_error(const struct cpu_user_regs *regs)
         nmi_hwdom_report(_XEN_NMIREASON_pci_serr);
         /* fallthrough */
     case 'i': /* 'ignore' */
-        /* Would like to print a diagnostic here but can't call printk()
-           from NMI context -- raise a softirq instead. */
-        raise_softirq(PCI_SERR_SOFTIRQ);
+        /* Issue error message in NMI continuation. */
+        pci_serr_cont = true;
+        trigger_nmi_continuation();
         break;
     default:  /* 'fatal' */
         console_force_unlock();
@@ -1739,29 +1828,28 @@ static void unknown_nmi_error(const struct cpu_user_regs *regs,
     }
 }
 
-static int dummy_nmi_callback(const struct cpu_user_regs *regs, int cpu)
-{
-    return 0;
-}
-
-static nmi_callback_t *nmi_callback = dummy_nmi_callback;
+static nmi_callback_t *__read_mostly nmi_callback;
 
 DEFINE_PER_CPU(unsigned int, nmi_count);
 
 void do_nmi(const struct cpu_user_regs *regs)
 {
     unsigned int cpu = smp_processor_id();
+    nmi_callback_t *callback;
     unsigned char reason = 0;
     bool handle_unknown = false;
 
     this_cpu(nmi_count)++;
     nmi_enter();
 
-    if ( nmi_callback(regs, cpu) )
-    {
-        nmi_exit();
-        return;
-    }
+    /*
+     * Think carefully before putting any logic before this point.
+     * nmi_callback() might be the crash quiesce...
+     */
+
+    callback = ACCESS_ONCE(nmi_callback);
+    if ( unlikely(callback) && callback(regs, cpu) )
+        goto out;
 
     /*
      * Accessing port 0x61 may trap to SMM which has been actually
@@ -1788,6 +1876,7 @@ void do_nmi(const struct cpu_user_regs *regs)
             unknown_nmi_error(regs, reason);
     }
 
+ out:
     nmi_exit();
 }
 
@@ -1802,7 +1891,33 @@ nmi_callback_t *set_nmi_callback(nmi_callback_t *callback)
 
 void unset_nmi_callback(void)
 {
-    nmi_callback = dummy_nmi_callback;
+    nmi_callback = NULL;
+}
+
+bool nmi_check_continuation(void)
+{
+    bool ret = false;
+
+    if ( pci_serr_nmicont() )
+        ret = true;
+
+    if ( nmi_oprofile_send_virq() )
+        ret = true;
+
+    return ret;
+}
+
+void trigger_nmi_continuation(void)
+{
+    /*
+     * Issue a self-IPI. Handling is done in spurious_interrupt().
+     * NMI could have happened in IPI sequence, so wait for ICR being idle
+     * again before leaving NMI handler.
+     * This relies on self-IPI using a simple shorthand, thus avoiding any
+     * use of locking or percpu cpumasks.
+     */
+    send_IPI_self(SPURIOUS_APIC_VECTOR);
+    apic_wait_icr_idle();
 }
 
 void do_device_not_available(struct cpu_user_regs *regs)
@@ -1848,9 +1963,6 @@ void do_debug(struct cpu_user_regs *regs)
 
     /* Stash dr6 as early as possible. */
     dr6 = read_debugreg(6);
-
-    if ( debugger_trap_entry(TRAP_debug, regs) )
-        return;
 
     /*
      * At the time of writing (March 2018), on the subject of %dr6:
@@ -1960,6 +2072,12 @@ void do_debug(struct cpu_user_regs *regs)
     v->arch.dr6 |= (dr6 & ~X86_DR6_DEFAULT);
     v->arch.dr6 &= (dr6 | ~X86_DR6_DEFAULT);
 
+    if ( guest_kernel_mode(v, regs) && v->domain->debugger_attached )
+    {
+        domain_pause_for_debugger();
+        return;
+    }
+
     pv_inject_hw_exception(TRAP_debug, X86_EVENT_NO_EC);
 }
 
@@ -1974,9 +2092,6 @@ void do_entry_CP(struct cpu_user_regs *regs)
     };
     const char *err = "??";
     unsigned int ec = regs->error_code;
-
-    if ( debugger_trap_entry(TRAP_debug, regs) )
-        return;
 
     /* Decode ec if possible */
     if ( ec < ARRAY_SIZE(errors) && errors[ec][0] )
@@ -2016,7 +2131,7 @@ static void __init set_intr_gate(unsigned int n, void *addr)
     __set_intr_gate(n, 0, addr);
 }
 
-static unsigned int calc_ler_msr(void)
+static unsigned int noinline __init calc_ler_msr(void)
 {
     switch ( boot_cpu_data.x86_vendor )
     {
@@ -2054,8 +2169,17 @@ void percpu_traps_init(void)
     if ( !opt_ler )
         return;
 
-    if ( !ler_msr && (ler_msr = calc_ler_msr()) )
+    if ( !ler_msr )
+    {
+        ler_msr = calc_ler_msr();
+        if ( !ler_msr )
+        {
+            opt_ler = false;
+            return;
+        }
+
         setup_force_cpu_cap(X86_FEATURE_XEN_LBR);
+    }
 
     if ( cpu_has_xen_lbr )
         wrmsrl(MSR_IA32_DEBUGCTLMSR, IA32_DEBUGCTLMSR_LBR);
@@ -2137,8 +2261,6 @@ void __init trap_init(void)
     percpu_traps_init();
 
     cpu_init();
-
-    open_softirq(PCI_SERR_SOFTIRQ, pci_serr_softirq);
 }
 
 void activate_debugregs(const struct vcpu *curr)
@@ -2159,6 +2281,11 @@ void activate_debugregs(const struct vcpu *curr)
     if ( curr->arch.dr7 & DR7_ACTIVE_MASK )
         write_debugreg(7, curr->arch.dr7);
 
+    /*
+     * Both the PV and HVM paths leave stale DR_MASK values in hardware on
+     * context-switch-out.  If we're activating %dr7 for the guest, we must
+     * sync the DR_MASKs too, whether or not the guest can see them.
+     */
     if ( boot_cpu_has(X86_FEATURE_DBEXT) )
     {
         wrmsrl(MSR_AMD64_DR0_ADDRESS_MASK, curr->arch.msrs->dr_mask[0]);
@@ -2171,9 +2298,8 @@ void activate_debugregs(const struct vcpu *curr)
 void asm_domain_crash_synchronous(unsigned long addr)
 {
     /*
-     * We need clear AC bit here because in entry.S AC is set
-     * by ASM_STAC to temporarily allow accesses to user pages
-     * which is prevented by SMAP by default.
+     * We need to clear the AC bit here because the exception fixup logic
+     * may leave user accesses enabled.
      *
      * For some code paths, where this function is called, clac()
      * is not needed, but adding clac() here instead of each place
@@ -2193,6 +2319,19 @@ void asm_domain_crash_synchronous(unsigned long addr)
     for ( ; ; )
         do_softirq();
 }
+
+#ifdef CONFIG_DEBUG
+void check_ist_exit(const struct cpu_user_regs *regs, bool ist_exit)
+{
+    const unsigned int ist_mask =
+        (1U << X86_EXC_NMI) | (1U << X86_EXC_DB) |
+        (1U << X86_EXC_DF)  | (1U << X86_EXC_MC);
+    uint8_t ev = regs->entry_vector;
+    bool is_ist = (ev < TRAP_nr) && ((1U << ev) & ist_mask);
+
+    ASSERT(is_ist == ist_exit);
+}
+#endif
 
 /*
  * Local variables:

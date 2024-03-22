@@ -48,9 +48,13 @@ type x86_arch_emulation_flags =
 	| X86_EMU_USE_PIRQ
 	| X86_EMU_VPCI
 
+type x86_arch_misc_flags =
+	| X86_MSR_RELAXED
+
 type xen_x86_arch_domainconfig =
 {
 	emulation_flags: x86_arch_emulation_flags list;
+	misc_flags: x86_arch_misc_flags list;
 }
 
 type arch_domainconfig =
@@ -64,6 +68,8 @@ type domain_create_flag =
 	| CDF_OOS_OFF
 	| CDF_XS_DOMAIN
 	| CDF_IOMMU
+	| CDF_NESTED_VIRT
+	| CDF_VPMU
 
 type domain_create_iommu_opts =
 	| IOMMU_NO_SHAREPT
@@ -78,6 +84,8 @@ type domctl_create_config =
 	max_evtchn_port: int;
 	max_grant_frames: int;
 	max_maptrack_frames: int;
+	max_grant_version: int;
+	cpupool_id: int32;
 	arch: arch_domainconfig;
 }
 
@@ -115,6 +123,18 @@ type physinfo_cap_flag =
 	| CAP_HAP
 	| CAP_Shadow
 	| CAP_IOMMU_HAP_PT_SHARE
+	| CAP_Vmtrace
+	| CAP_Vpmu
+	| CAP_Gnttab_v1
+	| CAP_Gnttab_v2
+
+type arm_physinfo_cap_flag
+
+type x86_physinfo_cap_flag
+
+type arch_physinfo_cap_flags =
+	| ARM of arm_physinfo_cap_flag list
+	| X86 of x86_physinfo_cap_flag list
 
 type physinfo =
 {
@@ -129,6 +149,7 @@ type physinfo =
 	(* XXX hw_cap *)
 	capabilities     : physinfo_cap_flag list;
 	max_nr_cpus      : int;
+	arch_capabilities : arch_physinfo_cap_flags;
 }
 
 type version =
@@ -178,8 +199,11 @@ let with_intf f =
 		handle := Some h;
 		f h
 
-external domain_create: handle -> domctl_create_config -> domid
+external domain_create_stub: handle -> domid -> domctl_create_config -> domid
        = "stub_xc_domain_create"
+
+let domain_create handle ?(domid=0) config =
+	domain_create_stub handle domid config
 
 external domain_sethandle: handle -> domid -> string -> unit
        = "stub_xc_domain_sethandle"
@@ -198,14 +222,25 @@ external domain_shutdown: handle -> domid -> shutdown_reason -> unit
 external _domain_getinfolist: handle -> domid -> int -> domaininfo list
        = "stub_xc_domain_getinfolist"
 
+let rev_append_fold acc e = List.rev_append e acc
+
+(**
+ * [rev_concat lst] is equivalent to [lst |> List.concat |> List.rev]
+ * except it is tail recursive, whereas [List.concat] isn't.
+ * Example:
+ * rev_concat [[10;9;8];[7;6];[5]]] = [5; 6; 7; 8; 9; 10]
+ *)
+let rev_concat lst = List.fold_left rev_append_fold [] lst
+
 let domain_getinfolist handle first_domain =
-	let nb = 2 in
-	let last_domid l = (List.hd l).domid + 1 in
-	let rec __getlist from =
-		let l = _domain_getinfolist handle from nb in
-		(if List.length l = nb then __getlist (last_domid l) else []) @ l
-		in
-	List.rev (__getlist first_domain)
+	let nb = 1024 in
+	let rec __getlist lst from =
+		(* _domain_getinfolist returns domains in reverse order, largest first *)
+		match _domain_getinfolist handle from nb with
+		| [] -> rev_concat lst
+		| (hd :: _) as l -> __getlist (l :: lst) (hd.domid + 1)
+	in
+	__getlist [] first_domain
 
 external domain_getinfo: handle -> domid -> domaininfo= "stub_xc_domain_getinfo"
 
@@ -274,7 +309,13 @@ external version_changeset: handle -> string = "stub_xc_version_changeset"
 external version_capabilities: handle -> string =
   "stub_xc_version_capabilities"
 
-type featureset_index = Featureset_raw | Featureset_host | Featureset_pv | Featureset_hvm
+type featureset_index =
+  | Featureset_raw
+  | Featureset_host
+  | Featureset_pv
+  | Featureset_hvm
+  | Featureset_pv_max
+  | Featureset_hvm_max
 external get_cpu_featureset : handle -> featureset_index -> int64 array = "stub_xc_get_cpu_featureset"
 
 external watchdog : handle -> int -> int32 -> int

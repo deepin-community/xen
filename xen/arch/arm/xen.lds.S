@@ -3,6 +3,8 @@
 /* Modified for ARM Xen by Ian Campbell */
 
 #include <xen/cache.h>
+#include <xen/lib.h>
+#include <xen/xen.lds.h>
 #include <asm/page.h>
 #undef ENTRY
 #undef ALIGN
@@ -30,9 +32,16 @@ SECTIONS
   _start = .;
   .text : {
         _stext = .;            /* Text section */
-       *(.text)
+       *(.text.header)
+
        *(.text.cold)
-       *(.text.unlikely)
+       *(.text.unlikely .text.*_unlikely .text.unlikely.*)
+
+       *(.text)
+#ifdef CONFIG_CC_SPLIT_SECTIONS
+       *(.text.*)
+#endif
+
        *(.fixup)
        *(.gnu.warning)
        _etext = .;             /* End of text section */
@@ -49,6 +58,8 @@ SECTIONS
        __stop_bug_frames_1 = .;
        *(.bug_frames.2)
        __stop_bug_frames_2 = .;
+       *(.bug_frames.3)
+       __stop_bug_frames_3 = .;
        *(.rodata)
        *(.rodata.*)
        *(.data.rel.ro)
@@ -58,12 +69,7 @@ SECTIONS
        *(.proc.info)
        __proc_info_end = .;
 
-#if defined(CONFIG_HAS_VPCI) && defined(CONFIG_LATE_HWDOM)
-       . = ALIGN(POINTER_ALIGN);
-       __start_vpci_array = .;
-       *(SORT(.data.vpci.*))
-       __end_vpci_array = .;
-#endif
+       VPCI_ARRAY
   } :text
 
 #if defined(BUILD_ID)
@@ -76,28 +82,14 @@ SECTIONS
 #endif
   _erodata = .;                /* End of read-only data */
 
-  .data : {                    /* Data */
-       . = ALIGN(PAGE_SIZE);
-       *(.data.page_aligned)
-       *(.data)
-       . = ALIGN(8);
-       __start_schedulers_array = .;
-       *(.data.schedulers)
-       __end_schedulers_array = .;
+  . = ALIGN(PAGE_SIZE);
+  .data.ro_after_init : {
+      __ro_after_init_start = .;
+      *(.data.ro_after_init)
+      . = ALIGN(PAGE_SIZE);
+      __ro_after_init_end = .;
+  } : text
 
-#ifdef CONFIG_HYPFS
-       . = ALIGN(8);
-       __paramhypfs_start = .;
-       *(.data.paramhypfs)
-       __paramhypfs_end = .;
-#endif
-
-       *(.data.rel)
-       *(.data.rel.*)
-       CONSTRUCTORS
-  } :text
-
-  . = ALIGN(SMP_CACHE_BYTES);
   .data.read_mostly : {
        /* Exception table */
        __start___ex_table = .;
@@ -110,6 +102,20 @@ SECTIONS
        __stop___pre_ex_table = .;
 
        *(.data.read_mostly)
+  } :text
+
+  . = ALIGN(SMP_CACHE_BYTES);
+  .data : {                    /* Data */
+       *(.data.page_aligned)
+       . = ALIGN(8);
+       __start_schedulers_array = .;
+       *(.data.schedulers)
+       __end_schedulers_array = .;
+
+       HYPFS_PARAM
+
+       *(.data .data.*)
+       CONSTRUCTORS
   } :text
 
   . = ALIGN(8);
@@ -146,6 +152,8 @@ SECTIONS
        _sinittext = .;
        *(.init.text)
        _einittext = .;
+       . = ALIGN(PAGE_SIZE);        /* Avoid mapping alt insns executable */
+       *(.altinstr_replacement)
   } :text
   . = ALIGN(PAGE_SIZE);
   .init.data : {
@@ -167,15 +175,8 @@ SECTIONS
        __alt_instructions = .;
        *(.altinstructions)
        __alt_instructions_end = .;
-       . = ALIGN(4);
-       *(.altinstr_replacement)
 
-#ifdef CONFIG_DEBUG_LOCK_PROFILE
-       . = ALIGN(POINTER_ALIGN);
-       __lock_profile_start = .;
-       *(.lockprofile.data)
-       __lock_profile_end = .;
-#endif
+       LOCK_PROFILE_DATA
 
        *(.init.data)
        *(.init.data.rel)
@@ -187,13 +188,6 @@ SECTIONS
        *(.init_array)
        *(SORT(.init_array.*))
        __ctors_end = .;
-
-#if defined(CONFIG_HAS_VPCI) && !defined(CONFIG_LATE_HWDOM)
-       . = ALIGN(POINTER_ALIGN);
-       __start_vpci_array = .;
-       *(SORT(.data.vpci.*))
-       __end_vpci_array = .;
-#endif
   } :text
   __init_end_efi = .;
   . = ALIGN(STACK_SIZE);
@@ -212,34 +206,22 @@ SECTIONS
        *(.bss.percpu.read_mostly)
        . = ALIGN(SMP_CACHE_BYTES);
        __per_cpu_data_end = .;
-       *(.bss)
+       *(.bss .bss.*)
        . = ALIGN(POINTER_ALIGN);
        __bss_end = .;
   } :text
   _end = . ;
 
-#ifdef CONFIG_DTB_FILE
   /* Section for the device tree blob (if any). */
-  _sdtb = .;
   .dtb : { *(.dtb) } :text
-#endif
 
-  /* Sections to be discarded */
-  /DISCARD/ : {
-       *(.exit.text)
-       *(.exit.data)
-       *(.exitcall.exit)
-       *(.eh_frame)
-  }
+  DWARF2_DEBUG_SECTIONS
 
-  /* Stabs debugging sections.  */
-  .stab 0 : { *(.stab) }
-  .stabstr 0 : { *(.stabstr) }
-  .stab.excl 0 : { *(.stab.excl) }
-  .stab.exclstr 0 : { *(.stab.exclstr) }
-  .stab.index 0 : { *(.stab.index) }
-  .stab.indexstr 0 : { *(.stab.indexstr) }
-  .comment 0 : { *(.comment) }
+  DISCARD_SECTIONS
+
+  STABS_DEBUG_SECTIONS
+
+  ELF_DETAILS_SECTIONS
 }
 
 /*

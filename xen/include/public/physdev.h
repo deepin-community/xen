@@ -1,22 +1,5 @@
+/* SPDX-License-Identifier: MIT */
 /*
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to
- * deal in the Software without restriction, including without limitation the
- * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
- * sell copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in
- * all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- *
  * Copyright (c) 2006, Keir Fraser
  */
 
@@ -211,8 +194,8 @@ struct physdev_manage_pci_ext {
     /* IN */
     uint8_t bus;
     uint8_t devfn;
-    unsigned is_extfn;
-    unsigned is_virtfn;
+    uint32_t is_extfn;
+    uint32_t is_virtfn;
     struct {
         uint8_t bus;
         uint8_t devfn;
@@ -229,11 +212,11 @@ DEFINE_XEN_GUEST_HANDLE(physdev_manage_pci_ext_t);
 struct physdev_op {
     uint32_t cmd;
     union {
-        struct physdev_irq_status_query      irq_status_query;
-        struct physdev_set_iopl              set_iopl;
-        struct physdev_set_iobitmap          set_iobitmap;
-        struct physdev_apic                  apic_op;
-        struct physdev_irq                   irq_op;
+        physdev_irq_status_query_t irq_status_query;
+        physdev_set_iopl_t         set_iopl;
+        physdev_set_iobitmap_t     set_iobitmap;
+        physdev_apic_t             apic_op;
+        physdev_irq_t              irq_op;
     } u;
 };
 typedef struct physdev_op physdev_op_t;
@@ -334,7 +317,7 @@ struct physdev_dbgp_op {
     uint8_t op;
     uint8_t bus;
     union {
-        struct physdev_pci_device pci;
+        physdev_pci_device_t pci;
     } u;
 };
 typedef struct physdev_dbgp_op physdev_dbgp_op_t;

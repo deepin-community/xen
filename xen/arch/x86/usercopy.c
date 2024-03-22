@@ -10,12 +10,19 @@
 #include <xen/sched.h>
 #include <asm/uaccess.h>
 
-unsigned __copy_to_user_ll(void __user *to, const void *from, unsigned n)
+#ifndef GUARD
+# define GUARD UA_KEEP
+#endif
+
+unsigned int copy_to_guest_ll(void __user *to, const void *from, unsigned int n)
 {
     unsigned dummy;
 
     stac();
     asm volatile (
+        GUARD(
+        "    guest_access_mask_ptr %[to], %q[scratch1], %q[scratch2]\n"
+        )
         "    cmp  $"STR(2*BYTES_PER_LONG-1)", %[cnt]\n"
         "    jbe  1f\n"
         "    mov  %k[to], %[cnt]\n"
@@ -42,6 +49,7 @@ unsigned __copy_to_user_ll(void __user *to, const void *from, unsigned n)
         _ASM_EXTABLE(1b, 2b)
         : [cnt] "+c" (n), [to] "+D" (to), [from] "+S" (from),
           [aux] "=&r" (dummy)
+          GUARD(, [scratch1] "=&r" (dummy), [scratch2] "=&r" (dummy))
         : "[aux]" (n)
         : "memory" );
     clac();
@@ -49,12 +57,15 @@ unsigned __copy_to_user_ll(void __user *to, const void *from, unsigned n)
     return n;
 }
 
-unsigned __copy_from_user_ll(void *to, const void __user *from, unsigned n)
+unsigned int copy_from_guest_ll(void *to, const void __user *from, unsigned int n)
 {
     unsigned dummy;
 
     stac();
     asm volatile (
+        GUARD(
+        "    guest_access_mask_ptr %[from], %q[scratch1], %q[scratch2]\n"
+        )
         "    cmp  $"STR(2*BYTES_PER_LONG-1)", %[cnt]\n"
         "    jbe  1f\n"
         "    mov  %k[to], %[cnt]\n"
@@ -87,6 +98,7 @@ unsigned __copy_from_user_ll(void *to, const void __user *from, unsigned n)
         _ASM_EXTABLE(1b, 6b)
         : [cnt] "+c" (n), [to] "+D" (to), [from] "+S" (from),
           [aux] "=&r" (dummy)
+          GUARD(, [scratch1] "=&r" (dummy), [scratch2] "=&r" (dummy))
         : "[aux]" (n)
         : "memory" );
     clac();
@@ -94,42 +106,45 @@ unsigned __copy_from_user_ll(void *to, const void __user *from, unsigned n)
     return n;
 }
 
+#if GUARD(1) + 0
+
 /**
- * copy_to_user: - Copy a block of data into user space.
- * @to:   Destination address, in user space.
- * @from: Source address, in kernel space.
+ * copy_to_guest_pv: - Copy a block of data into PV guest space.
+ * @to:   Destination address, in PV guest space.
+ * @from: Source address, in hypervisor space.
  * @n:    Number of bytes to copy.
  *
- * Context: User context only.  This function may sleep.
- *
- * Copy data from kernel space to user space.
+ * Copy data from hypervisor space to PV guest space.
  *
  * Returns number of bytes that could not be copied.
  * On success, this will be zero.
  */
-unsigned copy_to_user(void __user *to, const void *from, unsigned n)
+unsigned int copy_to_guest_pv(void __user *to, const void *from, unsigned int n)
 {
     if ( access_ok(to, n) )
-        n = __copy_to_user(to, from, n);
+        n = __copy_to_guest_pv(to, from, n);
     return n;
 }
 
 /**
- * clear_user: - Zero a block of memory in user space.
- * @to:   Destination address, in user space.
+ * clear_guest_pv: - Zero a block of memory in PV guest space.
+ * @to:   Destination address, in PV guest space.
  * @n:    Number of bytes to zero.
  *
- * Zero a block of memory in user space.
+ * Zero a block of memory in PV guest space.
  *
  * Returns number of bytes that could not be cleared.
  * On success, this will be zero.
  */
-unsigned clear_user(void __user *to, unsigned n)
+unsigned int clear_guest_pv(void __user *to, unsigned int n)
 {
     if ( access_ok(to, n) )
     {
+        long dummy;
+
         stac();
         asm volatile (
+            "    guest_access_mask_ptr %[to], %[scratch1], %[scratch2]\n"
             "0:  rep stos"__OS"\n"
             "    mov  %[bytes], %[cnt]\n"
             "1:  rep stosb\n"
@@ -140,7 +155,8 @@ unsigned clear_user(void __user *to, unsigned n)
             ".previous\n"
             _ASM_EXTABLE(0b,3b)
             _ASM_EXTABLE(1b,2b)
-            : [cnt] "=&c" (n), [to] "+D" (to)
+            : [cnt] "=&c" (n), [to] "+D" (to), [scratch1] "=&r" (dummy),
+              [scratch2] "=&r" (dummy)
             : [bytes] "r" (n & (BYTES_PER_LONG - 1)),
               [longs] "0" (n / BYTES_PER_LONG), "a" (0) );
         clac();
@@ -150,14 +166,12 @@ unsigned clear_user(void __user *to, unsigned n)
 }
 
 /**
- * copy_from_user: - Copy a block of data from user space.
- * @to:   Destination address, in kernel space.
- * @from: Source address, in user space.
+ * copy_from_guest_pv: - Copy a block of data from PV guest space.
+ * @to:   Destination address, in hypervisor space.
+ * @from: Source address, in PV guest space.
  * @n:    Number of bytes to copy.
  *
- * Context: User context only.  This function may sleep.
- *
- * Copy data from user space to kernel space.
+ * Copy data from PV guest space to hypervisor space.
  *
  * Returns number of bytes that could not be copied.
  * On success, this will be zero.
@@ -165,14 +179,25 @@ unsigned clear_user(void __user *to, unsigned n)
  * If some data could not be copied, this function will pad the copied
  * data to the requested size using zero bytes.
  */
-unsigned copy_from_user(void *to, const void __user *from, unsigned n)
+unsigned int copy_from_guest_pv(void *to, const void __user *from,
+                                unsigned int n)
 {
     if ( access_ok(from, n) )
-        n = __copy_from_user(to, from, n);
+        n = __copy_from_guest_pv(to, from, n);
     else
         memset(to, 0, n);
     return n;
 }
+
+# undef GUARD
+# define GUARD UA_DROP
+# define copy_to_guest_ll copy_to_unsafe_ll
+# define copy_from_guest_ll copy_from_unsafe_ll
+# undef __user
+# define __user
+# include __FILE__
+
+#endif /* GUARD(1) */
 
 /*
  * Local variables:

@@ -67,11 +67,14 @@ integer_param("ple_gap", ple_gap);
 static unsigned int __read_mostly ple_window = 4096;
 integer_param("ple_window", ple_window);
 
+static unsigned int __ro_after_init vm_notify_window;
+integer_param("vm-notify-window", vm_notify_window);
+
 static bool __read_mostly opt_ept_pml = true;
 static s8 __read_mostly opt_ept_ad = -1;
 int8_t __read_mostly opt_ept_exec_sp = -1;
 
-static int __init parse_ept_param(const char *s)
+static int __init cf_check parse_ept_param(const char *s)
 {
     const char *ss;
     int val, rc = 0;
@@ -107,16 +110,16 @@ static void update_ept_param(void)
                  opt_ept_exec_sp);
 }
 
-static void __init init_ept_param(struct param_hypfs *par)
+static void __init cf_check init_ept_param(struct param_hypfs *par)
 {
     update_ept_param();
     custom_runtime_set_var(par, opt_ept_setting);
 }
 
-static int parse_ept_param_runtime(const char *s);
+static int cf_check parse_ept_param_runtime(const char *s);
 custom_runtime_only_param("ept", parse_ept_param_runtime, init_ept_param);
 
-static int parse_ept_param_runtime(const char *s)
+static int cf_check parse_ept_param_runtime(const char *s)
 {
     struct domain *d;
     int val;
@@ -209,6 +212,8 @@ static void __init vmx_display_features(void)
     P(cpu_has_vmx_virt_exceptions, "Virtualisation Exceptions");
     P(cpu_has_vmx_pml, "Page Modification Logging");
     P(cpu_has_vmx_tsc_scaling, "TSC Scaling");
+    P(cpu_has_vmx_bus_lock_detection, "Bus Lock Detection");
+    P(cpu_has_vmx_notify_vm_exiting, "Notify VM Exit");
 #undef P
 
     if ( !printed )
@@ -243,7 +248,7 @@ static bool_t cap_check(const char *name, u32 expected, u32 saw)
     return saw != expected;
 }
 
-static int vmx_init_vmcs_config(void)
+static int vmx_init_vmcs_config(bool bsp)
 {
     u32 vmx_basic_msr_low, vmx_basic_msr_high, min, opt;
     u32 _vmx_pin_based_exec_control;
@@ -291,6 +296,20 @@ static int vmx_init_vmcs_config(void)
         _vmx_cpu_based_exec_control &=
             ~(CPU_BASED_CR8_LOAD_EXITING | CPU_BASED_CR8_STORE_EXITING);
 
+    rdmsrl(MSR_IA32_VMX_MISC, _vmx_misc_cap);
+
+    /* Check whether IPT is supported in VMX operation. */
+    if ( bsp )
+        vmtrace_available = cpu_has_proc_trace &&
+                            (_vmx_misc_cap & VMX_MISC_PROC_TRACE);
+    else if ( vmtrace_available &&
+              !(_vmx_misc_cap & VMX_MISC_PROC_TRACE) )
+    {
+        printk("VMX: IPT capabilities differ between CPU%u and BSP\n",
+               smp_processor_id());
+        return -EINVAL;
+    }
+
     if ( _vmx_cpu_based_exec_control & CPU_BASED_ACTIVATE_SECONDARY_CONTROLS )
     {
         min = 0;
@@ -304,8 +323,8 @@ static int vmx_init_vmcs_config(void)
                SECONDARY_EXEC_ENABLE_VM_FUNCTIONS |
                SECONDARY_EXEC_ENABLE_VIRT_EXCEPTIONS |
                SECONDARY_EXEC_XSAVES |
-               SECONDARY_EXEC_TSC_SCALING);
-        rdmsrl(MSR_IA32_VMX_MISC, _vmx_misc_cap);
+               SECONDARY_EXEC_TSC_SCALING |
+               SECONDARY_EXEC_BUS_LOCK_DETECTION);
         if ( _vmx_misc_cap & VMX_MISC_VMWRITE_ALL )
             opt |= SECONDARY_EXEC_ENABLE_VMCS_SHADOWING;
         if ( opt_vpid_enabled )
@@ -314,6 +333,8 @@ static int vmx_init_vmcs_config(void)
             opt |= SECONDARY_EXEC_UNRESTRICTED_GUEST;
         if ( opt_ept_pml )
             opt |= SECONDARY_EXEC_ENABLE_PML;
+        if ( vm_notify_window != ~0u )
+            opt |= SECONDARY_EXEC_NOTIFY_VM_EXITING;
 
         /*
          * "APIC Register Virtualization" and "Virtual Interrupt Delivery"
@@ -576,7 +597,7 @@ static void vmx_free_vmcs(paddr_t pa)
     free_domheap_page(maddr_to_page(pa));
 }
 
-static void __vmx_clear_vmcs(void *info)
+static void cf_check __vmx_clear_vmcs(void *info)
 {
     struct vcpu *v = info;
     struct vmx_vcpu *vmx = &v->arch.hvm.vmx;
@@ -642,7 +663,7 @@ void vmx_vmcs_reload(struct vcpu *v)
     vmx_load_vmcs(v);
 }
 
-int vmx_cpu_up_prepare(unsigned int cpu)
+int cf_check vmx_cpu_up_prepare(unsigned int cpu)
 {
     /*
      * If nvmx_cpu_up_prepare() failed, do not return failure and just fallback
@@ -663,7 +684,7 @@ int vmx_cpu_up_prepare(unsigned int cpu)
     return -ENOMEM;
 }
 
-void vmx_cpu_dead(unsigned int cpu)
+void cf_check vmx_cpu_dead(unsigned int cpu)
 {
     vmx_free_vmcs(per_cpu(vmxon_region, cpu));
     per_cpu(vmxon_region, cpu) = 0;
@@ -715,7 +736,7 @@ static int _vmx_cpu_up(bool bsp)
         wrmsr(MSR_IA32_FEATURE_CONTROL, eax, 0);
     }
 
-    if ( (rc = vmx_init_vmcs_config()) != 0 )
+    if ( (rc = vmx_init_vmcs_config(bsp)) != 0 )
         return rc;
 
     INIT_LIST_HEAD(&this_cpu(active_vmcs_list));
@@ -761,12 +782,12 @@ static int _vmx_cpu_up(bool bsp)
     return 0;
 }
 
-int vmx_cpu_up()
+int cf_check vmx_cpu_up(void)
 {
     return _vmx_cpu_up(false);
 }
 
-void vmx_cpu_down(void)
+void cf_check vmx_cpu_down(void)
 {
     struct list_head *active_vmcs_list = &this_cpu(active_vmcs_list);
     unsigned long flags;
@@ -1110,20 +1131,6 @@ static int construct_vmcs(struct vcpu *v)
     /* Do not enable Monitor Trap Flag unless start single step debug */
     v->arch.hvm.vmx.exec_control &= ~CPU_BASED_MONITOR_TRAP_FLAG;
 
-    if ( !has_vlapic(d) )
-    {
-        /* Disable virtual apics, TPR */
-        v->arch.hvm.vmx.secondary_exec_control &=
-            ~(SECONDARY_EXEC_VIRTUALIZE_APIC_ACCESSES
-              | SECONDARY_EXEC_APIC_REGISTER_VIRT
-              | SECONDARY_EXEC_VIRTUAL_INTR_DELIVERY);
-        v->arch.hvm.vmx.exec_control &= ~CPU_BASED_TPR_SHADOW;
-
-        /* In turn, disable posted interrupts. */
-        __vmwrite(PIN_BASED_VM_EXEC_CONTROL,
-                  vmx_pin_based_exec_control & ~PIN_BASED_POSTED_INTERRUPT);
-    }
-
     vmx_update_cpu_exec_control(v);
 
     __vmwrite(VM_EXIT_CONTROLS, vmexit_ctl);
@@ -1289,6 +1296,10 @@ static int construct_vmcs(struct vcpu *v)
     v->arch.hvm.vmx.exception_bitmap = HVM_TRAP_MASK
               | (paging_mode_hap(d) ? 0 : (1U << TRAP_page_fault))
               | (v->arch.fully_eager_fpu ? 0 : (1U << TRAP_no_device));
+
+    if ( cpu_has_vmx_notify_vm_exiting )
+        __vmwrite(NOTIFY_WINDOW, vm_notify_window);
+
     vmx_update_exception_bitmap(v);
 
     v->arch.hvm.guest_cr[0] = X86_CR0_PE | X86_CR0_ET;
@@ -1331,6 +1342,10 @@ static int construct_vmcs(struct vcpu *v)
     if ( opt_l1d_flush && paging_mode_hap(d) )
         rc = vmx_add_msr(v, MSR_FLUSH_CMD, FLUSH_CMD_L1D,
                          VMX_MSR_GUEST_LOADONLY);
+
+    if ( !rc && (d->arch.spec_ctrl_flags & SCF_entry_ibpb) )
+        rc = vmx_add_msr(v, MSR_PRED_CMD, PRED_CMD_IBPB,
+                         VMX_MSR_HOST);
 
  out:
     vmx_vmcs_exit(v);
@@ -1814,7 +1829,7 @@ int vmx_create_vmcs(struct vcpu *v)
 
     if ( (rc = construct_vmcs(v)) != 0 )
     {
-        vmx_free_vmcs(vmx->vmcs_pa);
+        vmx_destroy_vmcs(v);
         return rc;
     }
 
@@ -1850,7 +1865,9 @@ void vmx_vmentry_failure(void)
     domain_crash(curr->domain);
 }
 
-void vmx_do_resume(void)
+void noreturn vmx_asm_do_vmentry(void);
+
+void cf_check vmx_do_resume(void)
 {
     struct vcpu *v = current;
     bool_t debug_state;
@@ -2102,7 +2119,7 @@ void vmcs_dump_vcpu(struct vcpu *v)
     vmx_vmcs_exit(v);
 }
 
-static void vmcs_dump(unsigned char ch)
+static void cf_check vmcs_dump(unsigned char ch)
 {
     struct domain *d;
     struct vcpu *v;
@@ -2118,6 +2135,11 @@ static void vmcs_dump(unsigned char ch)
         printk("\n>>> Domain %d <<<\n", d->domain_id);
         for_each_vcpu ( d, v )
         {
+            if ( !v->is_initialised )
+            {
+                printk("\tVCPU %u: not initialized\n", v->vcpu_id);
+                continue;
+            }
             printk("\tVCPU %d\n", v->vcpu_id);
             vmcs_dump_vcpu(v);
         }

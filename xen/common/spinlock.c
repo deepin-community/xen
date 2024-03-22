@@ -13,7 +13,7 @@
 
 static atomic_t spin_debug __read_mostly = ATOMIC_INIT(0);
 
-static void check_lock(union lock_debug *debug)
+void check_lock(union lock_debug *debug, bool try)
 {
     bool irq_safe = !local_irq_is_enabled();
 
@@ -42,7 +42,13 @@ static void check_lock(union lock_debug *debug)
      * 
      * To guard against this subtle bug we latch the IRQ safety of every
      * spinlock in the system, on first use.
+     *
+     * A spin_trylock() with interrupts off is always fine, as this can't
+     * block and above deadlock scenario doesn't apply.
      */
+    if ( try && irq_safe )
+        return;
+
     if ( unlikely(debug->irq_safe != irq_safe) )
     {
         union lock_debug seen, new = { 0 };
@@ -102,7 +108,6 @@ void spin_debug_disable(void)
 
 #else /* CONFIG_DEBUG_LOCKS */
 
-#define check_lock(l) ((void)0)
 #define check_barrier(l) ((void)0)
 #define got_lock(l) ((void)0)
 #define rel_lock(l) ((void)0)
@@ -159,7 +164,7 @@ void inline _spin_lock_cb(spinlock_t *lock, void (*cb)(void *), void *data)
     spinlock_tickets_t tickets = SPINLOCK_TICKET_INC;
     LOCK_PROFILE_VAR;
 
-    check_lock(&lock->debug);
+    check_lock(&lock->debug, false);
     preempt_disable();
     tickets.head_tail = arch_fetch_and_add(&lock->tickets.head_tail,
                                            tickets.head_tail);
@@ -170,9 +175,9 @@ void inline _spin_lock_cb(spinlock_t *lock, void (*cb)(void *), void *data)
             cb(data);
         arch_lock_relax();
     }
+    arch_lock_acquire_barrier();
     got_lock(&lock->debug);
     LOCK_PROFILE_GOT;
-    arch_lock_acquire_barrier();
 }
 
 void _spin_lock(spinlock_t *lock)
@@ -198,9 +203,9 @@ unsigned long _spin_lock_irqsave(spinlock_t *lock)
 
 void _spin_unlock(spinlock_t *lock)
 {
-    arch_lock_release_barrier();
     LOCK_PROFILE_REL;
     rel_lock(&lock->debug);
+    arch_lock_release_barrier();
     add_sized(&lock->tickets.head, 1);
     arch_lock_signal();
     preempt_enable();
@@ -220,8 +225,6 @@ void _spin_unlock_irqrestore(spinlock_t *lock, unsigned long flags)
 
 int _spin_is_locked(spinlock_t *lock)
 {
-    check_lock(&lock->debug);
-
     /*
      * Recursive locks may be locked by another CPU, yet we return
      * "false" here, making this function suitable only for use in
@@ -236,28 +239,31 @@ int _spin_trylock(spinlock_t *lock)
 {
     spinlock_tickets_t old, new;
 
-    check_lock(&lock->debug);
+    preempt_disable();
+    check_lock(&lock->debug, true);
     old = observe_lock(&lock->tickets);
     if ( old.head != old.tail )
+    {
+        preempt_enable();
         return 0;
+    }
     new = old;
     new.tail++;
-    preempt_disable();
     if ( cmpxchg(&lock->tickets.head_tail,
                  old.head_tail, new.head_tail) != old.head_tail )
     {
         preempt_enable();
         return 0;
     }
+    /*
+     * cmpxchg() is a full barrier so no need for an
+     * arch_lock_acquire_barrier().
+     */
     got_lock(&lock->debug);
 #ifdef CONFIG_DEBUG_LOCK_PROFILE
     if (lock->profile)
         lock->profile->time_locked = NOW();
 #endif
-    /*
-     * cmpxchg() is a full barrier so no need for an
-     * arch_lock_acquire_barrier().
-     */
     return 1;
 }
 
@@ -294,7 +300,7 @@ int _spin_trylock_recursive(spinlock_t *lock)
     BUILD_BUG_ON(NR_CPUS > SPINLOCK_NO_CPU);
     BUILD_BUG_ON(SPINLOCK_RECURSE_BITS < 3);
 
-    check_lock(&lock->debug);
+    check_lock(&lock->debug, true);
 
     if ( likely(lock->recurse_cpu != cpu) )
     {
@@ -338,7 +344,7 @@ void _spin_unlock_recursive(spinlock_t *lock)
 
 struct lock_profile_anc {
     struct lock_profile_qhead *head_q;   /* first head of this type */
-    char                      *name;     /* descriptive string for print */
+    const char                *name;     /* descriptive string for print */
 };
 
 typedef void lock_profile_subfunc(
@@ -348,7 +354,10 @@ extern struct lock_profile *__lock_profile_start;
 extern struct lock_profile *__lock_profile_end;
 
 static s_time_t lock_profile_start;
-static struct lock_profile_anc lock_profile_ancs[LOCKPROF_TYPE_N];
+static struct lock_profile_anc lock_profile_ancs[] = {
+    [LOCKPROF_TYPE_GLOBAL] = { .name = "Global" },
+    [LOCKPROF_TYPE_PERDOM] = { .name = "Domain" },
+};
 static struct lock_profile_qhead lock_profile_glb_q;
 static spinlock_t lock_profile_lock = SPIN_LOCK_UNLOCKED;
 
@@ -366,7 +375,7 @@ static void spinlock_profile_iterate(lock_profile_subfunc *sub, void *par)
     spin_unlock(&lock_profile_lock);
 }
 
-static void spinlock_profile_print_elem(struct lock_profile *data,
+static void cf_check spinlock_profile_print_elem(struct lock_profile *data,
     int32_t type, int32_t idx, void *par)
 {
     struct spinlock *lock = data->lock;
@@ -384,7 +393,7 @@ static void spinlock_profile_print_elem(struct lock_profile *data,
            data->lock_cnt, data->time_hold, data->block_cnt, data->time_block);
 }
 
-void spinlock_profile_printall(unsigned char key)
+void cf_check spinlock_profile_printall(unsigned char key)
 {
     s_time_t now = NOW();
     s_time_t diff;
@@ -395,7 +404,7 @@ void spinlock_profile_printall(unsigned char key)
     spinlock_profile_iterate(spinlock_profile_print_elem, NULL);
 }
 
-static void spinlock_profile_reset_elem(struct lock_profile *data,
+static void cf_check spinlock_profile_reset_elem(struct lock_profile *data,
     int32_t type, int32_t idx, void *par)
 {
     data->lock_cnt = 0;
@@ -404,7 +413,7 @@ static void spinlock_profile_reset_elem(struct lock_profile *data,
     data->time_block = 0;
 }
 
-void spinlock_profile_reset(unsigned char key)
+void cf_check spinlock_profile_reset(unsigned char key)
 {
     s_time_t now = NOW();
 
@@ -419,7 +428,7 @@ typedef struct {
     int                      rc;
 } spinlock_profile_ucopy_t;
 
-static void spinlock_profile_ucopy_elem(struct lock_profile *data,
+static void cf_check spinlock_profile_ucopy_elem(struct lock_profile *data,
     int32_t type, int32_t idx, void *par)
 {
     spinlock_profile_ucopy_t *p = par;
@@ -473,13 +482,12 @@ int spinlock_profile_control(struct xen_sysctl_lockprof_op *pc)
 }
 
 void _lock_profile_register_struct(
-    int32_t type, struct lock_profile_qhead *qhead, int32_t idx, char *name)
+    int32_t type, struct lock_profile_qhead *qhead, int32_t idx)
 {
     qhead->idx = idx;
     spin_lock(&lock_profile_lock);
     qhead->head_q = lock_profile_ancs[type].head_q;
     lock_profile_ancs[type].head_q = qhead;
-    lock_profile_ancs[type].name = name;
     spin_unlock(&lock_profile_lock);
 }
 
@@ -500,9 +508,11 @@ void _lock_profile_deregister_struct(
     spin_unlock(&lock_profile_lock);
 }
 
-static int __init lock_prof_init(void)
+static int __init cf_check lock_prof_init(void)
 {
     struct lock_profile **q;
+
+    BUILD_BUG_ON(ARRAY_SIZE(lock_profile_ancs) != LOCKPROF_TYPE_N);
 
     for ( q = &__lock_profile_start; q < &__lock_profile_end; q++ )
     {
@@ -511,9 +521,8 @@ static int __init lock_prof_init(void)
         (*q)->lock->profile = *q;
     }
 
-    _lock_profile_register_struct(
-        LOCKPROF_TYPE_GLOBAL, &lock_profile_glb_q,
-        0, "Global lock");
+    _lock_profile_register_struct(LOCKPROF_TYPE_GLOBAL,
+                                  &lock_profile_glb_q, 0);
 
     return 0;
 }

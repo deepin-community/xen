@@ -1,7 +1,7 @@
 XEN_ROOT = $(CURDIR)/../../..
-include $(XEN_ROOT)/tools/libfsimage/Rules.mk
+include $(XEN_ROOT)/tools/libfsimage/common.mk
 
-MAJOR = 4.14
+MAJOR := $(shell $(XEN_ROOT)/version.sh $(XEN_ROOT)/xen/Makefile)
 MINOR = 0
 
 LDFLAGS-$(CONFIG_SunOS) = -Wl,-M -Wl,mapfile-SunOS
@@ -13,12 +13,10 @@ LDFLAGS += $(PTHREAD_LDFLAGS)
 
 LIB_SRCS-y = fsimage.c fsimage_plugin.c fsimage_grub.c
 
-PIC_OBJS := $(patsubst %.c,%.opic,$(LIB_SRCS-y))
-
-LIB = libxenfsimage.so libxenfsimage.so.$(MAJOR) libxenfsimage.so.$(MAJOR).$(MINOR)
+TARGETS = libxenfsimage.so libxenfsimage.so.$(MAJOR) libxenfsimage.so.$(MAJOR).$(MINOR)
 
 .PHONY: all
-all: $(LIB)
+all: $(TARGETS)
 
 .PHONY: install
 install: all
@@ -39,9 +37,6 @@ uninstall:
 	rm -f $(DESTDIR)$(libdir)/libxenfsimage.so
 	rm -f $(DESTDIR)$(libdir)/libxenfsimage.so.$(MAJOR)
 	rm -f $(DESTDIR)$(libdir)/libxenfsimage.so.$(MAJOR).$(MINOR)
-
-clean distclean::
-	rm -f $(LIB)
 
 libxenfsimage.so: libxenfsimage.so.$(MAJOR)
 	ln -sf $< $@

@@ -171,24 +171,43 @@ extern void shadow_audit_tables(struct vcpu *v);
 /* Shadow type codes */
 #define SH_type_none           (0U) /* on the shadow free list */
 #define SH_type_min_shadow     (1U)
+#ifdef CONFIG_HVM
 #define SH_type_l1_32_shadow   (1U) /* shadowing a 32-bit L1 guest page */
 #define SH_type_fl1_32_shadow  (2U) /* L1 shadow for a 32b 4M superpage */
 #define SH_type_l2_32_shadow   (3U) /* shadowing a 32-bit L2 guest page */
 #define SH_type_l1_pae_shadow  (4U) /* shadowing a pae L1 page */
 #define SH_type_fl1_pae_shadow (5U) /* L1 shadow for pae 2M superpg */
 #define SH_type_l2_pae_shadow  (6U) /* shadowing a pae L2-low page */
-#define SH_type_l2h_pae_shadow (7U) /* shadowing a pae L2-high page */
-#define SH_type_l1_64_shadow   (8U) /* shadowing a 64-bit L1 page */
-#define SH_type_fl1_64_shadow  (9U) /* L1 shadow for 64-bit 2M superpg */
-#define SH_type_l2_64_shadow  (10U) /* shadowing a 64-bit L2 page */
-#define SH_type_l2h_64_shadow (11U) /* shadowing a compat PAE L2 high page */
-#define SH_type_l3_64_shadow  (12U) /* shadowing a 64-bit L3 page */
-#define SH_type_l4_64_shadow  (13U) /* shadowing a 64-bit L4 page */
-#define SH_type_max_shadow    (13U)
-#define SH_type_p2m_table     (14U) /* in use as the p2m table */
-#define SH_type_monitor_table (15U) /* in use as a monitor table */
-#define SH_type_oos_snapshot  (16U) /* in use as OOS snapshot */
-#define SH_type_unused        (17U)
+#define SH_type_l1_64_shadow   (7U) /* shadowing a 64-bit L1 page */
+#define SH_type_fl1_64_shadow  (8U) /* L1 shadow for 64-bit 2M superpg */
+#define SH_type_l2_64_shadow   (9U) /* shadowing a 64-bit L2 page */
+#define SH_type_l2h_64_shadow (10U) /* shadowing a compat PAE L2 high page */
+#define SH_type_l3_64_shadow  (11U) /* shadowing a 64-bit L3 page */
+#define SH_type_l4_64_shadow  (12U) /* shadowing a 64-bit L4 page */
+#define SH_type_max_shadow    (12U)
+#define SH_type_p2m_table     (13U) /* in use as the p2m table */
+#define SH_type_monitor_table (14U) /* in use as a monitor table */
+#define SH_type_oos_snapshot  (15U) /* in use as OOS snapshot */
+#define SH_type_unused        (16U)
+#else
+#define SH_type_l1_32_shadow   SH_type_unused
+#define SH_type_fl1_32_shadow  SH_type_unused
+#define SH_type_l2_32_shadow   SH_type_unused
+#define SH_type_l1_pae_shadow  SH_type_unused
+#define SH_type_fl1_pae_shadow SH_type_unused
+#define SH_type_l2_pae_shadow  SH_type_unused
+#define SH_type_l1_64_shadow   1U /* shadowing a 64-bit L1 page */
+#define SH_type_fl1_64_shadow  2U /* L1 shadow for 64-bit 2M superpg */
+#define SH_type_l2_64_shadow   3U /* shadowing a 64-bit L2 page */
+#define SH_type_l2h_64_shadow  4U /* shadowing a compat PAE L2 high page */
+#define SH_type_l3_64_shadow   5U /* shadowing a 64-bit L3 page */
+#define SH_type_l4_64_shadow   6U /* shadowing a 64-bit L4 page */
+#define SH_type_max_shadow     6U
+#define SH_type_p2m_table      7U /* in use as the p2m table */
+#define SH_type_monitor_table  8U /* in use as a monitor table */
+#define SH_type_oos_snapshot   9U /* in use as OOS snapshot */
+#define SH_type_unused        10U
+#endif
 
 /*
  * What counts as a pinnable shadow?
@@ -200,7 +219,6 @@ static inline int sh_type_is_pinnable(struct domain *d, unsigned int t)
      * persist even when not currently in use in a guest CR3 */
     if ( t == SH_type_l2_32_shadow
          || t == SH_type_l2_pae_shadow
-         || t == SH_type_l2h_pae_shadow
          || t == SH_type_l4_64_shadow )
         return 1;
 
@@ -250,13 +268,21 @@ static inline void sh_terminate_list(struct page_list_head *tmp_list)
     (((1u << (SH_type_max_shadow + 1u)) - 1u) - \
      ((1u << SH_type_min_shadow) - 1u))
 
+#ifdef CONFIG_HVM
 #define SHF_L1_32   (1u << SH_type_l1_32_shadow)
 #define SHF_FL1_32  (1u << SH_type_fl1_32_shadow)
 #define SHF_L2_32   (1u << SH_type_l2_32_shadow)
 #define SHF_L1_PAE  (1u << SH_type_l1_pae_shadow)
 #define SHF_FL1_PAE (1u << SH_type_fl1_pae_shadow)
 #define SHF_L2_PAE  (1u << SH_type_l2_pae_shadow)
-#define SHF_L2H_PAE (1u << SH_type_l2h_pae_shadow)
+#else
+#define SHF_L1_32   0
+#define SHF_FL1_32  0
+#define SHF_L2_32   0
+#define SHF_L1_PAE  0
+#define SHF_FL1_PAE 0
+#define SHF_L2_PAE  0
+#endif
 #define SHF_L1_64   (1u << SH_type_l1_64_shadow)
 #define SHF_FL1_64  (1u << SH_type_fl1_64_shadow)
 #define SHF_L2_64   (1u << SH_type_l2_64_shadow)
@@ -265,10 +291,11 @@ static inline void sh_terminate_list(struct page_list_head *tmp_list)
 #define SHF_L4_64   (1u << SH_type_l4_64_shadow)
 
 #define SHF_32  (SHF_L1_32|SHF_FL1_32|SHF_L2_32)
-#define SHF_PAE (SHF_L1_PAE|SHF_FL1_PAE|SHF_L2_PAE|SHF_L2H_PAE)
+#define SHF_PAE (SHF_L1_PAE|SHF_FL1_PAE|SHF_L2_PAE)
 #define SHF_64  (SHF_L1_64|SHF_FL1_64|SHF_L2_64|SHF_L2H_64|SHF_L3_64|SHF_L4_64)
 
 #define SHF_L1_ANY  (SHF_L1_32|SHF_L1_PAE|SHF_L1_64)
+#define SHF_FL1_ANY (SHF_FL1_32|SHF_FL1_PAE|SHF_FL1_64)
 
 #if (SHADOW_OPTIMIZATIONS & SHOPT_OUT_OF_SYNC)
 /* Marks a guest L1 page table which is shadowed but not write-protected.
@@ -297,7 +324,7 @@ static inline int sh_page_has_multiple_shadows(struct page_info *pg)
         return 0;
     shadows = pg->shadow_flags & SHF_page_type_mask;
     /* More than one type bit set in shadow-flags? */
-    return ( (shadows & ~(1UL << find_first_set_bit(shadows))) != 0 );
+    return shadows && (shadows & (shadows - 1));
 }
 
 #if (SHADOW_OPTIMIZATIONS & SHOPT_OUT_OF_SYNC)
@@ -331,8 +358,13 @@ extern const u8 sh_type_to_size[SH_type_unused];
 static inline unsigned int
 shadow_size(unsigned int shadow_type)
 {
+#ifdef CONFIG_HVM
     ASSERT(shadow_type < ARRAY_SIZE(sh_type_to_size));
     return sh_type_to_size[shadow_type];
+#else
+    ASSERT(shadow_type < SH_type_unused);
+    return 1;
+#endif
 }
 
 /******************************************************************************
@@ -343,7 +375,7 @@ shadow_size(unsigned int shadow_type)
 mfn_t shadow_hash_lookup(struct domain *d, unsigned long n, unsigned int t);
 void  shadow_hash_insert(struct domain *d,
                          unsigned long n, unsigned int t, mfn_t smfn);
-void  shadow_hash_delete(struct domain *d,
+bool  shadow_hash_delete(struct domain *d,
                          unsigned long n, unsigned int t, mfn_t smfn);
 
 /* shadow promotion */
@@ -351,14 +383,21 @@ void shadow_promote(struct domain *d, mfn_t gmfn, u32 type);
 void shadow_demote(struct domain *d, mfn_t gmfn, u32 type);
 
 /* Shadow page allocation functions */
-void  shadow_prealloc(struct domain *d, u32 shadow_type, unsigned int count);
+bool __must_check shadow_prealloc(struct domain *d, unsigned int shadow_type,
+                                  unsigned int count);
 mfn_t shadow_alloc(struct domain *d,
                     u32 shadow_type,
                     unsigned long backpointer);
 void  shadow_free(struct domain *d, mfn_t smfn);
 
-/* Install the xen mappings in various flavours of shadow */
-void sh_install_xen_entries_in_l4(struct domain *, mfn_t gl4mfn, mfn_t sl4mfn);
+/* Set up the top-level shadow and install it in slot 'slot' of shadow_table */
+pagetable_t sh_set_toplevel_shadow(struct vcpu *v,
+                                   unsigned int slot,
+                                   mfn_t gmfn,
+                                   unsigned int root_type,
+                                   mfn_t (*make_shadow)(struct vcpu *v,
+                                                        mfn_t gmfn,
+                                                        uint32_t shadow_type));
 
 /* Update the shadows in response to a pagetable write from Xen */
 int sh_validate_guest_entry(struct vcpu *v, mfn_t gmfn, void *entry, u32 size);
@@ -381,25 +420,36 @@ static inline int sh_remove_write_access(struct domain *d, mfn_t readonly_mfn,
 }
 #endif
 
-/* Functions that atomically write PT/P2M entries and update state */
-int shadow_write_p2m_entry(struct p2m_domain *p2m, unsigned long gfn,
-                           l1_pgentry_t *p, l1_pgentry_t new,
-                           unsigned int level);
-
 /* Functions that atomically write PV guest PT entries */
-bool sh_write_guest_entry(struct vcpu *v, intpte_t *p, intpte_t new,
-                          mfn_t gmfn);
-bool sh_cmpxchg_guest_entry(struct vcpu *v, intpte_t *p, intpte_t *old,
-                            intpte_t new, mfn_t gmfn);
+void cf_check sh_write_guest_entry(
+    struct vcpu *v, intpte_t *p, intpte_t new, mfn_t gmfn);
+intpte_t cf_check sh_cmpxchg_guest_entry(
+    struct vcpu *v, intpte_t *p, intpte_t old, intpte_t new, mfn_t gmfn);
 
 /* Update all the things that are derived from the guest's CR0/CR3/CR4.
  * Called to initialize paging structures if the paging mode
  * has changed, and when bringing up a VCPU for the first time. */
-void shadow_update_paging_modes(struct vcpu *v);
+void cf_check shadow_update_paging_modes(struct vcpu *v);
 
 /* Unhook the non-Xen mappings in this top-level shadow mfn.
  * With user_only == 1, unhooks only the user-mode mappings. */
 void shadow_unhook_mappings(struct domain *d, mfn_t smfn, int user_only);
+
+/*
+ * sh_{make,destroy}_monitor_table() depend only on the number of shadow
+ * levels.
+ */
+mfn_t sh_make_monitor_table(const struct vcpu *v, unsigned int shadow_levels);
+void sh_destroy_monitor_table(const struct vcpu *v, mfn_t mmfn,
+                              unsigned int shadow_levels);
+
+/* VRAM dirty tracking helpers. */
+void shadow_vram_get_mfn(mfn_t mfn, unsigned int l1f,
+                         mfn_t sl1mfn, const void *sl1e,
+                         const struct domain *d);
+void shadow_vram_put_mfn(mfn_t mfn, unsigned int l1f,
+                         mfn_t sl1mfn, const void *sl1e,
+                         const struct domain *d);
 
 #if (SHADOW_OPTIMIZATIONS & SHOPT_OUT_OF_SYNC)
 /* Allow a shadowed page to go out of sync */
@@ -438,6 +488,14 @@ mfn_t oos_snapshot_lookup(struct domain *d, mfn_t gmfn);
 
 #endif /* (SHADOW_OPTIMIZATIONS & SHOPT_OUT_OF_SYNC) */
 
+/* Deliberately free all the memory we can: tear down all of d's shadows. */
+void shadow_blow_tables(struct domain *d);
+
+/*
+ * Remove all mappings of a guest frame from the shadow tables.
+ * Returns non-zero if we need to flush TLBs.
+ */
+int sh_remove_all_mappings(struct domain *d, mfn_t gmfn, gfn_t gfn);
 
 /* Reset the up-pointers of every L3 shadow to 0.
  * This is called when l3 shadows stop being pinnable, to clear out all
@@ -465,8 +523,10 @@ static inline unsigned long __backpointer(const struct page_info *sp)
 {
     switch (sp->u.sh.type)
     {
+#ifdef CONFIG_HVM
     case SH_type_fl1_32_shadow:
     case SH_type_fl1_pae_shadow:
+#endif
     case SH_type_fl1_64_shadow:
         return sp->v.sh.back;
     }
@@ -694,6 +754,59 @@ static inline void sh_unpin(struct domain *d, mfn_t smfn)
 
 
 /**************************************************************************/
+/* Hash table mapping from guest pagetables to shadows
+ *
+ * Normal case: maps the mfn of a guest page to the mfn of its shadow page.
+ * FL1's:       see multi.c.
+ */
+
+static inline mfn_t
+get_shadow_status(struct domain *d, mfn_t gmfn, u32 shadow_type)
+/* Look for shadows in the hash table */
+{
+    mfn_t smfn = shadow_hash_lookup(d, mfn_x(gmfn), shadow_type);
+    ASSERT(!mfn_valid(smfn) || mfn_to_page(smfn)->u.sh.head);
+    perfc_incr(shadow_get_shadow_status);
+    return smfn;
+}
+
+static inline void
+set_shadow_status(struct domain *d, mfn_t gmfn, u32 shadow_type, mfn_t smfn)
+/* Put a shadow into the hash table */
+{
+    SHADOW_PRINTK("d%d gmfn=%lx, type=%08x, smfn=%lx\n",
+                  d->domain_id, mfn_x(gmfn), shadow_type, mfn_x(smfn));
+
+    ASSERT(mfn_to_page(smfn)->u.sh.head);
+
+    /* 32-bit PV guests don't own their l4 pages so can't get_page them */
+    if ( (shadow_type != SH_type_l4_64_shadow || !is_pv_32bit_domain(d)) &&
+         !get_page(mfn_to_page(gmfn), d) )
+    {
+        printk(XENLOG_G_ERR "%pd: cannot get page for MFN %" PRI_mfn "\n",
+               d, mfn_x(gmfn));
+        domain_crash(d);
+        return;
+    }
+
+    shadow_hash_insert(d, mfn_x(gmfn), shadow_type, smfn);
+}
+
+static inline void
+delete_shadow_status(struct domain *d, mfn_t gmfn, u32 shadow_type, mfn_t smfn)
+/* Remove a shadow from the hash table */
+{
+    SHADOW_PRINTK("d%d gmfn=%"PRI_mfn", type=%08x, smfn=%"PRI_mfn"\n",
+                  d->domain_id, mfn_x(gmfn), shadow_type, mfn_x(smfn));
+    ASSERT(mfn_to_page(smfn)->u.sh.head);
+    if ( shadow_hash_delete(d, mfn_x(gmfn), shadow_type, smfn) &&
+         /* 32-bit PV guests don't own their l4 pages; see set_shadow_status */
+         (shadow_type != SH_type_l4_64_shadow || !is_pv_32bit_domain(d)) )
+        put_page(mfn_to_page(gmfn));
+}
+
+
+/**************************************************************************/
 /* PTE-write emulation. */
 
 struct sh_emulate_ctxt {
@@ -811,8 +924,7 @@ static inline int sh_check_page_has_no_refs(struct page_info *page)
 }
 
 /* Flush the TLB of the selected vCPUs. */
-bool shadow_flush_tlb(bool (*flush_vcpu)(void *ctxt, struct vcpu *v),
-                      void *ctxt);
+bool cf_check shadow_flush_tlb(const unsigned long *vcpu_bitmap);
 
 #endif /* _XEN_SHADOW_PRIVATE_H */
 

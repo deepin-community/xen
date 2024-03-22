@@ -176,10 +176,14 @@ class domain
     getpodtarget
 # XENMEM_set_pod_target
     setpodtarget
-# XEN_DOMCTL_subscribe, XEN_DOMCTL_disable_migrate
+# XEN_DOMCTL_subscribe
     set_misc_info
 # XEN_DOMCTL_set_virq_handler
     set_virq_handler
+# XEN_DOMCTL_get_paging_mempool_size
+    getpagingmempool
+# XEN_DOMCTL_set_paging_mempool_size
+    setpagingmempool
 }
 
 # This is a continuation of class domain, since only 32 permissions can be
@@ -272,8 +276,6 @@ class hvm
 #  source = domain whose memory is being shared
 #  target = client domain
     share_mem
-# HVMOP_set_param setting HVM_PARAM_NESTEDHVM
-    nested
 # HVMOP_set_param setting HVM_PARAM_ALTP2MHVM
     altp2mhvm
 # HVMOP_altp2m_set_domain_state HVMOP_altp2m_get_domain_state
@@ -509,7 +511,7 @@ class security
 #
 class version
 {
-# Extra informations (-unstable).
+# Extra information (-unstable).
     xen_extraversion
 # Compile information of the hypervisor.
     xen_compile_info

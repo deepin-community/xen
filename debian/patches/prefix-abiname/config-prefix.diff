@@ -9,10 +9,10 @@ Patch-Name: config-prefix.diff
  2 files changed, 2 insertions(+), 1 deletion(-)
 
 diff --git a/Config.mk b/Config.mk
-index 0dab3b7..4cb368f 100644
+index 8d91e4c..fc90691 100644
 --- a/Config.mk
 +++ b/Config.mk
-@@ -74,7 +74,7 @@ EXTRA_LIB += $(EXTRA_PREFIX)/lib
+@@ -78,7 +78,7 @@ EXTRA_LIB += $(EXTRA_PREFIX)/lib
  endif
  
  PYTHON      ?= python
@@ -22,7 +22,7 @@ index 0dab3b7..4cb368f 100644
  # to permit the user to set PYTHON_PREFIX_ARG to '' to workaround this bug:
  #  https://bugs.launchpad.net/ubuntu/+bug/362570
 diff --git a/config/Paths.mk.in b/config/Paths.mk.in
-index 416fc7a..a38db67 100644
+index 44bab1d..90391d4 100644
 --- a/config/Paths.mk.in
 +++ b/config/Paths.mk.in
 @@ -13,6 +13,7 @@

@@ -29,7 +29,7 @@
 
 #include "private.h"
 
-int osdep_evtchn_open(xenevtchn_handle *xce)
+int osdep_evtchn_open(xenevtchn_handle *xce, unsigned int flags)
 {
     int fd;
 
@@ -53,13 +53,8 @@ int osdep_evtchn_close(xenevtchn_handle *xce)
 
 int osdep_evtchn_restrict(xenevtchn_handle *xce, domid_t domid)
 {
-    errno = -EOPNOTSUPP;
+    errno = EOPNOTSUPP;
     return -1;
-}
-
-int xenevtchn_fd(xenevtchn_handle *xce)
-{
-    return xce->fd;
 }
 
 int xenevtchn_notify(xenevtchn_handle *xce, evtchn_port_t port)
@@ -72,7 +67,8 @@ int xenevtchn_notify(xenevtchn_handle *xce, evtchn_port_t port)
     return ioctl(fd, IOCTL_EVTCHN_NOTIFY, &notify);
 }
 
-xenevtchn_port_or_error_t xenevtchn_bind_unbound_port(xenevtchn_handle *xce, uint32_t domid)
+xenevtchn_port_or_error_t xenevtchn_bind_unbound_port(xenevtchn_handle *xce,
+                                                      uint32_t domid)
 {
     int fd = xce->fd;
     struct ioctl_evtchn_bind_unbound_port bind;
@@ -82,8 +78,9 @@ xenevtchn_port_or_error_t xenevtchn_bind_unbound_port(xenevtchn_handle *xce, uin
     return ioctl(fd, IOCTL_EVTCHN_BIND_UNBOUND_PORT, &bind);
 }
 
-xenevtchn_port_or_error_t xenevtchn_bind_interdomain(xenevtchn_handle *xce, uint32_t domid,
-                                                  evtchn_port_t remote_port)
+xenevtchn_port_or_error_t xenevtchn_bind_interdomain(xenevtchn_handle *xce,
+                                                     uint32_t domid,
+                                                     evtchn_port_t remote_port)
 {
     int fd = xce->fd;
     struct ioctl_evtchn_bind_interdomain bind;
@@ -94,7 +91,8 @@ xenevtchn_port_or_error_t xenevtchn_bind_interdomain(xenevtchn_handle *xce, uint
     return ioctl(fd, IOCTL_EVTCHN_BIND_INTERDOMAIN, &bind);
 }
 
-xenevtchn_port_or_error_t xenevtchn_bind_virq(xenevtchn_handle *xce, unsigned int virq)
+xenevtchn_port_or_error_t xenevtchn_bind_virq(xenevtchn_handle *xce,
+                                              unsigned int virq)
 {
     int fd = xce->fd;
     struct ioctl_evtchn_bind_virq bind;
@@ -128,6 +126,7 @@ xenevtchn_port_or_error_t xenevtchn_pending(xenevtchn_handle *xce)
 int xenevtchn_unmask(xenevtchn_handle *xce, evtchn_port_t port)
 {
     int fd = xce->fd;
+
     return write_exact(fd, (char *)&port, sizeof(port));
 }
 

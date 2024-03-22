@@ -38,9 +38,9 @@
 #define put_stub(stb) ((stb).addr = 0)
 
 uint32_t mxcsr_mask = 0x0000ffbf;
-struct cpuid_policy cp;
+struct cpu_policy cp;
 
-static char fpu_save_area[4096] __attribute__((__aligned__((64))));
+static char fpu_save_area[0x4000] __attribute__((__aligned__((64))));
 static bool use_xsave;
 
 /*
@@ -85,7 +85,7 @@ bool emul_test_init(void)
 
     unsigned long sp;
 
-    x86_cpuid_policy_fill_native(&cp);
+    x86_cpu_policy_fill_native(&cp);
 
     /*
      * The emulator doesn't use these instructions, so can always emulate
@@ -191,8 +191,8 @@ int emul_test_read_cr(
         return X86EMUL_OKAY;
 
     case 4:
-        /* OSFXSR, OSXMMEXCPT, and maybe OSXSAVE */
-        *val = 0x00000600 | (cpu_has_xsave ? 0x00040000 : 0);
+        *val = X86_CR4_OSFXSR | X86_CR4_OSXMMEXCPT | X86_CR4_PKE |
+               (cpu_has_xsave ? X86_CR4_OSXSAVE : 0);
         return X86EMUL_OKAY;
     }
 
@@ -261,6 +261,18 @@ void emul_test_put_fpu(
     const struct x86_emul_fpu_aux *aux)
 {
     /* TBD */
+}
+
+static uint32_t pkru;
+
+static unsigned int rdpkru(void)
+{
+    return pkru;
+}
+
+static void wrpkru(unsigned int val)
+{
+    pkru = val;
 }
 
 #include "x86_emulate/x86_emulate.c"

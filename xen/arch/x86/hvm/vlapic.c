@@ -312,7 +312,7 @@ static void vlapic_init_sipi_one(struct vcpu *target, uint32_t icr)
     vcpu_unpause(target);
 }
 
-static void vlapic_init_sipi_action(void *data)
+static void cf_check vlapic_init_sipi_action(void *data)
 {
     struct vcpu *origin = data;
     uint32_t icr = vcpu_vlapic(origin)->init_sipi.icr;
@@ -462,12 +462,8 @@ void vlapic_handle_EOI(struct vlapic *vlapic, u8 vector)
     struct vcpu *v = vlapic_vcpu(vlapic);
     struct domain *d = v->domain;
 
-    /* All synic SINTx vectors are edge triggered */
-
     if ( vlapic_test_vector(vector, &vlapic->regs->data[APIC_TMR]) )
         vioapic_update_EOI(d, vector);
-    else if ( has_viridian_synic(d) )
-        viridian_synic_ack_sint(v, vector);
 
     hvm_dpci_msi_eoi(d, vector);
 }
@@ -584,7 +580,7 @@ static uint32_t vlapic_get_tmcct(const struct vlapic *vlapic)
 static void vlapic_set_tdcr(struct vlapic *vlapic, unsigned int val)
 {
     /* Only bits 0, 1 and 3 are settable; others are MBZ. */
-    val &= 0xb;
+    val &= APIC_TDR_DIV_MASK;
     vlapic_set_reg(vlapic, APIC_TDCR, val);
 
     /* Update the demangled hw.timer_divisor. */
@@ -619,8 +615,9 @@ static uint32_t vlapic_read_aligned(const struct vlapic *vlapic,
     return 0;
 }
 
-static int vlapic_mmio_read(struct vcpu *v, unsigned long address,
-                            unsigned int len, unsigned long *pval)
+static int cf_check vlapic_mmio_read(
+    struct vcpu *v, unsigned long address, unsigned int len,
+    unsigned long *pval)
 {
     struct vlapic *vlapic = vcpu_vlapic(v);
     unsigned int offset = address - vlapic_base_address(vlapic);
@@ -694,13 +691,13 @@ int guest_rdmsr_x2apic(const struct vcpu *v, uint32_t msr, uint64_t *val)
     return X86EMUL_OKAY;
 }
 
-static void vlapic_pt_cb(struct vcpu *v, void *data)
+static void cf_check vlapic_pt_cb(struct vcpu *v, void *data)
 {
     TRACE_0D(TRC_HVM_EMUL_LAPIC_TIMER_CB);
     *(s_time_t *)data = hvm_get_guest_time(v);
 }
 
-static void vlapic_tdt_pt_cb(struct vcpu *v, void *data)
+static void cf_check vlapic_tdt_pt_cb(struct vcpu *v, void *data)
 {
     *(s_time_t *)data = hvm_get_guest_time(v);
     vcpu_vlapic(v)->hw.tdt_msr = 0;
@@ -832,6 +829,9 @@ void vlapic_reg_write(struct vcpu *v, unsigned int reg, uint32_t val)
         {
             vlapic->hw.disabled &= ~VLAPIC_SW_DISABLED;
             pt_may_unmask_irq(vlapic_domain(vlapic), &vlapic->pt);
+            if ( v->arch.hvm.evtchn_upcall_vector &&
+                 vcpu_info(v, evtchn_upcall_pending) )
+                vlapic_set_irq(vlapic, v->arch.hvm.evtchn_upcall_vector, 0);
         }
         break;
 
@@ -891,7 +891,7 @@ void vlapic_reg_write(struct vcpu *v, unsigned int reg, uint32_t val)
     {
         uint32_t current_divisor = vlapic->hw.timer_divisor;
 
-        vlapic_set_tdcr(vlapic, val & 0xb);
+        vlapic_set_tdcr(vlapic, val);
 
         vlapic_update_timer(vlapic, vlapic_get_reg(vlapic, APIC_LVTT), false,
                             current_divisor);
@@ -902,8 +902,8 @@ void vlapic_reg_write(struct vcpu *v, unsigned int reg, uint32_t val)
     }
 }
 
-static int vlapic_mmio_write(struct vcpu *v, unsigned long address,
-                             unsigned int len, unsigned long val)
+static int cf_check vlapic_mmio_write(
+    struct vcpu *v, unsigned long address, unsigned int len, unsigned long val)
 {
     struct vlapic *vlapic = vcpu_vlapic(v);
     unsigned int offset = address - vlapic_base_address(vlapic);
@@ -1023,7 +1023,7 @@ int guest_wrmsr_x2apic(struct vcpu *v, uint32_t msr, uint64_t msr_content)
         break;
 
     case APIC_TDCR:
-        if ( msr_content & ~APIC_TDR_DIV_1 )
+        if ( msr_content & ~APIC_TDR_DIV_MASK )
             return X86EMUL_EXCEPTION;
         break;
 
@@ -1056,7 +1056,7 @@ int guest_wrmsr_x2apic(struct vcpu *v, uint32_t msr, uint64_t msr_content)
     return X86EMUL_OKAY;
 }
 
-static int vlapic_range(struct vcpu *v, unsigned long addr)
+static int cf_check vlapic_range(struct vcpu *v, unsigned long addr)
 {
     struct vlapic *vlapic = vcpu_vlapic(v);
     unsigned long offset  = addr - vlapic_base_address(vlapic);
@@ -1072,18 +1072,31 @@ static const struct hvm_mmio_ops vlapic_mmio_ops = {
     .write = vlapic_mmio_write,
 };
 
+static uint32_t x2apic_ldr_from_id(uint32_t id)
+{
+    return ((id & ~0xf) << 12) | (1 << (id & 0xf));
+}
+
 static void set_x2apic_id(struct vlapic *vlapic)
 {
-    u32 id = vlapic_vcpu(vlapic)->vcpu_id;
-    u32 ldr = ((id & ~0xf) << 12) | (1 << (id & 0xf));
+    const struct vcpu *v = vlapic_vcpu(vlapic);
+    uint32_t apic_id = v->vcpu_id * 2;
+    uint32_t apic_ldr = x2apic_ldr_from_id(apic_id);
 
-    vlapic_set_reg(vlapic, APIC_ID, id * 2);
-    vlapic_set_reg(vlapic, APIC_LDR, ldr);
+    /*
+     * Workaround for migrated domains to derive LDRs as the source host
+     * would've.
+     */
+    if ( v->domain->arch.hvm.bug_x2apic_ldr_vcpu_id )
+        apic_ldr = x2apic_ldr_from_id(v->vcpu_id);
+
+    vlapic_set_reg(vlapic, APIC_ID, apic_id);
+    vlapic_set_reg(vlapic, APIC_LDR, apic_ldr);
 }
 
 int guest_wrmsr_apic_base(struct vcpu *v, uint64_t value)
 {
-    const struct cpuid_policy *cp = v->domain->arch.cpuid;
+    const struct cpu_policy *cp = v->domain->arch.cpu_policy;
     struct vlapic *vlapic = vcpu_vlapic(v);
 
     if ( !has_vlapic(v->domain) )
@@ -1271,15 +1284,18 @@ static int __vlapic_accept_pic_intr(struct vcpu *v)
 
 int vlapic_accept_pic_intr(struct vcpu *v)
 {
+    bool target, accept = false;
+
     if ( vlapic_hw_disabled(vcpu_vlapic(v)) || !has_vpic(v->domain) )
         return 0;
 
-    TRACE_2D(TRC_HVM_EMUL_LAPIC_PIC_INTR,
-             (v == v->domain->arch.hvm.i8259_target),
-             v ? __vlapic_accept_pic_intr(v) : -1);
+    target = v == v->domain->arch.hvm.i8259_target;
+    if ( target )
+        accept = __vlapic_accept_pic_intr(v);
 
-    return ((v == v->domain->arch.hvm.i8259_target) &&
-            __vlapic_accept_pic_intr(v));
+    TRACE_2D(TRC_HVM_EMUL_LAPIC_PIC_INTR, target, accept);
+
+    return target && accept;
 }
 
 void vlapic_adjust_i8259_target(struct domain *d)
@@ -1453,6 +1469,7 @@ static void lapic_rearm(struct vlapic *s)
 {
     unsigned long tmict;
     uint64_t period, tdt_msr;
+    bool is_periodic;
 
     s->pt.irq = vlapic_get_reg(s, APIC_LVTT) & APIC_VECTOR_MASK;
 
@@ -1468,17 +1485,20 @@ static void lapic_rearm(struct vlapic *s)
 
     period = ((uint64_t)APIC_BUS_CYCLE_NS *
               (uint32_t)tmict * s->hw.timer_divisor);
+    is_periodic = vlapic_lvtt_period(s);
+
     TRACE_2_LONG_3D(TRC_HVM_EMUL_LAPIC_START_TIMER, TRC_PAR_LONG(period),
-             TRC_PAR_LONG(vlapic_lvtt_period(s) ? period : 0LL), s->pt.irq);
+             TRC_PAR_LONG(is_periodic ? period : 0LL), s->pt.irq);
+
     create_periodic_time(vlapic_vcpu(s), &s->pt, period,
-                         vlapic_lvtt_period(s) ? period : 0,
+                         is_periodic ? period : 0,
                          s->pt.irq,
-                         vlapic_lvtt_period(s) ? vlapic_pt_cb : NULL,
+                         is_periodic ? vlapic_pt_cb : NULL,
                          &s->timer_last_update, false);
     s->timer_last_update = s->pt.last_plt_gtime;
 }
 
-static int lapic_save_hidden(struct vcpu *v, hvm_domain_context_t *h)
+static int cf_check lapic_save_hidden(struct vcpu *v, hvm_domain_context_t *h)
 {
     if ( !has_vlapic(v->domain) )
         return 0;
@@ -1486,7 +1506,7 @@ static int lapic_save_hidden(struct vcpu *v, hvm_domain_context_t *h)
     return hvm_save_entry(LAPIC, v->vcpu_id, h, &vcpu_vlapic(v)->hw);
 }
 
-static int lapic_save_regs(struct vcpu *v, hvm_domain_context_t *h)
+static int cf_check lapic_save_regs(struct vcpu *v, hvm_domain_context_t *h)
 {
     if ( !has_vlapic(v->domain) )
         return 0;
@@ -1502,30 +1522,43 @@ static int lapic_save_regs(struct vcpu *v, hvm_domain_context_t *h)
  */
 static void lapic_load_fixup(struct vlapic *vlapic)
 {
-    uint32_t id = vlapic->loaded.id;
+    const struct vcpu *v = vlapic_vcpu(vlapic);
+    uint32_t good_ldr = x2apic_ldr_from_id(vlapic->loaded.id);
 
-    if ( vlapic_x2apic_mode(vlapic) && id && vlapic->loaded.ldr == 1 )
+    /* Skip fixups on xAPIC mode, or if the x2APIC LDR is already correct */
+    if ( !vlapic_x2apic_mode(vlapic) ||
+         (vlapic->loaded.ldr == good_ldr) )
+        return;
+
+    if ( vlapic->loaded.ldr == 1 )
     {
-        /*
-         * This is optional: ID != 0 contradicts LDR == 1. It's being added
-         * to aid in eventual debugging of issues arising from the fixup done
-         * here, but can be dropped as soon as it is found to conflict with
-         * other (future) changes.
-         */
-        if ( GET_xAPIC_ID(id) != vlapic_vcpu(vlapic)->vcpu_id * 2 ||
-             id != SET_xAPIC_ID(GET_xAPIC_ID(id)) )
-            printk(XENLOG_G_WARNING "%pv: bogus APIC ID %#x loaded\n",
-                   vlapic_vcpu(vlapic), id);
+       /*
+        * Xen <= 4.4 may have a bug by which all the APICs configured in
+        * x2APIC mode got LDR = 1, which is inconsistent on every vCPU
+        * except for the one with ID = 0. We'll fix the bug now and assign
+        * an LDR value consistent with the APIC ID.
+        */
         set_x2apic_id(vlapic);
     }
-    else /* Undo an eventual earlier fixup. */
+    else if ( vlapic->loaded.ldr == x2apic_ldr_from_id(v->vcpu_id) )
     {
-        vlapic_set_reg(vlapic, APIC_ID, id);
-        vlapic_set_reg(vlapic, APIC_LDR, vlapic->loaded.ldr);
+        /*
+         * Migrations from Xen 4.4 to date (4.19 dev window, Nov 2023) may
+         * have LDR drived from the vCPU ID, not the APIC ID. We must preserve
+         * LDRs so new vCPUs use consistent derivations and existing guests,
+         * which may have already read the LDR at the source host, aren't
+         * surprised when interrupts stop working the way they did at the
+         * other end.
+         */
+        v->domain->arch.hvm.bug_x2apic_ldr_vcpu_id = true;
     }
+    else
+        printk(XENLOG_G_WARNING
+               "%pv: bogus x2APIC record: ID %#x, LDR %#x, expected LDR %#x\n",
+               v, vlapic->loaded.id, vlapic->loaded.ldr, good_ldr);
 }
 
-static int lapic_load_hidden(struct domain *d, hvm_domain_context_t *h)
+static int cf_check lapic_load_hidden(struct domain *d, hvm_domain_context_t *h)
 {
     unsigned int vcpuid = hvm_load_instance(h);
     struct vcpu *v;
@@ -1559,7 +1592,7 @@ static int lapic_load_hidden(struct domain *d, hvm_domain_context_t *h)
     return 0;
 }
 
-static int lapic_load_regs(struct domain *d, hvm_domain_context_t *h)
+static int cf_check lapic_load_regs(struct domain *d, hvm_domain_context_t *h)
 {
     unsigned int vcpuid = hvm_load_instance(h);
     struct vcpu *v;
@@ -1614,27 +1647,17 @@ int vlapic_init(struct vcpu *v)
 
     vlapic->pt.source = PTSRC_lapic;
 
-    if (vlapic->regs_page == NULL)
+    vlapic->regs_page = alloc_domheap_page(v->domain, MEMF_no_owner);
+    if ( !vlapic->regs_page )
+        return -ENOMEM;
+
+    vlapic->regs = __map_domain_page_global(vlapic->regs_page);
+    if ( vlapic->regs == NULL )
     {
-        vlapic->regs_page = alloc_domheap_page(v->domain, MEMF_no_owner);
-        if ( vlapic->regs_page == NULL )
-        {
-            dprintk(XENLOG_ERR, "alloc vlapic regs error: %d/%d\n",
-                    v->domain->domain_id, v->vcpu_id);
-            return -ENOMEM;
-        }
+        free_domheap_page(vlapic->regs_page);
+        return -ENOMEM;
     }
-    if (vlapic->regs == NULL) 
-    {
-        vlapic->regs = __map_domain_page_global(vlapic->regs_page);
-        if ( vlapic->regs == NULL )
-        {
-            free_domheap_page(vlapic->regs_page);
-            dprintk(XENLOG_ERR, "map vlapic regs error: %d/%d\n",
-                    v->domain->domain_id, v->vcpu_id);
-            return -ENOMEM;
-        }
-    }
+
     clear_page(vlapic->regs);
 
     vlapic_reset(vlapic);

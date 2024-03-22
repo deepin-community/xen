@@ -54,8 +54,7 @@ nestedhvm_vcpu_reset(struct vcpu *v)
 
     hvm_asid_flush_vcpu_asid(&nv->nv_n2asid);
 
-    if ( hvm_funcs.nhvm_vcpu_reset )
-        hvm_funcs.nhvm_vcpu_reset(v);
+    alternative_vcall(hvm_funcs.nhvm_vcpu_reset, v);
 
     /* vcpu is in host mode */
     nestedhvm_vcpu_exit_guestmode(v);
@@ -64,14 +63,14 @@ nestedhvm_vcpu_reset(struct vcpu *v)
 int
 nestedhvm_vcpu_initialise(struct vcpu *v)
 {
-    int rc = -EOPNOTSUPP;
+    int rc;
 
     if ( !shadow_io_bitmap[0] )
         return -ENOMEM;
 
-    if ( !hvm_funcs.nhvm_vcpu_initialise ||
-         ((rc = hvm_funcs.nhvm_vcpu_initialise(v)) != 0) )
-         return rc;
+    rc = alternative_call(hvm_funcs.nhvm_vcpu_initialise, v);
+    if ( rc )
+        return rc;
 
     nestedhvm_vcpu_reset(v);
     return 0;
@@ -80,12 +79,10 @@ nestedhvm_vcpu_initialise(struct vcpu *v)
 void
 nestedhvm_vcpu_destroy(struct vcpu *v)
 {
-    if ( hvm_funcs.nhvm_vcpu_destroy )
-        hvm_funcs.nhvm_vcpu_destroy(v);
+    alternative_vcall(hvm_funcs.nhvm_vcpu_destroy, v);
 }
 
-static void
-nestedhvm_flushtlb_ipi(void *info)
+static void cf_check nestedhvm_flushtlb_ipi(void *info)
 {
     struct vcpu *v = current;
     struct domain *d = info;
@@ -127,8 +124,7 @@ nestedhvm_vmcx_flushtlb(struct p2m_domain *p2m)
  * iomap[2]      set        set
  */
 
-static int __init
-nestedhvm_setup(void)
+static int __init cf_check nestedhvm_setup(void)
 {
     /* Same format and size as hvm_io_bitmap (Intel needs only 2 pages). */
     unsigned nr = cpu_has_vmx ? 2 : 3;

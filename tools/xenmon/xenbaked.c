@@ -182,7 +182,7 @@ typedef struct
 {
     int event_count;
     int event_id;
-    char *text;
+    const char *text;
 } stat_map_t;
 
 stat_map_t stat_map[] = {
@@ -230,11 +230,7 @@ static void check_gotten_sum(void)
 static void dump_stats(void) 
 {
     stat_map_t *smt = stat_map;
-    time_t end_time, run_time;
-
-    time(&end_time);
-
-    run_time = end_time - start_time;
+    double run_time = difftime(time(NULL), start_time);
 
     printf("Event counts:\n");
     while (smt->text != NULL) {
@@ -242,13 +238,11 @@ static void dump_stats(void)
         smt++;
     }
 
-    printf("processed %d total records in %d seconds (%ld per second)\n",
-           rec_count, (int)run_time,
-           run_time ? (long)(rec_count/run_time) : 0L);
+    printf("processed %d total records in %.0f seconds (%.0f per second)\n",
+           rec_count, run_time, run_time ? rec_count / run_time : 0);
 
-    printf("woke up %d times in %d seconds (%ld per second)\n",
-           wakeups, (int) run_time,
-           run_time ? (long)(wakeups/run_time) : 0L);
+    printf("woke up %d times in %.0f seconds (%.0f per second)\n",
+           wakeups, run_time, run_time ? wakeups / run_time : 0);
 
     check_gotten_sum();
 }
@@ -436,7 +430,7 @@ static struct t_struct *map_tbufs(unsigned long tbufs_mfn, unsigned int num,
  */
 static unsigned int get_num_cpus(void)
 {
-    xc_physinfo_t physinfo = { 0 };
+    xc_physinfo_t physinfo;
     xc_interface *xc_handle = xc_interface_open(0,0,0);
     int ret;
 

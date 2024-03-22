@@ -1,6 +1,6 @@
-TOPLEVEL=$(CURDIR)/../..
-XEN_ROOT=$(TOPLEVEL)/../..
-include $(TOPLEVEL)/common.make
+OCAML_TOPLEVEL=$(CURDIR)/../..
+XEN_ROOT=$(OCAML_TOPLEVEL)/../..
+include $(OCAML_TOPLEVEL)/common.make
 
 # ignore unused generated functions and allow mixed declarations and code
 CFLAGS += -Wno-unused -Wno-declaration-after-statement
@@ -15,7 +15,7 @@ LIBS = xenlight.cma xenlight.cmxa
 
 OCAMLINCLUDE += -I ../xentoollog
 
-LIBS_xenlight = $(LDLIBS_libxenlight)
+LIBS_xenlight = $(call xenlibs-ldflags-ldlibs,light)
 
 xenlight_OBJS = $(OBJS)
 xenlight_C_OBJS = xenlight_stubs
@@ -50,10 +50,10 @@ xenlight.mli: xenlight.mli.in _libxl_types.mli.in
 	  < xenlight.mli.in > xenlight.mli.tmp
 	$(Q)mv xenlight.mli.tmp xenlight.mli
 
-_libxl_types.ml.in _libxl_types.mli.in _libxl_types.inc: genwrap.py $(XEN_ROOT)/tools/libxl/libxl_types.idl \
-                $(XEN_ROOT)/tools/libxl/idl.py
-	PYTHONPATH=$(XEN_ROOT)/tools/libxl $(PYTHON) genwrap.py \
-		$(XEN_ROOT)/tools/libxl/libxl_types.idl \
+_libxl_types.ml.in _libxl_types.mli.in _libxl_types.inc: genwrap.py $(XEN_ROOT)/tools/libs/light/libxl_types.idl \
+                $(XEN_ROOT)/tools/libs/light/idl.py
+	PYTHONPATH=$(XEN_ROOT)/tools/libs/light $(PYTHON) genwrap.py \
+		$(XEN_ROOT)/tools/libs/light/libxl_types.idl \
 		_libxl_types.mli.in _libxl_types.ml.in _libxl_types.inc
 
 libs: $(LIBS)
@@ -68,4 +68,4 @@ install: $(LIBS) META
 uninstall:
 	$(OCAMLFIND) remove -destdir $(OCAMLDESTDIR) xenlight
 
-include $(TOPLEVEL)/Makefile.rules
+include $(OCAML_TOPLEVEL)/Makefile.rules

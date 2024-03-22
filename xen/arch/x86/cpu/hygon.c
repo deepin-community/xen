@@ -28,45 +28,30 @@ static void hygon_get_topology(struct cpuinfo_x86 *c)
 	                        c->phys_proc_id, c->cpu_core_id);
 }
 
-static void init_hygon(struct cpuinfo_x86 *c)
+static void cf_check init_hygon(struct cpuinfo_x86 *c)
 {
 	unsigned long long value;
 
-	/*
-	 * Attempt to set lfence to be Dispatch Serialising.  This MSR almost
-	 * certainly isn't virtualised (and Xen at least will leak the real
-	 * value in but silently discard writes), as well as being per-core
-	 * rather than per-thread, so do a full safe read/write/readback cycle
-	 * in the worst case.
-	 */
-	if (rdmsr_safe(MSR_AMD64_DE_CFG, value))
-		/* Unable to read.  Assume the safer default. */
-		__clear_bit(X86_FEATURE_LFENCE_DISPATCH,
-			    c->x86_capability);
-	else if (value & AMD64_DE_CFG_LFENCE_SERIALISE)
-		/* Already dispatch serialising. */
-		__set_bit(X86_FEATURE_LFENCE_DISPATCH,
-			  c->x86_capability);
-	else if (wrmsr_safe(MSR_AMD64_DE_CFG,
-			    value | AMD64_DE_CFG_LFENCE_SERIALISE) ||
-		 rdmsr_safe(MSR_AMD64_DE_CFG, value) ||
-		 !(value & AMD64_DE_CFG_LFENCE_SERIALISE))
-		/* Attempt to set failed.  Assume the safer default. */
-		__clear_bit(X86_FEATURE_LFENCE_DISPATCH,
-			    c->x86_capability);
-	else
-		/* Successfully enabled! */
-		__set_bit(X86_FEATURE_LFENCE_DISPATCH,
-			  c->x86_capability);
+	amd_init_lfence(c);
+	amd_init_ssbd(c);
+
+	/* Probe for NSCB on Zen2 CPUs when not virtualised */
+	if (!cpu_has_hypervisor && !cpu_has_nscb && c == &boot_cpu_data &&
+	    c->x86 == 0x18)
+		detect_zen2_null_seg_behaviour();
 
 	/*
-	 * If the user has explicitly chosen to disable Memory Disambiguation
-	 * to mitigiate Speculative Store Bypass, poke the appropriate MSR.
+	 * TODO: Check heuristic safety with Hygon first
+	if (c->x86 == 0x18)
+		amd_init_spectral_chicken();
 	 */
-	if (opt_ssbd && !rdmsr_safe(MSR_AMD64_LS_CFG, value)) {
-		value |= 1ull << 10;
-		wrmsr_safe(MSR_AMD64_LS_CFG, value);
-	}
+
+	/*
+	 * Hygon CPUs before Zen2 don't clear segment bases/limits when
+	 * loading a NULL selector.
+	 */
+	if (c == &boot_cpu_data && !cpu_has_nscb)
+		setup_force_cpu_cap(X86_BUG_NULL_SEG);
 
 	/* MFENCE stops RDTSC speculation */
 	if (!cpu_has_lfence_dispatch)
@@ -95,9 +80,9 @@ static void init_hygon(struct cpuinfo_x86 *c)
 		__set_bit(X86_FEATURE_ARAT, c->x86_capability);
 
 	if (cpu_has(c, X86_FEATURE_EFRO)) {
-		rdmsrl(MSR_K7_HWCR, value);
+		rdmsrl(MSR_K8_HWCR, value);
 		value |= (1 << 27); /* Enable read-only APERF/MPERF bit */
-		wrmsrl(MSR_K7_HWCR, value);
+		wrmsrl(MSR_K8_HWCR, value);
 	}
 
 	amd_log_freq(c);

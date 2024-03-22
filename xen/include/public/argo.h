@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /******************************************************************************
  * Argo : Hypervisor-Mediated data eXchange
  *
@@ -5,24 +6,6 @@
  *
  * Copyright (c) 2010, Citrix Systems
  * Copyright (c) 2018-2019, BAE Systems
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to
- * deal in the Software without restriction, including without limitation the
- * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
- * sell copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in
- * all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
  *
  */
 
@@ -67,8 +50,8 @@ typedef struct xen_argo_addr
 
 typedef struct xen_argo_send_addr
 {
-    struct xen_argo_addr src;
-    struct xen_argo_addr dst;
+    xen_argo_addr_t src;
+    xen_argo_addr_t dst;
 } xen_argo_send_addr_t;
 
 typedef struct xen_argo_ring
@@ -121,7 +104,7 @@ typedef struct xen_argo_unregister_ring
 
 typedef struct xen_argo_ring_data_ent
 {
-    struct xen_argo_addr ring;
+    xen_argo_addr_t ring;
     uint16_t flags;
     uint16_t pad;
     uint32_t space_required;
@@ -132,13 +115,13 @@ typedef struct xen_argo_ring_data
 {
     uint32_t nent;
     uint32_t pad;
-    struct xen_argo_ring_data_ent data[XEN_FLEX_ARRAY_DIM];
+    xen_argo_ring_data_ent_t data[XEN_FLEX_ARRAY_DIM];
 } xen_argo_ring_data_t;
 
 struct xen_argo_ring_message_header
 {
     uint32_t len;
-    struct xen_argo_addr source;
+    xen_argo_addr_t source;
     uint32_t message_type;
     uint8_t data[XEN_FLEX_ARRAY_DIM];
 };

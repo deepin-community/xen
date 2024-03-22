@@ -443,6 +443,7 @@ int gic_make_hwdom_dt_node(const struct domain *d,
     return gic_hw_ops->make_hwdom_dt_node(d, gic, fdt);
 }
 
+#ifdef CONFIG_ACPI
 int gic_make_hwdom_madt(const struct domain *d, u32 offset)
 {
     return gic_hw_ops->make_hwdom_madt(d, offset);
@@ -453,14 +454,15 @@ unsigned long gic_get_hwdom_madt_size(const struct domain *d)
     unsigned long madt_size;
 
     madt_size = sizeof(struct acpi_table_madt)
-                + sizeof(struct acpi_madt_generic_interrupt) * d->max_vcpus
+                + ACPI_MADT_GICC_LENGTH * d->max_vcpus
                 + sizeof(struct acpi_madt_generic_distributor)
                 + gic_hw_ops->get_hwdom_extra_madt_size(d);
 
     return madt_size;
 }
+#endif
 
-int gic_iomem_deny_access(const struct domain *d)
+int gic_iomem_deny_access(struct domain *d)
 {
     return gic_hw_ops->iomem_deny_access(d);
 }

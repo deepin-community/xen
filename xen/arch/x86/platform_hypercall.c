@@ -17,6 +17,7 @@
 #include <xen/console.h>
 #include <xen/iocap.h>
 #include <xen/guest_access.h>
+#include <xen/hypercall.h>
 #include <xen/acpi.h>
 #include <xen/efi.h>
 #include <xen/cpu.h>
@@ -45,9 +46,9 @@ struct resource_access {
     xenpf_resource_entry_t *entries;
 };
 
-long cpu_frequency_change_helper(void *);
+long cf_check cpu_frequency_change_helper(void *);
 void check_resource_access(struct resource_access *);
-void resource_access(void *);
+void cf_check resource_access(void *);
 
 #ifndef COMPAT
 typedef long ret_t;
@@ -59,20 +60,45 @@ DEFINE_SPINLOCK(xenpf_lock);
 # undef guest_from_compat_handle
 # define guest_from_compat_handle(x,y) ((x)=(y))
 
-long cpu_frequency_change_helper(void *data)
+long cf_check cpu_frequency_change_helper(void *data)
 {
     return cpu_frequency_change((uint64_t)data);
 }
 
-static bool allow_access_msr(unsigned int msr)
+static bool msr_read_allowed(unsigned int msr)
 {
     switch ( msr )
     {
-    /* MSR for CMT, refer to chapter 17.14 of Intel SDM. */
     case MSR_IA32_CMT_EVTSEL:
     case MSR_IA32_CMT_CTR:
+        return cpu_has_pqe;
+
     case MSR_IA32_TSC:
         return true;
+
+    case MSR_TSX_FORCE_ABORT:
+        return cpu_has_tsx_force_abort;
+
+    case MSR_TSX_CTRL:
+        return cpu_has_tsx_ctrl;
+
+    case MSR_MCU_OPT_CTRL:
+        return cpu_has_srbds_ctrl;
+    }
+
+    if ( ppin_msr && msr == ppin_msr )
+        return true;
+
+    return false;
+}
+
+static bool msr_write_allowed(unsigned int msr)
+{
+    switch ( msr )
+    {
+    case MSR_IA32_CMT_EVTSEL:
+    case MSR_IA32_CMT_CTR:
+        return cpu_has_pqe;
     }
 
     return false;
@@ -96,15 +122,19 @@ void check_resource_access(struct resource_access *ra)
         switch ( entry->u.cmd )
         {
         case XEN_RESOURCE_OP_MSR_READ:
-            if ( ppin_msr && entry->idx == ppin_msr )
-                break;
-            /* fall through */
+            if ( entry->idx >> 32 )
+                ret = -EINVAL;
+            else if ( !msr_read_allowed(entry->idx) )
+                ret = -EPERM;
+            break;
+
         case XEN_RESOURCE_OP_MSR_WRITE:
             if ( entry->idx >> 32 )
                 ret = -EINVAL;
-            else if ( !allow_access_msr(entry->idx) )
-                ret = -EACCES;
+            else if ( !msr_write_allowed(entry->idx) )
+                ret = -EPERM;
             break;
+
         default:
             ret = -EOPNOTSUPP;
             break;
@@ -120,7 +150,7 @@ void check_resource_access(struct resource_access *ra)
     ra->nr_done = i;
 }
 
-void resource_access(void *info)
+void cf_check resource_access(void *info)
 {
     struct resource_access *ra = info;
     unsigned int i;
@@ -163,12 +193,11 @@ void resource_access(void *info)
                 }
             }
             break;
+
         case XEN_RESOURCE_OP_MSR_WRITE:
-            if ( unlikely(entry->idx == MSR_IA32_TSC) )
-                ret = -EPERM;
-            else
-                ret = wrmsr_safe(entry->idx, entry->val);
+            ret = wrmsr_safe(entry->idx, entry->val);
             break;
+
         default:
             BUG();
             break;
@@ -185,7 +214,8 @@ void resource_access(void *info)
 }
 #endif
 
-ret_t do_platform_op(XEN_GUEST_HANDLE_PARAM(xen_platform_op_t) u_xenpf_op)
+ret_t do_platform_op(
+    XEN_GUEST_HANDLE_PARAM(xen_platform_op_t) u_xenpf_op)
 {
     ret_t ret;
     struct xen_platform_op curop, *op = &curop;
@@ -697,12 +727,17 @@ ret_t do_platform_op(XEN_GUEST_HANDLE_PARAM(xen_platform_op_t) u_xenpf_op)
         case XEN_CORE_PARKING_SET:
             idle_nums = min_t(uint32_t,
                     op->u.core_parking.idle_nums, num_present_cpus() - 1);
-            ret = continue_hypercall_on_cpu(
-                    0, core_parking_helper, (void *)(unsigned long)idle_nums);
+            if ( CONFIG_NR_CPUS > 1 )
+                ret = continue_hypercall_on_cpu(
+                        0, core_parking_helper,
+                        (void *)(unsigned long)idle_nums);
+            else if ( idle_nums )
+                ret = -EINVAL;
             break;
 
         case XEN_CORE_PARKING_GET:
-            op->u.core_parking.idle_nums = get_cur_idle_nums();
+            op->u.core_parking.idle_nums = CONFIG_NR_CPUS > 1
+                                           ? get_cur_idle_nums() : 0;
             ret = __copy_field_to_guest(u_xenpf_op, op, u.core_parking) ?
                   -EFAULT : 0;
             break;

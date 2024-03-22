@@ -289,16 +289,21 @@ int parse_cmdline_opts(int argc, char** argv, struct Opts* opts)
    memcpy(vtpm_globals.srk_auth, WELLKNOWN_AUTH, sizeof(TPM_AUTHDATA));
 
    for(i = 1; i < argc; ++i) {
-      if(!strncmp(argv[i], "owner_auth:", 10)) {
-         if((rc = parse_auth_string(argv[i] + 10, vtpm_globals.owner_auth)) < 0) {
+      if(!strncmp(argv[i], "owner_auth=", 11)) {
+         if((rc = parse_auth_string(argv[i] + 11, vtpm_globals.owner_auth)) < 0) {
             goto err_invalid;
          }
          if(rc == 1) {
             opts->gen_owner_auth = 1;
          }
       }
-      else if(!strncmp(argv[i], "srk_auth:", 8)) {
-         if((rc = parse_auth_string(argv[i] + 8, vtpm_globals.srk_auth)) != 0) {
+      else if(!strncmp(argv[i], "srk_auth=", 9)) {
+         if((rc = parse_auth_string(argv[i] + 9, vtpm_globals.srk_auth)) != 0) {
+            goto err_invalid;
+         }
+      }
+      else if(!strncmp(argv[i], "srk_handle=", 11)) {
+         if(sscanf(argv[i] + 11, "%x", &vtpm_globals.srk_handle) != 1) {
             goto err_invalid;
          }
       }
@@ -498,20 +503,6 @@ egress:
    return status;
 }
 
-void vtpmmgr_shutdown(void)
-{
-   /* Cleanup TPM resources */
-   TPM_TerminateHandle(vtpm_globals.oiap.AuthHandle);
-
-   /* Close tpmback */
-   shutdown_tpmback();
-
-   /* Close tpmfront/tpm_tis */
-   close(vtpm_globals.tpm_fd);
-
-   vtpmloginfo(VTPM_LOG_VTPM, "VTPM Manager stopped.\n");
-}
-
 /* TPM 2.0 */
 
 static void tpm2_AuthArea_ctor(const char *authValue, UINT32 authLen,
@@ -586,7 +577,11 @@ TPM_RESULT vtpmmgr2_create(void)
 {
     TPM_RESULT status = TPM_SUCCESS;
 
-    TPMTRYRETURN(tpm2_take_ownership());
+    if ( vtpm_globals.srk_handle == 0 ) {
+        TPMTRYRETURN(tpm2_take_ownership());
+    } else {
+        tpm2_AuthArea_ctor(NULL, 0, &vtpm_globals.srk_auth_area);
+    }
 
    /* create SK */
     TPM2_Create_Params_out out;
@@ -661,7 +656,7 @@ static TPM_RC flush_tpm2(void)
 {
     int i;
 
-    for (i = TRANSIENT_FIRST; i < TRANSIENT_LAST; i++)
+    for (i = TRANSIENT_FIRST; i <= TRANSIENT_LAST; i++)
          TPM2_FlushContext(i);
 
     return TPM_SUCCESS;
@@ -787,4 +782,26 @@ TPM_RC tpm2_pcr_read(int index, uint8_t *buf)
 abort_egress:
 egress:
     return status;
+}
+
+void vtpmmgr_shutdown(void)
+{
+   /* Cleanup TPM resources */
+   TPM_TerminateHandle(vtpm_globals.oiap.AuthHandle);
+
+   /* Close tpmback */
+   shutdown_tpmback();
+
+    if (hw_is_tpm2()) {
+        /* Blow away all stale handles left in the tpm*/
+        if (flush_tpm2() != TPM_SUCCESS) {
+            vtpmlogerror(VTPM_LOG_TPM,
+                         "TPM2_FlushResources failed, continuing shutdown..\n");
+        }
+    }
+
+   /* Close tpmfront/tpm_tis */
+   close(vtpm_globals.tpm_fd);
+
+   vtpmloginfo(VTPM_LOG_VTPM, "VTPM Manager stopped.\n");
 }

@@ -16,17 +16,19 @@
  *)
 open Stdext
 
+module SymbolMap = Map.Make(Symbol)
+
 module Node = struct
 
 type t = {
 	name: Symbol.t;
 	perms: Perms.Node.t;
 	value: string;
-	children: t list;
+	children: t SymbolMap.t;
 }
 
 let create _name _perms _value =
-	{ name = Symbol.of_string _name; perms = _perms; value = _value; children = []; }
+	{ name = Symbol.of_string _name; perms = _perms; value = _value; children = SymbolMap.empty; }
 
 let get_owner node = Perms.Node.get_owner node.perms
 let get_children node = node.children
@@ -42,38 +44,34 @@ let set_value node nvalue =
 let set_perms node nperms = { node with perms = nperms }
 
 let add_child node child =
-	{ node with children = child :: node.children }
+	let children = SymbolMap.add child.name child node.children in
+	{ node with children }
 
 let exists node childname =
 	let childname = Symbol.of_string childname in
-	List.exists (fun n -> n.name = childname) node.children
+	SymbolMap.mem childname node.children
 
 let find node childname =
 	let childname = Symbol.of_string childname in
-	List.find (fun n -> n.name = childname) node.children
+	SymbolMap.find childname node.children
 
 let replace_child node child nchild =
-	(* this is the on-steroid version of the filter one-replace one *)
-	let rec replace_one_in_list l =
-		match l with
-		| []                               -> []
-		| h :: tl when h.name = child.name -> nchild :: tl
-		| h :: tl                          -> h :: replace_one_in_list tl
-		in
-	{ node with children = (replace_one_in_list node.children) }
+	{ node with
+	  children = SymbolMap.update child.name
+			(function None -> None | Some _ -> Some nchild)
+			node.children
+	}
 
 let del_childname node childname =
 	let sym = Symbol.of_string childname in
-	let rec delete_one_in_list l =
-		match l with
-		| []                        -> raise Not_found
-		| h :: tl when h.name = sym -> tl
-		| h :: tl                   -> h :: delete_one_in_list tl
-		in
-	{ node with children = (delete_one_in_list node.children) }
+	{ node with children =
+		SymbolMap.update sym
+			(function None -> raise Not_found | Some _ -> None)
+			node.children
+	}
 
 let del_all_children node =
-	{ node with children = [] }
+	{ node with children = SymbolMap.empty }
 
 (* check if the current node can be accessed by the current connection with rperm permissions *)
 let check_perm node connection request =
@@ -87,12 +85,23 @@ let check_owner node connection =
 		raise Define.Permission_denied;
 	end
 
-let rec recurse fct node = fct node; List.iter (recurse fct) node.children
+let rec recurse fct node = fct node; SymbolMap.iter (fun _ -> recurse fct) node.children
 
-(** [recurse_map f tree] applies [f] on each node in the tree recursively *)
-let recurse_map f =
+(** [recurse_filter_map f tree] applies [f] on each node in the tree recursively,
+    possibly removing some nodes.
+    Note that the nodes removed this way won't generate watch events.
+*)
+let recurse_filter_map f =
+	let invalid = -1 in
+	let is_valid _ node = node.perms.owner <> invalid in
 	let rec walk node =
-		f { node with children = List.rev_map walk node.children |> List.rev }
+		(* Map.filter_map is Ocaml 4.11+ only *)
+		let node =
+		{ node with children =
+			SymbolMap.map walk node.children |> SymbolMap.filter is_valid } in
+		match f node with
+		| Some keep -> keep
+		| None -> { node with perms = {node.perms with owner = invalid } }
 	in
 	walk
 
@@ -336,7 +345,7 @@ let ls store perm path =
 				Node.check_perm cnode perm Perms.READ;
 				cnode.Node.children in
 			Path.apply store.root path do_ls in
-	List.rev (List.map (fun n -> Symbol.to_string n.Node.name) children)
+	SymbolMap.fold (fun k _ accu -> Symbol.to_string k :: accu) children []
 
 let getperms store perm path =
 	if path = [] then (
@@ -366,7 +375,7 @@ let traversal root_node f =
 	let rec _traversal path node =
 		f path node;
 		let node_path = Path.of_path_and_name path (Symbol.to_string node.Node.name) in
-		List.iter (_traversal node_path) node.Node.children
+		SymbolMap.iter (fun _ -> _traversal node_path) node.Node.children
 		in
 	_traversal [] root_node
 
@@ -446,11 +455,13 @@ let setperms store perm path nperms =
 
 let reset_permissions store domid =
 	Logging.info "store|node" "Cleaning up xenstore ACLs for domid %d" domid;
-	store.root <- Node.recurse_map (fun node ->
-		let perms = Perms.Node.remove_domid ~domid node.perms in
-		if perms <> node.perms then
-			Logging.debug "store|node" "Changed permissions for node %s" (Node.get_name node);
-		{ node with perms }
+	store.root <- Node.recurse_filter_map (fun node ->
+		match Perms.Node.remove_domid ~domid node.perms with
+		| None -> None
+		| Some perms ->
+			if perms <> node.perms then
+				Logging.debug "store|node" "Changed permissions for node %s" (Node.get_name node);
+			Some { node with Node.perms }
 	) store.root
 
 type ops = {
@@ -489,9 +500,6 @@ let copy store = {
 	root = store.root;
 	quota = Quota.copy store.quota;
 }
-
-let mark_symbols store =
-	Node.recurse (fun node -> Symbol.mark_as_used node.Node.name) store.root
 
 let incr_transaction_coalesce store =
 	store.stat_transaction_coalesce <- store.stat_transaction_coalesce + 1

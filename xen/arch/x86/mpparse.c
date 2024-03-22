@@ -30,7 +30,6 @@
 #include <asm/setup.h>
 
 #include <mach_apic.h>
-#include <mach_mpparse.h>
 #include <bios_ebda.h>
 
 /* Have we found an MP table */
@@ -85,9 +84,14 @@ void __init set_nr_cpu_ids(unsigned int max_cpus)
 	if (!park_offline_cpus)
 		tot_cpus = max_cpus;
 	nr_cpu_ids = min(tot_cpus, NR_CPUS + 0u);
-	if (park_offline_cpus && nr_cpu_ids < num_processors)
-		printk(XENLOG_WARNING "SMP: Cannot bring up %u further CPUs\n",
-		       num_processors - nr_cpu_ids);
+	if (nr_cpu_ids < num_processors)
+	{
+		unaccounted_cpus = true;
+		if (park_offline_cpus)
+			printk(XENLOG_WARNING
+			       "SMP: Cannot bring up %u further CPUs\n",
+			       num_processors - nr_cpu_ids);
+	}
 
 #ifndef nr_cpumask_bits
 	nr_cpumask_bits = ROUNDUP(nr_cpu_ids, BITS_PER_LONG);
@@ -170,7 +174,7 @@ static int MP_processor_info_x(struct mpc_config_processor *m,
 	if (num_processors >= 8 && hotplug
 	    && genapic.name == apic_default.name) {
 		printk_once(XENLOG_WARNING
-			    "WARNING: CPUs limit of 8 reached - ignoring futher processors\n");
+			    "WARNING: CPUs limit of 8 reached - ignoring further processors\n");
 		unaccounted_cpus = true;
 		return -ENOSPC;
 	}
@@ -326,8 +330,6 @@ static int __init smp_read_mpc(struct mp_config_table *mpc)
 	str[12]=0;
 	printk("Product ID: %s ",str);
 
-	mps_oem_check(mpc, oem, str);
-
 	printk("APIC at: %#x\n", mpc->mpc_lapic);
 
 	/* 
@@ -410,7 +412,6 @@ static int __init smp_read_mpc(struct mp_config_table *mpc)
 			}
 		}
 	}
-	clustered_apic_check();
 	if (!num_processors)
 		printk(KERN_ERR "SMP mptable: no processors registered!\n");
 	return num_processors;
@@ -515,7 +516,7 @@ static inline void __init construct_default_ISA_mptable(int mpc_default_type)
 				   (boot_cpu_data.x86_model << 4) |
 				   boot_cpu_data.x86_mask;
 	processor.mpc_featureflag =
-            boot_cpu_data.x86_capability[cpufeat_word(X86_FEATURE_FPU)];
+            boot_cpu_data.x86_capability[FEATURESET_1d];
 	processor.mpc_reserved[0] = 0;
 	processor.mpc_reserved[1] = 0;
 	for (i = 0; i < 2; i++) {

@@ -10,6 +10,7 @@
 #include <xen/param.h>
 #include <xen/sched.h>
 
+#include <asm/cpu-policy.h>
 #include <asm/cpufeature.h>
 #include <asm/invpcid.h>
 #include <asm/spec_ctrl.h>
@@ -20,7 +21,7 @@
 int8_t __read_mostly opt_pv32 = -1;
 #endif
 
-static __init int parse_pv(const char *s)
+static int __init cf_check parse_pv(const char *s)
 {
     const char *ss;
     int val, rc = 0;
@@ -63,16 +64,16 @@ static const char opt_pcid_2_string[][7] = {
     [PCID_NOXPTI] = "noxpti",
 };
 
-static void __init opt_pcid_init(struct param_hypfs *par)
+static void __init cf_check opt_pcid_init(struct param_hypfs *par)
 {
     custom_runtime_set_var(par, opt_pcid_2_string[opt_pcid]);
 }
 #endif
 
-static int parse_pcid(const char *s);
+static int cf_check parse_pcid(const char *s);
 custom_runtime_param("pcid", parse_pcid, opt_pcid_init);
 
-static int parse_pcid(const char *s)
+static int cf_check parse_pcid(const char *s)
 {
     int rc = 0;
 
@@ -110,12 +111,6 @@ static int parse_pcid(const char *s)
     return rc;
 }
 
-static void noreturn continue_nonidle_domain(void)
-{
-    check_wakeup_from_wait();
-    reset_stack_and_jump(ret_from_intr);
-}
-
 static int setup_compat_l4(struct vcpu *v)
 {
     struct page_info *pg;
@@ -151,7 +146,7 @@ static void release_compat_l4(struct vcpu *v)
 
 unsigned long pv_fixup_guest_cr4(const struct vcpu *v, unsigned long cr4)
 {
-    const struct cpuid_policy *p = v->domain->arch.cpuid;
+    const struct cpu_policy *p = v->domain->arch.cpu_policy;
 
     /* Discard attempts to set guest controllable bits outside of the policy. */
     cr4 &= ~((p->basic.tsc     ? 0 : X86_CR4_TSD)      |
@@ -173,7 +168,7 @@ unsigned long pv_fixup_guest_cr4(const struct vcpu *v, unsigned long cr4)
 static int8_t __read_mostly opt_global_pages = -1;
 boolean_runtime_param("global-pages", opt_global_pages);
 
-static int __init pge_init(void)
+static int __init cf_check pge_init(void)
 {
     if ( opt_global_pages == -1 )
         opt_global_pages = !cpu_has_hypervisor ||
@@ -188,7 +183,21 @@ unsigned long pv_make_cr4(const struct vcpu *v)
 {
     const struct domain *d = v->domain;
     unsigned long cr4 = mmu_cr4_features &
-        ~(X86_CR4_PCIDE | X86_CR4_PGE | X86_CR4_TSD);
+        ~(X86_CR4_PCIDE | X86_CR4_PGE | X86_CR4_TSD | X86_CR4_PKE);
+
+    /*
+     * We want CR4.PKE set in HVM context when available, but don't support it
+     * in PV context at all.
+     *
+     * _PAGE_PKEY_BITS where previously software available PTE bits.  In
+     * principle, we could let an aware PV guest enable PKE.
+     *
+     * However, Xen uses _PAGE_GNTTAB in debug builds which overlaps with
+     * _PAGE_PKEY_BITS, and the ownership of (and eligibility to move)
+     * software PTE bits is not considered in the PV ABI at all.  For now,
+     * punt the problem to whichever unluckly person finds a compelling
+     * usecase for PKRU in PV guests.
+     */
 
     /*
      * PCIDE or PGE depends on the PCID/XPTI settings, but must not both be
@@ -218,6 +227,7 @@ unsigned long pv_make_cr4(const struct vcpu *v)
     return cr4;
 }
 
+#ifdef CONFIG_PV32
 int switch_compat(struct domain *d)
 {
     struct vcpu *v;
@@ -262,6 +272,7 @@ int switch_compat(struct domain *d)
 
     return rc;
 }
+#endif
 
 static int pv_create_gdt_ldt_l1tab(struct vcpu *v)
 {
@@ -341,13 +352,14 @@ void pv_domain_destroy(struct domain *d)
     FREE_XENHEAP_PAGE(d->arch.pv.gdt_ldt_l1tab);
 }
 
+void noreturn cf_check continue_pv_domain(void);
 
 int pv_domain_initialise(struct domain *d)
 {
     static const struct arch_csw pv_csw = {
         .from = paravirt_ctxt_switch_from,
         .to   = paravirt_ctxt_switch_to,
-        .tail = continue_nonidle_domain,
+        .tail = continue_pv_domain,
     };
     int rc = -ENOMEM;
 
@@ -412,10 +424,13 @@ bool __init xpti_pcid_enabled(void)
 
 static void _toggle_guest_pt(struct vcpu *v)
 {
+    bool guest_update;
+    pagetable_t old_shadow;
     unsigned long cr3;
 
     v->arch.flags ^= TF_kernel_mode;
-    update_cr3(v);
+    guest_update = v->arch.flags & TF_kernel_mode;
+    old_shadow = update_cr3(v);
 
     /*
      * Don't flush user global mappings from the TLB. Don't tick TLB clock.
@@ -424,13 +439,31 @@ static void _toggle_guest_pt(struct vcpu *v)
      * TLB flush (for just the incoming PCID), as the top level page table may
      * have changed behind our backs. To be on the safe side, suppress the
      * no-flush unconditionally in this case.
+     *
+     * Furthermore in shadow mode update_cr3() can fail, in which case here
+     * we're still running on the prior top-level shadow (which we're about
+     * to release). Switch to the idle page tables in such an event; the
+     * guest will have been crashed already.
      */
     cr3 = v->arch.cr3;
     if ( shadow_mode_enabled(v->domain) )
+    {
         cr3 &= ~X86_CR3_NOFLUSH;
+
+        if ( unlikely(mfn_eq(pagetable_get_mfn(old_shadow),
+                             maddr_to_mfn(cr3))) )
+        {
+            cr3 = idle_vcpu[v->processor]->arch.cr3;
+            /* Also suppress runstate/time area updates below. */
+            guest_update = false;
+        }
+    }
     write_cr3(cr3);
 
-    if ( !(v->arch.flags & TF_kernel_mode) )
+    if ( !pagetable_is_null(old_shadow) )
+        shadow_put_top_level(v->domain, old_shadow);
+
+    if ( !guest_update )
         return;
 
     if ( v->arch.pv.need_update_runstate_area && update_runstate_area(v) )
@@ -452,7 +485,7 @@ void toggle_guest_mode(struct vcpu *v)
      * Update the cached value of the GS base about to become inactive, as a
      * subsequent context switch won't bother re-reading it.
      */
-    gs_base = rdgsbase();
+    gs_base = read_gs_base();
     if ( v->arch.flags & TF_kernel_mode )
         v->arch.pv.gs_base_kernel = gs_base;
     else

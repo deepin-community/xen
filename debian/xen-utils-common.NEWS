@@ -1,0 +1,42 @@
+xen (4.16.1-1) unstable; urgency=medium
+
+    At this version xen in Debian switched from using standard full-blown build
+    of qemu-system-i386 for the HVM domains and qdisks to a special xen-only
+    build of qemu in qemu-system-xen package. Previously we recommended
+    qemu-system-x86, now we recommend qemu-system-xen.  This significantly
+    reduces amount of inter-dependencies.
+
+    If you have apt configured to automatically install package Recommends
+    (which is the default), when updating to this version of xen, apt will
+    install the new qemu-system-xen recommendation by default, so your
+    qemu-xen domains, if any, will continue to work as before. You might
+    want to remove qemu-system-x86 package at this time if you do not use
+    it, - xen does not use it anymore.
+
+    If your apt is configured to not install Recommends by default, and you
+    do have qemu-xen domUs, you may want to install qemu-system-xen package
+    manually.
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Sat, 23 Apr 2022 12:02:00 +0300
+
+xen (4.11.4-1) unstable; urgency=medium
+
+    This package version fixes a bug that would call the stop action on the
+    xen init script when removing an obsolete xen-utils-V package for a Xen
+    version V other than the currently running one. This results in stopping
+    the xenconsoled process.
+
+    If you just upgraded from Xen 4.8 (Stretch), this will happen when
+    removing the xen-utils-4.8 package afterwards.
+
+    The resulting situation can safely be repaired by calling the start action
+    on the xen script again manually once to bring back the xenconsoled
+    process. There will be no damage to running domUs.
+
+    If you're upgrading from previous Xen 4.11 packages, no action is needed.
+
+    Having these (or later) Xen 4.11 packages installed means that the bug
+    will not trigger any more when removing xen-utils-4.11 after upgrading to
+    a newer Xen version (e.g. 4.13) in the future.
+
+ -- Hans van Kranenburg <hans@knorrie.org>  Tue, 26 May 2020 13:33:17 +0200

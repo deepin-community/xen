@@ -6,27 +6,19 @@ all:
 -include $(XEN_ROOT)/config/Tools.mk
 include $(XEN_ROOT)/Config.mk
 
+XEN_FULLVERSION=$(shell env \
+    XEN_EXTRAVERSION=$(XEN_EXTRAVERSION) \
+    XEN_VENDORVERSION=$(XEN_VENDORVERSION) \
+    $(SHELL) $(XEN_ROOT)/version.sh --full $(XEN_ROOT)/xen/Makefile)
+
 export _INSTALL := $(INSTALL)
 INSTALL = $(XEN_ROOT)/tools/cross-install
 
 LDFLAGS += $(PREPEND_LDFLAGS_XEN_TOOLS)
 
 XEN_INCLUDE        = $(XEN_ROOT)/tools/include
-XEN_LIBXENTOOLCORE  = $(XEN_ROOT)/tools/libs/toolcore
-XEN_LIBXENTOOLLOG  = $(XEN_ROOT)/tools/libs/toollog
-XEN_LIBXENEVTCHN   = $(XEN_ROOT)/tools/libs/evtchn
-XEN_LIBXENGNTTAB   = $(XEN_ROOT)/tools/libs/gnttab
-XEN_LIBXENCALL     = $(XEN_ROOT)/tools/libs/call
-XEN_LIBXENFOREIGNMEMORY = $(XEN_ROOT)/tools/libs/foreignmemory
-XEN_LIBXENDEVICEMODEL = $(XEN_ROOT)/tools/libs/devicemodel
-XEN_LIBXENHYPFS    = $(XEN_ROOT)/tools/libs/hypfs
-XEN_LIBXC          = $(XEN_ROOT)/tools/libxc
-XEN_XENLIGHT       = $(XEN_ROOT)/tools/libxl
-# Currently libxlutil lives in the same directory as libxenlight
-XEN_XLUTIL         = $(XEN_XENLIGHT)
-XEN_XENSTORE       = $(XEN_ROOT)/tools/xenstore
-XEN_LIBXENSTAT     = $(XEN_ROOT)/tools/xenstat/libxenstat/src
-XEN_LIBVCHAN       = $(XEN_ROOT)/tools/libvchan
+
+include $(XEN_ROOT)/tools/libs/uselibs.mk
 
 CFLAGS_xeninclude = -I$(XEN_INCLUDE)
 
@@ -69,13 +61,8 @@ endif
 #           public headers. Users of libfoo are therefore transitively
 #           using libbaz's header but not linking against libbaz.
 #
-# SHDEPS_libfoo: Flags for linking recursive dependencies of
-#                libfoo. Must contain SHLIB for every library which
-#                libfoo links against. So must contain both
-#                $(SHLIB_libbar) and $(SHLIB_libbaz).
-#
 # SHLIB_libfoo: Flags for recursively linking against libfoo. Must
-#               contains SHDEPS_libfoo and:
+#               contains $(call xenlibs-rpath,foo) and:
 #                   -Wl,-rpath-link=<directory containing libfoo.so>
 #
 # CFLAGS_libfoo: Flags for compiling against libfoo. Must add the
@@ -87,104 +74,89 @@ endif
 #                libfoo.
 #
 # LDLIBS_libfoo: Flags for linking against libfoo. Must contain
-#                $(SHDEPS_libfoo) and the path to libfoo.so
+#                $(call xenlibs-rpath,foo) and the path to libfoo.so
 #
 # Consumers of libfoo should include $(CFLAGS_libfoo) and
 # $(LDLIBS_libfoo) in their appropriate directories. They should not
 # include any CFLAGS or LDLIBS relating to libbar or libbaz unless
 # they use those libraries directly (not via libfoo) too.
-#
-# Consumers of libfoo should not directly use $(SHDEPS_libfoo) or
-# $(SHLIB_libfoo)
 
-CFLAGS_libxentoollog = -I$(XEN_LIBXENTOOLLOG)/include $(CFLAGS_xeninclude)
-SHDEPS_libxentoollog =
-LDLIBS_libxentoollog = $(SHDEPS_libxentoollog) $(XEN_LIBXENTOOLLOG)/libxentoollog$(libextension)
-SHLIB_libxentoollog  = $(SHDEPS_libxentoollog) -Wl,-rpath-link=$(XEN_LIBXENTOOLLOG)
+# Give the list of Xen library that the libraries in $(1) are linked against,
+# directly or indirectly.
+define xenlibs-dependencies
+    $(sort $(foreach lib,$(1), \
+        $(USELIBS_$(lib)) $(call xenlibs-dependencies,$(USELIBS_$(lib)))))
+endef
 
-CFLAGS_libxentoolcore = -I$(XEN_LIBXENTOOLCORE)/include $(CFLAGS_xeninclude)
-SHDEPS_libxentoolcore =
-LDLIBS_libxentoolcore = $(SHDEPS_libxentoolcore) $(XEN_LIBXENTOOLCORE)/libxentoolcore$(libextension)
-SHLIB_libxentoolcore  = $(SHDEPS_libxentoolcore) -Wl,-rpath-link=$(XEN_LIBXENTOOLCORE)
+# Flags for linking recursive dependencies of Xen libraries in $(1)
+define xenlibs-rpath
+    $(addprefix -Wl$(comma)-rpath-link=$(XEN_ROOT)/tools/libs/,$(call xenlibs-dependencies,$(1)))
+endef
 
-CFLAGS_libxenevtchn = -I$(XEN_LIBXENEVTCHN)/include $(CFLAGS_xeninclude)
-SHDEPS_libxenevtchn = $(SHLIB_libxentoolcore)
-LDLIBS_libxenevtchn = $(SHDEPS_libxenevtchn) $(XEN_LIBXENEVTCHN)/libxenevtchn$(libextension)
-SHLIB_libxenevtchn  = $(SHDEPS_libxenevtchn) -Wl,-rpath-link=$(XEN_LIBXENEVTCHN)
+# Provide a path for each library in $(1)
+define xenlibs-libs
+    $(foreach lib,$(1), \
+        $(XEN_ROOT)/tools/libs/$(lib)/lib$(FILENAME_$(lib))$(libextension))
+endef
 
-CFLAGS_libxengnttab = -I$(XEN_LIBXENGNTTAB)/include $(CFLAGS_xeninclude)
-SHDEPS_libxengnttab = $(SHLIB_libxentoollog) $(SHLIB_libxentoolcore)
-LDLIBS_libxengnttab = $(SHDEPS_libxengnttab) $(XEN_LIBXENGNTTAB)/libxengnttab$(libextension)
-SHLIB_libxengnttab  = $(SHDEPS_libxengnttab) -Wl,-rpath-link=$(XEN_LIBXENGNTTAB)
+# Flags for linking against all Xen libraries listed in $(1)
+define xenlibs-ldlibs
+    $(call xenlibs-rpath,$(1)) $(call xenlibs-libs,$(1)) \
+    $(foreach lib,$(1),$(xenlibs-ldlibs-$(lib)))
+endef
 
-CFLAGS_libxencall = -I$(XEN_LIBXENCALL)/include $(CFLAGS_xeninclude)
-SHDEPS_libxencall = $(SHLIB_libxentoolcore)
-LDLIBS_libxencall = $(SHDEPS_libxencall) $(XEN_LIBXENCALL)/libxencall$(libextension)
-SHLIB_libxencall  = $(SHDEPS_libxencall) -Wl,-rpath-link=$(XEN_LIBXENCALL)
+# Provide needed flags for linking an in-tree Xen library by an external
+# project (or when it is necessary to link with "-lxen$(1)" instead of using
+# the full path to the library).
+define xenlibs-ldflags
+    $(call xenlibs-rpath,$(1)) \
+    $(foreach lib,$(1),-L$(XEN_ROOT)/tools/libs/$(lib))
+endef
 
-CFLAGS_libxenforeignmemory = -I$(XEN_LIBXENFOREIGNMEMORY)/include $(CFLAGS_xeninclude)
-SHDEPS_libxenforeignmemory = $(SHLIB_libxentoolcore)
-LDLIBS_libxenforeignmemory = $(SHDEPS_libxenforeignmemory) $(XEN_LIBXENFOREIGNMEMORY)/libxenforeignmemory$(libextension)
-SHLIB_libxenforeignmemory  = $(SHDEPS_libxenforeignmemory) -Wl,-rpath-link=$(XEN_LIBXENFOREIGNMEMORY)
+# Flags for linking against all Xen libraries listed in $(1) but by making use
+# of -L and -l instead of providing a path to the shared library.
+define xenlibs-ldflags-ldlibs
+    $(call xenlibs-ldflags,$(1)) \
+    $(foreach lib,$(1), -l$(FILENAME_$(lib))) \
+    $(foreach lib,$(1),$(xenlibs-ldlibs-$(lib)))
+endef
 
-CFLAGS_libxendevicemodel = -I$(XEN_LIBXENDEVICEMODEL)/include $(CFLAGS_xeninclude)
-SHDEPS_libxendevicemodel = $(SHLIB_libxentoollog) $(SHLIB_libxentoolcore) $(SHLIB_libxencall)
-LDLIBS_libxendevicemodel = $(SHDEPS_libxendevicemodel) $(XEN_LIBXENDEVICEMODEL)/libxendevicemodel$(libextension)
-SHLIB_libxendevicemodel  = $(SHDEPS_libxendevicemodel) -Wl,-rpath-link=$(XEN_LIBXENDEVICEMODEL)
+define LIB_defs
+ FILENAME_$(1) ?= xen$(1)
+ XEN_libxen$(1) = $$(XEN_ROOT)/tools/libs/$(1)
+ CFLAGS_libxen$(1) = $$(CFLAGS_xeninclude)
+ SHLIB_libxen$(1) = $$(call xenlibs-rpath,$(1)) -Wl,-rpath-link=$$(XEN_libxen$(1))
+ LDLIBS_libxen$(1) = $$(call xenlibs-ldlibs,$(1))
+endef
 
-CFLAGS_libxenhypfs = -I$(XEN_LIBXENHYPFS)/include $(CFLAGS_xeninclude)
-SHDEPS_libxenhypfs = $(SHLIB_libxentoollog) $(SHLIB_libxentoolcore) $(SHLIB_libxencall)
-LDLIBS_libxenhypfs = $(SHDEPS_libxenhypfs) $(XEN_LIBXENHYPFS)/libxenhypfs$(libextension)
-SHLIB_libxenhypfs  = $(SHDEPS_libxenhypfs) -Wl,-rpath-link=$(XEN_LIBXENHYPFS)
+$(foreach lib,$(LIBS_LIBS),$(eval $(call LIB_defs,$(lib))))
 
 # code which compiles against libxenctrl get __XEN_TOOLS__ and
 # therefore sees the unstable hypercall interfaces.
-CFLAGS_libxenctrl = -I$(XEN_LIBXC)/include $(CFLAGS_libxentoollog) $(CFLAGS_libxenforeignmemory) $(CFLAGS_libxendevicemodel) $(CFLAGS_xeninclude) -D__XEN_TOOLS__
-SHDEPS_libxenctrl = $(SHLIB_libxentoollog) $(SHLIB_libxenevtchn) $(SHLIB_libxengnttab) $(SHLIB_libxencall) $(SHLIB_libxenforeignmemory) $(SHLIB_libxendevicemodel)
-LDLIBS_libxenctrl = $(SHDEPS_libxenctrl) $(XEN_LIBXC)/libxenctrl$(libextension)
-SHLIB_libxenctrl  = $(SHDEPS_libxenctrl) -Wl,-rpath-link=$(XEN_LIBXC)
+CFLAGS_libxenctrl += -D__XEN_TOOLS__
 
-CFLAGS_libxenguest = -I$(XEN_LIBXC)/include $(CFLAGS_libxenevtchn) $(CFLAGS_libxenforeignmemory) $(CFLAGS_xeninclude)
-SHDEPS_libxenguest = $(SHLIB_libxenevtchn)
-LDLIBS_libxenguest = $(SHDEPS_libxenguest) $(XEN_LIBXC)/libxenguest$(libextension)
-SHLIB_libxenguest  = $(SHDEPS_libxenguest) -Wl,-rpath-link=$(XEN_LIBXC)
-
-CFLAGS_libxenstore = -I$(XEN_XENSTORE)/include $(CFLAGS_xeninclude)
-SHDEPS_libxenstore = $(SHLIB_libxentoolcore)
-LDLIBS_libxenstore = $(SHDEPS_libxenstore) $(XEN_XENSTORE)/libxenstore$(libextension)
-SHLIB_libxenstore  = $(SHDEPS_libxenstore) -Wl,-rpath-link=$(XEN_XENSTORE)
 ifeq ($(CONFIG_Linux),y)
-LDLIBS_libxenstore += -ldl
+xenlibs-ldlibs-store := -ldl
 endif
 
-CFLAGS_libxenstat  = -I$(XEN_LIBXENSTAT)
-SHDEPS_libxenstat  = $(SHLIB_libxenctrl) $(SHLIB_libxenstore)
-LDLIBS_libxenstat  = $(SHDEPS_libxenstat) $(XEN_LIBXENSTAT)/libxenstat$(libextension)
-SHLIB_libxenstat   = $(SHDEPS_libxenstat) -Wl,-rpath-link=$(XEN_LIBXENSTAT)
+CFLAGS_libxenlight += $(CFLAGS_libxenctrl)
 
-CFLAGS_libxenvchan = -I$(XEN_LIBVCHAN) $(CFLAGS_libxengnttab) $(CFLAGS_libxenevtchn)
-SHDEPS_libxenvchan = $(SHLIB_libxentoollog) $(SHLIB_libxenstore) $(SHLIB_libxenevtchn) $(SHLIB_libxengnttab)
-LDLIBS_libxenvchan = $(SHDEPS_libxenvchan) $(XEN_LIBVCHAN)/libxenvchan$(libextension)
-SHLIB_libxenvchan  = $(SHDEPS_libxenvchan) -Wl,-rpath-link=$(XEN_LIBVCHAN)
+# Don't add -Werror if we are used by qemu-trad build system.
+ifndef BUILDING_QEMU_TRAD
+ifeq ($(CONFIG_WERROR),y)
+CFLAGS += -Werror
+endif
+endif
 
 ifeq ($(debug),y)
-# Disable optimizations
-CFLAGS += -O0 -fno-omit-frame-pointer
+# Use -Og if available, -O0 otherwise
+dbg_opt_level := $(call cc-option,$(CC),-Og,-O0)
+CFLAGS += $(dbg_opt_level) -fno-omit-frame-pointer
 # But allow an override to -O0 in case Python enforces -D_FORTIFY_SOURCE=<n>.
 PY_CFLAGS += $(PY_NOOPT_CFLAGS)
 else
 CFLAGS += -O2 -fomit-frame-pointer
 endif
-
-CFLAGS_libxenlight = -I$(XEN_XENLIGHT) $(CFLAGS_libxenctrl) $(CFLAGS_xeninclude)
-SHDEPS_libxenlight = $(SHLIB_libxenctrl) $(SHLIB_libxenstore) $(SHLIB_libxenhypfs)
-LDLIBS_libxenlight = $(SHDEPS_libxenlight) $(XEN_XENLIGHT)/libxenlight$(libextension)
-SHLIB_libxenlight  = $(SHDEPS_libxenlight) -Wl,-rpath-link=$(XEN_XENLIGHT)
-
-CFLAGS_libxlutil = -I$(XEN_XLUTIL)
-SHDEPS_libxlutil = $(SHLIB_libxenlight)
-LDLIBS_libxlutil = $(SHDEPS_libxlutil) $(XEN_XLUTIL)/libxlutil$(libextension)
-SHLIB_libxlutil  = $(SHDEPS_libxlutil) -Wl,-rpath-link=$(XEN_XLUTIL)
 
 CFLAGS += -D__XEN_INTERFACE_VERSION__=__XEN_LATEST_INTERFACE_VERSION__
 
@@ -221,15 +193,7 @@ INSTALL_PYTHON_PROG = \
 %.o: %.S
 	$(CC) $(CFLAGS) $(CFLAGS_$*.o) -c $< -o $@ $(APPEND_CFLAGS)
 %.opic: %.S
-	$(CC) $(CPPFLAGS) -DPIC $(CFLAGS) $(CFLAGS.opic) -fPIC -c -o $@ $< $(APPEND_CFLAGS)
-
-headers.chk:
-	for i in $(filter %.h,$^); do \
-	    $(CC) -x c -ansi -Wall -Werror $(CFLAGS_xeninclude) \
-	          -S -o /dev/null $$i || exit 1; \
-	    echo $$i; \
-	done >$@.new
-	mv $@.new $@
+	$(CC) $(CPPFLAGS) -DPIC $(CFLAGS) -fPIC -c -o $@ $< $(APPEND_CFLAGS)
 
 subdirs-all subdirs-clean subdirs-install subdirs-distclean subdirs-uninstall: .phony
 	@set -e; for subdir in $(SUBDIRS) $(SUBDIRS-y); do \
@@ -250,27 +214,38 @@ endif
 
 PKG_CONFIG_DIR ?= $(XEN_ROOT)/tools/pkg-config
 
-PKG_CONFIG_FILTER = $(foreach l,$(PKG_CONFIG_REMOVE),-e 's!\([ ,]\)$(l),!\1!g' -e 's![ ,]$(l)$$!!g')
-
-$(PKG_CONFIG_DIR)/%.pc: %.pc.in Makefile $(XEN_ROOT)/tools/Rules.mk
+$(PKG_CONFIG_DIR):
 	mkdir -p $(PKG_CONFIG_DIR)
-	@sed -e 's!@@version@@!$(PKG_CONFIG_VERSION)!g' \
-	     -e 's!@@prefix@@!$(PKG_CONFIG_PREFIX)!g' \
-	     -e 's!@@incdir@@!$(PKG_CONFIG_INCDIR)!g' \
-	     -e 's!@@libdir@@!$(PKG_CONFIG_LIBDIR)!g' \
-	     -e 's!@@firmwaredir@@!$(XENFIRMWAREDIR)!g' \
-	     -e 's!@@libexecbin@@!$(LIBEXEC_BIN)!g' \
-	     -e 's!@@cflagslocal@@!$(PKG_CONFIG_CFLAGS_LOCAL)!g' \
-	     -e 's!@@libsflag@@\([^ ]*\)!-L\1 -Wl,-rpath-link=\1!g' \
-	     $(PKG_CONFIG_FILTER) < $< > $@
 
-%.pc: %.pc.in Makefile $(XEN_ROOT)/tools/Rules.mk
-	@sed -e 's!@@version@@!$(PKG_CONFIG_VERSION)!g' \
-	     -e 's!@@prefix@@!$(PKG_CONFIG_PREFIX)!g' \
-	     -e 's!@@incdir@@!$(PKG_CONFIG_INCDIR)!g' \
-	     -e 's!@@libdir@@!$(PKG_CONFIG_LIBDIR)!g' \
-	     -e 's!@@firmwaredir@@!$(XENFIRMWAREDIR)!g' \
-	     -e 's!@@libexecbin@@!$(LIBEXEC_BIN)!g' \
-	     -e 's!@@cflagslocal@@!!g' \
-	     -e 's!@@libsflag@@!-L!g' \
-	     $(PKG_CONFIG_FILTER) < $< > $@
+$(PKG_CONFIG_DIR)/%.pc: Makefile $(XEN_ROOT)/tools/Rules.mk $(PKG_CONFIG_DIR)
+	{ \
+	echo "prefix=$(PKG_CONFIG_PREFIX)"; \
+	echo "includedir=$(PKG_CONFIG_INCDIR)"; \
+	echo "libdir=$(PKG_CONFIG_LIBDIR)"; \
+	echo ""; \
+	echo "Name: $(PKG_CONFIG_NAME)"; \
+	echo "Description: $(PKG_CONFIG_DESC)"; \
+	echo "Version: $(PKG_CONFIG_VERSION)"; \
+	echo "Cflags: -I\$${includedir}"; \
+	echo "Libs: -L\$${libdir} $(PKG_CONFIG_USELIBS) -l$(PKG_CONFIG_LIB)"; \
+	echo "Libs.private: $(PKG_CONFIG_LIBSPRIV)"; \
+	echo "Requires.private: $(PKG_CONFIG_REQPRIV)"; \
+	} > $@
+
+%.pc: Makefile $(XEN_ROOT)/tools/Rules.mk
+	{ \
+	echo "prefix=$(PKG_CONFIG_PREFIX)"; \
+	echo "includedir=$(PKG_CONFIG_INCDIR)"; \
+	echo "libdir=$(PKG_CONFIG_LIBDIR)"; \
+	echo ""; \
+	echo "Name: $(PKG_CONFIG_NAME)"; \
+	echo "Description: $(PKG_CONFIG_DESC)"; \
+	echo "Version: $(PKG_CONFIG_VERSION)"; \
+	echo "Cflags: -I\$${includedir}"; \
+	echo "Libs: -L\$${libdir} -l$(PKG_CONFIG_LIB)"; \
+	echo "Libs.private: $(PKG_CONFIG_LIBSPRIV)"; \
+	echo "Requires.private: $(PKG_CONFIG_REQPRIV)"; \
+	} > $@
+
+.PHONY: FORCE
+FORCE:

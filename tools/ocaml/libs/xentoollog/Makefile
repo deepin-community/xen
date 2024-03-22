@@ -1,6 +1,6 @@
-TOPLEVEL=$(CURDIR)/../..
-XEN_ROOT=$(TOPLEVEL)/../..
-include $(TOPLEVEL)/common.make
+OCAML_TOPLEVEL=$(CURDIR)/../..
+XEN_ROOT=$(OCAML_TOPLEVEL)/../..
+include $(OCAML_TOPLEVEL)/common.make
 
 # allow mixed declarations and code
 CFLAGS += -Wno-declaration-after-statement
@@ -13,7 +13,7 @@ OBJS = xentoollog
 INTF = xentoollog.cmi
 LIBS = xentoollog.cma xentoollog.cmxa
 
-LIBS_xentoollog = $(LDLIBS_libxentoollog)
+LIBS_xentoollog = $(call xenlibs-ldflags-ldlibs,toollog)
 
 xentoollog_OBJS = $(OBJS)
 xentoollog_C_OBJS = xentoollog_stubs
@@ -49,7 +49,7 @@ xentoollog.mli: xentoollog.mli.in _xtl_levels.mli.in
 
 libs: $(LIBS)
 
-_xtl_levels.ml.in _xtl_levels.mli.in _xtl_levels.inc: genlevels.py $(XEN_ROOT)/tools/libs/toollog/include/xentoollog.h
+_xtl_levels.ml.in _xtl_levels.mli.in _xtl_levels.inc: genlevels.py $(XEN_INCLUDE)/xentoollog.h
 	$(PYTHON) genlevels.py _xtl_levels.mli.in _xtl_levels.ml.in _xtl_levels.inc
 
 .PHONY: install
@@ -62,4 +62,4 @@ install: $(LIBS) META
 uninstall:
 	ocamlfind remove -destdir $(OCAMLDESTDIR) xentoollog
 
-include $(TOPLEVEL)/Makefile.rules
+include $(OCAML_TOPLEVEL)/Makefile.rules

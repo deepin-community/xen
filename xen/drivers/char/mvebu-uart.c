@@ -18,7 +18,9 @@
  * License along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <xen/errno.h>
 #include <xen/irq.h>
+#include <xen/mm.h>
 #include <xen/serial.h>
 #include <xen/vmap.h>
 #include <asm/io.h>
@@ -62,8 +64,8 @@ static struct mvebu3700_uart {
     struct vuart_info vuart;
 } mvebu3700_com = {0};
 
-#define mvebu3700_read(uart, off)           readl((uart)->regs + off)
-#define mvebu3700_write(uart, off, val)     writel(val, (uart->regs) + off)
+#define mvebu3700_read(uart, off)           readl((uart)->regs + (off))
+#define mvebu3700_write(uart, off, val)     writel(val, (uart)->regs + (off))
 
 static void mvebu3700_uart_interrupt(int irq, void *data,
                                      struct cpu_user_regs *regs)

@@ -23,7 +23,7 @@
 #ifndef __X86_EMULATE_H__
 #define __X86_EMULATE_H__
 
-#include <xen/lib/x86/cpuid.h>
+#include <xen/lib/x86/cpu-policy.h>
 
 #define MAX_INST_LEN 15
 
@@ -254,13 +254,12 @@ struct x86_emulate_ops
 
     /*
      * insn_fetch: Emulate fetch from instruction byte stream.
-     *  Except for @bytes, all parameters are the same as for 'read'.
+     *  Except for @bytes and missing @seg, all parameters are the same as for
+     *  'read'.
      *  @bytes: Access length (0 <= @bytes < 16, with zero meaning
      *  "validate address only").
-     *  @seg is always x86_seg_cs.
      */
     int (*insn_fetch)(
-        enum x86_segment seg,
         unsigned long offset,
         void *p_data,
         unsigned int bytes,
@@ -566,8 +565,11 @@ struct x86_emulate_ctxt
      * Input-only state:
      */
 
-    /* CPUID Policy for the domain. */
-    const struct cpuid_policy *cpuid;
+    /* CPU policy for the domain.  Allow aliases for local code clarity. */
+    union {
+        struct cpu_policy *cpu_policy;
+        struct cpu_policy *cpuid;
+    };
 
     /* Set this if writes may have side effects. */
     bool force_writeback;
@@ -738,7 +740,7 @@ static inline unsigned long *decode_gpr(struct cpu_user_regs *regs,
 }
 
 /* Unhandleable read, write or instruction fetch */
-int
+int cf_check
 x86emul_unhandleable_rw(
     enum x86_segment seg,
     unsigned long offset,
@@ -750,8 +752,7 @@ struct x86_emulate_state *
 x86_decode_insn(
     struct x86_emulate_ctxt *ctxt,
     int (*insn_fetch)(
-        enum x86_segment seg, unsigned long offset,
-        void *p_data, unsigned int bytes,
+        unsigned long offset, void *p_data, unsigned int bytes,
         struct x86_emulate_ctxt *ctxt));
 
 unsigned int
@@ -768,16 +769,16 @@ x86_insn_immediate(const struct x86_emulate_state *state,
 unsigned int
 x86_insn_length(const struct x86_emulate_state *state,
                 const struct x86_emulate_ctxt *ctxt);
-bool
+bool cf_check
 x86_insn_is_mem_access(const struct x86_emulate_state *state,
                        const struct x86_emulate_ctxt *ctxt);
-bool
+bool cf_check
 x86_insn_is_mem_write(const struct x86_emulate_state *state,
                       const struct x86_emulate_ctxt *ctxt);
-bool
+bool cf_check
 x86_insn_is_portio(const struct x86_emulate_state *state,
                    const struct x86_emulate_ctxt *ctxt);
-bool
+bool cf_check
 x86_insn_is_cr_access(const struct x86_emulate_state *state,
                       const struct x86_emulate_ctxt *ctxt);
 
@@ -789,17 +790,18 @@ void x86_emulate_free_state(struct x86_emulate_state *state);
 
 #ifdef __XEN__
 
-int x86emul_read_xcr(unsigned int reg, uint64_t *val,
-                     struct x86_emulate_ctxt *ctxt);
-int x86emul_write_xcr(unsigned int reg, uint64_t val,
-                      struct x86_emulate_ctxt *ctxt);
+int cf_check x86emul_read_xcr(
+    unsigned int reg, uint64_t *val, struct x86_emulate_ctxt *ctxt);
+int cf_check x86emul_write_xcr(
+    unsigned int reg, uint64_t val, struct x86_emulate_ctxt *ctxt);
 
-int x86emul_read_dr(unsigned int reg, unsigned long *val,
-                    struct x86_emulate_ctxt *ctxt);
-int x86emul_write_dr(unsigned int reg, unsigned long val,
-                     struct x86_emulate_ctxt *ctxt);
-int x86emul_cpuid(uint32_t leaf, uint32_t subleaf,
-                  struct cpuid_leaf *res, struct x86_emulate_ctxt *ctxt);
+int cf_check x86emul_read_dr(
+    unsigned int reg, unsigned long *val, struct x86_emulate_ctxt *ctxt);
+int cf_check x86emul_write_dr(
+    unsigned int reg, unsigned long val, struct x86_emulate_ctxt *ctxt);
+int cf_check x86emul_cpuid(
+    uint32_t leaf, uint32_t subleaf, struct cpuid_leaf *res,
+    struct x86_emulate_ctxt *ctxt);
 
 #endif
 

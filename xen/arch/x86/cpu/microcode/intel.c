@@ -32,38 +32,38 @@
 #define pr_debug(x...) ((void)0)
 
 struct microcode_patch {
-    unsigned int hdrver;
-    unsigned int rev;
+    uint32_t hdrver;
+    int32_t rev;
     uint16_t year;
     uint8_t  day;
     uint8_t  month;
-    unsigned int sig;
-    unsigned int cksum;
-    unsigned int ldrver;
+    uint32_t sig;
+    uint32_t cksum;
+    uint32_t ldrver;
 
     /*
      * Microcode for the Pentium Pro and II had all further fields in the
      * header reserved, had a fixed datasize of 2000 and totalsize of 2048,
      * and didn't use platform flags despite the availability of the MSR.
      */
-    unsigned int pf;
-    unsigned int datasize;
-    unsigned int totalsize;
-    unsigned int reserved[3];
+    uint32_t pf;
+    uint32_t datasize;
+    uint32_t totalsize;
+    uint32_t reserved[3];
 
     /* Microcode payload.  Format is propriety and encrypted. */
     uint8_t data[];
-};
 
-/* microcode format is extended from prescott processors */
+    /* Extended header (iff totalsize > datasize, P4 Prescott and later) */
+};
 struct extended_sigtable {
-    unsigned int count;
-    unsigned int cksum;
-    unsigned int reserved[3];
+    uint32_t count;
+    uint32_t cksum;
+    uint32_t rsvd[3];
     struct {
-        unsigned int sig;
-        unsigned int pf;
-        unsigned int cksum;
+        uint32_t sig;
+        uint32_t pf;
+        uint32_t cksum;
     } sigs[];
 };
 
@@ -116,7 +116,7 @@ static bool signature_matches(const struct cpu_signature *cpu_sig,
     return cpu_sig->pf & ucode_pf;
 }
 
-static void collect_cpu_info(void)
+static void cf_check collect_cpu_info(void)
 {
     struct cpu_signature *csig = &this_cpu(cpu_sig);
     uint64_t msr_content;
@@ -126,13 +126,16 @@ static void collect_cpu_info(void)
     rdmsrl(MSR_IA32_PLATFORM_ID, msr_content);
     csig->pf = 1 << ((msr_content >> 50) & 7);
 
-    wrmsrl(MSR_IA32_UCODE_REV, 0x0ULL);
-    /* As documented in the SDM: Do a CPUID 1 here */
+    /*
+     * Obtaining the microcode version involves writing 0 to the "read only"
+     * UCODE_REV MSR, executing any CPUID instruction, after which a nonzero
+     * revision should appear.
+     */
+    wrmsrl(MSR_IA32_UCODE_REV, 0);
     csig->sig = cpuid_eax(1);
-
-    /* get the current revision from MSR 0x8B */
     rdmsrl(MSR_IA32_UCODE_REV, msr_content);
-    csig->rev = (uint32_t)(msr_content >> 32);
+    csig->rev = msr_content >> 32;
+
     pr_debug("microcode: collect_cpu_info : sig=%#x, pf=%#x, rev=%#x\n",
              csig->sig, csig->pf, csig->rev);
 }
@@ -219,6 +222,29 @@ static int microcode_sanity_check(const struct microcode_patch *patch)
     return 0;
 }
 
+/*
+ * Production microcode has a positive revision.  Pre-production microcode has
+ * a negative revision.
+ */
+static enum microcode_match_result compare_revisions(
+    int32_t old_rev, int32_t new_rev)
+{
+    if ( new_rev > old_rev )
+        return NEW_UCODE;
+
+    if ( new_rev == old_rev )
+        return SAME_UCODE;
+
+    /*
+     * Treat pre-production as always applicable - anyone using pre-production
+     * microcode knows what they are doing, and can keep any resulting pieces.
+     */
+    if ( new_rev < 0 )
+        return NEW_UCODE;
+
+    return OLD_UCODE;
+}
+
 /* Check an update against the CPU signature and current update revision */
 static enum microcode_match_result microcode_update_match(
     const struct microcode_patch *mc)
@@ -242,10 +268,10 @@ static enum microcode_match_result microcode_update_match(
     return MIS_UCODE;
 
  found:
-    return mc->rev > cpu_sig->rev ? NEW_UCODE : OLD_UCODE;
+    return compare_revisions(cpu_sig->rev, mc->rev);
 }
 
-static enum microcode_match_result compare_patch(
+static enum microcode_match_result cf_check compare_patch(
     const struct microcode_patch *new, const struct microcode_patch *old)
 {
     /*
@@ -255,29 +281,34 @@ static enum microcode_match_result compare_patch(
     ASSERT(microcode_update_match(old) != MIS_UCODE);
     ASSERT(microcode_update_match(new) != MIS_UCODE);
 
-    return new->rev > old->rev ? NEW_UCODE : OLD_UCODE;
+    return compare_revisions(old->rev, new->rev);
 }
 
-static int apply_microcode(const struct microcode_patch *patch)
+static int cf_check apply_microcode(const struct microcode_patch *patch)
 {
     uint64_t msr_content;
     unsigned int cpu = smp_processor_id();
     struct cpu_signature *sig = &this_cpu(cpu_sig);
     uint32_t rev, old_rev = sig->rev;
+    enum microcode_match_result result;
 
-    if ( microcode_update_match(patch) != NEW_UCODE )
+    result = microcode_update_match(patch);
+
+    if ( result != NEW_UCODE &&
+         !(opt_ucode_allow_same && result == SAME_UCODE) )
         return -EINVAL;
 
     wbinvd();
 
-    /* write microcode via MSR 0x79 */
     wrmsrl(MSR_IA32_UCODE_WRITE, (unsigned long)patch->data);
-    wrmsrl(MSR_IA32_UCODE_REV, 0x0ULL);
 
-    /* As documented in the SDM: Do a CPUID 1 here */
-    cpuid_eax(1);
-
-    /* get the current revision from MSR 0x8B */
+    /*
+     * Obtaining the microcode version involves writing 0 to the "read only"
+     * UCODE_REV MSR, executing any CPUID instruction, after which a nonzero
+     * revision should appear.
+     */
+    wrmsrl(MSR_IA32_UCODE_REV, 0);
+    cpuid_eax(0);
     rdmsrl(MSR_IA32_UCODE_REV, msr_content);
     sig->rev = rev = msr_content >> 32;
 
@@ -296,8 +327,8 @@ static int apply_microcode(const struct microcode_patch *patch)
     return 0;
 }
 
-static struct microcode_patch *cpu_request_microcode(const void *buf,
-                                                     size_t size)
+static struct microcode_patch *cf_check cpu_request_microcode(
+    const void *buf, size_t size)
 {
     int error = 0;
     const struct microcode_patch *saved = NULL;
@@ -328,7 +359,7 @@ static struct microcode_patch *cpu_request_microcode(const void *buf,
          * one with higher revision.
          */
         if ( (microcode_update_match(mc) != MIS_UCODE) &&
-             (!saved || (mc->rev > saved->rev)) )
+             (!saved || compare_revisions(saved->rev, mc->rev) == NEW_UCODE) )
             saved = mc;
 
         buf  += blob_size;
@@ -349,7 +380,7 @@ static struct microcode_patch *cpu_request_microcode(const void *buf,
     return patch;
 }
 
-const struct microcode_ops intel_ucode_ops = {
+const struct microcode_ops __initconst_cf_clobber intel_ucode_ops = {
     .cpu_request_microcode            = cpu_request_microcode,
     .collect_cpu_info                 = collect_cpu_info,
     .apply_microcode                  = apply_microcode,

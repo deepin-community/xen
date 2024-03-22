@@ -28,6 +28,15 @@
 #define _LINUX
 #endif
 
+/*
+ * Fixmap pages to reserve for ACPI boot-time tables (see
+ * arch/x86/include/asm/fixmap.h or arch/arm/include/asm/fixmap.h),
+ * 64 pages(256KB) is large enough for most cases.)
+ */
+#define NUM_FIXMAP_ACPI_PAGES  64
+
+#ifndef __ASSEMBLY__
+
 #include <xen/list.h>
 
 #include <acpi/acpi.h>
@@ -39,12 +48,6 @@
 #define ACPI_MADT_GET_POLARITY(inti)	ACPI_MADT_GET_(POLARITY, inti)
 #define ACPI_MADT_GET_TRIGGER(inti)	ACPI_MADT_GET_(TRIGGER, inti)
 
-/*
- * Fixmap pages to reserve for ACPI boot-time tables (see asm-x86/fixmap.h or
- * asm-arm/config.h, 64 pages(256KB) is large enough for most cases.)
- */
-#define NUM_FIXMAP_ACPI_PAGES  64
-
 #define BAD_MADT_ENTRY(entry, end) (                                        \
                 (!(entry)) || (unsigned long)(entry) + sizeof(*(entry)) > (end) ||  \
                 (entry)->header.length < sizeof(*(entry)))
@@ -52,6 +55,8 @@
 #ifdef CONFIG_ACPI
 
 extern acpi_physical_address rsdp_hint;
+
+extern bool opt_acpi_verbose;
 
 enum acpi_interrupt_id {
 	ACPI_INTERRUPT_PMI	= 1,
@@ -68,6 +73,7 @@ typedef int (*acpi_table_entry_handler) (struct acpi_subtable_header *header, co
 
 unsigned int acpi_get_processor_id (unsigned int cpu);
 char * __acpi_map_table (paddr_t phys_addr, unsigned long size);
+bool __acpi_unmap_table(const void *ptr, unsigned long size);
 int acpi_boot_init (void);
 int acpi_boot_table_init (void);
 int acpi_numa_init (void);
@@ -87,7 +93,7 @@ struct acpi_subtable_header *acpi_table_get_entry_madt(enum acpi_madt_type id,
 int acpi_table_parse_madt(enum acpi_madt_type id, acpi_table_entry_handler handler, unsigned int max_entries);
 int acpi_table_parse_srat(int id, acpi_madt_entry_handler handler,
 	unsigned int max_entries);
-int acpi_parse_srat(struct acpi_table_header *);
+int cf_check acpi_parse_srat(struct acpi_table_header *);
 void acpi_table_print (struct acpi_table_header *header, unsigned long phys_addr);
 void acpi_table_print_madt_entry (struct acpi_subtable_header *madt);
 void acpi_table_print_srat_entry (struct acpi_subtable_header *srat);
@@ -202,5 +208,7 @@ void acpi_reboot(void);
 
 void acpi_dmar_zap(void);
 void acpi_dmar_reinstate(void);
+
+#endif /* __ASSEMBLY__ */
 
 #endif /*_LINUX_ACPI_H*/

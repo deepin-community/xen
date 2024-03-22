@@ -124,7 +124,6 @@ static void __prepare_to_wait(struct waitqueue_vcpu *wqv)
     struct cpu_info *cpu_info = get_cpu_info();
     struct vcpu *curr = current;
     unsigned long dummy;
-    u32 entry_vector = cpu_info->guest_cpu_user_regs.entry_vector;
 
     ASSERT(wqv->esp == 0);
 
@@ -138,30 +137,39 @@ static void __prepare_to_wait(struct waitqueue_vcpu *wqv)
             do_softirq();
     }
 
-    /* Hand-rolled setjmp(). */
+    /*
+     * Hand-rolled setjmp().
+     *
+     * __prepare_to_wait() is the leaf of a deep calltree.  Preserve the GPRs,
+     * bounds check what we want to stash in wqv->stack, copy the active stack
+     * (up to cpu_info) into wqv->stack, then return normally.  Our caller
+     * will shortly schedule() and discard the current context.
+     *
+     * The copy out is performed with a rep movsb.  When
+     * check_wakeup_from_wait() longjmp()'s back into us, %rsp is pre-adjusted
+     * to be suitable and %rsi/%rdi are swapped, so the rep movsb instead
+     * copies in from wqv->stack over the active stack.
+     */
     asm volatile (
-        "push %%rax; push %%rbx; push %%rdx; push %%rbp;"
-        "push %%r8;  push %%r9;  push %%r10; push %%r11;"
-        "push %%r12; push %%r13; push %%r14; push %%r15;"
+        "push %%rbx; push %%rbp; push %%r12;"
+        "push %%r13; push %%r14; push %%r15;"
 
-        "call 1f;"
-        "1: addq $2f-1b,(%%rsp);"
         "sub %%esp,%%ecx;"
-        "cmp %3,%%ecx;"
-        "ja 3f;"
+        "cmp %[sz], %%ecx;"
+        "ja .L_skip;"       /* Bail if >4k */
         "mov %%rsp,%%rsi;"
 
         /* check_wakeup_from_wait() longjmp()'s to this point. */
-        "2: rep movsb;"
+        ".L_wq_resume: rep movsb;"
         "mov %%rsp,%%rsi;"
-        "3: pop %%rax;"
 
-        "pop %%r15; pop %%r14; pop %%r13; pop %%r12;"
-        "pop %%r11; pop %%r10; pop %%r9;  pop %%r8;"
-        "pop %%rbp; pop %%rdx; pop %%rbx; pop %%rax"
+        ".L_skip:"
+        "pop %%r15; pop %%r14; pop %%r13;"
+        "pop %%r12; pop %%rbp; pop %%rbx"
         : "=&S" (wqv->esp), "=&c" (dummy), "=&D" (dummy)
-        : "i" (PAGE_SIZE), "0" (0), "1" (cpu_info), "2" (wqv->stack)
-        : "memory" );
+        : "0" (0), "1" (cpu_info), "2" (wqv->stack),
+          [sz] "i" (PAGE_SIZE)
+        : "memory", "rax", "rdx", "r8", "r9", "r10", "r11" );
 
     if ( unlikely(wqv->esp == 0) )
     {
@@ -171,8 +179,6 @@ static void __prepare_to_wait(struct waitqueue_vcpu *wqv)
         for ( ; ; )
             do_softirq();
     }
-
-    cpu_info->guest_cpu_user_regs.entry_vector = entry_vector;
 }
 
 static void __finish_wait(struct waitqueue_vcpu *wqv)
@@ -204,16 +210,46 @@ void check_wakeup_from_wait(void)
     }
 
     /*
-     * Hand-rolled longjmp().  Returns to the pointer on the top of
-     * wqv->stack, and lands on a `rep movs` instruction.  All other GPRs are
-     * restored from the stack, so are available for use here.
+     * We are about to jump into a deeper call tree.  In principle, this risks
+     * executing more RET than CALL instructions, and underflowing the RSB.
+     *
+     * However, we are pinned to the same CPU as previously.  Therefore,
+     * either:
+     *
+     *   1) We've scheduled another vCPU in the meantime, and the context
+     *      switch path has (by default) issued IBPB which flushes the RSB, or
+     *
+     *   2) We're still in the same context.  Returning back to the deeper
+     *      call tree is resuming the execution path we left, and remains
+     *      balanced as far as that logic is concerned.
+     *
+     *      In fact, the path through the scheduler will execute more CALL
+     *      than RET instructions, making the RSB unbalanced in the safe
+     *      direction.
+     *
+     * Therefore, no actions are necessary here to maintain RSB safety.
      */
-    asm volatile (
-        "mov %1,%%"__OP"sp; INDIRECT_JMP %[ip]"
-        : : "S" (wqv->stack), "D" (wqv->esp),
-          "c" ((char *)get_cpu_info() - (char *)wqv->esp),
-          [ip] "r" (*(unsigned long *)wqv->stack)
-        : "memory" );
+
+    /*
+     * Hand-rolled longjmp().
+     *
+     * check_wakeup_from_wait() is always called with a shallow stack,
+     * immediately after the vCPU has been rescheduled.
+     *
+     * Adjust %rsp to be the correct depth for the (deeper) stack we want to
+     * restore, then prepare %rsi, %rdi and %rcx such that when we rejoin the
+     * rep movs in __prepare_to_wait(), it copies from wqv->stack over the
+     * active stack.
+     *
+     * All other GPRs are available for use; They're restored from the stack,
+     * or explicitly clobbered.
+     */
+    asm volatile ( "mov %%rdi, %%rsp;"
+                   "jmp .L_wq_resume"
+                   :
+                   : "S" (wqv->stack), "D" (wqv->esp),
+                     "c" ((char *)get_cpu_info() - (char *)wqv->esp)
+                   : "memory" );
     unreachable();
 }
 

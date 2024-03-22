@@ -38,6 +38,11 @@ extern const struct kernel_param __setup_start[], __setup_end[];
     __attribute__((__aligned__(1))) char
 #define __kparam          __param(__initsetup)
 
+/* Only for use with .init data, to avoid creating livepatch problems. */
+#define __TEMP_NAME(base, line) base ## _ ## line
+#define _TEMP_NAME(base, line) __TEMP_NAME(base, line)
+#define TEMP_NAME(base) _TEMP_NAME(base, __LINE__)
+
 #define custom_param(_name, _var) \
     __setup_str __setup_str_##_var[] = _name; \
     __kparam __setup_##_var = \
@@ -74,9 +79,9 @@ extern const struct kernel_param __setup_start[], __setup_end[];
           .len = sizeof(_var), \
           .par.var = &_var }
 #define ignore_param(_name)                 \
-    __setup_str setup_str_ign[] = _name;    \
-    __kparam setup_ign =                    \
-        { .name = setup_str_ign,            \
+    __setup_str TEMP_NAME(__setup_str_ign)[] = _name;    \
+    __kparam TEMP_NAME(__setup_ign) =                    \
+        { .name = TEMP_NAME(__setup_str_ign),            \
           .type = OPT_IGNORE }
 
 #ifdef CONFIG_HYPFS
@@ -111,8 +116,7 @@ extern struct param_hypfs __paramhypfs_start[], __paramhypfs_end[];
         { .hypfs.e.type = XEN_HYPFS_TYPE_STRING, \
           .hypfs.e.encoding = XEN_HYPFS_ENC_PLAIN, \
           .hypfs.e.name = (nam), \
-          .hypfs.e.read = hypfs_read_leaf, \
-          .hypfs.e.write = hypfs_write_custom, \
+          .hypfs.e.funcs = &hypfs_custom_wr_funcs, \
           .init_leaf = (initfunc), \
           .func = (variable) }
 #define boolean_runtime_only_param(nam, variable) \
@@ -122,8 +126,7 @@ extern struct param_hypfs __paramhypfs_start[], __paramhypfs_end[];
           .hypfs.e.name = (nam), \
           .hypfs.e.size = sizeof(variable), \
           .hypfs.e.max_size = sizeof(variable), \
-          .hypfs.e.read = hypfs_read_leaf, \
-          .hypfs.e.write = hypfs_write_bool, \
+          .hypfs.e.funcs = &hypfs_bool_wr_funcs, \
           .hypfs.u.content = &(variable) }
 #define integer_runtime_only_param(nam, variable) \
     __paramfs __parfs_##variable = \
@@ -132,8 +135,7 @@ extern struct param_hypfs __paramhypfs_start[], __paramhypfs_end[];
           .hypfs.e.name = (nam), \
           .hypfs.e.size = sizeof(variable), \
           .hypfs.e.max_size = sizeof(variable), \
-          .hypfs.e.read = hypfs_read_leaf, \
-          .hypfs.e.write = hypfs_write_leaf, \
+          .hypfs.e.funcs = &hypfs_leaf_wr_funcs, \
           .hypfs.u.content = &(variable) }
 #define size_runtime_only_param(nam, variable) \
     __paramfs __parfs_##variable = \
@@ -142,8 +144,7 @@ extern struct param_hypfs __paramhypfs_start[], __paramhypfs_end[];
           .hypfs.e.name = (nam), \
           .hypfs.e.size = sizeof(variable), \
           .hypfs.e.max_size = sizeof(variable), \
-          .hypfs.e.read = hypfs_read_leaf, \
-          .hypfs.e.write = hypfs_write_leaf, \
+          .hypfs.e.funcs = &hypfs_leaf_wr_funcs, \
           .hypfs.u.content = &(variable) }
 #define string_runtime_only_param(nam, variable) \
     __paramfs __parfs_##variable = \
@@ -152,8 +153,7 @@ extern struct param_hypfs __paramhypfs_start[], __paramhypfs_end[];
           .hypfs.e.name = (nam), \
           .hypfs.e.size = 0, \
           .hypfs.e.max_size = sizeof(variable), \
-          .hypfs.e.read = hypfs_read_leaf, \
-          .hypfs.e.write = hypfs_write_leaf, \
+          .hypfs.e.funcs = &hypfs_leaf_wr_funcs, \
           .hypfs.u.content = &(variable) }
 
 #else
@@ -183,6 +183,8 @@ extern struct param_hypfs __paramhypfs_start[], __paramhypfs_end[];
 #define string_runtime_param(_name, _var) \
     string_param(_name, _var); \
     string_runtime_only_param(_name, _var)
+
+extern bool opt_dit;
 
 static inline void no_config_param(const char *cfg, const char *param,
                                    const char *s, const char *e)

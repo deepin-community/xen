@@ -1,3 +1,4 @@
+#include <xen/lib.h>
 #include <xen/multiboot.h>
 #include <xen/multiboot2.h>
 #include <public/xen.h>
@@ -9,7 +10,7 @@
 #include <asm/cpufeature.h>
 #include <public/elfnote.h>
 
-        .text
+        .section .text.header, "ax", @progbits
         .code32
 
 #define sym_offs(sym)     ((sym) - __XEN_VIRT_START)
@@ -121,6 +122,7 @@ multiboot2_header:
 .Lbad_ldr_nst: .asciz "ERR: EFI SystemTable is not provided by bootloader!"
 .Lbad_ldr_nih: .asciz "ERR: EFI ImageHandle is not provided by bootloader!"
 .Lbad_efi_msg: .asciz "ERR: EFI IA-32 platforms are not supported!"
+.Lbad_alg_msg: .asciz "ERR: Xen must be loaded at a 2Mb boundary!"
 
         .section .init.data, "aw", @progbits
         .align 4
@@ -141,21 +143,24 @@ efi_platform:
         .section .init.text, "ax", @progbits
 
 bad_cpu:
-        add     $sym_offs(.Lbad_cpu_msg),%esi   # Error message
+        mov     $sym_offs(.Lbad_cpu_msg), %ecx
         jmp     .Lget_vtb
 not_multiboot:
-        add     $sym_offs(.Lbad_ldr_msg),%esi   # Error message
+        mov     $sym_offs(.Lbad_ldr_msg), %ecx
+        jmp     .Lget_vtb
+.Lnot_aligned:
+        mov     $sym_offs(.Lbad_alg_msg), %ecx
         jmp     .Lget_vtb
 .Lmb2_no_st:
         /*
          * Here we are on EFI platform. vga_text_buffer was zapped earlier
          * because there is pretty good chance that VGA is unavailable.
          */
-        add     $sym_offs(.Lbad_ldr_nst),%esi   # Error message
+        mov     $sym_offs(.Lbad_ldr_nst), %ecx
         jmp     .Lget_vtb
 .Lmb2_no_ih:
         /* Ditto. */
-        add     $sym_offs(.Lbad_ldr_nih),%esi   # Error message
+        mov     $sym_offs(.Lbad_ldr_nih), %ecx
         jmp     .Lget_vtb
 .Lmb2_no_bs:
         /*
@@ -163,7 +168,7 @@ not_multiboot:
          * via start label. Then reliable vga_text_buffer zap is impossible
          * in Multiboot2 scanning loop and we have to zero %edi below.
          */
-        add     $sym_offs(.Lbad_ldr_nbs),%esi   # Error message
+        mov     $sym_offs(.Lbad_ldr_nbs), %ecx
         xor     %edi,%edi                       # No VGA text buffer
         jmp     .Lprint_err
 .Lmb2_efi_ia_32:
@@ -171,12 +176,15 @@ not_multiboot:
          * Here we are on EFI IA-32 platform. Then reliable vga_text_buffer zap is
          * impossible in Multiboot2 scanning loop and we have to zero %edi below.
          */
-        add     $sym_offs(.Lbad_efi_msg),%esi   # Error message
+        mov     $sym_offs(.Lbad_efi_msg), %ecx
         xor     %edi,%edi                       # No VGA text buffer
         jmp     .Lprint_err
 .Lget_vtb:
         mov     sym_esi(vga_text_buffer),%edi
 .Lprint_err:
+        add     %ecx, %esi     # Add string offset to relocation base.
+        # NOTE: No further use of sym_esi() till the end of the "function"!
+1:
         lodsb
         test    %al,%al        # Terminate on '\0' sentinel
         je      .Lhalt
@@ -189,11 +197,11 @@ not_multiboot:
         mov     %bl,%al
         out     %al,%dx        # Send a character over the serial line
         test    %edi,%edi      # Is the VGA text buffer available?
-        jz      .Lprint_err
+        jz      1b
         stosb                  # Write a character to the VGA text buffer
         mov     $7,%al
         stosb                  # Write an attribute to the VGA text buffer
-        jmp     .Lprint_err
+        jmp     1b
 .Lhalt: hlt
         jmp     .Lhalt
 
@@ -562,12 +570,18 @@ trampoline_setup:
         mov     %esi, sym_esi(xen_phys_start)
         mov     %esi, sym_esi(trampoline_xen_phys_start)
 
-        mov     sym_esi(trampoline_phys), %ecx
-
         /* Get bottom-most low-memory stack address. */
+        mov     sym_esi(trampoline_phys), %ecx
         add     $TRAMPOLINE_SPACE,%ecx
 
+#ifdef CONFIG_VIDEO
+        lea     sym_esi(boot_vid_info), %edx
+#else
+        xor     %edx, %edx
+#endif
+
         /* Save Multiboot / PVH info struct (after relocation) for later use. */
+        push    %edx                /* Boot video info to be filled from MB2. */
         push    %ecx                /* Bottom-most low-memory stack address. */
         push    %ebx                /* Multiboot / PVH information address. */
         push    %eax                /* Magic number. */
@@ -639,7 +653,7 @@ trampoline_setup:
         /* Check for NX. Adjust EFER setting if available. */
         bt      $cpufeat_bit(X86_FEATURE_NX), %edx
         jnc     1f
-        orb     $EFER_NX >> 8, 1 + sym_esi(trampoline_efer)
+        orb     $EFER_NXE >> 8, 1 + sym_esi(trampoline_efer)
 1:
 
         /* Check for availability of long mode. */
@@ -663,6 +677,15 @@ trampoline_setup:
 
         cmp     %edi, %eax
         jb      1b
+
+        .if !IS_ALIGNED(sym_offs(0), 1 << L2_PAGETABLE_SHIFT)
+        .error "Symbol offset calculation breaks alignment"
+        .endif
+
+        /* Check that the image base is aligned. */
+        lea     sym_esi(_start), %eax
+        test    $(1 << L2_PAGETABLE_SHIFT) - 1, %eax
+        jnz     .Lnot_aligned
 
         /* Map Xen into the higher mappings using 2M superpages. */
         lea     _PAGE_PSE + PAGE_HYPERVISOR_RWX + sym_esi(_start), %eax
@@ -771,11 +794,17 @@ trampoline_setup:
         /* Jump into the relocated trampoline. */
         lret
 
+        /*
+         * cmdline and reloc are written in C, and linked to be 32bit PIC with
+         * entrypoints at 0 and using the stdcall convention.
+         */
+        ALIGN
 cmdline_parse_early:
-#include "cmdline.S"
+        .incbin "cmdline.bin"
 
+        ALIGN
 reloc:
-#include "reloc.S"
+        .incbin "reloc.bin"
 
 ENTRY(trampoline_start)
 #include "trampoline.S"

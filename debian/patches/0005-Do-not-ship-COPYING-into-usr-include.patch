@@ -9,22 +9,14 @@ Patch-Name: tools-include-no-COPYING.diff
 
 Signed-off-by: Ian Jackson <ian.jackson@citrix.com>
 ---
- tools/include/Makefile | 2 --
- 1 file changed, 2 deletions(-)
+ tools/include/Makefile | 1 -
+ 1 file changed, 1 deletion(-)
 
 diff --git a/tools/include/Makefile b/tools/include/Makefile
-index 3d0192f..edfb35e 100644
+index d69aeb5..73c6a6c 100644
 --- a/tools/include/Makefile
 +++ b/tools/include/Makefile
-@@ -18,7 +18,6 @@ XEN_LIB_X86_INCLUDES = $(filter-out %autogen.h, $(XEN_ROOT)/xen/include/xen/lib/
- xen/.dir: $(XEN_PUBLIC_INCLUDES) $(XEN_LIB_X86_INCLUDES)
- 	@rm -rf xen
- 	mkdir -p xen/libelf
--	ln -sf $(XEN_ROOT)/xen/include/public/COPYING xen
- 	ln -sf $(XEN_PUBLIC_INCLUDES) xen
- 	ln -sf $(addprefix $(XEN_ROOT)/xen/include/public/,arch-x86 arch-arm hvm io xsm) xen
- 	ln -sf ../xen-sys/$(XEN_OS) xen/sys
-@@ -57,7 +56,6 @@ install: all
+@@ -64,7 +64,6 @@ install: all
  	$(INSTALL_DIR) $(DESTDIR)$(includedir)/xen/io
  	$(INSTALL_DIR) $(DESTDIR)$(includedir)/xen/sys
  	$(INSTALL_DIR) $(DESTDIR)$(includedir)/xen/xsm

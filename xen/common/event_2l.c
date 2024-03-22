@@ -7,15 +7,17 @@
  * Version 2 or later.  See the file COPYING for more details.
  */
 
+#include "event_channel.h"
+
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/errno.h>
 #include <xen/sched.h>
-#include <xen/event.h>
 
 #include <asm/guest_atomics.h>
 
-static void evtchn_2l_set_pending(struct vcpu *v, struct evtchn *evtchn)
+static void cf_check evtchn_2l_set_pending(
+    struct vcpu *v, struct evtchn *evtchn)
 {
     struct domain *d = v->domain;
     unsigned int port = evtchn->port;
@@ -40,12 +42,14 @@ static void evtchn_2l_set_pending(struct vcpu *v, struct evtchn *evtchn)
     evtchn_check_pollers(d, port);
 }
 
-static void evtchn_2l_clear_pending(struct domain *d, struct evtchn *evtchn)
+static void cf_check evtchn_2l_clear_pending(
+    struct domain *d, struct evtchn *evtchn)
 {
     guest_clear_bit(d, evtchn->port, &shared_info(d, evtchn_pending));
 }
 
-static void evtchn_2l_unmask(struct domain *d, struct evtchn *evtchn)
+static void cf_check evtchn_2l_unmask(
+    struct domain *d, struct evtchn *evtchn)
 {
     struct vcpu *v = d->vcpu[evtchn->notify_vcpu_id];
     unsigned int port = evtchn->port;
@@ -63,8 +67,8 @@ static void evtchn_2l_unmask(struct domain *d, struct evtchn *evtchn)
     }
 }
 
-static bool evtchn_2l_is_pending(const struct domain *d,
-                                 const struct evtchn *evtchn)
+static bool cf_check evtchn_2l_is_pending(
+    const struct domain *d, const struct evtchn *evtchn)
 {
     evtchn_port_t port = evtchn->port;
     unsigned int max_ports = BITS_PER_EVTCHN_WORD(d) * BITS_PER_EVTCHN_WORD(d);
@@ -74,8 +78,8 @@ static bool evtchn_2l_is_pending(const struct domain *d,
             guest_test_bit(d, port, &shared_info(d, evtchn_pending)));
 }
 
-static bool evtchn_2l_is_masked(const struct domain *d,
-                                const struct evtchn *evtchn)
+static bool cf_check evtchn_2l_is_masked(
+    const struct domain *d, const struct evtchn *evtchn)
 {
     evtchn_port_t port = evtchn->port;
     unsigned int max_ports = BITS_PER_EVTCHN_WORD(d) * BITS_PER_EVTCHN_WORD(d);
@@ -85,8 +89,8 @@ static bool evtchn_2l_is_masked(const struct domain *d,
             guest_test_bit(d, port, &shared_info(d, evtchn_mask)));
 }
 
-static void evtchn_2l_print_state(struct domain *d,
-                                  const struct evtchn *evtchn)
+static void cf_check evtchn_2l_print_state(
+    struct domain *d, const struct evtchn *evtchn)
 {
     struct vcpu *v = d->vcpu[evtchn->notify_vcpu_id];
 

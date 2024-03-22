@@ -96,7 +96,8 @@
 #define OPTEE_KNOWN_NSEC_CAPS OPTEE_SMC_NSEC_CAP_UNIPROCESSOR
 #define OPTEE_KNOWN_SEC_CAPS (OPTEE_SMC_SEC_CAP_HAVE_RESERVED_SHM | \
                               OPTEE_SMC_SEC_CAP_UNREGISTERED_SHM | \
-                              OPTEE_SMC_SEC_CAP_DYNAMIC_SHM)
+                              OPTEE_SMC_SEC_CAP_DYNAMIC_SHM | \
+                              OPTEE_SMC_SEC_CAP_MEMREF_NULL)
 
 enum optee_call_state {
     OPTEE_CALL_NORMAL,
@@ -409,7 +410,7 @@ static struct shm_rpc *allocate_and_pin_shm_rpc(struct optee_domain *ctx,
     if ( !shm_rpc )
         return ERR_PTR(-ENOMEM);
 
-    shm_rpc->xen_arg_pg = alloc_domheap_page(current->domain, 0);
+    shm_rpc->xen_arg_pg = alloc_domheap_page(NULL, 0);
     if ( !shm_rpc->xen_arg_pg )
     {
         xfree(shm_rpc);
@@ -529,8 +530,7 @@ static struct optee_shm_buf *allocate_optee_shm_buf(struct optee_domain *ctx,
     while ( unlikely(old != atomic_cmpxchg(&ctx->optee_shm_buf_pages,
                                            old, new)) );
 
-    optee_shm_buf = xzalloc_bytes(sizeof(struct optee_shm_buf) +
-                                  pages_cnt * sizeof(struct page *));
+    optee_shm_buf = xzalloc_flex_struct(struct optee_shm_buf, pages, pages_cnt);
     if ( !optee_shm_buf )
     {
         err_code = -ENOMEM;
@@ -774,14 +774,17 @@ static int translate_noncontig(struct optee_domain *ctx,
      * - There is a plan to implement preemption in the code below, which
      *   will allow use to increase default MAX_SHM_BUFFER_PG value.
      */
-    xen_pgs = alloc_domheap_pages(current->domain, order, 0);
+    xen_pgs = alloc_domheap_pages(NULL, order, 0);
     if ( !xen_pgs )
         return -ENOMEM;
 
     optee_shm_buf = allocate_optee_shm_buf(ctx, param->u.tmem.shm_ref,
                                            pg_count, xen_pgs, order);
     if ( IS_ERR(optee_shm_buf) )
+    {
+        free_domheap_pages(xen_pgs, order);
         return PTR_ERR(optee_shm_buf);
+    }
 
     gfn = gaddr_to_gfn(param->u.tmem.buf_ptr &
                        ~(OPTEE_MSG_NONCONTIG_PAGE_SIZE - 1));
@@ -807,7 +810,7 @@ static int translate_noncontig(struct optee_domain *ctx,
         {
             guest_pg = get_domain_ram_page(gfn);
             if ( !guest_pg )
-                return -EINVAL;
+                goto free_shm_buf;
 
             guest_data = __map_domain_page(guest_pg);
             xen_data = __map_domain_page(xen_pgs);
@@ -854,6 +857,7 @@ err_unmap:
     unmap_domain_page(guest_data);
     unmap_domain_page(xen_data);
     put_page(guest_pg);
+free_shm_buf:
     free_optee_shm_buf(ctx, optee_shm_buf->cookie);
 
     return -EINVAL;
@@ -938,7 +942,7 @@ static bool copy_std_request(struct cpu_user_regs *regs,
 
     BUILD_BUG_ON(OPTEE_MSG_NONCONTIG_PAGE_SIZE > PAGE_SIZE);
 
-    call->xen_arg_pg = alloc_domheap_page(current->domain, 0);
+    call->xen_arg_pg = alloc_domheap_page(NULL, 0);
     if ( !call->xen_arg_pg )
     {
         set_user_reg(regs, 0, OPTEE_SMC_RETURN_ENOMEM);
@@ -1127,28 +1131,17 @@ static int handle_rpc_return(struct optee_domain *ctx,
          */
         if ( shm_rpc->xen_arg->cmd == OPTEE_RPC_CMD_SHM_FREE )
         {
-            uint64_t cookie = shm_rpc->xen_arg->params[0].u.value.b;
-
-            free_optee_shm_buf(ctx, cookie);
-
-            /*
-             * OP-TEE asks to free the buffer, but this is not the same
-             * buffer we previously allocated for it. While nothing
-             * prevents OP-TEE from asking this, it is the strange
-             * situation. This may or may not be caused by a bug in
-             * OP-TEE or mediator. But is better to print warning.
-             */
-            if ( call->rpc_data_cookie && call->rpc_data_cookie != cookie )
-            {
-                gprintk(XENLOG_ERR,
-                        "Saved RPC cookie does not corresponds to OP-TEE's (%"PRIx64" != %"PRIx64")\n",
-                        call->rpc_data_cookie, cookie);
-
-                WARN();
-            }
+            free_optee_shm_buf(ctx, shm_rpc->xen_arg->params[0].u.value.b);
             call->rpc_data_cookie = 0;
         }
         unmap_domain_page(shm_rpc->xen_arg);
+    }
+    else if ( call->rpc_op == OPTEE_SMC_RPC_FUNC_FREE )
+    {
+        uint64_t cookie = regpair_to_uint64(get_user_reg(regs, 1),
+                                            get_user_reg(regs, 2));
+
+        free_shm_rpc(ctx, cookie);
     }
 
     return ret;
@@ -1598,13 +1591,6 @@ static void handle_rpc(struct optee_domain *ctx, struct cpu_user_regs *regs)
     case OPTEE_SMC_RPC_FUNC_ALLOC:
         handle_rpc_func_alloc(ctx, regs, call);
         return;
-    case OPTEE_SMC_RPC_FUNC_FREE:
-    {
-        uint64_t cookie = regpair_to_uint64(call->rpc_params[0],
-                                            call->rpc_params[1]);
-        free_shm_rpc(ctx, cookie);
-        break;
-    }
     case OPTEE_SMC_RPC_FUNC_FOREIGN_INTR:
         break;
     case OPTEE_SMC_RPC_FUNC_CMD:
@@ -1661,7 +1647,11 @@ static bool optee_handle_call(struct cpu_user_regs *regs)
     if ( !ctx )
         return false;
 
-    switch ( get_user_reg(regs, 0) )
+    /*
+     * The function identifier is always stored in the least significant
+     * 32-bit (see section ARM DEN 0028D).
+     */
+    switch ( (uint32_t)get_user_reg(regs, 0) )
     {
     case OPTEE_SMC_CALLS_COUNT:
         set_user_reg(regs, 0, OPTEE_MEDIATOR_SMC_COUNT);
@@ -1706,7 +1696,7 @@ static bool optee_handle_call(struct cpu_user_regs *regs)
         return true;
 
     case OPTEE_SMC_DISABLE_SHM_CACHE:
-        arm_smccc_smc(OPTEE_SMC_ENABLE_SHM_CACHE, 0, 0, 0, 0, 0, 0,
+        arm_smccc_smc(OPTEE_SMC_DISABLE_SHM_CACHE, 0, 0, 0, 0, 0, 0,
                       OPTEE_CLIENT_ID(current->domain), &resp);
         set_user_reg(regs, 0, resp.a0);
         if ( resp.a0 == OPTEE_SMC_RETURN_OK ) {

@@ -8,14 +8,18 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <xenctrl.h>
-#include <xc_dom.h>
+#include <xenguest.h>
 #include <xenstore.h>
+#include <xentoollog.h>
 #include <xen/sys/xenbus_dev.h>
 #include <xen-xsm/flask/flask.h>
 #include <xen/io/xenbus.h>
 
 #include "init-dom-json.h"
-#include "_paths.h"
+
+#define LAPIC_BASE_ADDRESS  0xfee00000UL
+#define MB(x)               ((uint64_t)x << 20)
+#define GB(x)               ((uint64_t)x << 30)
 
 static uint32_t domid = ~0;
 static char *kernel;
@@ -25,7 +29,7 @@ static char *param;
 static char *name = "Xenstore";
 static int memory;
 static int maxmem;
-static xen_pfn_t console_mfn;
+static xen_pfn_t console_gfn;
 static xc_evtchn_port_or_error_t console_evtchn;
 
 static struct option options[] = {
@@ -36,6 +40,7 @@ static struct option options[] = {
     { "param", 1, NULL, 'p' },
     { "name", 1, NULL, 'n' },
     { "maxmem", 1, NULL, 'M' },
+    { "verbose", 0, NULL, 'v' },
     { NULL, 0, NULL, 0 }
 };
 
@@ -57,7 +62,8 @@ static void usage(void)
 "  --maxmem <max size>        maximum memory size in the format:\n"
 "                             <MB val>|<a>/<b>|<MB val>:<a>/<b>\n"
 "                             (an absolute value in MB, a fraction a/b of\n"
-"                             the host memory, or the maximum of both)\n");
+"                             the host memory, or the maximum of both)\n"
+"  -v[v[v]]                   verbosity of domain building\n");
 }
 
 static int build(xc_interface *xch)
@@ -65,7 +71,10 @@ static int build(xc_interface *xch)
     char cmdline[512];
     int rv, xs_fd;
     struct xc_dom_image *dom = NULL;
-    int limit_kb = (maxmem ? : (memory + 1)) * 1024;
+    int limit_kb = (maxmem ? : memory) * 1024 + X86_HVM_NR_SPECIAL_PAGES * 4;
+    uint64_t mem_size = MB(memory);
+    uint64_t max_size = MB(maxmem ? : memory);
+    struct e820entry e820[3];
     struct xen_domctl_createdomain config = {
         .ssidref = SECINITSID_DOMU,
         .flags = XEN_DOMCTL_CDF_xs_domain,
@@ -76,9 +85,11 @@ static int build(xc_interface *xch)
          * 1 grant frame is enough: we don't need many grants.
          * Mini-OS doesn't like less than 4, though, so use 4.
          * 128 maptrack frames: 256 entries per frame, enough for 32768 domains.
+         * Currently Mini-OS only supports grant v1.
          */
         .max_grant_frames = 4,
         .max_maptrack_frames = 128,
+        .grant_opts = XEN_DOMCTL_GRANT_version(1),
     };
 
     xs_fd = open("/dev/xen/xenbus_backend", O_RDWR);
@@ -96,6 +107,76 @@ static int build(xc_interface *xch)
             fprintf(stderr, "xc_flask_context_to_sid failed\n");
             goto err;
         }
+    }
+
+    dom = xc_dom_allocate(xch, NULL, NULL);
+    if ( !dom )
+    {
+        fprintf(stderr, "xc_dom_allocate failed\n");
+        rv = -1;
+        goto err;
+    }
+
+    rv = xc_dom_kernel_file(dom, kernel);
+    if ( rv )
+    {
+        fprintf(stderr, "xc_dom_kernel_file failed\n");
+        goto err;
+    }
+
+    if ( ramdisk )
+    {
+        rv = xc_dom_module_file(dom, ramdisk, NULL);
+        if ( rv )
+        {
+            fprintf(stderr, "xc_dom_module_file failed\n");
+            goto err;
+        }
+    }
+
+    rv = xc_dom_boot_xen_init(dom, xch, domid);
+    if ( rv )
+    {
+        fprintf(stderr, "xc_dom_boot_xen_init failed\n");
+        goto err;
+    }
+
+    dom->container_type = XC_DOM_HVM_CONTAINER;
+    rv = xc_dom_parse_image(dom);
+    if ( rv )
+    {
+        dom->container_type = XC_DOM_PV_CONTAINER;
+        rv = xc_dom_parse_image(dom);
+        if ( rv )
+        {
+            fprintf(stderr, "xc_dom_parse_image failed\n");
+            goto err;
+        }
+    }
+    else
+    {
+        config.flags |= XEN_DOMCTL_CDF_hvm | XEN_DOMCTL_CDF_hap;
+        config.arch.emulation_flags = XEN_X86_EMU_LAPIC;
+        dom->target_pages = mem_size >> XC_PAGE_SHIFT;
+        dom->mmio_size = GB(4) - LAPIC_BASE_ADDRESS;
+        dom->lowmem_end = (mem_size > LAPIC_BASE_ADDRESS) ?
+                          LAPIC_BASE_ADDRESS : mem_size;
+        dom->highmem_end = (mem_size > LAPIC_BASE_ADDRESS) ?
+                           GB(4) + mem_size - LAPIC_BASE_ADDRESS : 0;
+        dom->mmio_start = LAPIC_BASE_ADDRESS;
+        dom->max_vcpus = 1;
+        e820[0].addr = 0;
+        e820[0].size = (max_size > LAPIC_BASE_ADDRESS) ?
+                       LAPIC_BASE_ADDRESS : max_size;
+        e820[0].type = E820_RAM;
+        e820[1].addr = (X86_HVM_END_SPECIAL_REGION -
+                        X86_HVM_NR_SPECIAL_PAGES) << XC_PAGE_SHIFT;
+        e820[1].size = X86_HVM_NR_SPECIAL_PAGES << XC_PAGE_SHIFT;
+        e820[1].type = E820_RESERVED;
+        e820[2].addr = GB(4);
+        e820[2].size = (max_size > LAPIC_BASE_ADDRESS) ?
+                       max_size - LAPIC_BASE_ADDRESS : 0;
+        e820[2].type = E820_RAM;
     }
 
     rv = xc_domain_create(xch, &domid, &config);
@@ -122,11 +203,15 @@ static int build(xc_interface *xch)
         fprintf(stderr, "xc_evtchn_alloc_unbound failed\n");
         goto err;
     }
-    rv = xc_domain_set_memmap_limit(xch, domid, limit_kb);
-    if ( rv )
+
+    if ( dom->container_type == XC_DOM_PV_CONTAINER )
     {
-        fprintf(stderr, "xc_domain_set_memmap_limit failed\n");
-        goto err;
+        rv = xc_domain_set_memmap_limit(xch, domid, limit_kb);
+        if ( rv )
+        {
+            fprintf(stderr, "xc_domain_set_memmap_limit failed\n");
+            goto err;
+        }
     }
 
     rv = ioctl(xs_fd, IOCTL_XENBUS_BACKEND_SETUP, domid);
@@ -137,49 +222,15 @@ static int build(xc_interface *xch)
     }
 
     if ( param )
-        snprintf(cmdline, 512, "--event %d --internal-db %s", rv, param);
+        snprintf(cmdline, 512, "--event %d %s", rv, param);
     else
-        snprintf(cmdline, 512, "--event %d --internal-db", rv);
+        snprintf(cmdline, 512, "--event %d", rv);
 
-    dom = xc_dom_allocate(xch, cmdline, NULL);
-    if ( !dom )
-    {
-        fprintf(stderr, "xc_dom_allocate failed\n");
-        goto err;
-    }
-    dom->container_type = XC_DOM_PV_CONTAINER;
+    dom->guest_domid = domid;
+    dom->cmdline = xc_dom_strdup(dom, cmdline);
     dom->xenstore_domid = domid;
     dom->console_evtchn = console_evtchn;
 
-    rv = xc_dom_kernel_file(dom, kernel);
-    if ( rv )
-    {
-        fprintf(stderr, "xc_dom_kernel_file failed\n");
-        goto err;
-    }
-
-    if ( ramdisk )
-    {
-        rv = xc_dom_module_file(dom, ramdisk, NULL);
-        if ( rv )
-        {
-            fprintf(stderr, "xc_dom_module_file failed\n");
-            goto err;
-        }
-    }
-
-    rv = xc_dom_boot_xen_init(dom, xch, domid);
-    if ( rv )
-    {
-        fprintf(stderr, "xc_dom_boot_xen_init failed\n");
-        goto err;
-    }
-    rv = xc_dom_parse_image(dom);
-    if ( rv )
-    {
-        fprintf(stderr, "xc_dom_parse_image failed\n");
-        goto err;
-    }
     rv = xc_dom_mem_init(dom, memory);
     if ( rv )
     {
@@ -191,6 +242,16 @@ static int build(xc_interface *xch)
     {
         fprintf(stderr, "xc_dom_boot_mem_init failed\n");
         goto err;
+    }
+    if ( dom->container_type == XC_DOM_HVM_CONTAINER )
+    {
+        rv = xc_domain_set_memory_map(xch, domid, e820,
+                                      dom->highmem_end ? 3 : 2);
+        if ( rv )
+        {
+            fprintf(stderr, "xc_domain_set_memory_map failed\n");
+            goto err;
+        }
     }
     rv = xc_dom_build_image(dom);
     if ( rv )
@@ -225,7 +286,9 @@ static int build(xc_interface *xch)
     }
 
     rv = 0;
-    console_mfn = xc_dom_p2m(dom, dom->console_pfn);
+    console_gfn = (dom->container_type == XC_DOM_PV_CONTAINER)
+                  ? xc_dom_p2m(dom, dom->console_pfn)
+                  : dom->console_pfn;
 
 err:
     if ( dom )
@@ -349,8 +412,10 @@ int main(int argc, char** argv)
     char buf[16], be_path[64], fe_path[64];
     int rv, fd;
     char *maxmem_str = NULL;
+    xentoollog_level minmsglevel = XTL_PROGRESS;
+    xentoollog_logger *logger = NULL;
 
-    while ( (opt = getopt_long(argc, argv, "", options, NULL)) != -1 )
+    while ( (opt = getopt_long(argc, argv, "v", options, NULL)) != -1 )
     {
         switch ( opt )
         {
@@ -375,6 +440,10 @@ int main(int argc, char** argv)
         case 'M':
             maxmem_str = optarg;
             break;
+        case 'v':
+            if ( minmsglevel )
+                minmsglevel--;
+            break;
         default:
             usage();
             return 2;
@@ -387,11 +456,15 @@ int main(int argc, char** argv)
         return 2;
     }
 
-    xch = xc_interface_open(NULL, NULL, 0);
+    logger = (xentoollog_logger *)xtl_createlogger_stdiostream(stderr,
+                                                               minmsglevel, 0);
+
+    xch = xc_interface_open(logger, logger, 0);
     if ( !xch )
     {
         fprintf(stderr, "xc_interface_open() failed\n");
-        return 1;
+        rv = 1;
+        goto out;
     }
 
     if ( maxmem_str )
@@ -400,7 +473,8 @@ int main(int argc, char** argv)
         if ( maxmem < 0 )
         {
             xc_interface_close(xch);
-            return 1;
+            rv = 1;
+            goto out;
         }
     }
 
@@ -414,17 +488,24 @@ int main(int argc, char** argv)
     xc_interface_close(xch);
 
     if ( rv )
-        return 1;
+    {
+        rv = 1;
+        goto out;
+    }
 
     rv = gen_stub_json_config(domid, NULL);
     if ( rv )
-        return 3;
+    {
+        rv = 3;
+        goto out;
+    }
 
     xsh = xs_open(0);
     if ( !xsh )
     {
         fprintf(stderr, "xs_open() failed.\n");
-        return 3;
+        rv = 3;
+        goto out;
     }
     snprintf(buf, 16, "%d", domid);
     do_xs_write(xsh, "/tool/xenstored/domid", buf);
@@ -452,7 +533,7 @@ int main(int argc, char** argv)
     do_xs_write_dir_node(xsh, fe_path, "tty", "");
     snprintf(buf, 16, "%d", console_evtchn);
     do_xs_write_dir_node(xsh, fe_path, "port", buf);
-    snprintf(buf, 16, "%ld", console_mfn);
+    snprintf(buf, 16, "%ld", console_gfn);
     do_xs_write_dir_node(xsh, fe_path, "ring-ref", buf);
     xs_close(xsh);
 
@@ -460,7 +541,8 @@ int main(int argc, char** argv)
     if ( fd < 0 )
     {
         fprintf(stderr, "Creating " XEN_RUN_DIR "/xenstored.pid failed\n");
-        return 3;
+        rv = 3;
+        goto out;
     }
     rv = snprintf(buf, 16, "domid:%d\n", domid);
     rv = write(fd, buf, rv);
@@ -469,10 +551,17 @@ int main(int argc, char** argv)
     {
         fprintf(stderr,
                 "Writing domid to " XEN_RUN_DIR "/xenstored.pid failed\n");
-        return 3;
+        rv = 3;
+        goto out;
     }
 
-    return 0;
+    rv = 0;
+
+ out:
+    if ( logger )
+        xtl_logger_destroy(logger);
+
+    return rv;
 }
 
 /*

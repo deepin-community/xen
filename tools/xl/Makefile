@@ -5,14 +5,14 @@
 XEN_ROOT = $(CURDIR)/../..
 include $(XEN_ROOT)/tools/Rules.mk
 
-CFLAGS += -Werror -Wno-format-zero-length -Wmissing-declarations \
-	-Wno-declaration-after-statement -Wformat-nonliteral
-CFLAGS += -I. -fPIC
+CFLAGS += -Wno-format-zero-length -Wmissing-declarations -Wformat-nonliteral
+CFLAGS += -fPIC
 
 CFLAGS += $(PTHREAD_CFLAGS)
 LDFLAGS += $(PTHREAD_LDFLAGS)
 
 CFLAGS_XL += $(CFLAGS_libxenlight)
+CFLAGS_XL += $(CFLAGS_libxenutil)
 CFLAGS_XL += -Wshadow
 
 XL_OBJS-$(CONFIG_X86) = xl_psr.o
@@ -28,32 +28,27 @@ $(XL_OBJS): CFLAGS += $(CFLAGS_libxentoollog)
 $(XL_OBJS): CFLAGS += $(CFLAGS_XL)
 $(XL_OBJS): CFLAGS += -include $(XEN_ROOT)/tools/config.h # libxl_json.h needs it.
 
-genpath-target = $(call buildmakevars2header,_paths.h)
-$(eval $(genpath-target))
-
-$(XL_OBJS): _paths.h
-
 .PHONY: all
 all: xl
 
 xl: $(XL_OBJS)
-	$(CC) $(LDFLAGS) -o $@ $(XL_OBJS) $(LDLIBS_libxlutil) $(LDLIBS_libxenlight) $(LDLIBS_libxentoollog) -lyajl $(APPEND_LDFLAGS)
+	$(CC) $(LDFLAGS) -o $@ $(XL_OBJS) $(LDLIBS_libxenutil) $(LDLIBS_libxenlight) $(LDLIBS_libxentoollog) -lyajl $(APPEND_LDFLAGS)
 
 .PHONY: install
 install: all
 	$(INSTALL_DIR) $(DESTDIR)$(sbindir)
 	$(INSTALL_DIR) $(DESTDIR)$(BASH_COMPLETION_DIR)
 	$(INSTALL_PROG) xl $(DESTDIR)$(sbindir)
-	$(INSTALL_DATA) bash-completion $(DESTDIR)$(BASH_COMPLETION_DIR)/xl.sh
+	$(INSTALL_DATA) bash-completion $(DESTDIR)$(BASH_COMPLETION_DIR)/xl
 
 .PHONY: uninstall
 uninstall:
-	rm -f $(DESTDIR)$(BASH_COMPLETION_DIR)/xl.sh
+	rm -f $(DESTDIR)$(BASH_COMPLETION_DIR)/xl
 	rm -f $(DESTDIR)$(sbindir)/xl
 
 .PHONY: clean
 clean:
-	$(RM) -f *.o xl _paths.h $(DEPS_RM)
+	$(RM) *.o xl $(DEPS_RM)
 
 distclean: clean
 

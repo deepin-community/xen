@@ -28,9 +28,17 @@
 #include <asm/setup.h>
 #endif
 
-#define XSM_FRAMEWORK_VERSION    "1.0.0"
+#define XSM_FRAMEWORK_VERSION    "1.0.1"
 
-struct xsm_operations *xsm_ops;
+struct xsm_ops __alt_call_maybe_initdata xsm_ops;
+
+enum xsm_ops_state {
+    XSM_OPS_UNREGISTERED,
+    XSM_OPS_REG_FAILED,
+    XSM_OPS_REGISTERED,
+};
+
+static enum xsm_ops_state __initdata xsm_ops_registered = XSM_OPS_UNREGISTERED;
 
 enum xsm_bootparam {
     XSM_BOOTPARAM_DUMMY,
@@ -47,7 +55,7 @@ static enum xsm_bootparam __initdata xsm_bootparam =
     XSM_BOOTPARAM_DUMMY;
 #endif
 
-static int __init parse_xsm_param(const char *s)
+static int __init cf_check parse_xsm_param(const char *s)
 {
     int rc = 0;
 
@@ -68,17 +76,10 @@ static int __init parse_xsm_param(const char *s)
 }
 custom_param("xsm", parse_xsm_param);
 
-static inline int verify(struct xsm_operations *ops)
-{
-    /* verify the security_operations structure exists */
-    if ( !ops )
-        return -EINVAL;
-    xsm_fixup_ops(ops);
-    return 0;
-}
-
 static int __init xsm_core_init(const void *policy_buffer, size_t policy_size)
 {
+    const struct xsm_ops *ops = NULL;
+
 #ifdef CONFIG_XSM_FLASK_POLICY
     if ( policy_size == 0 )
     {
@@ -87,25 +88,25 @@ static int __init xsm_core_init(const void *policy_buffer, size_t policy_size)
     }
 #endif
 
-    if ( verify(&dummy_xsm_ops) )
+    if ( xsm_ops_registered != XSM_OPS_UNREGISTERED )
     {
-        printk(XENLOG_ERR "Could not verify dummy_xsm_ops structure\n");
+        printk(XENLOG_ERR
+               "Could not init XSM, xsm_ops register already attempted\n");
         return -EIO;
     }
-
-    xsm_ops = &dummy_xsm_ops;
 
     switch ( xsm_bootparam )
     {
     case XSM_BOOTPARAM_DUMMY:
+        xsm_ops_registered = XSM_OPS_REGISTERED;
         break;
 
     case XSM_BOOTPARAM_FLASK:
-        flask_init(policy_buffer, policy_size);
+        ops = flask_init(policy_buffer, policy_size);
         break;
 
     case XSM_BOOTPARAM_SILO:
-        silo_init();
+        ops = silo_init();
         break;
 
     default:
@@ -113,12 +114,33 @@ static int __init xsm_core_init(const void *policy_buffer, size_t policy_size)
         break;
     }
 
+    if ( ops )
+    {
+        xsm_ops_registered = XSM_OPS_REGISTERED;
+        xsm_ops = *ops;
+    }
+    /*
+     * This handles three cases,
+     *   - dummy policy module was selected
+     *   - a policy module does not provide all handlers
+     *   - a policy module failed to init
+     */
+    xsm_fixup_ops(&xsm_ops);
+
+    if ( xsm_ops_registered != XSM_OPS_REGISTERED )
+    {
+        xsm_ops_registered = XSM_OPS_REG_FAILED;
+        printk(XENLOG_ERR
+               "Could not init XSM, xsm_ops register failed\n");
+        return -EFAULT;
+    }
+
     return 0;
 }
 
 #ifdef CONFIG_MULTIBOOT
-int __init xsm_multiboot_init(unsigned long *module_map,
-                              const multiboot_info_t *mbi)
+int __init xsm_multiboot_init(
+    unsigned long *module_map, const multiboot_info_t *mbi)
 {
     int ret = 0;
     void *policy_buffer = NULL;
@@ -128,8 +150,8 @@ int __init xsm_multiboot_init(unsigned long *module_map,
 
     if ( XSM_MAGIC )
     {
-        ret = xsm_multiboot_policy_init(module_map, mbi,
-                                        &policy_buffer, &policy_size);
+        ret = xsm_multiboot_policy_init(module_map, mbi, &policy_buffer,
+                                        &policy_size);
         if ( ret )
         {
             bootstrap_map(NULL);
@@ -195,31 +217,15 @@ bool __init has_xsm_magic(paddr_t start)
 }
 #endif
 
-int __init register_xsm(struct xsm_operations *ops)
-{
-    if ( verify(ops) )
-    {
-        printk(XENLOG_ERR "Could not verify xsm_operations structure\n");
-        return -EINVAL;
-    }
-
-    if ( xsm_ops != &dummy_xsm_ops )
-        return -EAGAIN;
-
-    xsm_ops = ops;
-
-    return 0;
-}
-
 #endif
 
-long do_xsm_op (XEN_GUEST_HANDLE_PARAM(xsm_op_t) op)
+long do_xsm_op(XEN_GUEST_HANDLE_PARAM(void) op)
 {
     return xsm_do_xsm_op(op);
 }
 
 #ifdef CONFIG_COMPAT
-int compat_xsm_op (XEN_GUEST_HANDLE_PARAM(xsm_op_t) op)
+int compat_xsm_op(XEN_GUEST_HANDLE_PARAM(void) op)
 {
     return xsm_do_compat_op(op);
 }

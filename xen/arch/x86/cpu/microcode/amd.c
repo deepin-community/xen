@@ -24,7 +24,7 @@
 
 #define pr_debug(x...) ((void)0)
 
-struct __packed equiv_cpu_entry {
+struct equiv_cpu_entry {
     uint32_t installed_cpu;
     uint32_t fixed_errata_mask;
     uint32_t fixed_errata_compare;
@@ -33,7 +33,9 @@ struct __packed equiv_cpu_entry {
 };
 
 struct microcode_patch {
-    uint32_t data_code;
+    uint16_t year;
+    uint8_t  day;
+    uint8_t  month;
     uint32_t patch_id;
     uint8_t  mc_patch_data_id[2];
     uint8_t  mc_patch_data_len;
@@ -89,7 +91,7 @@ static struct {
     uint16_t id;
 } equiv __read_mostly;
 
-static void collect_cpu_info(void)
+static void cf_check collect_cpu_info(void)
 {
     struct cpu_signature *csig = &this_cpu(cpu_sig);
 
@@ -102,7 +104,7 @@ static void collect_cpu_info(void)
              smp_processor_id(), csig->rev);
 }
 
-static bool_t verify_patch_size(uint32_t patch_size)
+static bool verify_patch_size(uint32_t patch_size)
 {
     uint32_t max_size;
 
@@ -113,7 +115,7 @@ static bool_t verify_patch_size(uint32_t patch_size)
 #define F17H_MPB_MAX_SIZE 3200
 #define F19H_MPB_MAX_SIZE 5568
 
-    switch (boot_cpu_data.x86)
+    switch ( boot_cpu_data.x86 )
     {
     case 0x14:
         max_size = F14H_MPB_MAX_SIZE;
@@ -135,7 +137,7 @@ static bool_t verify_patch_size(uint32_t patch_size)
         break;
     }
 
-    return (patch_size <= max_size);
+    return patch_size <= max_size;
 }
 
 static bool check_final_patch_levels(const struct cpu_signature *sig)
@@ -168,6 +170,18 @@ static bool check_final_patch_levels(const struct cpu_signature *sig)
     return false;
 }
 
+static enum microcode_match_result compare_revisions(
+    uint32_t old_rev, uint32_t new_rev)
+{
+    if ( new_rev > old_rev )
+        return NEW_UCODE;
+
+    if ( new_rev == old_rev )
+        return SAME_UCODE;
+
+    return OLD_UCODE;
+}
+
 static enum microcode_match_result microcode_fits(
     const struct microcode_patch *patch)
 {
@@ -178,16 +192,7 @@ static enum microcode_match_result microcode_fits(
          equiv.id  != patch->processor_rev_id )
         return MIS_UCODE;
 
-    if ( patch->patch_id <= sig->rev )
-    {
-        pr_debug("microcode: patch is already at required level or greater.\n");
-        return OLD_UCODE;
-    }
-
-    pr_debug("microcode: CPU%d found a matching microcode update with version %#x (current=%#x)\n",
-             cpu, patch->patch_id, sig->rev);
-
-    return NEW_UCODE;
+    return compare_revisions(sig->rev, patch->patch_id);
 }
 
 static enum microcode_match_result compare_header(
@@ -196,10 +201,10 @@ static enum microcode_match_result compare_header(
     if ( new->processor_rev_id != old->processor_rev_id )
         return MIS_UCODE;
 
-    return new->patch_id > old->patch_id ? NEW_UCODE : OLD_UCODE;
+    return compare_revisions(old->patch_id, new->patch_id);
 }
 
-static enum microcode_match_result compare_patch(
+static enum microcode_match_result cf_check compare_patch(
     const struct microcode_patch *new, const struct microcode_patch *old)
 {
     /* Both patches to compare are supposed to be applicable to local CPU. */
@@ -209,14 +214,19 @@ static enum microcode_match_result compare_patch(
     return compare_header(new, old);
 }
 
-static int apply_microcode(const struct microcode_patch *patch)
+static int cf_check apply_microcode(const struct microcode_patch *patch)
 {
     int hw_err;
     unsigned int cpu = smp_processor_id();
     struct cpu_signature *sig = &per_cpu(cpu_sig, cpu);
     uint32_t rev, old_rev = sig->rev;
+    enum microcode_match_result result = microcode_fits(patch);
 
-    if ( microcode_fits(patch) != NEW_UCODE )
+    /*
+     * Allow application of the same revision to pick up SMT-specific changes
+     * even if the revision of the other SMT thread is already up-to-date.
+     */
+    if ( result != NEW_UCODE && result != SAME_UCODE )
         return -EINVAL;
 
     if ( check_final_patch_levels(sig) )
@@ -248,8 +258,11 @@ static int apply_microcode(const struct microcode_patch *patch)
         return -EIO;
     }
 
-    printk(XENLOG_WARNING "microcode: CPU%u updated from revision %#x to %#x\n",
-           cpu, old_rev, rev);
+    printk(XENLOG_WARNING
+           "microcode: CPU%u updated from revision %#x to %#x, date = %04x-%02x-%02x\n",
+           cpu, old_rev, rev, patch->year, patch->month, patch->day);
+
+    amd_check_zenbleed();
 
     return 0;
 }
@@ -293,7 +306,8 @@ static int scan_equiv_cpu_table(const struct container_equiv_table *et)
     return -ESRCH;
 }
 
-static struct microcode_patch *cpu_request_microcode(const void *buf, size_t size)
+static struct microcode_patch *cf_check cpu_request_microcode(
+    const void *buf, size_t size)
 {
     const struct microcode_patch *saved = NULL;
     struct microcode_patch *patch = NULL;
@@ -346,8 +360,7 @@ static struct microcode_patch *cpu_request_microcode(const void *buf, size_t siz
             if ( size < sizeof(*mc) ||
                  (mc = buf)->type != UCODE_UCODE_TYPE ||
                  size - sizeof(*mc) < mc->len ||
-                 mc->len < sizeof(struct microcode_patch) ||
-                 (!skip_ucode && !verify_patch_size(mc->len)) )
+                 mc->len < sizeof(struct microcode_patch) )
             {
                 printk(XENLOG_ERR "microcode: Bad microcode data\n");
                 error = -EINVAL;
@@ -356,6 +369,19 @@ static struct microcode_patch *cpu_request_microcode(const void *buf, size_t siz
 
             if ( skip_ucode )
                 goto skip;
+
+            if ( !verify_patch_size(mc->len) )
+            {
+                printk(XENLOG_WARNING
+                       "microcode: Bad microcode length 0x%08x for cpu 0x%04x\n",
+                       mc->len, mc->patch->processor_rev_id);
+                /*
+                 * If the blob size sanity check fails, trust the container
+                 * length which has already been checked to be at least
+                 * plausible at this point.
+                 */
+                goto skip;
+            }
 
             /*
              * If the new ucode covers current CPU, compare ucodes and store the
@@ -380,6 +406,14 @@ static struct microcode_patch *cpu_request_microcode(const void *buf, size_t siz
             if ( size >= 4 && *(const uint32_t *)buf == UCODE_MAGIC )
                 break;
         }
+
+        /*
+         * Any error means we didn't get cleanly to the end of the microcode
+         * container.  There isn't an overall length field, so we've got no
+         * way of skipping to the next container in the stream.
+         */
+        if ( error )
+            break;
     }
 
     if ( saved )
@@ -395,7 +429,7 @@ static struct microcode_patch *cpu_request_microcode(const void *buf, size_t siz
     return patch;
 }
 
-const struct microcode_ops amd_ucode_ops = {
+const struct microcode_ops __initconst_cf_clobber amd_ucode_ops = {
     .cpu_request_microcode            = cpu_request_microcode,
     .collect_cpu_info                 = collect_cpu_info,
     .apply_microcode                  = apply_microcode,
