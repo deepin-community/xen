@@ -99,7 +99,7 @@ static int context_struct_compute_av(struct context *scontext,
  * constraint_expr_eval should pass in NULL for xcontext.
  */
 static int constraint_expr_eval(struct context *scontext,
-                            struct context *tcontext, struct context *xcontext, 
+                            struct context *tcontext, struct context *xcontext,
                                                 struct constraint_expr *cexpr)
 {
     u32 val1, val2;
@@ -283,7 +283,7 @@ mls_ops:
  * security_dump_masked_av - dumps masked permissions during
  * security_compute_av due to RBAC, MLS/Constraint and Type bounds.
  */
-static int dump_masked_av_helper(void *k, void *d, void *args)
+static int cf_check dump_masked_av_helper(void *k, void *d, void *args)
 {
     struct perm_datum *pdatum = d;
     char **permission_names = args;
@@ -1073,7 +1073,7 @@ static int security_compute_sid(u32 ssid,
                 /* Look for a role transition rule. */
                 for ( roletr = policydb.role_tr; roletr; roletr = roletr->next )
                 {
-                    if ( roletr->role == scontext->role && 
+                    if ( roletr->role == scontext->role &&
                                             roletr->type == tcontext->type )
                     {
                         /* Use the role transition rule. */
@@ -1240,7 +1240,7 @@ static int validate_classes(struct policydb *p)
 }
 
 /* Clone the SID into the new SID table. */
-static int clone_sid(u32 sid, struct context *context, void *arg)
+static int cf_check clone_sid(u32 sid, struct context *context, void *arg)
 {
     struct sidtab *s = arg;
 
@@ -1277,7 +1277,7 @@ struct convert_context_args {
  * in the policy `p->newp'.  Verify that the
  * context is valid under the new policy.
  */
-static int convert_context(u32 key, struct context *c, void *p)
+static int cf_check convert_context(u32 key, struct context *c, void *p)
 {
     struct convert_context_args *args;
     struct context oldc;
@@ -1485,7 +1485,7 @@ int security_irq_sid(int pirq, u32 *out_sid)
     POLICY_RDLOCK;
 
     c = policydb.ocontexts[OCON_PIRQ];
-    
+
     while ( c )
     {
         if ( c->u.pirq == pirq )

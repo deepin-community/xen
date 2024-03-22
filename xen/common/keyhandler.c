@@ -3,7 +3,10 @@
  */
 
 #include <asm/regs.h>
+#include <xen/debugger.h>
+#include <xen/delay.h>
 #include <xen/keyhandler.h>
+#include <xen/param.h>
 #include <xen/shutdown.h>
 #include <xen/event.h>
 #include <xen/console.h>
@@ -18,16 +21,16 @@
 #include <xen/mm.h>
 #include <xen/watchdog.h>
 #include <xen/init.h>
-#include <asm/debugger.h>
 #include <asm/div64.h>
 
 static unsigned char keypress_key;
 static bool_t alt_key_handling;
 
-static keyhandler_fn_t show_handlers, dump_hwdom_registers,
-    dump_domains, read_clocks;
-static irq_keyhandler_fn_t do_toggle_alt_key, dump_registers,
-    reboot_machine, run_all_keyhandlers, do_debug_key;
+static keyhandler_fn_t cf_check show_handlers, cf_check dump_hwdom_registers,
+    cf_check dump_domains, cf_check read_clocks;
+static irq_keyhandler_fn_t cf_check do_toggle_alt_key, cf_check dump_registers,
+    cf_check reboot_machine, cf_check run_all_keyhandlers,
+    cf_check do_debug_key;
 
 static struct keyhandler {
     union {
@@ -41,10 +44,10 @@ static struct keyhandler {
 } key_table[128] __read_mostly =
 {
 #define KEYHANDLER(k, f, desc, diag)            \
-    [k] = { { (f) }, desc, 0, diag }
+    [k] = { { .fn = (f) }, desc, 0, diag }
 
 #define IRQ_KEYHANDLER(k, f, desc, diag)        \
-    [k] = { { (keyhandler_fn_t *)(f) }, desc, 1, diag }
+    [k] = { { .irq_fn = (f) }, desc, 1, diag }
 
     IRQ_KEYHANDLER('A', do_toggle_alt_key, "toggle alternative key handling", 0),
     IRQ_KEYHANDLER('d', dump_registers, "dump registers", 1),
@@ -71,7 +74,7 @@ static struct keyhandler {
 #undef KEYHANDLER
 };
 
-static void keypress_action(void *unused)
+static void cf_check keypress_action(void *unused)
 {
     handle_keypress(keypress_key, NULL);
 }
@@ -122,7 +125,7 @@ void register_irq_keyhandler(unsigned char key, irq_keyhandler_fn_t fn,
     key_table[key].diagnostic = diagnostic;
 }
 
-static void show_handlers(unsigned char key)
+static void cf_check show_handlers(unsigned char key)
 {
     unsigned int i;
 
@@ -135,7 +138,7 @@ static void show_handlers(unsigned char key)
 
 static cpumask_t dump_execstate_mask;
 
-void dump_execstate(struct cpu_user_regs *regs)
+void cf_check dump_execstate(struct cpu_user_regs *regs)
 {
     unsigned int cpu = smp_processor_id();
 
@@ -168,7 +171,8 @@ void dump_execstate(struct cpu_user_regs *regs)
     watchdog_enable();
 }
 
-static void dump_registers(unsigned char key, struct cpu_user_regs *regs)
+static void cf_check dump_registers(
+    unsigned char key, struct cpu_user_regs *regs)
 {
     unsigned int cpu;
 
@@ -181,7 +185,10 @@ static void dump_registers(unsigned char key, struct cpu_user_regs *regs)
     cpumask_copy(&dump_execstate_mask, &cpu_online_map);
 
     /* Get local execution state out immediately, in case we get stuck. */
-    dump_execstate(regs);
+    if ( regs )
+        dump_execstate(regs);
+    else
+        run_in_exception_handler(dump_execstate);
 
     /* Alt. handling: remaining CPUs are dumped asynchronously one-by-one. */
     if ( alt_key_handling )
@@ -201,7 +208,7 @@ static void dump_registers(unsigned char key, struct cpu_user_regs *regs)
 
 static DECLARE_TASKLET(dump_hwdom_tasklet, NULL, NULL);
 
-static void dump_hwdom_action(void *data)
+static void cf_check dump_hwdom_action(void *data)
 {
     struct vcpu *v = data;
 
@@ -219,7 +226,7 @@ static void dump_hwdom_action(void *data)
     }
 }
 
-static void dump_hwdom_registers(unsigned char key)
+static void cf_check dump_hwdom_registers(unsigned char key)
 {
     struct vcpu *v;
 
@@ -241,13 +248,14 @@ static void dump_hwdom_registers(unsigned char key)
     }
 }
 
-static void reboot_machine(unsigned char key, struct cpu_user_regs *regs)
+static void cf_check reboot_machine(
+    unsigned char key, struct cpu_user_regs *regs)
 {
     printk("'%c' pressed -> rebooting machine\n", key);
     machine_restart(0);
 }
 
-static void dump_domains(unsigned char key)
+static void cf_check dump_domains(unsigned char key)
 {
     struct domain *d;
     const struct sched_unit *unit;
@@ -269,11 +277,22 @@ static void dump_domains(unsigned char key)
         printk("    refcnt=%d dying=%d pause_count=%d\n",
                atomic_read(&d->refcnt), d->is_dying,
                atomic_read(&d->pause_count));
-        printk("    nr_pages=%d xenheap_pages=%d shared_pages=%u paged_pages=%u "
-               "dirty_cpus={%*pbl} max_pages=%u\n",
-               domain_tot_pages(d), d->xenheap_pages, atomic_read(&d->shr_pages),
-               atomic_read(&d->paged_pages), CPUMASK_PR(d->dirty_cpumask),
-               d->max_pages);
+        printk("    nr_pages=%u xenheap_pages=%u"
+#ifdef CONFIG_MEM_SHARING
+               " shared_pages=%u"
+#endif
+#ifdef CONFIG_MEM_PAGING
+               " paged_pages=%u"
+#endif
+               " dirty_cpus={%*pbl} max_pages=%u\n",
+               domain_tot_pages(d), d->xenheap_pages,
+#ifdef CONFIG_MEM_SHARING
+               atomic_read(&d->shr_pages),
+#endif
+#ifdef CONFIG_MEM_PAGING
+               atomic_read(&d->paged_pages),
+#endif
+               CPUMASK_PR(d->dirty_cpumask), d->max_pages);
         printk("    handle=%02x%02x%02x%02x-%02x%02x-%02x%02x-"
                "%02x%02x-%02x%02x%02x%02x%02x%02x vm_assist=%08lx\n",
                d->handle[ 0], d->handle[ 1], d->handle[ 2], d->handle[ 3],
@@ -355,7 +374,7 @@ static cpumask_t read_clocks_cpumask;
 static DEFINE_PER_CPU(s_time_t, read_clocks_time);
 static DEFINE_PER_CPU(u64, read_cycles_time);
 
-static void read_clocks_slave(void *unused)
+static void cf_check read_clocks_slave(void *unused)
 {
     unsigned int cpu = smp_processor_id();
     local_irq_disable();
@@ -367,7 +386,7 @@ static void read_clocks_slave(void *unused)
     local_irq_enable();
 }
 
-static void read_clocks(unsigned char key)
+static void cf_check read_clocks(unsigned char key)
 {
     unsigned int cpu = smp_processor_id(), min_stime_cpu, max_stime_cpu;
     unsigned int min_cycles_cpu, max_cycles_cpu;
@@ -432,7 +451,7 @@ static void read_clocks(unsigned char key)
            maxdif_cycles, sumdif_cycles/count, count, dif_cycles);
 }
 
-static void run_all_nonirq_keyhandlers(void *unused)
+static void cf_check run_all_nonirq_keyhandlers(void *unused)
 {
     /* Fire all the non-IRQ-context diagnostic keyhandlers */
     struct keyhandler *h;
@@ -456,7 +475,8 @@ static void run_all_nonirq_keyhandlers(void *unused)
 static DECLARE_TASKLET(run_all_keyhandlers_tasklet,
                        run_all_nonirq_keyhandlers, NULL);
 
-static void run_all_keyhandlers(unsigned char key, struct cpu_user_regs *regs)
+static void cf_check run_all_keyhandlers(
+    unsigned char key, struct cpu_user_regs *regs)
 {
     struct keyhandler *h;
     unsigned int k;
@@ -481,16 +501,25 @@ static void run_all_keyhandlers(unsigned char key, struct cpu_user_regs *regs)
     tasklet_schedule(&run_all_keyhandlers_tasklet);
 }
 
-static void do_debug_key(unsigned char key, struct cpu_user_regs *regs)
+static void cf_check do_debugger_trap_fatal(struct cpu_user_regs *regs)
 {
-    printk("'%c' pressed -> trapping into debugger\n", key);
     (void)debugger_trap_fatal(0xf001, regs);
 
     /* Prevent tail call optimisation, which confuses xendbg. */
     barrier();
 }
 
-static void do_toggle_alt_key(unsigned char key, struct cpu_user_regs *regs)
+static void cf_check do_debug_key(unsigned char key, struct cpu_user_regs *regs)
+{
+    printk("'%c' pressed -> trapping into debugger\n", key);
+    if ( regs )
+        do_debugger_trap_fatal(regs);
+    else
+        run_in_exception_handler(do_debugger_trap_fatal);
+}
+
+static void cf_check do_toggle_alt_key(
+    unsigned char key, struct cpu_user_regs *regs)
 {
     alt_key_handling = !alt_key_handling;
     printk("'%c' pressed -> using %s key handling\n", key,
@@ -504,6 +533,59 @@ void __init initialize_keytable(void)
         alt_key_handling = 1;
         printk(XENLOG_INFO "Defaulting to alternative key handling; "
                "send 'A' to switch to normal mode.\n");
+    }
+}
+
+#define CRASHACTION_SIZE  32
+static char crash_debug_panic[CRASHACTION_SIZE];
+string_runtime_param("crash-debug-panic", crash_debug_panic);
+static char crash_debug_hwdom[CRASHACTION_SIZE];
+string_runtime_param("crash-debug-hwdom", crash_debug_hwdom);
+static char crash_debug_watchdog[CRASHACTION_SIZE];
+string_runtime_param("crash-debug-watchdog", crash_debug_watchdog);
+#ifdef CONFIG_KEXEC
+static char crash_debug_kexeccmd[CRASHACTION_SIZE];
+string_runtime_param("crash-debug-kexeccmd", crash_debug_kexeccmd);
+#else
+#define crash_debug_kexeccmd NULL
+#endif
+static char crash_debug_debugkey[CRASHACTION_SIZE];
+string_runtime_param("crash-debug-debugkey", crash_debug_debugkey);
+
+void keyhandler_crash_action(enum crash_reason reason)
+{
+    static const char *const crash_action[] = {
+        [CRASHREASON_PANIC] = crash_debug_panic,
+        [CRASHREASON_HWDOM] = crash_debug_hwdom,
+        [CRASHREASON_WATCHDOG] = crash_debug_watchdog,
+        [CRASHREASON_KEXECCMD] = crash_debug_kexeccmd,
+        [CRASHREASON_DEBUGKEY] = crash_debug_debugkey,
+    };
+    static bool ignore;
+    const char *action;
+
+    /* Some handlers are not functional too early. */
+    if ( system_state < SYS_STATE_smp_boot )
+        return;
+
+    if ( (unsigned int)reason >= ARRAY_SIZE(crash_action) )
+        return;
+    action = crash_action[reason];
+    if ( !action )
+        return;
+
+    /* Avoid recursion. */
+    if ( ignore )
+        return;
+    ignore = true;
+
+    while ( *action )
+    {
+        if ( *action == '+' )
+            mdelay(10);
+        else
+            handle_keypress(*action, NULL);
+        action++;
     }
 }
 

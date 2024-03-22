@@ -1,0 +1,3 @@
+# This happens due to debhelper trimming the changelog, but not the NEWS files
+# (see #1021502). It's not a xen packaging problem.
+debian-news-entry-has-unknown-version 4.11.1+92-g6c33308a8d-1 [usr/share/doc/xen-hypervisor-common/NEWS.Debian.gz:1]

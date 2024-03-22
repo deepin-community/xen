@@ -1,6 +1,4 @@
-#include <asm/asm_defns.h>
 #include <asm/current.h>
-#include <asm/macros.h>
 #include <asm/regs.h>
 #include <asm/alternative.h>
 #include <asm/smccc.h>
@@ -104,6 +102,30 @@
         .endif
 
         .endm
+
+/*
+ * Clobber top 32 bits of gp registers when switching from AArch32
+ */
+        .macro clobber_gp_top_halves, compat, save_x0_x1
+
+        .if \compat == 1      /* AArch32 mode */
+
+        /*
+         * At the moment, no-one is using save_x0_x1 == 0 with compat == 1.
+         * So the code is not handling it to simplify the implementation.
+         */
+        .if \save_x0_x1 == 0
+        .error "save_x0_x1 is 0 but compat is 1"
+        .endif
+
+        .irp n,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30
+        mov w\n, w\n
+        .endr
+
+        .endif
+
+        .endm
+
 /*
  * Save state on entry to hypervisor, restore on exit
  *
@@ -112,7 +134,22 @@
  * position on the stack before.
  */
         .macro  entry, hyp, compat, save_x0_x1=1
+
+        /*
+         * Ensure any PAR_EL1 reads complete, in case we were interrupted
+         * between the PAR_EL1 read and the memory barrier for the erratum
+         * 1508412 workaround.
+         */
+        alternative_if ARM64_WORKAROUND_1508412
+        dmb sy
+        alternative_else_nop_endif
+
         sub     sp, sp, #(UREGS_SPSR_el1 - UREGS_LR) /* CPSR, PC, SP, LR */
+
+        .if \hyp == 0         /* Guest mode */
+        clobber_gp_top_halves compat=\compat, save_x0_x1=\save_x0_x1
+        .endif
+
         push    x28, x29
         push    x26, x27
         push    x24, x25
@@ -157,7 +194,7 @@
         add     x21, sp, #UREGS_CPSR
         mrs     x22, spsr_el2
         mrs     x23, esr_el2
-        stp     w22, w23, [x21]
+        stp     x22, x23, [x21]
 
         .endm
 
@@ -338,16 +375,26 @@ guest_sync:
         cbnz    x1, guest_sync_slowpath         /* should be 0 for HVC #0 */
 
         /*
-         * Fastest path possible for ARM_SMCCC_ARCH_WORKAROUND_1.
-         * The workaround has already been applied on the exception
+         * Fastest path possible for ARM_SMCCC_ARCH_WORKAROUND_1 and
+         * ARM_SMCCC_ARCH_WORKAROUND_3.
+         * The workaround needed has already been applied on the exception
          * entry from the guest, so let's quickly get back to the guest.
          *
          * Note that eor is used because the function identifier cannot
          * be encoded as an immediate for cmp.
          */
         eor     w0, w0, #ARM_SMCCC_ARCH_WORKAROUND_1_FID
-        cbnz    w0, check_wa2
+        cbz     w0, fastpath_out_workaround
 
+        /* ARM_SMCCC_ARCH_WORKAROUND_2 handling */
+        eor     w0, w0, #(ARM_SMCCC_ARCH_WORKAROUND_1_FID ^ ARM_SMCCC_ARCH_WORKAROUND_2_FID)
+        cbz     w0, wa2_ssbd
+
+        /* Fastpath out for ARM_SMCCC_ARCH_WORKAROUND_3 */
+        eor     w0, w0, #(ARM_SMCCC_ARCH_WORKAROUND_2_FID ^ ARM_SMCCC_ARCH_WORKAROUND_3_FID)
+        cbnz    w0, guest_sync_slowpath
+
+fastpath_out_workaround:
         /*
          * Clobber both x0 and x1 to prevent leakage. Note that thanks
          * the eor, x0 = 0.
@@ -356,10 +403,7 @@ guest_sync:
         eret
         sb
 
-check_wa2:
-        /* ARM_SMCCC_ARCH_WORKAROUND_2 handling */
-        eor     w0, w0, #(ARM_SMCCC_ARCH_WORKAROUND_1_FID ^ ARM_SMCCC_ARCH_WORKAROUND_2_FID)
-        cbnz    w0, guest_sync_slowpath
+wa2_ssbd:
 #ifdef CONFIG_ARM_SSBD
 alternative_cb arm_enable_wa2_handling
         b       wa2_end
@@ -434,7 +478,7 @@ return_from_trap:
         msr     daifset, #IFLAGS___I_ /* Mask interrupts */
 
         ldr     x21, [sp, #UREGS_PC]            /* load ELR */
-        ldr     w22, [sp, #UREGS_CPSR]          /* load SPSR */
+        ldr     x22, [sp, #UREGS_CPSR]          /* load SPSR */
 
         pop     x0, x1
         pop     x2, x3
@@ -457,6 +501,15 @@ return_from_trap:
         pop     x28, x29
 
         ldr     lr, [sp], #(UREGS_SPSR_el1 - UREGS_LR) /* CPSR, PC, SP, LR */
+
+        /*
+         * Ensure any device/NC reads complete, in case we were interrupted
+         * between the memory barrier for the erratum 1508412 workaround and
+         * any PAR_EL1 read.
+         */
+        alternative_if ARM64_WORKAROUND_1508412
+        dmb sy
+        alternative_else_nop_endif
 
         eret
         sb

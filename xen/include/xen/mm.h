@@ -51,107 +51,17 @@
 #define __XEN_MM_H__
 
 #include <xen/compiler.h>
+#include <xen/mm-frame.h>
 #include <xen/types.h>
 #include <xen/list.h>
 #include <xen/spinlock.h>
-#include <xen/typesafe.h>
-#include <xen/kernel.h>
 #include <xen/perfc.h>
 #include <public/memory.h>
-
-TYPE_SAFE(unsigned long, mfn);
-#define PRI_mfn          "05lx"
-#define INVALID_MFN      _mfn(~0UL)
-/*
- * To be used for global variable initialization. This workaround a bug
- * in GCC < 5.0.
- */
-#define INVALID_MFN_INITIALIZER { ~0UL }
-
-#ifndef mfn_t
-#define mfn_t /* Grep fodder: mfn_t, _mfn() and mfn_x() are defined above */
-#define _mfn
-#define mfn_x
-#undef mfn_t
-#undef _mfn
-#undef mfn_x
-#endif
-
-static inline mfn_t mfn_add(mfn_t mfn, unsigned long i)
-{
-    return _mfn(mfn_x(mfn) + i);
-}
-
-static inline mfn_t mfn_max(mfn_t x, mfn_t y)
-{
-    return _mfn(max(mfn_x(x), mfn_x(y)));
-}
-
-static inline mfn_t mfn_min(mfn_t x, mfn_t y)
-{
-    return _mfn(min(mfn_x(x), mfn_x(y)));
-}
-
-static inline bool_t mfn_eq(mfn_t x, mfn_t y)
-{
-    return mfn_x(x) == mfn_x(y);
-}
-
-TYPE_SAFE(unsigned long, gfn);
-#define PRI_gfn          "05lx"
-#define INVALID_GFN      _gfn(~0UL)
-/*
- * To be used for global variable initialization. This workaround a bug
- * in GCC < 5.0 https://gcc.gnu.org/bugzilla/show_bug.cgi?id=64856
- */
-#define INVALID_GFN_INITIALIZER { ~0UL }
-
-#ifndef gfn_t
-#define gfn_t /* Grep fodder: gfn_t, _gfn() and gfn_x() are defined above */
-#define _gfn
-#define gfn_x
-#undef gfn_t
-#undef _gfn
-#undef gfn_x
-#endif
-
-static inline gfn_t gfn_add(gfn_t gfn, unsigned long i)
-{
-    return _gfn(gfn_x(gfn) + i);
-}
-
-static inline gfn_t gfn_max(gfn_t x, gfn_t y)
-{
-    return _gfn(max(gfn_x(x), gfn_x(y)));
-}
-
-static inline gfn_t gfn_min(gfn_t x, gfn_t y)
-{
-    return _gfn(min(gfn_x(x), gfn_x(y)));
-}
-
-static inline bool_t gfn_eq(gfn_t x, gfn_t y)
-{
-    return gfn_x(x) == gfn_x(y);
-}
-
-TYPE_SAFE(unsigned long, pfn);
-#define PRI_pfn          "05lx"
-#define INVALID_PFN      (~0UL)
-
-#ifndef pfn_t
-#define pfn_t /* Grep fodder: pfn_t, _pfn() and pfn_x() are defined above */
-#define _pfn
-#define pfn_x
-#undef pfn_t
-#undef _pfn
-#undef pfn_x
-#endif
 
 struct page_info;
 
 void put_page(struct page_info *);
-int get_page(struct page_info *, struct domain *);
+bool __must_check get_page(struct page_info *, const struct domain *);
 struct domain *__must_check page_get_owner_and_reference(struct page_info *);
 
 /* Boot-time allocator. Turns into generic allocator after bootstrap. */
@@ -175,6 +85,13 @@ bool scrub_free_pages(void);
 } while ( false )
 #define FREE_XENHEAP_PAGE(p) FREE_XENHEAP_PAGES(p, 0)
 
+/* These functions are for static memory */
+void unprepare_staticmem_pages(struct page_info *pg, unsigned long nr_mfns,
+                               bool need_scrub);
+void free_domstatic_page(struct page_info *page);
+int acquire_domstatic_pages(struct domain *d, mfn_t smfn, unsigned int nr_mfns,
+                            unsigned int memflags);
+
 /* Map machine page range in Xen virtual address space. */
 int map_pages_to_xen(
     unsigned long virt,
@@ -183,7 +100,11 @@ int map_pages_to_xen(
     unsigned int flags);
 /* Alter the permissions of a range of Xen virtual address space. */
 int modify_xen_mappings(unsigned long s, unsigned long e, unsigned int flags);
-int destroy_xen_mappings(unsigned long v, unsigned long e);
+void modify_xen_mappings_lite(unsigned long s, unsigned long e, unsigned int flags);
+int destroy_xen_mappings(unsigned long s, unsigned long e);
+/* Retrieve the MFN mapped by VA in Xen virtual address space. */
+mfn_t xen_map_to_mfn(unsigned long va);
+
 /*
  * Create only non-leaf page table entries for the
  * page range in Xen virtual address space.
@@ -213,9 +134,15 @@ int query_page_offline(mfn_t mfn, uint32_t *status);
 void heap_init_late(void);
 
 int assign_pages(
+    struct page_info *pg,
+    unsigned int nr,
     struct domain *d,
+    unsigned int memflags);
+
+int assign_page(
     struct page_info *pg,
     unsigned int order,
+    struct domain *d,
     unsigned int memflags);
 
 /* Dump info to serial console */
@@ -272,6 +199,7 @@ struct npfec {
 #else
 #define MAX_ORDER 20 /* 2^20 contiguous pages */
 #endif
+mfn_t acquire_reserved_page(struct domain *d, unsigned int memflags);
 
 /* Private domain structs for DOMID_XEN, DOMID_IO, etc. */
 extern struct domain *dom_xen, *dom_io;
@@ -627,6 +555,8 @@ int __must_check steal_page(struct domain *d, struct page_info *page,
 int page_is_ram_type(unsigned long mfn, unsigned long mem_type);
 /* Returns the page type(s). */
 unsigned int page_get_ram_type(mfn_t mfn);
+/* Check if a range falls into a hole in the memory map. */
+bool is_memory_hole(mfn_t start, mfn_t end);
 
 /* Prepare/destroy a ring for a dom0 helper. Helper with talk
  * with Xen on behalf of this domain. */

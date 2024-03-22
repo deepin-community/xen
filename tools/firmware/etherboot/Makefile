@@ -10,7 +10,8 @@ else
 IPXE_GIT_URL ?= git://git.ipxe.org/ipxe.git
 endif
 
-IPXE_GIT_TAG := 1dd56dbd11082fb622c2ed21cfaced4f47d798a6
+# put an updated tar.gz on xenbits after changes to this variable
+IPXE_GIT_TAG := 3c040ad387099483102708bb1839110bc788cefb
 
 IPXE_TARBALL_URL ?= $(XEN_EXTFILES_URL)/ipxe-git-$(IPXE_GIT_TAG).tar.gz
 

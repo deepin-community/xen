@@ -19,14 +19,31 @@ open Printf
 let debug fmt = Logging.debug "domain" fmt
 let warn  fmt = Logging.warn  "domain" fmt
 
+(* A bound inter-domain event channel port pair.  The remote port, and the
+   local port it is bound to. *)
+type port_pair =
+{
+	local: Xeneventchn.t;
+	remote: int;
+}
+
+(* Sentinal port_pair with both set to EVTCHN_INVALID *)
+let invalid_ports =
+{
+	local = Xeneventchn.of_int 0;
+	remote = 0
+}
+
+let string_of_port_pair p =
+	sprintf "(l %d, r %d)" (Xeneventchn.to_int p.local) p.remote
+
 type t =
 {
 	id: Xenctrl.domid;
 	mfn: nativeint;
 	interface: Xenmmap.mmap_interface;
 	eventchn: Event.t;
-	mutable remote_port: int;
-	mutable port: Xeneventchn.t option;
+	mutable ports: port_pair;
 	mutable bad_client: bool;
 	mutable io_credit: int; (* the rounds of ring process left to do, default is 0,
 	                           usually set to 1 when there is work detected, could
@@ -41,8 +58,8 @@ let is_dom0 d = d.id = 0
 let get_id domain = domain.id
 let get_interface d = d.interface
 let get_mfn d = d.mfn
-let get_remote_port d = d.remote_port
-let get_port d = d.port
+let get_remote_port d = d.ports.remote
+let get_local_port d = d.ports.local
 
 let is_bad_domain domain = domain.bad_client
 let mark_as_bad domain = domain.bad_client <- true
@@ -56,44 +73,43 @@ let is_paused_for_conflict dom = dom.conflict_credit <= 0.0
 
 let is_free_to_conflict = is_dom0
 
-let string_of_port = function
-| None -> "None"
-| Some x -> string_of_int (Xeneventchn.to_int x)
-
 let dump d chan =
-	fprintf chan "dom,%d,%nd,%d\n" d.id d.mfn d.remote_port
+	fprintf chan "dom,%d,%nd,%d,%d\n"
+		d.id d.mfn d.ports.remote (Xeneventchn.to_int d.ports.local)
 
-let notify dom = match dom.port with
-| None ->
-	warn "domain %d: attempt to notify on unknown port" dom.id
-| Some port ->
-	Event.notify dom.eventchn port
+let rebind_evtchn d remote_port =
+	Event.unbind d.eventchn d.ports.local;
+	let local = Event.bind_interdomain d.eventchn d.id remote_port in
+	let new_ports = { local; remote = remote_port } in
+	debug "domain %d rebind %s => %s"
+	      d.id (string_of_port_pair d.ports) (string_of_port_pair new_ports);
+	d.ports <- new_ports
 
-let bind_interdomain dom =
-	begin match dom.port with
-	| None -> ()
-	| Some port -> Event.unbind dom.eventchn port
-	end;
-	dom.port <- Some (Event.bind_interdomain dom.eventchn dom.id dom.remote_port);
-	debug "bound domain %d remote port %d to local port %s" dom.id dom.remote_port (string_of_port dom.port)
-
+let notify dom =
+	Event.notify dom.eventchn dom.ports.local
 
 let close dom =
-	debug "domain %d unbound port %s" dom.id (string_of_port dom.port);
-	begin match dom.port with
-	| None -> ()
-	| Some port -> Event.unbind dom.eventchn port
-	end;
-	Xenmmap.unmap dom.interface;
-	()
+	debug "domain %d unbind %s" dom.id (string_of_port_pair dom.ports);
+	Event.unbind dom.eventchn dom.ports.local;
+	dom.ports <- invalid_ports;
+	Xenmmap.unmap dom.interface
 
-let make id mfn remote_port interface eventchn = {
+(* On clean start, local_port will be None, and we must bind the remote port
+   given.  On Live Update, the event channel is already bound, and both the
+   local and remote port numbers come from the transfer record. *)
+let make ?local_port ~remote_port id mfn interface eventchn =
+	let local = match local_port with
+		| None -> Event.bind_interdomain eventchn id remote_port
+		| Some p -> Xeneventchn.of_int p
+	in
+	let ports = { local; remote = remote_port } in
+	debug "domain %d bind %s" id (string_of_port_pair ports);
+{
 	id = id;
 	mfn = mfn;
-	remote_port = remote_port;
+	ports;
 	interface = interface;
 	eventchn = eventchn;
-	port = None;
 	bad_client = false;
 	io_credit = 0;
 	conflict_credit = !Define.conflict_burst_limit;

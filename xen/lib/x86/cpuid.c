@@ -1,6 +1,6 @@
 #include "private.h"
 
-#include <xen/lib/x86/cpuid.h>
+#include <xen/lib/x86/cpu-policy.h>
 
 static void zero_leaves(struct cpuid_leaf *l,
                         unsigned int first, unsigned int last)
@@ -60,13 +60,59 @@ const char *x86_cpuid_vendor_to_str(unsigned int vendor)
     }
 }
 
-void x86_cpuid_policy_recalc_synth(struct cpuid_policy *p)
+void x86_cpu_policy_to_featureset(
+    const struct cpu_policy *p, uint32_t fs[FEATURESET_NR_ENTRIES])
+{
+    fs[FEATURESET_1d]        = p->basic._1d;
+    fs[FEATURESET_1c]        = p->basic._1c;
+    fs[FEATURESET_e1d]       = p->extd.e1d;
+    fs[FEATURESET_e1c]       = p->extd.e1c;
+    fs[FEATURESET_Da1]       = p->xstate.Da1;
+    fs[FEATURESET_7b0]       = p->feat._7b0;
+    fs[FEATURESET_7c0]       = p->feat._7c0;
+    fs[FEATURESET_e7d]       = p->extd.e7d;
+    fs[FEATURESET_e8b]       = p->extd.e8b;
+    fs[FEATURESET_7d0]       = p->feat._7d0;
+    fs[FEATURESET_7a1]       = p->feat._7a1;
+    fs[FEATURESET_e21a]      = p->extd.e21a;
+    fs[FEATURESET_7b1]       = p->feat._7b1;
+    fs[FEATURESET_7d2]       = p->feat._7d2;
+    fs[FEATURESET_7c1]       = p->feat._7c1;
+    fs[FEATURESET_7d1]       = p->feat._7d1;
+    fs[FEATURESET_m10Al]     = p->arch_caps.lo;
+    fs[FEATURESET_m10Ah]     = p->arch_caps.hi;
+}
+
+void x86_cpu_featureset_to_policy(
+    const uint32_t fs[FEATURESET_NR_ENTRIES], struct cpu_policy *p)
+{
+    p->basic._1d             = fs[FEATURESET_1d];
+    p->basic._1c             = fs[FEATURESET_1c];
+    p->extd.e1d              = fs[FEATURESET_e1d];
+    p->extd.e1c              = fs[FEATURESET_e1c];
+    p->xstate.Da1            = fs[FEATURESET_Da1];
+    p->feat._7b0             = fs[FEATURESET_7b0];
+    p->feat._7c0             = fs[FEATURESET_7c0];
+    p->extd.e7d              = fs[FEATURESET_e7d];
+    p->extd.e8b              = fs[FEATURESET_e8b];
+    p->feat._7d0             = fs[FEATURESET_7d0];
+    p->feat._7a1             = fs[FEATURESET_7a1];
+    p->extd.e21a             = fs[FEATURESET_e21a];
+    p->feat._7b1             = fs[FEATURESET_7b1];
+    p->feat._7d2             = fs[FEATURESET_7d2];
+    p->feat._7c1             = fs[FEATURESET_7c1];
+    p->feat._7d1             = fs[FEATURESET_7d1];
+    p->arch_caps.lo          = fs[FEATURESET_m10Al];
+    p->arch_caps.hi          = fs[FEATURESET_m10Ah];
+}
+
+void x86_cpu_policy_recalc_synth(struct cpu_policy *p)
 {
     p->x86_vendor = x86_cpuid_lookup_vendor(
         p->basic.vendor_ebx, p->basic.vendor_ecx, p->basic.vendor_edx);
 }
 
-void x86_cpuid_policy_fill_native(struct cpuid_policy *p)
+void x86_cpu_policy_fill_native(struct cpu_policy *p)
 {
     unsigned int i;
 
@@ -157,7 +203,7 @@ void x86_cpuid_policy_fill_native(struct cpuid_policy *p)
         cpuid_count_leaf(0xd, 0, &p->xstate.raw[0]);
         cpuid_count_leaf(0xd, 1, &p->xstate.raw[1]);
 
-        xstates = cpuid_policy_xstates(p);
+        xstates = cpu_policy_xstates(p);
 
         /* This logic will probably need adjusting when XCR0[63] gets used. */
         BUILD_BUG_ON(ARRAY_SIZE(p->xstate.raw) > 63);
@@ -165,7 +211,7 @@ void x86_cpuid_policy_fill_native(struct cpuid_policy *p)
         for ( i = 2; i < min_t(unsigned int, 63,
                                ARRAY_SIZE(p->xstate.raw)); ++i )
         {
-            if ( xstates & (1ul << i) )
+            if ( xstates & (1ull << i) )
                 cpuid_count_leaf(0xd, i, &p->xstate.raw[i]);
         }
     }
@@ -180,10 +226,17 @@ void x86_cpuid_policy_fill_native(struct cpuid_policy *p)
     p->hv_limit = 0;
     p->hv2_limit = 0;
 
-    x86_cpuid_policy_recalc_synth(p);
+#ifdef __XEN__
+    /* TODO MSR_PLATFORM_INFO */
+
+    if ( p->feat.arch_caps )
+        rdmsrl(MSR_ARCH_CAPABILITIES, p->arch_caps.raw);
+#endif
+
+    x86_cpu_policy_recalc_synth(p);
 }
 
-void x86_cpuid_policy_clear_out_of_range_leaves(struct cpuid_policy *p)
+void x86_cpu_policy_clear_out_of_range_leaves(struct cpu_policy *p)
 {
     unsigned int i;
 
@@ -218,7 +271,7 @@ void x86_cpuid_policy_clear_out_of_range_leaves(struct cpuid_policy *p)
         zero_leaves(p->topo.raw, i, ARRAY_SIZE(p->topo.raw) - 1);
     }
 
-    if ( p->basic.max_leaf < 0xd || !cpuid_policy_xstates(p) )
+    if ( p->basic.max_leaf < 0xd || !cpu_policy_xstates(p) )
         memset(p->xstate.raw, 0, sizeof(p->xstate.raw));
     else
     {
@@ -226,7 +279,7 @@ void x86_cpuid_policy_clear_out_of_range_leaves(struct cpuid_policy *p)
         BUILD_BUG_ON(ARRAY_SIZE(p->xstate.raw) > 63);
 
         /* First two leaves always valid.  Rest depend on xstates. */
-        i = max(2, 64 - __builtin_clzll(cpuid_policy_xstates(p)));
+        i = max(2, 64 - __builtin_clzll(cpu_policy_xstates(p)));
 
         zero_leaves(p->xstate.raw, i,
                     ARRAY_SIZE(p->xstate.raw) - 1);
@@ -236,7 +289,7 @@ void x86_cpuid_policy_clear_out_of_range_leaves(struct cpuid_policy *p)
                 ARRAY_SIZE(p->extd.raw) - 1);
 }
 
-const uint32_t *x86_cpuid_lookup_deep_deps(uint32_t feature)
+const uint32_t *x86_cpu_policy_lookup_deep_deps(uint32_t feature)
 {
     static const uint32_t deep_features[] = INIT_DEEP_FEATURES;
     static const struct {
@@ -291,7 +344,7 @@ static int copy_leaf_to_buffer(uint32_t leaf, uint32_t subleaf,
     return 0;
 }
 
-int x86_cpuid_copy_to_buffer(const struct cpuid_policy *p,
+int x86_cpuid_copy_to_buffer(const struct cpu_policy *p,
                              cpuid_leaf_buffer_t leaves, uint32_t *nr_entries_p)
 {
     const uint32_t nr_entries = *nr_entries_p;
@@ -341,7 +394,7 @@ int x86_cpuid_copy_to_buffer(const struct cpuid_policy *p,
 
         case 0xd:
         {
-            uint64_t xstates = cpuid_policy_xstates(p);
+            uint64_t xstates = cpu_policy_xstates(p);
 
             COPY_LEAF(leaf, 0, &p->xstate.raw[0]);
             COPY_LEAF(leaf, 1, &p->xstate.raw[1]);
@@ -377,7 +430,7 @@ int x86_cpuid_copy_to_buffer(const struct cpuid_policy *p,
     return 0;
 }
 
-int x86_cpuid_copy_from_buffer(struct cpuid_policy *p,
+int x86_cpuid_copy_from_buffer(struct cpu_policy *p,
                                const cpuid_leaf_buffer_t leaves,
                                uint32_t nr_entries, uint32_t *err_leaf,
                                uint32_t *err_subleaf)
@@ -480,7 +533,7 @@ int x86_cpuid_copy_from_buffer(struct cpuid_policy *p,
         }
     }
 
-    x86_cpuid_policy_recalc_synth(p);
+    x86_cpu_policy_recalc_synth(p);
 
     return 0;
 

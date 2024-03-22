@@ -28,7 +28,7 @@
   ((year) % 4 == 0 && ((year) % 100 != 0 || (year) % 400 == 0))
 
 /* How many days are in each month.  */
-const unsigned short int __mon_lengths[2][12] = {
+static const unsigned short int __mon_lengths[2][12] = {
     /* Normal years.  */
     {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31},
     /* Leap years.  */
@@ -108,7 +108,7 @@ void update_domain_wallclock_time(struct domain *d)
     sec = wc_sec + d->time_offset.seconds;
     shared_info(d, wc_sec)    = sec;
     shared_info(d, wc_nsec)   = wc_nsec;
-#ifdef CONFIG_X86
+#if defined(CONFIG_X86) && defined(CONFIG_COMPAT)
     if ( likely(!has_32bit_shinfo(d)) )
         d->shared_info->native.wc_sec_hi = sec >> 32;
     else

@@ -167,7 +167,7 @@ static int rsinterval = 1000;
 static atomic_t cpu_count = ATOMIC_INIT(0);
 static atomic_t pending_count = ATOMIC_INIT(0);
 
-static void rcu_barrier_callback(struct rcu_head *head)
+static void cf_check rcu_barrier_callback(struct rcu_head *head)
 {
     /*
      * We need a barrier making all previous writes visible to other cpus
@@ -466,7 +466,7 @@ static void __rcu_process_callbacks(struct rcu_ctrlblk *rcp,
         rcu_do_batch(rdp);
 }
 
-static void rcu_process_callbacks(void)
+static void cf_check rcu_process_callbacks(void)
 {
     struct rcu_data *rdp = &this_cpu(rcu_data);
 
@@ -575,7 +575,7 @@ static void rcu_idle_timer_stop(void)
         stop_timer(&rdp->idle_timer);
 }
 
-static void rcu_idle_timer_handler(void* data)
+static void cf_check rcu_idle_timer_handler(void* data)
 {
     perfc_incr(rcu_idle_timer);
 
@@ -641,7 +641,7 @@ static void rcu_init_percpu_data(int cpu, struct rcu_ctrlblk *rcp,
     init_timer(&rdp->idle_timer, rcu_idle_timer_handler, rdp, cpu);
 }
 
-static int cpu_callback(
+static int cf_check cpu_callback(
     struct notifier_block *nfb, unsigned long action, void *hcpu)
 {
     unsigned int cpu = (unsigned long)hcpu;

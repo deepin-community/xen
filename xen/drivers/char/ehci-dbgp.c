@@ -1000,13 +1000,15 @@ err:
 
 typedef void (*set_debug_port_t)(struct ehci_dbgp *, unsigned int);
 
-static void default_set_debug_port(struct ehci_dbgp *dbgp, unsigned int port)
+static void cf_check default_set_debug_port(
+    struct ehci_dbgp *dbgp, unsigned int port)
 {
 }
 
 static set_debug_port_t __read_mostly set_debug_port = default_set_debug_port;
 
-static void nvidia_set_debug_port(struct ehci_dbgp *dbgp, unsigned int port)
+static void cf_check nvidia_set_debug_port(
+    struct ehci_dbgp *dbgp, unsigned int port)
 {
     uint32_t dword = pci_conf_read32(PCI_SBDF(0, dbgp->bus, dbgp->slot,
                                               dbgp->func), 0x74);
@@ -1167,7 +1169,7 @@ static inline void _ehci_dbgp_flush(struct ehci_dbgp *dbgp)
     dbgp->out.chunk = 0;
 }
 
-static void ehci_dbgp_flush(struct serial_port *port)
+static void cf_check ehci_dbgp_flush(struct serial_port *port)
 {
     struct ehci_dbgp *dbgp = port->uart;
     s_time_t goal;
@@ -1196,7 +1198,7 @@ static void ehci_dbgp_flush(struct serial_port *port)
        set_timer(&dbgp->timer, goal);
 }
 
-static void ehci_dbgp_putc(struct serial_port *port, char c)
+static void cf_check ehci_dbgp_putc(struct serial_port *port, char c)
 {
     struct ehci_dbgp *dbgp = port->uart;
 
@@ -1209,7 +1211,7 @@ static void ehci_dbgp_putc(struct serial_port *port, char c)
         ehci_dbgp_flush(port);
 }
 
-static int ehci_dbgp_tx_ready(struct serial_port *port)
+static int cf_check ehci_dbgp_tx_ready(struct serial_port *port)
 {
     struct ehci_dbgp *dbgp = port->uart;
 
@@ -1228,7 +1230,7 @@ static int ehci_dbgp_tx_ready(struct serial_port *port)
            (dbgp->state == dbgp_idle) * DBGP_MAX_PACKET;
 }
 
-static int ehci_dbgp_getc(struct serial_port *port, char *pc)
+static int cf_check ehci_dbgp_getc(struct serial_port *port, char *pc)
 {
     struct ehci_dbgp *dbgp = port->uart;
 
@@ -1245,7 +1247,7 @@ static int ehci_dbgp_getc(struct serial_port *port, char *pc)
 /* Safe: ehci_dbgp_poll() runs as timer handler, so not reentrant. */
 static struct serial_port *poll_port;
 
-static void _ehci_dbgp_poll(struct cpu_user_regs *regs)
+static void cf_check _ehci_dbgp_poll(struct cpu_user_regs *regs)
 {
     struct serial_port *port = poll_port;
     struct ehci_dbgp *dbgp = port->uart;
@@ -1289,7 +1291,7 @@ static void _ehci_dbgp_poll(struct cpu_user_regs *regs)
     set_timer(&dbgp->timer, NOW() + timeout);
 }
 
-static void ehci_dbgp_poll(void *data)
+static void cf_check ehci_dbgp_poll(void *data)
 {
     poll_port = data;
 #ifdef run_in_exception_handler
@@ -1309,7 +1311,7 @@ static bool_t ehci_dbgp_setup_preirq(struct ehci_dbgp *dbgp)
     return 0;
 }
 
-static void __init ehci_dbgp_init_preirq(struct serial_port *port)
+static void __init cf_check ehci_dbgp_init_preirq(struct serial_port *port)
 {
     struct ehci_dbgp *dbgp = port->uart;
     u32 debug_port, offset;
@@ -1358,7 +1360,7 @@ static void ehci_dbgp_setup_postirq(struct ehci_dbgp *dbgp)
     set_timer(&dbgp->timer, NOW() + MILLISECS(1));
 }
 
-static void __init ehci_dbgp_init_postirq(struct serial_port *port)
+static void __init cf_check ehci_dbgp_init_postirq(struct serial_port *port)
 {
     struct ehci_dbgp *dbgp = port->uart;
 
@@ -1409,12 +1411,12 @@ static int ehci_dbgp_check_release(struct ehci_dbgp *dbgp)
     return 0;
 }
 
-static void __init ehci_dbgp_endboot(struct serial_port *port)
+static void __init cf_check ehci_dbgp_endboot(struct serial_port *port)
 {
     ehci_dbgp_check_release(port->uart);
 }
 
-static void ehci_dbgp_suspend(struct serial_port *port)
+static void cf_check ehci_dbgp_suspend(struct serial_port *port)
 {
     struct ehci_dbgp *dbgp = port->uart;
 
@@ -1431,7 +1433,7 @@ static void ehci_dbgp_suspend(struct serial_port *port)
     dbgp->state = dbgp_unsafe;
 }
 
-static void ehci_dbgp_resume(struct serial_port *port)
+static void cf_check ehci_dbgp_resume(struct serial_port *port)
 {
     struct ehci_dbgp *dbgp = port->uart;
 
@@ -1462,7 +1464,17 @@ static struct uart_driver __read_mostly ehci_dbgp_driver = {
 static struct ehci_dbgp ehci_dbgp = { .state = dbgp_unsafe, .phys_port = 1 };
 
 static char __initdata opt_dbgp[30];
-string_param("dbgp", opt_dbgp);
+
+static int __init cf_check parse_ehci_dbgp(const char *opt)
+{
+    if ( strncmp(opt, "ehci", 4) )
+        return 0;
+
+    strlcpy(opt_dbgp, opt, sizeof(opt_dbgp));
+
+    return 0;
+}
+custom_param("dbgp", parse_ehci_dbgp);
 
 void __init ehci_dbgp_init(void)
 {
@@ -1470,7 +1482,7 @@ void __init ehci_dbgp_init(void)
     u32 debug_port, offset, bar_val;
     const char *e;
 
-    if ( strncmp(opt_dbgp, "ehci", 4) )
+    if ( !opt_dbgp[0] )
         return;
 
     if ( isdigit(opt_dbgp[4]) || !opt_dbgp[4] )
@@ -1478,7 +1490,7 @@ void __init ehci_dbgp_init(void)
         unsigned int num = 0;
 
         if ( opt_dbgp[4] )
-            simple_strtoul(opt_dbgp + 4, &e, 10);
+            num = simple_strtoul(opt_dbgp + 4, &e, 10);
 
         dbgp->cap = find_dbgp(dbgp, num);
         if ( !dbgp->cap )

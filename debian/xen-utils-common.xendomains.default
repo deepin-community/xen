@@ -1,9 +1,3 @@
-# The xendomains script can send SysRq requests to domains on shutdown.
-# If you don't want to MIGRATE, SAVE, or SHUTDOWN, this may be a possibility
-# to do a quick and dirty shutdown ("s e i u o") or at least sync the disks
-# of the domains ("s").
-#
-# XENDOMAINS_SYSRQ=
 
 # Set this to a non-empty string if you want to migrate virtual machines
 # on shutdown. The string will be passed to the xm migrate DOMID command
@@ -13,7 +7,7 @@
 # If migration succeeds, neither SAVE nor SHUTDOWN will be executed for
 # that domain.
 #
-# XENDOMAINS_MIGRATE=
+XENDOMAINS_MIGRATE=""
 
 # Directory to save running domains to when the system (dom0) is
 # shut down. Will also be used to restore domains from if # XENDOMAINS_RESTORE

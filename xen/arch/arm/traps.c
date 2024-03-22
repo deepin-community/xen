@@ -21,6 +21,7 @@
 #include <xen/hypercall.h>
 #include <xen/init.h>
 #include <xen/iocap.h>
+#include <xen/ioreq.h>
 #include <xen/irq.h>
 #include <xen/lib.h>
 #include <xen/mem_access.h>
@@ -33,6 +34,7 @@
 #include <xen/symbols.h>
 #include <xen/version.h>
 #include <xen/virtual_region.h>
+#include <xen/vpci.h>
 
 #include <public/sched.h>
 #include <public/xen.h>
@@ -40,7 +42,6 @@
 #include <asm/acpi.h>
 #include <asm/cpuerrata.h>
 #include <asm/cpufeature.h>
-#include <asm/debugger.h>
 #include <asm/event.h>
 #include <asm/hsr.h>
 #include <asm/mmio.h>
@@ -98,7 +99,7 @@ register_t get_default_hcr_flags(void)
 {
     return  (HCR_PTW|HCR_BSU_INNER|HCR_AMO|HCR_IMO|HCR_FMO|HCR_VM|
              (vwfi != NATIVE ? (HCR_TWI|HCR_TWE) : 0) |
-             HCR_TSC|HCR_TAC|HCR_SWIO|HCR_TIDCP|HCR_FB|HCR_TSW);
+             HCR_TID3|HCR_TSC|HCR_TAC|HCR_SWIO|HCR_TIDCP|HCR_FB|HCR_TSW);
 }
 
 static enum {
@@ -175,14 +176,14 @@ static void print_xen_info(void)
 {
     char taint_str[TAINT_STRING_MAX_LEN];
 
-    printk("----[ Xen-%d.%d%s  %s  debug=%c " gcov_string "  %s ]----\n",
+    printk("----[ Xen-%d.%d%s  %s  %s  %s ]----\n",
            xen_major_version(), xen_minor_version(), xen_extra_version(),
 #ifdef CONFIG_ARM_32
            "arm32",
 #else
            "arm64",
 #endif
-           debug_build() ? 'y' : 'n', print_tainted(taint_str));
+           xen_build_info(), print_tainted(taint_str));
 }
 
 #ifdef CONFIG_ARM_32
@@ -545,7 +546,7 @@ void inject_undef64_exception(struct cpu_user_regs *regs, int instr_len)
         PSR_IRQ_MASK | PSR_DBG_MASK;
     regs->pc = handler;
 
-    WRITE_SYSREG32(esr.bits, ESR_EL1);
+    WRITE_SYSREG(esr.bits, ESR_EL1);
 }
 
 /* Inject an abort exception into a 64 bit guest */
@@ -560,7 +561,7 @@ static void inject_abt64_exception(struct cpu_user_regs *regs,
         .len = instr_len,
     };
 
-    if ( psr_mode_is_user(regs) )
+    if ( regs_mode_is_user(regs) )
         esr.ec = prefetch
             ? HSR_EC_INSTR_ABORT_LOWER_EL : HSR_EC_DATA_ABORT_LOWER_EL;
     else
@@ -579,7 +580,7 @@ static void inject_abt64_exception(struct cpu_user_regs *regs,
     regs->pc = handler;
 
     WRITE_SYSREG(addr, FAR_EL1);
-    WRITE_SYSREG32(esr.bits, ESR_EL1);
+    WRITE_SYSREG(esr.bits, ESR_EL1);
 }
 
 static void inject_dabt64_exception(struct cpu_user_regs *regs,
@@ -716,7 +717,7 @@ struct reg_ctxt {
     uint64_t vttbr_el2;
 };
 
-static const char *mode_string(uint32_t cpsr)
+static const char *mode_string(register_t cpsr)
 {
     uint32_t mode;
     static const char *mode_strings[] = {
@@ -761,7 +762,7 @@ static void show_registers_32(const struct cpu_user_regs *regs,
         printk(" %pS", _p(regs->pc));
     printk("\n");
 #endif
-    printk("CPSR:   %08"PRIx32" MODE:%s\n", regs->cpsr,
+    printk("CPSR:   %"PRIregister" MODE:%s\n", regs->cpsr,
            mode_string(regs->cpsr));
     printk("     R0: %08"PRIx32" R1: %08"PRIx32" R2: %08"PRIx32" R3: %08"PRIx32"\n",
            regs->r0, regs->r1, regs->r2, regs->r3);
@@ -845,7 +846,7 @@ static void show_registers_64(const struct cpu_user_regs *regs,
     {
         printk("SP:     %016"PRIx64"\n", regs->sp);
     }
-    printk("CPSR:   %08"PRIx32" MODE:%s\n", regs->cpsr,
+    printk("CPSR:   %016"PRIx64" MODE:%s\n", regs->cpsr,
            mode_string(regs->cpsr));
     printk("     X0: %016"PRIx64"  X1: %016"PRIx64"  X2: %016"PRIx64"\n",
            regs->x0, regs->x1, regs->x2);
@@ -895,7 +896,7 @@ static void _show_registers(const struct cpu_user_regs *regs,
 
     if ( guest_mode )
     {
-        if ( psr_mode_is_32bit(regs) )
+        if ( regs_mode_is_32bit(regs) )
             show_registers_32(regs, ctxt, guest_mode, v);
 #ifdef CONFIG_ARM_64
         else
@@ -910,15 +911,15 @@ static void _show_registers(const struct cpu_user_regs *regs,
         show_registers_32(regs, ctxt, guest_mode, v);
 #endif
     }
-    printk("  VTCR_EL2: %08"PRIx32"\n", READ_SYSREG32(VTCR_EL2));
+    printk("  VTCR_EL2: %"PRIregister"\n", READ_SYSREG(VTCR_EL2));
     printk(" VTTBR_EL2: %016"PRIx64"\n", ctxt->vttbr_el2);
     printk("\n");
 
-    printk(" SCTLR_EL2: %08"PRIx32"\n", READ_SYSREG32(SCTLR_EL2));
+    printk(" SCTLR_EL2: %"PRIregister"\n", READ_SYSREG(SCTLR_EL2));
     printk("   HCR_EL2: %"PRIregister"\n", READ_SYSREG(HCR_EL2));
     printk(" TTBR0_EL2: %016"PRIx64"\n", READ_SYSREG64(TTBR0_EL2));
     printk("\n");
-    printk("   ESR_EL2: %08"PRIx32"\n", regs->hsr);
+    printk("   ESR_EL2: %"PRIregister"\n", regs->hsr);
     printk(" HPFAR_EL2: %"PRIregister"\n", READ_SYSREG(HPFAR_EL2));
 
 #ifdef CONFIG_ARM_32
@@ -1192,7 +1193,7 @@ void vcpu_show_execution_state(struct vcpu *v)
     vcpu_pause(v); /* acceptably dangerous */
 
     vcpu_show_registers(v);
-    if ( !psr_mode_is_user(&v->arch.cpu_info->guest_cpu_user_regs) )
+    if ( !regs_mode_is_user(&v->arch.cpu_info->guest_cpu_user_regs) )
         show_guest_stack(v, &v->arch.cpu_info->guest_cpu_user_regs);
 
     vcpu_unpause(v);
@@ -1236,6 +1237,14 @@ int do_bug_frame(const struct cpu_user_regs *regs, vaddr_t pc)
     if ( !bug )
         return -ENOENT;
 
+    if ( id == BUGFRAME_run_fn )
+    {
+        void (*fn)(const struct cpu_user_regs *) = (void *)regs->BUG_FN_REG;
+
+        fn(regs);
+        return 0;
+    }
+
     /* WARN, BUG or ASSERT: decode the filename pointer and line number. */
     filename = bug_file(bug);
     if ( !is_kernel(filename) )
@@ -1257,10 +1266,6 @@ int do_bug_frame(const struct cpu_user_regs *regs, vaddr_t pc)
 
     case BUGFRAME_bug:
         printk("Xen BUG at %s%s:%d\n", prefix, filename, lineno);
-
-        if ( debugger_trap_fatal(TRAP_invalid_op, regs) )
-            return 0;
-
         show_execution_state(regs);
         panic("Xen BUG at %s%s:%d\n", prefix, filename, lineno);
 
@@ -1272,8 +1277,6 @@ int do_bug_frame(const struct cpu_user_regs *regs, vaddr_t pc)
 
         printk("Assertion '%s' failed at %s%s:%d\n",
                predicate, prefix, filename, lineno);
-        if ( debugger_trap_fatal(TRAP_invalid_op, regs) )
-            return 0;
         show_execution_state(regs);
         panic("Assertion '%s' failed at %s%s:%d\n",
               predicate, prefix, filename, lineno);
@@ -1328,64 +1331,20 @@ static register_t do_deprecated_hypercall(void)
     return -ENOSYS;
 }
 
-typedef register_t (*arm_hypercall_fn_t)(
-    register_t, register_t, register_t, register_t, register_t);
+long dep_sched_op_compat(int cmd, unsigned long arg)
+{
+    return do_deprecated_hypercall();
+}
 
-typedef struct {
-    arm_hypercall_fn_t fn;
-    int nr_args;
-} arm_hypercall_t;
+long dep_event_channel_op_compat(XEN_GUEST_HANDLE_PARAM(evtchn_op_t) uop)
+{
+    return do_deprecated_hypercall();
+}
 
-#define HYPERCALL(_name, _nr_args)                                   \
-    [ __HYPERVISOR_ ## _name ] =  {                                  \
-        .fn = (arm_hypercall_fn_t) &do_ ## _name,                    \
-        .nr_args = _nr_args,                                         \
-    }
-
-#define HYPERCALL_ARM(_name, _nr_args)                        \
-    [ __HYPERVISOR_ ## _name ] =  {                                  \
-        .fn = (arm_hypercall_fn_t) &do_arm_ ## _name,                \
-        .nr_args = _nr_args,                                         \
-    }
-/*
- * Only use this for hypercalls which were deprecated (i.e. replaced
- * by something else) before Xen on ARM was created, i.e. *not* for
- * hypercalls which are simply not yet used on ARM.
- */
-#define HYPERCALL_DEPRECATED(_name, _nr_args)                   \
-    [ __HYPERVISOR_##_name ] = {                                \
-        .fn = (arm_hypercall_fn_t) &do_deprecated_hypercall,    \
-        .nr_args = _nr_args,                                    \
-    }
-
-static arm_hypercall_t arm_hypercall_table[] = {
-    HYPERCALL(memory_op, 2),
-    HYPERCALL(domctl, 1),
-    HYPERCALL(sched_op, 2),
-    HYPERCALL_DEPRECATED(sched_op_compat, 2),
-    HYPERCALL(console_io, 3),
-    HYPERCALL(xen_version, 2),
-    HYPERCALL(xsm_op, 1),
-    HYPERCALL(event_channel_op, 2),
-    HYPERCALL_DEPRECATED(event_channel_op_compat, 1),
-    HYPERCALL(physdev_op, 2),
-    HYPERCALL_DEPRECATED(physdev_op_compat, 1),
-    HYPERCALL(sysctl, 2),
-    HYPERCALL(hvm_op, 2),
-#ifdef CONFIG_GRANT_TABLE
-    HYPERCALL(grant_table_op, 3),
-#endif
-    HYPERCALL(multicall, 2),
-    HYPERCALL(platform_op, 1),
-    HYPERCALL_ARM(vcpu_op, 3),
-    HYPERCALL(vm_assist, 2),
-#ifdef CONFIG_ARGO
-    HYPERCALL(argo_op, 5),
-#endif
-#ifdef CONFIG_HYPFS
-    HYPERCALL(hypfs_op, 5),
-#endif
-};
+long dep_physdev_op_compat(XEN_GUEST_HANDLE_PARAM(physdev_op_t) uop)
+{
+    return do_deprecated_hypercall();
+}
 
 #ifndef NDEBUG
 static void do_debug_trap(struct cpu_user_regs *regs, unsigned int code)
@@ -1411,7 +1370,7 @@ static void do_debug_trap(struct cpu_user_regs *regs, unsigned int code)
         show_execution_state(regs);
         break;
     default:
-        panic("DOM%d: Unhandled debug trap %#x\n", domid, code);
+        printk("DOM%d: Unhandled debug trap %#x\n", domid, code);
         break;
     }
 }
@@ -1424,7 +1383,6 @@ static void do_debug_trap(struct cpu_user_regs *regs, unsigned int code)
 #define HYPERCALL_ARG3(r) (r)->x2
 #define HYPERCALL_ARG4(r) (r)->x3
 #define HYPERCALL_ARG5(r) (r)->x4
-#define HYPERCALL_ARGS(r) (r)->x0, (r)->x1, (r)->x2, (r)->x3, (r)->x4
 #else
 #define HYPERCALL_RESULT_REG(r) (r)->r0
 #define HYPERCALL_ARG1(r) (r)->r0
@@ -1432,15 +1390,14 @@ static void do_debug_trap(struct cpu_user_regs *regs, unsigned int code)
 #define HYPERCALL_ARG3(r) (r)->r2
 #define HYPERCALL_ARG4(r) (r)->r3
 #define HYPERCALL_ARG5(r) (r)->r4
-#define HYPERCALL_ARGS(r) (r)->r0, (r)->r1, (r)->r2, (r)->r3, (r)->r4
 #endif
+
+static const unsigned char hypercall_args[] = hypercall_args_arm;
 
 static void do_trap_hypercall(struct cpu_user_regs *regs, register_t *nr,
                               const union hsr hsr)
 {
-    arm_hypercall_fn_t call = NULL;
-
-    BUILD_BUG_ON(NR_hypercalls < ARRAY_SIZE(arm_hypercall_table) );
+    struct vcpu *curr = current;
 
     if ( hsr.iss != XEN_HYPERCALL_TAG )
     {
@@ -1448,35 +1405,25 @@ static void do_trap_hypercall(struct cpu_user_regs *regs, register_t *nr,
         return inject_undef_exception(regs, hsr);
     }
 
-    if ( *nr >= ARRAY_SIZE(arm_hypercall_table) )
-    {
-        perfc_incr(invalid_hypercalls);
-        HYPERCALL_RESULT_REG(regs) = -ENOSYS;
-        return;
-    }
-
-    current->hcall_preempted = false;
+    curr->hcall_preempted = false;
 
     perfc_incra(hypercalls, *nr);
-    call = arm_hypercall_table[*nr].fn;
-    if ( call == NULL )
-    {
-        HYPERCALL_RESULT_REG(regs) = -ENOSYS;
-        return;
-    }
 
-    HYPERCALL_RESULT_REG(regs) = call(HYPERCALL_ARGS(regs));
+    call_handlers_arm(*nr, HYPERCALL_RESULT_REG(regs), HYPERCALL_ARG1(regs),
+                      HYPERCALL_ARG2(regs), HYPERCALL_ARG3(regs),
+                      HYPERCALL_ARG4(regs), HYPERCALL_ARG5(regs));
 
 #ifndef NDEBUG
-    if ( !current->hcall_preempted )
+    if ( !curr->hcall_preempted && HYPERCALL_RESULT_REG(regs) != -ENOSYS )
     {
         /* Deliberately corrupt parameter regs used by this hypercall. */
-        switch ( arm_hypercall_table[*nr].nr_args ) {
+        switch ( hypercall_args[*nr] ) {
         case 5: HYPERCALL_ARG5(regs) = 0xDEADBEEF;
         case 4: HYPERCALL_ARG4(regs) = 0xDEADBEEF;
         case 3: HYPERCALL_ARG3(regs) = 0xDEADBEEF;
         case 2: HYPERCALL_ARG2(regs) = 0xDEADBEEF;
         case 1: /* Don't clobber x0/r0 -- it's the return value */
+        case 0: /* -ENOSYS case */
             break;
         default: BUG();
         }
@@ -1485,8 +1432,21 @@ static void do_trap_hypercall(struct cpu_user_regs *regs, register_t *nr,
 #endif
 
     /* Ensure the hypercall trap instruction is re-executed. */
-    if ( current->hcall_preempted )
+    if ( curr->hcall_preempted )
         regs->pc -= 4;  /* re-execute 'hvc #XEN_HYPERCALL_TAG' */
+
+#ifdef CONFIG_IOREQ_SERVER
+    /*
+     * We call ioreq_signal_mapcache_invalidate from do_trap_hypercall()
+     * because the only way a guest can modify its P2M on Arm is via an
+     * hypercall.
+     * Note that sending the invalidation request causes the vCPU to block
+     * until all the IOREQ servers have acknowledged the invalidation.
+     */
+    if ( unlikely(curr->mapcache_invalidate) &&
+         test_and_clear_bool(curr->mapcache_invalidate) )
+        ioreq_signal_mapcache_invalidate();
+#endif
 }
 
 void arch_hypercall_tasklet_result(struct vcpu *v, long res)
@@ -1500,7 +1460,7 @@ static bool check_multicall_32bit_clean(struct multicall_entry *multi)
 {
     int i;
 
-    for ( i = 0; i < arm_hypercall_table[multi->op].nr_args; i++ )
+    for ( i = 0; i < hypercall_args[multi->op]; i++ )
     {
         if ( unlikely(multi->args[i] & 0xffffffff00000000ULL) )
         {
@@ -1517,16 +1477,8 @@ static bool check_multicall_32bit_clean(struct multicall_entry *multi)
 enum mc_disposition arch_do_multicall_call(struct mc_state *state)
 {
     struct multicall_entry *multi = &state->call;
-    arm_hypercall_fn_t call = NULL;
 
-    if ( multi->op >= ARRAY_SIZE(arm_hypercall_table) )
-    {
-        multi->result = -ENOSYS;
-        return mc_continue;
-    }
-
-    call = arm_hypercall_table[multi->op].fn;
-    if ( call == NULL )
+    if ( multi->op >= ARRAY_SIZE(hypercall_args) )
     {
         multi->result = -ENOSYS;
         return mc_continue;
@@ -1536,11 +1488,10 @@ enum mc_disposition arch_do_multicall_call(struct mc_state *state)
          !check_multicall_32bit_clean(multi) )
         return mc_continue;
 
-    multi->result = call(multi->args[0], multi->args[1],
-                         multi->args[2], multi->args[3],
-                         multi->args[4]);
+    call_handlers_arm(multi->op, multi->result, multi->args[0], multi->args[1],
+                      multi->args[2], multi->args[3], multi->args[4]);
 
-    return likely(!psr_mode_is_user(guest_cpu_user_regs()))
+    return likely(!regs_mode_is_user(guest_cpu_user_regs()))
            ? mc_continue : mc_preempt;
 }
 
@@ -1573,7 +1524,7 @@ static const unsigned short cc_map[16] = {
 
 int check_conditional_instr(struct cpu_user_regs *regs, const union hsr hsr)
 {
-    unsigned long cpsr, cpsr_cond;
+    register_t cpsr, cpsr_cond;
     int cond;
 
     /*
@@ -1611,7 +1562,7 @@ int check_conditional_instr(struct cpu_user_regs *regs, const union hsr hsr)
     {
         unsigned long it;
 
-        BUG_ON( !psr_mode_is_32bit(regs) || !(cpsr & PSR_THUMB) );
+        BUG_ON( !regs_mode_is_32bit(regs) || !(cpsr & PSR_THUMB) );
 
         it = ( (cpsr >> (10-2)) & 0xfc) | ((cpsr >> 25) & 0x3 );
 
@@ -1635,8 +1586,8 @@ int check_conditional_instr(struct cpu_user_regs *regs, const union hsr hsr)
 
 void advance_pc(struct cpu_user_regs *regs, const union hsr hsr)
 {
-    unsigned long itbits, cond, cpsr = regs->cpsr;
-    bool is_thumb = psr_mode_is_32bit(regs) && (cpsr & PSR_THUMB);
+    register_t itbits, cond, cpsr = regs->cpsr;
+    bool is_thumb = regs_mode_is_32bit(regs) && (cpsr & PSR_THUMB);
 
     if ( is_thumb && (cpsr & PSR_IT_MASK) )
     {
@@ -1679,7 +1630,7 @@ void handle_raz_wi(struct cpu_user_regs *regs,
 {
     ASSERT((min_el == 0) || (min_el == 1));
 
-    if ( min_el > 0 && psr_mode_is_user(regs) )
+    if ( min_el > 0 && regs_mode_is_user(regs) )
         return inject_undef_exception(regs, hsr);
 
     if ( read )
@@ -1698,7 +1649,7 @@ void handle_wo_wi(struct cpu_user_regs *regs,
 {
     ASSERT((min_el == 0) || (min_el == 1));
 
-    if ( min_el > 0 && psr_mode_is_user(regs) )
+    if ( min_el > 0 && regs_mode_is_user(regs) )
         return inject_undef_exception(regs, hsr);
 
     if ( read )
@@ -1718,7 +1669,7 @@ void handle_ro_read_val(struct cpu_user_regs *regs,
 {
     ASSERT((min_el == 0) || (min_el == 1));
 
-    if ( min_el > 0 && psr_mode_is_user(regs) )
+    if ( min_el > 0 && regs_mode_is_user(regs) )
         return inject_undef_exception(regs, hsr);
 
     if ( !read )
@@ -1836,7 +1787,7 @@ static inline bool hpfar_is_valid(bool s1ptw, uint8_t fsc)
      *  1. the stage 2 fault happen during a stage 1 page table walk
      *  (the bit ESR_EL2.S1PTW is set)
      *  2. the fault was due to a translation fault and the processor
-     *  does not carry erratum #8342220
+     *  does not carry erratum #834220
      *
      * Note that technically HPFAR is valid for other cases, but they
      * are currently not supported by Xen.
@@ -1867,10 +1818,25 @@ static bool try_map_mmio(gfn_t gfn)
         return false;
 
     /* The hardware domain can only map permitted MMIO regions */
-    if ( !iomem_access_permitted(d, mfn_x(mfn), mfn_x(mfn) + 1) )
+    if ( !iomem_access_permitted(d, mfn_x(mfn), mfn_x(mfn)) )
         return false;
 
     return !map_regions_p2mt(d, gfn, 1, mfn, p2m_mmio_direct_c);
+}
+
+static inline bool check_p2m(bool is_data, paddr_t gpa)
+{
+    /*
+     * First check if the translation fault can be resolved by the P2M subsystem.
+     * If that's the case nothing else to do.
+     */
+    if ( p2m_resolve_translation_fault(current->domain , gaddr_to_gfn(gpa)) )
+        return true;
+
+    if ( is_data && try_map_mmio(gaddr_to_gfn(gpa)) )
+        return true;
+
+    return false;
 }
 
 static void do_trap_stage2_abort_guest(struct cpu_user_regs *regs,
@@ -1886,6 +1852,8 @@ static void do_trap_stage2_abort_guest(struct cpu_user_regs *regs,
     paddr_t gpa;
     uint8_t fsc = xabt.fsc & ~FSC_LL_MASK;
     bool is_data = (hsr.ec == HSR_EC_DATA_ABORT_LOWER_EL);
+    mmio_info_t info;
+    enum io_state state;
 
     /*
      * If this bit has been set, it means that this stage-2 abort is caused
@@ -1939,49 +1907,82 @@ static void do_trap_stage2_abort_guest(struct cpu_user_regs *regs,
         return;
     }
     case FSC_FLT_TRANS:
-        /*
-         * Attempt first to emulate the MMIO as the data abort will
-         * likely happen in an emulated region.
-         *
-         * Note that emulated region cannot be executed
-         */
-        if ( is_data )
-        {
-            enum io_state state = try_handle_mmio(regs, hsr, gpa);
+    {
+        info.gpa = gpa;
+        info.dabt = hsr.dabt;
 
-            switch ( state )
-            {
+        /*
+         * Assumption :- Most of the times when we get a data abort and the ISS
+         * is invalid or an instruction abort, the underlying cause is that the
+         * page tables have not been set up correctly.
+         */
+        if ( !is_data || !info.dabt.valid )
+        {
+            if ( check_p2m(is_data, gpa) )
+                return;
+
+            /*
+             * If the instruction abort could not be resolved by setting the
+             * appropriate bits in the translation table, then Xen should
+             * forward the abort to the guest.
+             */
+            if ( !is_data )
+                goto inject_abt;
+        }
+
+        try_decode_instruction(regs, &info);
+
+        /*
+         * If Xen could not decode the instruction or encountered an error
+         * while decoding, then it should forward the abort to the guest.
+         */
+        if ( info.dabt_instr.state == INSTR_ERROR )
+            goto inject_abt;
+
+        state = try_handle_mmio(regs, &info);
+
+        switch ( state )
+        {
             case IO_ABORT:
                 goto inject_abt;
             case IO_HANDLED:
+                /*
+                 * If the instruction was decoded and has executed successfully
+                 * on the MMIO region, then Xen should execute the next part of
+                 * the instruction. (for eg increment the rn if it is a
+                 * post-indexing instruction.
+                 */
+                finalize_instr_emulation(&info.dabt_instr);
                 advance_pc(regs, hsr);
+                return;
+            case IO_RETRY:
+                /* finish later */
                 return;
             case IO_UNHANDLED:
                 /* IO unhandled, try another way to handle it. */
                 break;
-            }
         }
 
         /*
-         * First check if the translation fault can be resolved by the
-         * P2M subsystem. If that's the case nothing else to do.
+         * If the instruction syndrome was invalid, then we already checked if
+         * this was due to a P2M fault. So no point to check again as the result
+         * will be the same.
          */
-        if ( p2m_resolve_translation_fault(current->domain,
-                                           gaddr_to_gfn(gpa)) )
-            return;
-
-        if ( is_data && try_map_mmio(gaddr_to_gfn(gpa)) )
+        if ( (info.dabt_instr.state == INSTR_VALID) && check_p2m(is_data, gpa) )
             return;
 
         break;
+    }
     default:
-        gprintk(XENLOG_WARNING, "Unsupported FSC: HSR=%#x DFSC=%#x\n",
+        gprintk(XENLOG_WARNING,
+                "Unsupported FSC: HSR=%#"PRIregister" DFSC=%#x\n",
                 hsr.bits, xabt.fsc);
     }
 
 inject_abt:
-    gdprintk(XENLOG_DEBUG, "HSR=0x%x pc=%#"PRIregister" gva=%#"PRIvaddr
-             " gpa=%#"PRIpaddr"\n", hsr.bits, regs->pc, gva, gpa);
+    gdprintk(XENLOG_DEBUG,
+             "HSR=%#"PRIregister" pc=%#"PRIregister" gva=%#"PRIvaddr" gpa=%#"PRIpaddr"\n",
+             hsr.bits, regs->pc, gva, gpa);
     if ( is_data )
         inject_dabt_exception(regs, gva, hsr.len);
     else
@@ -2073,32 +2074,37 @@ void do_trap_guest_sync(struct cpu_user_regs *regs)
         advance_pc(regs, hsr);
         break;
     case HSR_EC_CP15_32:
-        GUEST_BUG_ON(!psr_mode_is_32bit(regs));
+        GUEST_BUG_ON(!regs_mode_is_32bit(regs));
         perfc_incr(trap_cp15_32);
         do_cp15_32(regs, hsr);
         break;
     case HSR_EC_CP15_64:
-        GUEST_BUG_ON(!psr_mode_is_32bit(regs));
+        GUEST_BUG_ON(!regs_mode_is_32bit(regs));
         perfc_incr(trap_cp15_64);
         do_cp15_64(regs, hsr);
         break;
     case HSR_EC_CP14_32:
-        GUEST_BUG_ON(!psr_mode_is_32bit(regs));
+        GUEST_BUG_ON(!regs_mode_is_32bit(regs));
         perfc_incr(trap_cp14_32);
         do_cp14_32(regs, hsr);
         break;
     case HSR_EC_CP14_64:
-        GUEST_BUG_ON(!psr_mode_is_32bit(regs));
+        GUEST_BUG_ON(!regs_mode_is_32bit(regs));
         perfc_incr(trap_cp14_64);
         do_cp14_64(regs, hsr);
         break;
     case HSR_EC_CP14_DBG:
-        GUEST_BUG_ON(!psr_mode_is_32bit(regs));
+        GUEST_BUG_ON(!regs_mode_is_32bit(regs));
         perfc_incr(trap_cp14_dbg);
         do_cp14_dbg(regs, hsr);
         break;
+    case HSR_EC_CP10:
+        GUEST_BUG_ON(!regs_mode_is_32bit(regs));
+        perfc_incr(trap_cp10);
+        do_cp10(regs, hsr);
+        break;
     case HSR_EC_CP:
-        GUEST_BUG_ON(!psr_mode_is_32bit(regs));
+        GUEST_BUG_ON(!regs_mode_is_32bit(regs));
         perfc_incr(trap_cp);
         do_cp(regs, hsr);
         break;
@@ -2109,7 +2115,7 @@ void do_trap_guest_sync(struct cpu_user_regs *regs)
          * ARMv7 (DDI 0406C.b): B1.14.8
          * ARMv8 (DDI 0487A.d): D1-1501 Table D1-44
          */
-        GUEST_BUG_ON(!psr_mode_is_32bit(regs));
+        GUEST_BUG_ON(!regs_mode_is_32bit(regs));
         perfc_incr(trap_smc32);
         do_trap_smc(regs, hsr);
         break;
@@ -2117,7 +2123,7 @@ void do_trap_guest_sync(struct cpu_user_regs *regs)
     {
         register_t nr;
 
-        GUEST_BUG_ON(!psr_mode_is_32bit(regs));
+        GUEST_BUG_ON(!regs_mode_is_32bit(regs));
         perfc_incr(trap_hvc32);
 #ifndef NDEBUG
         if ( (hsr.iss & 0xff00) == 0xff00 )
@@ -2132,7 +2138,7 @@ void do_trap_guest_sync(struct cpu_user_regs *regs)
     }
 #ifdef CONFIG_ARM_64
     case HSR_EC_HVC64:
-        GUEST_BUG_ON(psr_mode_is_32bit(regs));
+        GUEST_BUG_ON(regs_mode_is_32bit(regs));
         perfc_incr(trap_hvc64);
 #ifndef NDEBUG
         if ( (hsr.iss & 0xff00) == 0xff00 )
@@ -2148,12 +2154,12 @@ void do_trap_guest_sync(struct cpu_user_regs *regs)
          *
          * ARMv8 (DDI 0487A.d): D1-1501 Table D1-44
          */
-        GUEST_BUG_ON(psr_mode_is_32bit(regs));
+        GUEST_BUG_ON(regs_mode_is_32bit(regs));
         perfc_incr(trap_smc64);
         do_trap_smc(regs, hsr);
         break;
     case HSR_EC_SYSREG:
-        GUEST_BUG_ON(psr_mode_is_32bit(regs));
+        GUEST_BUG_ON(regs_mode_is_32bit(regs));
         perfc_incr(trap_sysreg);
         do_sysreg(regs, hsr);
         break;
@@ -2170,7 +2176,7 @@ void do_trap_guest_sync(struct cpu_user_regs *regs)
 
     default:
         gprintk(XENLOG_WARNING,
-                "Unknown Guest Trap. HSR=0x%x EC=0x%x IL=%x Syndrome=0x%"PRIx32"\n",
+                "Unknown Guest Trap. HSR=%#"PRIregister" EC=0x%x IL=%x Syndrome=0x%"PRIx32"\n",
                 hsr.bits, hsr.ec, hsr.len, hsr.iss);
         inject_undef_exception(regs, hsr);
     }
@@ -2208,7 +2214,7 @@ void do_trap_hyp_sync(struct cpu_user_regs *regs)
         break;
     }
     default:
-        printk("Hypervisor Trap. HSR=0x%x EC=0x%x IL=%x Syndrome=0x%"PRIx32"\n",
+        printk("Hypervisor Trap. HSR=%#"PRIregister" EC=0x%x IL=%x Syndrome=0x%"PRIx32"\n",
                hsr.bits, hsr.ec, hsr.len, hsr.iss);
         do_unexpected_trap("Hypervisor", regs);
     }
@@ -2250,12 +2256,38 @@ static void check_for_pcpu_work(void)
  * Process pending work for the vCPU. Any call should be fast or
  * implement preemption.
  */
-static void check_for_vcpu_work(void)
+static bool check_for_vcpu_work(void)
 {
     struct vcpu *v = current;
 
+    if ( has_vpci(v->domain) )
+    {
+        bool pending;
+
+        local_irq_enable();
+        pending = vpci_process_pending(v);
+        local_irq_disable();
+
+        if ( pending )
+            return true;
+    }
+
+#ifdef CONFIG_IOREQ_SERVER
+    if ( domain_has_ioreq_server(v->domain) )
+    {
+        bool handled;
+
+        local_irq_enable();
+        handled = vcpu_ioreq_handle_completion(v);
+        local_irq_disable();
+
+        if ( !handled )
+            return true;
+    }
+#endif
+
     if ( likely(!v->arch.need_flush_to_ram) )
-        return;
+        return false;
 
     /*
      * Give a chance for the pCPU to process work before handling the vCPU
@@ -2266,6 +2298,8 @@ static void check_for_vcpu_work(void)
     local_irq_enable();
     p2m_flush_vm(v);
     local_irq_disable();
+
+    return false;
 }
 
 /*
@@ -2278,7 +2312,13 @@ void leave_hypervisor_to_guest(void)
 {
     local_irq_disable();
 
-    check_for_vcpu_work();
+    /*
+     * check_for_vcpu_work() may return true if there are more work to before
+     * the vCPU can safely resume. This gives us an opportunity to deschedule
+     * the vCPU if needed.
+     */
+    while ( check_for_vcpu_work() )
+        check_for_pcpu_work();
     check_for_pcpu_work();
 
     vgic_sync_to_lrs();

@@ -25,8 +25,6 @@
 #ifndef _MM_LOCKS_H
 #define _MM_LOCKS_H
 
-#include <asm/mem_sharing.h>
-
 /* Per-CPU variable for enforcing the lock ordering */
 DECLARE_PER_CPU(int, mm_lock_level);
 
@@ -40,7 +38,7 @@ static inline void mm_lock_init(mm_lock_t *l)
     l->unlock_level = 0;
 }
 
-static inline int mm_locked_by_me(mm_lock_t *l)
+static inline bool mm_locked_by_me(const mm_lock_t *l)
 {
     return (l->lock.recurse_cpu == current->processor);
 }
@@ -239,6 +237,8 @@ static inline void mm_enforce_order_unlock(int unlock_level,
  *                                                                      *
  ************************************************************************/
 
+#ifdef CONFIG_HVM
+
 /* Nested P2M lock (per-domain)
  *
  * A per-domain lock that protects the mapping from nested-CR3 to
@@ -355,6 +355,8 @@ declare_mm_lock(pod)
 #define pod_lock(p)           mm_lock(pod, (p)->domain, &(p)->pod.lock)
 #define pod_unlock(p)         mm_unlock(&(p)->pod.lock)
 #define pod_locked_by_me(p)   mm_locked_by_me(&(p)->pod.lock)
+
+#endif /* CONFIG_HVM */
 
 /* Page alloc lock (per-domain)
  *

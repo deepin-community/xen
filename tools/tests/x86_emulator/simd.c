@@ -912,6 +912,13 @@ static inline vec_t movlhps(vec_t x, vec_t y) {
 })
 #  endif
 # endif
+#elif VEC_SIZE == 64
+# if FLOAT_SIZE == 4
+#  define dup_hi(x) B(movshdup, _mask, x, undef(), ~0)
+#  define dup_lo(x) B(movsldup, _mask, x, undef(), ~0)
+# elif FLOAT_SIZE == 8
+#  define dup_lo(x) B(movddup, _mask, x, undef(), ~0)
+# endif
 #endif
 #if VEC_SIZE == 16 && defined(__SSSE3__) && !defined(__AVX512VL__)
 # if INT_SIZE == 1
@@ -1727,8 +1734,8 @@ int simd_test(void)
     if ( !eq(x - src, (alt + 1) / 2) ) return __LINE__;
 #endif
 
-    for ( i = 0; i < ELEM_COUNT; ++i )
-        y[i] = (i & 1 ? inv : src)[i];
+    for ( y = src, i = 1; i < ELEM_COUNT; i += 2 )
+        y[i] = inv[i];
 
 #ifdef select
 # ifdef UINT_SIZE

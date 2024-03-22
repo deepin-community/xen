@@ -21,14 +21,13 @@
 #include <avc_ss.h>
 #include <objsec.h>
 #include <conditional.h>
+#include "private.h"
 
 #define ret_t long
 #define _copy_to_guest copy_to_guest
 #define _copy_from_guest copy_from_guest
 
 enum flask_bootparam_t __read_mostly flask_bootparam = FLASK_BOOTPARAM_ENFORCING;
-static int parse_flask_param(const char *s);
-custom_param("flask", parse_flask_param);
 
 bool __read_mostly flask_enforcing = true;
 
@@ -59,7 +58,7 @@ static int flask_security_make_bools(void);
 
 extern int ss_initialized;
 
-static int __init parse_flask_param(const char *s)
+static int __init cf_check parse_flask_param(const char *s)
 {
     if ( !strcmp(s, "enforcing") )
         flask_bootparam = FLASK_BOOTPARAM_ENFORCING;
@@ -74,16 +73,17 @@ static int __init parse_flask_param(const char *s)
 
     return (flask_bootparam == FLASK_BOOTPARAM_INVALID) ? -EINVAL : 0;
 }
+custom_param("flask", parse_flask_param);
 
-static int domain_has_security(struct domain *d, u32 perms)
+static int domain_has_security(struct domain *d, uint32_t perms)
 {
     struct domain_security_struct *dsec;
-    
+
     dsec = d->ssid;
     if ( !dsec )
         return -EACCES;
-        
-    return avc_has_perm(dsec->sid, SECINITSID_SECURITY, SECCLASS_SECURITY, 
+
+    return avc_has_perm(dsec->sid, SECINITSID_SECURITY, SECCLASS_SECURITY,
                         perms, NULL);
 }
 
@@ -130,7 +130,7 @@ static int flask_security_access(struct xen_flask_access *arg)
     arg->audit_allow = avd.auditallow;
     arg->audit_deny = avd.auditdeny;
     arg->seqno = avd.seqno;
-                
+
     return rv;
 }
 
@@ -196,7 +196,7 @@ static int flask_security_sid(struct xen_flask_sid_context *arg)
 {
     int rv;
     char *context;
-    u32 len;
+    uint32_t len;
 
     rv = domain_has_security(current->domain, SECURITY__CHECK_CONTEXT);
     if ( rv )
@@ -223,33 +223,8 @@ static int flask_security_sid(struct xen_flask_sid_context *arg)
 
 #ifndef COMPAT
 
-static int flask_disable(void)
-{
-    static int flask_disabled = 0;
-
-    if ( ss_initialized )
-    {
-        /* Not permitted after initial policy load. */
-        return -EINVAL;
-    }
-
-    if ( flask_disabled )
-    {
-        /* Only do this once. */
-        return -EINVAL;
-    }
-
-    printk("Flask:  Disabled at runtime.\n");
-
-    flask_disabled = 1;
-
-    /* Reset xsm_ops to the original module. */
-    xsm_ops = &dummy_xsm_ops;
-
-    return 0;
-}
-
-static int flask_security_setavc_threshold(struct xen_flask_setavc_threshold *arg)
+static int flask_security_setavc_threshold(
+    struct xen_flask_setavc_threshold *arg)
 {
     int rv = 0;
 
@@ -376,7 +351,7 @@ static int flask_security_get_bool(struct xen_flask_boolean *arg)
         if ( nameout_len > arg->size )
             rv = -ERANGE;
         arg->size = nameout_len;
- 
+
         if ( !rv && _copy_to_guest(arg->name, nameout, nameout_len) )
             rv = -EFAULT;
         xfree(nameout);
@@ -412,9 +387,9 @@ static int flask_security_make_bools(void)
     int ret = 0;
     int num;
     int *values = NULL;
-    
+
     xfree(bool_pending_values);
-    
+
     ret = security_get_bools(&num, NULL, &values, NULL);
     if ( ret != 0 )
         goto out;
@@ -500,8 +475,8 @@ static int flask_devicetree_label(struct xen_flask_devicetree_label *arg)
 {
     int rv;
     char *buf;
-    u32 sid = arg->sid;
-    u32 perm = sid ? SECURITY__ADD_OCONTEXT : SECURITY__DEL_OCONTEXT;
+    uint32_t sid = arg->sid;
+    uint32_t perm = sid ? SECURITY__ADD_OCONTEXT : SECURITY__DEL_OCONTEXT;
 
     rv = domain_has_security(current->domain, perm);
     if ( rv )
@@ -555,7 +530,7 @@ static int flask_get_peer_sid(struct xen_flask_peersid *arg)
     struct evtchn *chn;
     struct domain_security_struct *dsec;
 
-    spin_lock(&d->event_lock);
+    read_lock(&d->event_lock);
 
     if ( !port_is_valid(d, arg->evtchn) )
         goto out;
@@ -573,7 +548,7 @@ static int flask_get_peer_sid(struct xen_flask_peersid *arg)
     rv = 0;
 
  out:
-    spin_unlock(&d->event_lock);
+    read_unlock(&d->event_lock);
     return rv;
 }
 
@@ -633,7 +608,7 @@ static int flask_relabel_domain(struct xen_flask_relabel *arg)
 
 #endif /* !COMPAT */
 
-ret_t do_flask_op(XEN_GUEST_HANDLE_PARAM(xsm_op_t) u_flask_op)
+ret_t cf_check do_flask_op(XEN_GUEST_HANDLE_PARAM(void) u_flask_op)
 {
     xen_flask_op_t op;
     int rv;
@@ -696,10 +671,6 @@ ret_t do_flask_op(XEN_GUEST_HANDLE_PARAM(xsm_op_t) u_flask_op)
 
     case FLASK_MLS:
         rv = flask_mls_enabled;
-        break;    
-
-    case FLASK_DISABLE:
-        rv = flask_disable();
         break;
 
     case FLASK_GETAVC_THRESHOLD:
@@ -789,8 +760,6 @@ CHECK_flask_transition;
 
 #define xen_flask_load compat_flask_load
 #define flask_security_load compat_security_load
-
-#define xen_flask_userlist compat_flask_userlist
 
 #define xen_flask_sid_context compat_flask_sid_context
 #define flask_security_context compat_security_context

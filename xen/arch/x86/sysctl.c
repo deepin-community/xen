@@ -31,45 +31,14 @@
 #include <xen/cpu.h>
 #include <xsm/xsm.h>
 #include <asm/psr.h>
-#include <asm/cpuid.h>
-
-const struct cpu_policy system_policies[6] = {
-    [ XEN_SYSCTL_cpu_policy_raw ] = {
-        &raw_cpuid_policy,
-        &raw_msr_policy,
-    },
-    [ XEN_SYSCTL_cpu_policy_host ] = {
-        &host_cpuid_policy,
-        &host_msr_policy,
-    },
-#ifdef CONFIG_PV
-    [ XEN_SYSCTL_cpu_policy_pv_max ] = {
-        &pv_max_cpuid_policy,
-        &pv_max_msr_policy,
-    },
-    [ XEN_SYSCTL_cpu_policy_pv_default ] = {
-        &pv_def_cpuid_policy,
-        &pv_def_msr_policy,
-    },
-#endif
-#ifdef CONFIG_HVM
-    [ XEN_SYSCTL_cpu_policy_hvm_max ] = {
-        &hvm_max_cpuid_policy,
-        &hvm_max_msr_policy,
-    },
-    [ XEN_SYSCTL_cpu_policy_hvm_default ] = {
-        &hvm_def_cpuid_policy,
-        &hvm_def_msr_policy,
-    },
-#endif
-};
+#include <asm/cpu-policy.h>
 
 struct l3_cache_info {
     int ret;
     unsigned long size;
 };
 
-static void l3_cache_get(void *arg)
+static void cf_check l3_cache_get(void *arg)
 {
     struct cpuid4_info info;
     struct l3_cache_info *l3_info = arg;
@@ -79,40 +48,7 @@ static void l3_cache_get(void *arg)
         l3_info->size = info.size / 1024; /* in KB unit */
 }
 
-long cpu_up_helper(void *data)
-{
-    unsigned int cpu = (unsigned long)data;
-    int ret = cpu_up(cpu);
-
-    /* Have one more go on EBUSY. */
-    if ( ret == -EBUSY )
-        ret = cpu_up(cpu);
-
-    if ( !ret && !opt_smt &&
-         cpu_data[cpu].compute_unit_id == INVALID_CUID &&
-         cpumask_weight(per_cpu(cpu_sibling_mask, cpu)) > 1 )
-    {
-        ret = cpu_down_helper(data);
-        if ( ret )
-            printk("Could not re-offline CPU%u (%d)\n", cpu, ret);
-        else
-            ret = -EPERM;
-    }
-
-    return ret;
-}
-
-long cpu_down_helper(void *data)
-{
-    int cpu = (unsigned long)data;
-    int ret = cpu_down(cpu);
-    /* Have one more go on EBUSY. */
-    if ( ret == -EBUSY )
-        ret = cpu_down(cpu);
-    return ret;
-}
-
-static long smt_up_down_helper(void *data)
+static long cf_check smt_up_down_helper(void *data)
 {
     bool up = (bool)data;
     unsigned int cpu, sibling_mask = boot_cpu_data.x86_num_siblings - 1;
@@ -212,6 +148,9 @@ long arch_do_sysctl(
                 ret = -EBUSY;
                 break;
             }
+            if ( CONFIG_NR_CPUS <= 1 )
+                /* Mimic behavior of smt_up_down_helper(). */
+                return 0;
             plug = op == XEN_SYSCTL_CPU_HOTPLUG_SMT_ENABLE;
             fn = smt_up_down_helper;
             hcpu = _p(plug);
@@ -357,17 +296,19 @@ long arch_do_sysctl(
 
     case XEN_SYSCTL_get_cpu_featureset:
     {
-        static const struct cpuid_policy *const policy_table[4] = {
-            [XEN_SYSCTL_cpu_featureset_raw]  = &raw_cpuid_policy,
-            [XEN_SYSCTL_cpu_featureset_host] = &host_cpuid_policy,
+        static const struct cpu_policy *const policy_table[6] = {
+            [XEN_SYSCTL_cpu_featureset_raw]  = &raw_cpu_policy,
+            [XEN_SYSCTL_cpu_featureset_host] = &host_cpu_policy,
 #ifdef CONFIG_PV
-            [XEN_SYSCTL_cpu_featureset_pv]   = &pv_def_cpuid_policy,
+            [XEN_SYSCTL_cpu_featureset_pv]   = &pv_def_cpu_policy,
+            [XEN_SYSCTL_cpu_featureset_pv_max] = &pv_max_cpu_policy,
 #endif
 #ifdef CONFIG_HVM
-            [XEN_SYSCTL_cpu_featureset_hvm]  = &hvm_def_cpuid_policy,
+            [XEN_SYSCTL_cpu_featureset_hvm]  = &hvm_def_cpu_policy,
+            [XEN_SYSCTL_cpu_featureset_hvm_max] = &hvm_max_cpu_policy,
 #endif
         };
-        const struct cpuid_policy *p = NULL;
+        const struct cpu_policy *p = NULL;
         uint32_t featureset[FSCAPINTS];
         unsigned int nr;
 
@@ -398,7 +339,7 @@ long arch_do_sysctl(
             ret = -EINVAL;
 
         if ( !ret )
-            cpuid_policy_to_featureset(p, featureset);
+            x86_cpu_policy_to_featureset(p, featureset);
 
         /* Copy the requested featureset into place. */
         if ( !ret && copy_to_guest(sysctl->u.cpu_featureset.features,
@@ -420,6 +361,18 @@ long arch_do_sysctl(
 
     case XEN_SYSCTL_get_cpu_policy:
     {
+        static const struct cpu_policy *const system_policies[6] = {
+            [XEN_SYSCTL_cpu_policy_raw]         = &raw_cpu_policy,
+            [XEN_SYSCTL_cpu_policy_host]        = &host_cpu_policy,
+#ifdef CONFIG_PV
+            [XEN_SYSCTL_cpu_policy_pv_max]      = &pv_max_cpu_policy,
+            [XEN_SYSCTL_cpu_policy_pv_default]  = &pv_def_cpu_policy,
+#endif
+#ifdef CONFIG_HVM
+            [XEN_SYSCTL_cpu_policy_hvm_max]     = &hvm_max_cpu_policy,
+            [XEN_SYSCTL_cpu_policy_hvm_default] = &hvm_def_cpu_policy,
+#endif
+        };
         const struct cpu_policy *policy;
 
         /* Reserved field set, or bad policy index? */
@@ -429,22 +382,22 @@ long arch_do_sysctl(
             ret = -EINVAL;
             break;
         }
-        policy = &system_policies[
+        policy = system_policies[
             array_index_nospec(sysctl->u.cpu_policy.index,
                                ARRAY_SIZE(system_policies))];
 
-        if ( !policy->cpuid || !policy->msr )
+        if ( !policy )
         {
             ret = -EOPNOTSUPP;
             break;
         }
 
         /* Process the CPUID leaves. */
-        if ( guest_handle_is_null(sysctl->u.cpu_policy.cpuid_policy) )
+        if ( guest_handle_is_null(sysctl->u.cpu_policy.leaves) )
             sysctl->u.cpu_policy.nr_leaves = CPUID_MAX_SERIALISED_LEAVES;
         else if ( (ret = x86_cpuid_copy_to_buffer(
-                       policy->cpuid,
-                       sysctl->u.cpu_policy.cpuid_policy,
+                       policy,
+                       sysctl->u.cpu_policy.leaves,
                        &sysctl->u.cpu_policy.nr_leaves)) )
             break;
 
@@ -456,11 +409,11 @@ long arch_do_sysctl(
         }
 
         /* Process the MSR entries. */
-        if ( guest_handle_is_null(sysctl->u.cpu_policy.msr_policy) )
+        if ( guest_handle_is_null(sysctl->u.cpu_policy.msrs) )
             sysctl->u.cpu_policy.nr_msrs = MSR_MAX_SERIALISED_ENTRIES;
         else if ( (ret = x86_msr_copy_to_buffer(
-                       policy->msr,
-                       sysctl->u.cpu_policy.msr_policy,
+                       policy,
+                       sysctl->u.cpu_policy.msrs,
                        &sysctl->u.cpu_policy.nr_msrs)) )
             break;
 

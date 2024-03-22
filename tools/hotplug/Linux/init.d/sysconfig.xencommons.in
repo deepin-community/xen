@@ -33,6 +33,19 @@
 #XENSTORED=@XENSTORED@
 
 ## Type: string
+## Default: unlimited
+#
+# Select maximum number of file descriptors xenstored is allowed to have
+# opened at one time.
+# For each HVM domain xenstored might need up to 5 open file descriptors,
+# PVH and PV domains will require up to 3 open file descriptors. Additionally
+# 20-30 file descriptors will be opened for internal uses.
+# The specified value (including "unlimited") will be capped by the contents
+# of /proc/sys/fs/nr_open if existing.
+# Only evaluated if XENSTORETYPE is "daemon".
+#XENSTORED_MAX_OPEN_FDS=unlimited
+
+## Type: string
 ## Default: ""
 #
 # Additional commandline arguments to start xenstored,
@@ -48,12 +61,14 @@ XENSTORED_ARGS=
 # Only evaluated if XENSTORETYPE is "daemon".
 #XENSTORED_TRACE=[yes|on|1]
 
-## Type: string
-## Default: "@XEN_LIB_STORED@"
+## Type: integer
+## Default: 50
 #
-# Running xenstored on XENSTORED_ROOTDIR
-# Only evaluated if XENSTORETYPE is "daemon".
-#XENSTORED_ROOTDIR=@XEN_LIB_STORED@
+# Percentage of dom0 memory size the xenstore daemon can use before the
+# OOM killer is allowed to kill it.
+# The specified value is multiplied by -10 and echoed to
+# /proc/PID/oom_score_adj.
+#XENSTORED_OOM_MEM_THRESHOLD=50
 
 ## Type: string
 ## Default: @LIBEXEC@/boot/xenstore-stubdom.gz
@@ -86,12 +101,6 @@ XENSTORED_ARGS=
 # Additional arguments for starting the xenstore domain.
 # Only evaluated if XENSTORETYPE is "domain".
 XENSTORE_DOMAIN_ARGS=
-
-## Type: string
-## Default: Not defined, xenbackendd debug mode off
-#
-# Running xenbackendd in debug mode
-#XENBACKENDD_DEBUG=[yes|on|1]
 
 # qemu path
 #QEMU_XEN=@qemu_xen_path@

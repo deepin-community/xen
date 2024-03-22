@@ -150,6 +150,8 @@ static int bank_mce_rdmsr(const struct vcpu *v, uint32_t msr, uint64_t *val)
     default:
         switch ( boot_cpu_data.x86_vendor )
         {
+        case X86_VENDOR_CENTAUR:
+        case X86_VENDOR_SHANGHAI:
         case X86_VENDOR_INTEL:
             ret = vmce_intel_rdmsr(v, msr, val);
             break;
@@ -353,7 +355,7 @@ int vmce_wrmsr(uint32_t msr, uint64_t val)
 }
 
 #if CONFIG_HVM
-static int vmce_save_vcpu_ctxt(struct vcpu *v, hvm_domain_context_t *h)
+static int cf_check vmce_save_vcpu_ctxt(struct vcpu *v, hvm_domain_context_t *h)
 {
     struct hvm_vmce_vcpu ctxt = {
         .caps = v->arch.vmce.mcg_cap,
@@ -365,7 +367,7 @@ static int vmce_save_vcpu_ctxt(struct vcpu *v, hvm_domain_context_t *h)
     return hvm_save_entry(VMCE_VCPU, v->vcpu_id, h, &ctxt);
 }
 
-static int vmce_load_vcpu_ctxt(struct domain *d, hvm_domain_context_t *h)
+static int cf_check vmce_load_vcpu_ctxt(struct domain *d, hvm_domain_context_t *h)
 {
     unsigned int vcpuid = hvm_load_instance(h);
     struct vcpu *v;

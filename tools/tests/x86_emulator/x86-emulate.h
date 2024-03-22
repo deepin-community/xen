@@ -29,9 +29,7 @@
 #ifdef EOF
 # error "Must not include <stdio.h> before x86-emulate.h"
 #endif
-#ifdef WRAP
-# include <stdio.h>
-#endif
+#include <stdio.h>
 
 #include <xen/xen.h>
 
@@ -54,6 +52,8 @@
 #define likely(x)   __builtin_expect(!!(x), true)
 #define unlikely(x) __builtin_expect(!!(x), false)
 
+#define cf_check /* No Control Flow Integriy checking */
+
 #define container_of(ptr, type, member) ({             \
     typeof(((type *)0)->member) *mptr__ = (ptr);       \
     (type *)((char *)mptr__ - offsetof(type, member)); \
@@ -68,7 +68,7 @@
 #define is_canonical_address(x) (((int64_t)(x) >> 47) == ((int64_t)(x) >> 63))
 
 extern uint32_t mxcsr_mask;
-extern struct cpuid_policy cp;
+extern struct cpu_policy cp;
 
 #define MMAP_SZ 16384
 bool emul_test_init(void);
@@ -83,11 +83,7 @@ void emul_restore_fpu_state(void);
  * around the actual function.
  */
 #ifndef WRAP
-# if 0 /* This only works for explicit calls, not for compiler generated ones. */
-#  define WRAP(x) typeof(x) x asm("emul_" #x)
-# else
-# define WRAP(x) asm(".equ " #x ", emul_" #x)
-# endif
+# define WRAP(x) typeof(x) __wrap_ ## x
 #endif
 
 WRAP(fwrite);
@@ -97,6 +93,10 @@ WRAP(memset);
 WRAP(printf);
 WRAP(putchar);
 WRAP(puts);
+WRAP(snprintf);
+WRAP(strstr);
+WRAP(vprintf);
+WRAP(vsnprintf);
 
 #undef WRAP
 
@@ -105,8 +105,7 @@ WRAP(puts);
 void evex_disp8_test(void *instr, struct x86_emulate_ctxt *ctxt,
                      const struct x86_emulate_ops *ops);
 void predicates_test(void *instr, struct x86_emulate_ctxt *ctxt,
-                     int (*fetch)(enum x86_segment seg,
-                                  unsigned long offset,
+                     int (*fetch)(unsigned long offset,
                                   void *p_data,
                                   unsigned int bytes,
                                   struct x86_emulate_ctxt *ctxt));
@@ -168,7 +167,9 @@ static inline bool xcr0_mask(uint64_t mask)
 #define cpu_has_movdir64b  cp.feat.movdir64b
 #define cpu_has_avx512_4vnniw (cp.feat.avx512_4vnniw && xcr0_mask(0xe6))
 #define cpu_has_avx512_4fmaps (cp.feat.avx512_4fmaps && xcr0_mask(0xe6))
+#define cpu_has_avx512_vp2intersect (cp.feat.avx512_vp2intersect && xcr0_mask(0xe6))
 #define cpu_has_serialize  cp.feat.serialize
+#define cpu_has_avx_vnni   (cp.feat.avx_vnni && xcr0_mask(6))
 #define cpu_has_avx512_bf16 (cp.feat.avx512_bf16 && xcr0_mask(0xe6))
 
 #define cpu_has_xgetbv1   (cpu_has_xsave && cp.xstate.xgetbv1)

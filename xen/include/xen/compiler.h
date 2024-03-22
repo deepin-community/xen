@@ -3,6 +3,16 @@
 
 #if !defined(__GNUC__) || (__GNUC__ < 4)
 #error Sorry, your compiler is too old/not recognized.
+#elif CONFIG_CC_IS_GCC
+# if defined(CONFIG_ARM_32) && CONFIG_GCC_VERSION < 40900
+#  error Sorry, your version of GCC is too old - please use 4.9 or newer.
+# elif defined(CONFIG_ARM_64) && CONFIG_GCC_VERSION < 50100
+/*
+ * https://gcc.gnu.org/bugzilla/show_bug.cgi?id=63293
+ * https://lore.kernel.org/r/20210107111841.GN1551@shell.armlinux.org.uk
+ */
+#  error Sorry, your version of GCC is too old - please use 5.1 or newer.
+# endif
 #endif
 
 #define barrier()     __asm__ __volatile__("": : :"memory")
@@ -12,6 +22,7 @@
 
 #define inline        __inline__
 #define always_inline __inline__ __attribute__ ((__always_inline__))
+#define gnu_inline    __inline__ __attribute__ ((__gnu_inline__))
 #define noinline      __attribute__((__noinline__))
 
 #define noreturn      __attribute__((__noreturn__))
@@ -26,10 +37,32 @@
 # define nocall
 #endif
 
+#ifdef CONFIG_XEN_IBT
+# define cf_check     __attribute__((__cf_check__))
+#else
+# define cf_check
+#endif
+
 #if (!defined(__clang__) && (__GNUC__ == 4) && (__GNUC_MINOR__ < 5))
 #define unreachable() do {} while (1)
 #else
 #define unreachable() __builtin_unreachable()
+#endif
+
+/*
+ * Add the pseudo keyword 'fallthrough' so case statement blocks
+ * must end with any of these keywords:
+ *   break;
+ *   fallthrough;
+ *   goto <label>;
+ *   return [expression];
+ *
+ *  gcc: https://gcc.gnu.org/onlinedocs/gcc/Statement-Attributes.html#Statement-Attributes
+ */
+#if (!defined(__clang__) && (__GNUC__ >= 7))
+# define fallthrough        __attribute__((__fallthrough__))
+#else
+# define fallthrough        do {} while (0)  /* fallthrough */
 #endif
 
 #ifdef __clang__
@@ -76,13 +109,21 @@
 
 #define offsetof(a,b) __builtin_offsetof(a,b)
 
+/**
+ * sizeof_field(TYPE, MEMBER)
+ *
+ * @TYPE: The structure containing the field of interest
+ * @MEMBER: The field to return the size of
+ */
+#define sizeof_field(TYPE, MEMBER) sizeof((((TYPE *)0)->MEMBER))
+
 #if !defined(__STDC_VERSION__) || __STDC_VERSION__ < 201112L
 #define alignof __alignof__
 #endif
 
 /* &a[0] degrades to a pointer: a different type from an array */
 #define __must_be_array(a) \
-  BUILD_BUG_ON_ZERO(__builtin_types_compatible_p(typeof(a), typeof(&a[0])))
+  BUILD_BUG_ON_ZERO(__builtin_types_compatible_p(typeof(a), typeof(&(a)[0])))
 
 #ifdef CONFIG_CC_HAS_VISIBILITY_ATTRIBUTE
 /* Results in more efficient PIC code (no indirections through GOT or PLT). */

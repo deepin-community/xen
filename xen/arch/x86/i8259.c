@@ -37,21 +37,21 @@ static bool _mask_and_ack_8259A_irq(unsigned int irq);
 
 bool bogus_8259A_irq(unsigned int irq)
 {
-    return _mask_and_ack_8259A_irq(irq);
+    return !_mask_and_ack_8259A_irq(irq);
 }
 
-static void mask_and_ack_8259A_irq(struct irq_desc *desc)
+static void cf_check mask_and_ack_8259A_irq(struct irq_desc *desc)
 {
     _mask_and_ack_8259A_irq(desc->irq);
 }
 
-static unsigned int startup_8259A_irq(struct irq_desc *desc)
+static unsigned int cf_check startup_8259A_irq(struct irq_desc *desc)
 {
     enable_8259A_irq(desc);
     return 0; /* never anything pending */
 }
 
-static void end_8259A_irq(struct irq_desc *desc, u8 vector)
+static void cf_check end_8259A_irq(struct irq_desc *desc, u8 vector)
 {
     if (!(desc->status & (IRQ_DISABLED|IRQ_INPROGRESS)))
         enable_8259A_irq(desc);
@@ -108,12 +108,12 @@ static void _disable_8259A_irq(unsigned int irq)
     spin_unlock_irqrestore(&i8259A_lock, flags);
 }
 
-void disable_8259A_irq(struct irq_desc *desc)
+void cf_check disable_8259A_irq(struct irq_desc *desc)
 {
     _disable_8259A_irq(desc->irq);
 }
 
-void enable_8259A_irq(struct irq_desc *desc)
+void cf_check enable_8259A_irq(struct irq_desc *desc)
 {
     unsigned int mask = ~(1 << desc->irq);
     unsigned long flags;
@@ -222,7 +222,8 @@ static bool _mask_and_ack_8259A_irq(unsigned int irq)
         is_real_irq = false;
         /* Report spurious IRQ, once per IRQ line. */
         if (!(spurious_irq_mask & irqmask)) {
-            printk("spurious 8259A interrupt: IRQ%d.\n", irq);
+            printk("cpu%u: spurious 8259A interrupt: IRQ%u\n",
+                   smp_processor_id(), irq);
             spurious_irq_mask |= irqmask;
         }
         /*
@@ -349,7 +350,23 @@ void __init init_IRQ(void)
             continue;
         desc->handler = &i8259A_irq_type;
         per_cpu(vector_irq, cpu)[LEGACY_VECTOR(irq)] = irq;
-        cpumask_copy(desc->arch.cpu_mask, cpumask_of(cpu));
+
+        /*
+         * The interrupt affinity logic never targets interrupts to offline
+         * CPUs, hence it's safe to use cpumask_all here.
+         *
+         * Legacy PIC interrupts are only targeted to CPU0, but depending on
+         * the platform they can be distributed to any online CPU in hardware.
+         * Note this behavior has only been observed on AMD hardware. In order
+         * to cope install all active legacy vectors on all CPUs.
+         *
+         * IO-APIC will change the destination mask if/when taking ownership of
+         * the interrupt.
+         */
+        cpumask_copy(desc->arch.cpu_mask,
+                     (boot_cpu_data.x86_vendor &
+                      (X86_VENDOR_AMD | X86_VENDOR_HYGON) ? &cpumask_all
+                                                          : cpumask_of(cpu)));
         desc->arch.vector = LEGACY_VECTOR(irq);
     }
     

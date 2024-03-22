@@ -97,13 +97,12 @@
 #ifdef __XEN__
 #include <xen/lib.h>
 #include <asm/byteorder.h>
+#include <asm/unaligned.h>
+#else
+#define get_unaligned_le16(_p) (*(u16 *)(_p))
 #endif
 
 #include <xen/lzo.h>
-#define get_unaligned(_p) (*(_p))
-#define put_unaligned(_val,_p) (*(_p)=_val)
-#define get_unaligned_le16(_p) (*(u16 *)(_p))
-#define get_unaligned_le32(_p) (*(u32 *)(_p))
 
 #include "decompress.h"
 
@@ -136,8 +135,8 @@
  */
 #define MAX_255_COUNT      ((((size_t)~0) / 255) - 2)
 
-int INIT lzo1x_decompress_safe(const unsigned char *in, size_t in_len,
-                               unsigned char *out, size_t *out_len)
+int __init lzo1x_decompress_safe(const unsigned char *in, size_t in_len,
+                                 unsigned char *out, size_t *out_len)
 {
     unsigned char *op;
     const unsigned char *ip;

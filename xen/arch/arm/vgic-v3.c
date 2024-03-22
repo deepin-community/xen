@@ -135,7 +135,7 @@ static void vgic_store_irouter(struct domain *d, struct vgic_irq_rank *rank,
     ASSERT(virq >= 32);
 
     /* Get the index in the rank */
-    offset &= virq & INTERRUPT_RANK_MASK;
+    offset = virq & INTERRUPT_RANK_MASK;
 
     new_vcpu = vgic_v3_irouter_to_vcpu(d, irouter);
     old_vcpu = d->vcpu[read_atomic(&rank->vcpu[offset])];
@@ -249,16 +249,15 @@ static int __vgic_v3_rdistr_rd_mmio_read(struct vcpu *v, mmio_info_t *info,
 
     case VREG64(GICR_PENDBASER):
     {
-        unsigned long flags;
+        uint64_t val;
 
         if ( !v->domain->arch.vgic.has_its )
             goto read_as_zero_64;
         if ( !vgic_reg64_check_access(dabt) ) goto bad_width;
 
-        spin_lock_irqsave(&v->arch.vgic.lock, flags);
-        *r = vreg_reg64_extract(v->arch.vgic.rdist_pendbase, info);
-        *r &= ~GICR_PENDBASER_PTZ;       /* WO, reads as 0 */
-        spin_unlock_irqrestore(&v->arch.vgic.lock, flags);
+        val = read_atomic(&v->arch.vgic.rdist_pendbase);
+        val &= ~GICR_PENDBASER_PTZ;      /* WO, reads as 0 */
+        *r = vreg_reg64_extract(val, info);
         return 1;
     }
 
@@ -577,13 +576,13 @@ static int __vgic_v3_rdistr_rd_mmio_write(struct vcpu *v, mmio_info_t *info,
         /* Writing PENDBASER with LPIs enabled is UNPREDICTABLE. */
         if ( !(v->arch.vgic.flags & VGIC_V3_LPIS_ENABLED) )
         {
-            reg = v->arch.vgic.rdist_pendbase;
+            reg = read_atomic(&v->arch.vgic.rdist_pendbase);
             vreg_reg64_update(&reg, r, info);
             reg = sanitize_pendbaser(reg);
-            v->arch.vgic.rdist_pendbase = reg;
+            write_atomic(&v->arch.vgic.rdist_pendbase, reg);
         }
 
-        spin_unlock_irqrestore(&v->arch.vgic.lock, false);
+        spin_unlock_irqrestore(&v->arch.vgic.lock, flags);
 
         return 1;
     }
@@ -817,10 +816,12 @@ static int __vgic_v3_distr_common_mmio_write(const char *name, struct vcpu *v,
 
     case VRANGE32(GICD_ICPENDR, GICD_ICPENDRN):
         if ( dabt.size != DABT_WORD ) goto bad_width;
-        printk(XENLOG_G_ERR
-               "%pv: %s: unhandled word write %#"PRIregister" to ICPENDR%d\n",
-               v, name, r, reg - GICD_ICPENDR);
-        return 0;
+        rank = vgic_rank_offset(v, 1, reg - GICD_ICPENDR, DABT_WORD);
+        if ( rank == NULL ) goto write_ignore;
+
+        vgic_check_inflight_irqs_pending(v->domain, v, rank->index, r);
+
+        goto write_ignore;
 
     case VRANGE32(GICD_ISACTIVER, GICD_ISACTIVERN):
         if ( dabt.size != DABT_WORD ) goto bad_width;
@@ -986,11 +987,8 @@ static int vgic_v3_rdistr_sgi_mmio_write(struct vcpu *v, mmio_info_t *info,
                                                  info, gicr_reg, r);
 
     case VREG32(GICR_ICPENDR0):
-        if ( dabt.size != DABT_WORD ) goto bad_width;
-        printk(XENLOG_G_ERR
-               "%pv: vGICR: SGI: unhandled word write %#"PRIregister" to ICPENDR0\n",
-               v, r);
-        return 0;
+        return __vgic_v3_distr_common_mmio_write("vGICR: SGI", v,
+                                                 info, gicr_reg, r);
 
     case VREG32(GICR_IGRPMODR0):
         /* We do not implement security extensions for guests, write ignore */
@@ -1531,7 +1529,7 @@ static bool vgic_v3_emulate_sysreg(struct cpu_user_regs *regs, union hsr hsr)
     switch ( hsr.bits & HSR_SYSREG_REGS_MASK )
     {
     case HSR_SYSREG_ICC_SGI1R_EL1:
-        return vreg_emulate_sysreg64(regs, hsr, vgic_v3_emulate_sgi1r);
+        return vreg_emulate_sysreg(regs, hsr, vgic_v3_emulate_sgi1r);
 
     default:
         return false;
@@ -1641,14 +1639,15 @@ static inline unsigned int vgic_v3_max_rdist_count(struct domain *d)
      * Normally there is only one GICv3 redistributor region.
      * The GICv3 DT binding provisions for multiple regions, since there are
      * platforms out there which need those (multi-socket systems).
-     * For Dom0 we have to live with the MMIO layout the hardware provides,
-     * so we have to copy the multiple regions - as the first region may not
-     * provide enough space to hold all redistributors we need.
-     * However DomU get a constructed memory map, so we can go with
-     * the architected single redistributor region.
+     * For domain using the host memory layout, we have to live with the MMIO
+     * layout the hardware provides, so we have to copy the multiple regions
+     * - as the first region may not provide enough space to hold all
+     * redistributors we need.
+     * All the other domains will get a constructed memory map, so we can go
+     * with the architected single redistributor region.
      */
-    return is_hardware_domain(d) ? vgic_v3_hw.nr_rdist_regions :
-               GUEST_GICV3_RDIST_REGIONS;
+    return domain_use_host_layout(d) ? vgic_v3_hw.nr_rdist_regions :
+                                       GUEST_GICV3_RDIST_REGIONS;
 }
 
 static int vgic_v3_domain_init(struct domain *d)
@@ -1670,10 +1669,11 @@ static int vgic_v3_domain_init(struct domain *d)
     radix_tree_init(&d->arch.vgic.pend_lpi_tree);
 
     /*
-     * Domain 0 gets the hardware address.
-     * Guests get the virtual platform layout.
+     * For domain using the host memory layout, it gets the hardware
+     * address.
+     * Other domains get the virtual platform layout.
      */
-    if ( is_hardware_domain(d) )
+    if ( domain_use_host_layout(d) )
     {
         unsigned int first_cpu = 0;
 
@@ -1696,10 +1696,10 @@ static int vgic_v3_domain_init(struct domain *d)
         }
 
         /*
-         * The hardware domain may not use all the re-distributors
-         * regions (e.g when the number of vCPUs does not match the
-         * number of pCPUs). Update the number of regions to avoid
-         * exposing unused region as they will not get emulated.
+         * For domain using the host memory layout, it may not use all
+         * the re-distributors regions (e.g when the number of vCPUs does
+         * not match the number of pCPUs). Update the number of regions to
+         * avoid exposing unused region as they will not get emulated.
          */
         d->arch.vgic.nr_regions = i + 1;
 

@@ -6,7 +6,6 @@ include $(XEN_ROOT)/tools/Rules.mk
 
 SUBDIRS-y :=
 SUBDIRS-y += libs
-SUBDIRS-y += libxc
 SUBDIRS-y += flask
 SUBDIRS-y += fuzz
 SUBDIRS-y += xenstore
@@ -18,10 +17,9 @@ SUBDIRS-$(CONFIG_XCUTILS) += xcutils
 SUBDIRS-$(CONFIG_X86) += firmware
 SUBDIRS-y += console
 SUBDIRS-y += xenmon
-SUBDIRS-y += xenstat
-SUBDIRS-$(CONFIG_NetBSD) += xenbackendd
+SUBDIRS-$(XENSTAT_XENTOP) += xentop
 SUBDIRS-y += libfsimage
-SUBDIRS-$(CONFIG_Linux) += libvchan
+SUBDIRS-$(CONFIG_Linux) += vchan
 
 # do not recurse in to a dir we are about to delete
 ifneq "$(MAKECMDGOALS)" "distclean"
@@ -30,24 +28,19 @@ SUBDIRS-$(CONFIG_QEMU_XEN) += qemu-xen-dir
 endif
 
 SUBDIRS-y += xenpmd
-SUBDIRS-y += libxl
 SUBDIRS-$(CONFIG_GOLANG) += golang
 SUBDIRS-y += xl
 SUBDIRS-y += helpers
 SUBDIRS-$(CONFIG_X86) += xenpaging
-SUBDIRS-$(CONFIG_X86) += debugger/gdbsx
-SUBDIRS-$(CONFIG_X86) += debugger/kdd
+SUBDIRS-$(CONFIG_X86) += debugger
 SUBDIRS-$(CONFIG_TESTS) += tests
 
-# These don't cross-compile
-ifeq ($(XEN_COMPILE_ARCH),$(XEN_TARGET_ARCH))
 SUBDIRS-y += python
 SUBDIRS-y += pygrub
 SUBDIRS-$(OCAML_TOOLS) += ocaml
-endif
 
 ifeq ($(CONFIG_RUMP),y)
-SUBDIRS-y := libs libxc xenstore
+SUBDIRS-y := libs
 endif
 
 # For the sake of linking, set the sys-root
@@ -166,6 +159,7 @@ qemu-traditional-recurse = \
 	set -e; \
 		$(buildmakevars2shellvars); \
 		export CONFIG_BLKTAP1=n; \
+		export BUILDING_QEMU_TRAD=y; \
 		cd qemu-xen-traditional-dir; \
 		$(1)
 
@@ -224,9 +218,9 @@ subdir-all-qemu-xen-dir: qemu-xen-dir-find
 	mkdir -p qemu-xen-build; \
 	cd qemu-xen-build; \
 	if $$source/scripts/tracetool.py --check-backend --backend log ; then \
-		enable_trace_backend='--enable-trace-backend=log'; \
+		enable_trace_backend="--enable-trace-backends=log"; \
 	elif $$source/scripts/tracetool.py --check-backend --backend stderr ; then \
-		enable_trace_backend='--enable-trace-backend=stderr'; \
+		enable_trace_backend='--enable-trace-backends=stderr'; \
 	else \
 		enable_trace_backend='' ; \
 	fi ; \
@@ -241,42 +235,22 @@ subdir-all-qemu-xen-dir: qemu-xen-dir-find
 	$$source/configure --enable-xen --target-list=i386-softmmu \
 		$(QEMU_XEN_ENABLE_DEBUG) \
 		$$enable_trace_backend \
-		--prefix=$(LIBEXEC) \
+		--prefix=$(prefix) \
 		--libdir=$(LIBEXEC_LIB) \
 		--includedir=$(LIBEXEC_INC) \
 		--extra-cflags="-DXC_WANT_COMPAT_EVTCHN_API=1 \
 		-DXC_WANT_COMPAT_GNTTAB_API=1 \
 		-DXC_WANT_COMPAT_MAP_FOREIGN_API=1 \
 		-DXC_WANT_COMPAT_DEVICEMODEL_API=1 \
-		-I$(XEN_ROOT)/tools/include \
-		-I$(XEN_ROOT)/tools/libs/toolcore/include \
-		-I$(XEN_ROOT)/tools/libs/toollog/include \
-		-I$(XEN_ROOT)/tools/libs/evtchn/include \
-		-I$(XEN_ROOT)/tools/libs/gnttab/include \
-		-I$(XEN_ROOT)/tools/libs/foreignmemory/include \
-		-I$(XEN_ROOT)/tools/libs/devicemodel/include \
-		-I$(XEN_ROOT)/tools/libxc/include \
-		-I$(XEN_ROOT)/tools/xenstore/include \
-		-I$(XEN_ROOT)/tools/xenstore/compat/include \
 		$(EXTRA_CFLAGS_QEMU_XEN)" \
-		--extra-ldflags="-L$(XEN_ROOT)/tools/libxc \
-		-L$(XEN_ROOT)/tools/xenstore \
-		-L$(XEN_ROOT)/tools/libs/toolcore \
-		-L$(XEN_ROOT)/tools/libs/evtchn \
-		-L$(XEN_ROOT)/tools/libs/gnttab \
-		-L$(XEN_ROOT)/tools/libs/foreignmemory \
-		-L$(XEN_ROOT)/tools/libs/devicemodel \
-		-Wl,-rpath-link=$(XEN_ROOT)/tools/libs/toolcore \
-		-Wl,-rpath-link=$(XEN_ROOT)/tools/libs/toollog \
-		-Wl,-rpath-link=$(XEN_ROOT)/tools/libs/evtchn \
-		-Wl,-rpath-link=$(XEN_ROOT)/tools/libs/gnttab \
-		-Wl,-rpath-link=$(XEN_ROOT)/tools/libs/call \
-		-Wl,-rpath-link=$(XEN_ROOT)/tools/libs/foreignmemory \
-		-Wl,-rpath-link=$(XEN_ROOT)/tools/libs/devicemodel \
-		$(QEMU_UPSTREAM_RPATH)" \
+		--extra-ldflags="$(QEMU_UPSTREAM_RPATH)" \
 		--bindir=$(LIBEXEC_BIN) \
 		--datadir=$(SHAREDIR)/qemu-xen \
 		--localstatedir=$(localstatedir) \
+		--docdir=$(LIBEXEC)/share/doc \
+		--mandir=$(LIBEXEC)/share/man \
+		--libexecdir=$(LIBEXEC)/libexec \
+		--firmwarepath=$(LIBEXEC)/share/qemu-firmware \
 		--disable-kvm \
 		--disable-docs \
 		--disable-guest-agent \
@@ -297,33 +271,6 @@ subdir-clean-qemu-xen-dir:
 	fi
 
 subdir-uninstall-qemu-xen-dir: ;
-
-subdir-clean-debugger/gdbsx subdir-distclean-debugger/gdbsx: .phony
-	$(MAKE) -C debugger/gdbsx clean
-
-subdir-install-debugger/gdbsx: .phony
-	$(MAKE) -C debugger/gdbsx install
-
-subdir-all-debugger/gdbsx: .phony
-	$(MAKE) -C debugger/gdbsx all
-
-subdir-uninstall-debugger/gdbsx: .phony
-	$(MAKE) -C debugger/gdbsx uninstall
-
-subdir-clean-debugger/kdd subdir-distclean-debugger/kdd: .phony
-	$(MAKE) -C debugger/kdd clean
-
-subdir-install-debugger/kdd: .phony
-	$(MAKE) -C debugger/kdd install
-
-subdir-uninstall-debugger/kdd: .phony
-	$(MAKE) -C debugger/kdd uninstall
-
-subdir-all-debugger/kdd: .phony
-	$(MAKE) -C debugger/kdd all
-
-subdir-distclean-firmware: .phony
-	$(MAKE) -C firmware distclean
 
 subtree-force-update:
 ifeq ($(CONFIG_QEMU_XEN),y)

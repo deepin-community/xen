@@ -1,8 +1,10 @@
+#include <xen/cpu.h>
 #include <xen/init.h>
 #include <xen/bitops.h>
 #include <xen/mm.h>
 #include <xen/param.h>
 #include <xen/smp.h>
+#include <xen/softirq.h>
 #include <xen/pci.h>
 #include <xen/warning.h>
 #include <asm/io.h>
@@ -13,6 +15,7 @@
 #include <asm/spec_ctrl.h>
 #include <asm/acpi.h>
 #include <asm/apic.h>
+#include <asm/microcode.h>
 
 #include "cpu.h"
 
@@ -48,6 +51,10 @@ boolean_param("allow_unsafe", opt_allow_unsafe);
 
 /* Signal whether the ACPI C1E quirk is required. */
 bool __read_mostly amd_acpi_c1e_quirk;
+bool __ro_after_init amd_legacy_ssbd;
+bool __initdata amd_virt_spec_ctrl;
+
+static bool __read_mostly fam17_c6_disabled;
 
 static inline int rdmsr_amd_safe(unsigned int msr, unsigned int *lo,
 				 unsigned int *hi)
@@ -208,7 +215,7 @@ static void __init noinline probe_masking_msrs(void)
  * parameter of NULL is used to context switch to the default host state (by
  * the cpu bringup-code, crash path, etc).
  */
-static void amd_ctxt_switch_masking(const struct vcpu *next)
+static void cf_check amd_ctxt_switch_masking(const struct vcpu *next)
 {
 	struct cpuidmasks *these_masks = &this_cpu(cpuidmasks);
 	const struct domain *nextd = next ? next->domain : NULL;
@@ -430,7 +437,7 @@ static void disable_c1_ramping(void)
 	}
 }
 
-static void disable_c1e(void *unused)
+static void cf_check disable_c1e(void *unused)
 {
 	uint64_t msr_content;
 
@@ -468,14 +475,14 @@ static void check_syscfg_dram_mod_en(void)
 		return;
 
 	rdmsrl(MSR_K8_SYSCFG, syscfg);
-	if (!(syscfg & K8_MTRRFIXRANGE_DRAM_MODIFY))
+	if (!(syscfg & SYSCFG_MTRR_FIX_DRAM_MOD_EN))
 		return;
 
 	if (!test_and_set_bool(printed))
 		printk(KERN_ERR "MTRR: SYSCFG[MtrrFixDramModEn] not "
 			"cleared by BIOS, clearing this bit\n");
 
-	syscfg &= ~K8_MTRRFIXRANGE_DRAM_MODIFY;
+	syscfg &= ~SYSCFG_MTRR_FIX_DRAM_MOD_EN;
 	wrmsrl(MSR_K8_SYSCFG, syscfg);
 }
 
@@ -634,7 +641,7 @@ void amd_log_freq(const struct cpuinfo_x86 *c)
 #undef FREQ
 }
 
-void early_init_amd(struct cpuinfo_x86 *c)
+void cf_check early_init_amd(struct cpuinfo_x86 *c)
 {
 	if (c == &boot_cpu_data)
 		amd_init_levelling();
@@ -642,7 +649,356 @@ void early_init_amd(struct cpuinfo_x86 *c)
 	ctxt_switch_levelling(NULL);
 }
 
-static void init_amd(struct cpuinfo_x86 *c)
+void amd_init_lfence(struct cpuinfo_x86 *c)
+{
+	uint64_t value;
+
+	/*
+	 * Some hardware has LFENCE dispatch serialising always enabled,
+	 * nothing to do on that case.
+	 */
+	if (test_bit(X86_FEATURE_LFENCE_DISPATCH, c->x86_capability))
+		return;
+
+	/*
+	 * Attempt to set lfence to be Dispatch Serialising.  This MSR almost
+	 * certainly isn't virtualised (and Xen at least will leak the real
+	 * value in but silently discard writes), as well as being per-core
+	 * rather than per-thread, so do a full safe read/write/readback cycle
+	 * in the worst case.
+	 */
+	if (rdmsr_safe(MSR_AMD64_DE_CFG, value))
+		/* Unable to read.  Assume the safer default. */
+		__clear_bit(X86_FEATURE_LFENCE_DISPATCH,
+			    c->x86_capability);
+	else if (value & AMD64_DE_CFG_LFENCE_SERIALISE)
+		/* Already dispatch serialising. */
+		__set_bit(X86_FEATURE_LFENCE_DISPATCH,
+			  c->x86_capability);
+	else if (wrmsr_safe(MSR_AMD64_DE_CFG,
+			    value | AMD64_DE_CFG_LFENCE_SERIALISE) ||
+		 rdmsr_safe(MSR_AMD64_DE_CFG, value) ||
+		 !(value & AMD64_DE_CFG_LFENCE_SERIALISE))
+		/* Attempt to set failed.  Assume the safer default. */
+		__clear_bit(X86_FEATURE_LFENCE_DISPATCH,
+			    c->x86_capability);
+	else
+		/* Successfully enabled! */
+		__set_bit(X86_FEATURE_LFENCE_DISPATCH,
+			  c->x86_capability);
+}
+
+/*
+ * Refer to the AMD Speculative Store Bypass whitepaper:
+ * https://developer.amd.com/wp-content/resources/124441_AMD64_SpeculativeStoreBypassDisable_Whitepaper_final.pdf
+ */
+static bool set_legacy_ssbd(const struct cpuinfo_x86 *c, bool enable)
+{
+	int bit = -1;
+
+	switch (c->x86) {
+	case 0x15: bit = 54; break;
+	case 0x16: bit = 33; break;
+	case 0x17:
+	case 0x18: bit = 10; break;
+	}
+
+	if (bit >= 0) {
+		uint64_t val, mask = 1ull << bit;
+
+		if (rdmsr_safe(MSR_AMD64_LS_CFG, val) ||
+		    ({
+			    val &= ~mask;
+			    if (enable)
+				    val |= mask;
+			    false;
+		    }) ||
+		    wrmsr_safe(MSR_AMD64_LS_CFG, val) ||
+		    ({
+			    rdmsrl(MSR_AMD64_LS_CFG, val);
+			    (val & mask) != (enable * mask);
+		    }))
+			bit = -1;
+	}
+
+	return bit >= 0;
+}
+
+void amd_init_ssbd(const struct cpuinfo_x86 *c)
+{
+	if (cpu_has_ssb_no)
+		return;
+
+	if (cpu_has_amd_ssbd) {
+		/* Handled by common MSR_SPEC_CTRL logic */
+		return;
+	}
+
+	if (cpu_has_virt_ssbd) {
+		wrmsrl(MSR_VIRT_SPEC_CTRL, opt_ssbd ? SPEC_CTRL_SSBD : 0);
+		return;
+	}
+
+	if (!set_legacy_ssbd(c, opt_ssbd)) {
+		printk_once(XENLOG_ERR "No SSBD controls available\n");
+		if (amd_legacy_ssbd)
+			panic("CPU feature mismatch: no legacy SSBD\n");
+	} else if (c == &boot_cpu_data)
+		amd_legacy_ssbd = true;
+}
+
+static struct ssbd_ls_cfg {
+    spinlock_t lock;
+    unsigned int count;
+} __cacheline_aligned *ssbd_ls_cfg;
+static unsigned int __ro_after_init ssbd_max_cores;
+#define AMD_FAM17H_MAX_SOCKETS 2
+
+bool __init amd_setup_legacy_ssbd(void)
+{
+	unsigned int i;
+
+	if ((boot_cpu_data.x86 != 0x17 && boot_cpu_data.x86 != 0x18) ||
+	    boot_cpu_data.x86_num_siblings <= 1 || opt_ssbd)
+		return true;
+
+	/*
+	 * One could be forgiven for thinking that c->x86_max_cores is the
+	 * correct value to use here.
+	 *
+	 * However, that value is derived from the current configuration, and
+	 * c->cpu_core_id is sparse on all but the top end CPUs.  Derive
+	 * max_cpus from ApicIdCoreIdSize which will cover any sparseness.
+	 */
+	if (boot_cpu_data.extended_cpuid_level >= 0x80000008) {
+		ssbd_max_cores = 1u << MASK_EXTR(cpuid_ecx(0x80000008), 0xf000);
+		ssbd_max_cores /= boot_cpu_data.x86_num_siblings;
+	}
+	if (!ssbd_max_cores)
+		return false;
+
+	ssbd_ls_cfg = xzalloc_array(struct ssbd_ls_cfg,
+	                            ssbd_max_cores * AMD_FAM17H_MAX_SOCKETS);
+	if (!ssbd_ls_cfg)
+		return false;
+
+	for (i = 0; i < ssbd_max_cores * AMD_FAM17H_MAX_SOCKETS; i++)
+		spin_lock_init(&ssbd_ls_cfg[i].lock);
+
+	return true;
+}
+
+/*
+ * legacy_ssbd is always initialized to false because when SSBD is set
+ * from the command line guest attempts to change it are a no-op (see
+ * amd_set_legacy_ssbd()), whereas when SSBD is inactive hardware will
+ * be forced into that mode (see amd_init_ssbd()).
+ */
+static DEFINE_PER_CPU(bool, legacy_ssbd);
+
+/* Must be called only when the SSBD setting needs toggling. */
+static void core_set_legacy_ssbd(bool enable)
+{
+	const struct cpuinfo_x86 *c = &current_cpu_data;
+	struct ssbd_ls_cfg *status;
+	unsigned long flags;
+
+	BUG_ON(this_cpu(legacy_ssbd) == enable);
+
+	if ((c->x86 != 0x17 && c->x86 != 0x18) || c->x86_num_siblings <= 1) {
+		BUG_ON(!set_legacy_ssbd(c, enable));
+		return;
+	}
+
+	BUG_ON(c->phys_proc_id >= AMD_FAM17H_MAX_SOCKETS);
+	BUG_ON(c->cpu_core_id >= ssbd_max_cores);
+	status = &ssbd_ls_cfg[c->phys_proc_id * ssbd_max_cores +
+	                      c->cpu_core_id];
+
+	spin_lock_irqsave(&status->lock, flags);
+	status->count += enable ? 1 : -1;
+	ASSERT(status->count <= c->x86_num_siblings);
+	if (enable ? status->count == 1 : !status->count)
+		BUG_ON(!set_legacy_ssbd(c, enable));
+	spin_unlock_irqrestore(&status->lock, flags);
+}
+
+void amd_set_legacy_ssbd(bool enable)
+{
+	if (opt_ssbd)
+		/*
+		 * Ignore attempts to turn off SSBD, it's hardcoded on the
+		 * command line.
+		 */
+		return;
+
+	if (this_cpu(legacy_ssbd) == enable)
+		return;
+
+	if (cpu_has_virt_ssbd)
+		wrmsr(MSR_VIRT_SPEC_CTRL, enable ? SPEC_CTRL_SSBD : 0, 0);
+	else if (amd_legacy_ssbd)
+		core_set_legacy_ssbd(enable);
+	else
+		ASSERT_UNREACHABLE();
+
+	this_cpu(legacy_ssbd) = enable;
+}
+
+/*
+ * On Zen2 we offer this chicken (bit) on the altar of Speculation.
+ *
+ * Refer to the AMD Branch Type Confusion whitepaper:
+ * https://www.amd.com/system/files/documents/technical-guidance-for-mitigating-branch-type-confusion.pdf
+ *
+ * Setting this unnamed bit supposedly causes prediction information on
+ * non-branch instructions to be ignored.  It is to be set unilaterally in
+ * newer microcode.
+ *
+ * This chickenbit is something unrelated on Zen1.
+ */
+void amd_init_spectral_chicken(void)
+{
+	uint64_t val, chickenbit = 1 << 1;
+
+	if (cpu_has_hypervisor || !is_zen2_uarch())
+		return;
+
+	if (rdmsr_safe(MSR_AMD64_DE_CFG2, val) == 0 && !(val & chickenbit))
+		wrmsr_safe(MSR_AMD64_DE_CFG2, val | chickenbit);
+}
+
+void __init detect_zen2_null_seg_behaviour(void)
+{
+	uint64_t base;
+
+	wrmsrl(MSR_FS_BASE, 1);
+	asm volatile ( "mov %0, %%fs" :: "r" (0) );
+	rdmsrl(MSR_FS_BASE, base);
+
+	if (base == 0)
+		setup_force_cpu_cap(X86_FEATURE_NSCB);
+
+}
+
+void amd_check_zenbleed(void)
+{
+	const struct cpu_signature *sig = &this_cpu(cpu_sig);
+	unsigned int good_rev;
+	uint64_t val, old_val, chickenbit = (1 << 9);
+
+	/*
+	 * If we're virtualised, we can't do family/model checks safely, and
+	 * we likely wouldn't have access to DE_CFG even if we could see a
+	 * microcode revision.
+	 *
+	 * A hypervisor may hide AVX as a stopgap mitigation.  We're not in a
+	 * position to care either way.  An admin doesn't want to be disabling
+	 * AVX as a mitigation on any build of Xen with this logic present.
+	 */
+	if (cpu_has_hypervisor || boot_cpu_data.x86 != 0x17)
+		return;
+
+	switch (boot_cpu_data.x86_model) {
+	case 0x30 ... 0x3f: good_rev = 0x0830107a; break;
+	case 0x60 ... 0x67: good_rev = 0x0860010b; break;
+	case 0x68 ... 0x6f: good_rev = 0x08608105; break;
+	case 0x70 ... 0x7f: good_rev = 0x08701032; break;
+	case 0xa0 ... 0xaf: good_rev = 0x08a00008; break;
+	default:
+		/*
+		 * With the Fam17h check above, most parts getting here are
+		 * Zen1.  They're not affected.  Assume Zen2 ones making it
+		 * here are affected regardless of microcode version.
+		 */
+		if (is_zen1_uarch())
+			return;
+		good_rev = ~0U;
+		break;
+	}
+
+	rdmsrl(MSR_AMD64_DE_CFG, val);
+	old_val = val;
+
+	/*
+	 * Microcode is the preferred mitigation, in terms of performance.
+	 * However, without microcode, this chickenbit (specific to the Zen2
+	 * uarch) disables Floating Point Mov-Elimination to mitigate the
+	 * issue.
+	 */
+	val &= ~chickenbit;
+	if (sig->rev < good_rev)
+		val |= chickenbit;
+
+	if (val == old_val)
+		/* Nothing to change. */
+		return;
+
+	/*
+	 * DE_CFG is a Core-scoped MSR, and this write is racy during late
+	 * microcode load.  However, both threads calculate the new value from
+	 * state which is shared, and unrelated to the old value, so the
+	 * result should be consistent.
+	 */
+	wrmsrl(MSR_AMD64_DE_CFG, val);
+
+	/*
+	 * Inform the admin that we changed something, but don't spam,
+	 * especially during a late microcode load.
+	 */
+	if (smp_processor_id() == 0)
+		printk(XENLOG_INFO "Zenbleed mitigation - using %s\n",
+		       val & chickenbit ? "chickenbit" : "microcode");
+}
+
+static void cf_check fam17_disable_c6(void *arg)
+{
+	/* Disable C6 by clearing the CCR{0,1,2}_CC6EN bits. */
+	const uint64_t mask = ~((1ul << 6) | (1ul << 14) | (1ul << 22));
+	uint64_t val;
+
+	if (!fam17_c6_disabled) {
+		printk(XENLOG_WARNING
+    "Disabling C6 after 1000 days apparent uptime due to AMD errata 1474\n");
+		fam17_c6_disabled = true;
+		/*
+		 * Prevent CPU hotplug so that started CPUs will either see
+		 * zen_c6_disabled set, or will be handled by
+		 * smp_call_function().
+		 */
+		while (!get_cpu_maps())
+			process_pending_softirqs();
+		smp_call_function(fam17_disable_c6, NULL, 0);
+		put_cpu_maps();
+	}
+
+	/* Update the MSR to disable C6, done on all threads. */
+	rdmsrl(MSR_AMD_CSTATE_CFG, val);
+	wrmsrl(MSR_AMD_CSTATE_CFG, val & mask);
+}
+
+static void amd_check_erratum_1485(void)
+{
+	uint64_t val, chickenbit = (1 << 5);
+
+	if (cpu_has_hypervisor || boot_cpu_data.x86 != 0x19 || !is_zen4_uarch())
+		return;
+
+	rdmsrl(MSR_AMD64_BP_CFG, val);
+
+	if (val & chickenbit)
+		return;
+
+	/*
+	 * BP_CFG is a core-scoped MSR. There's a benign race on this write
+	 * on the case where 2 threads perform the previous check at the
+	 * same time before the chickenbit is set. It's benign because the
+	 * value being written is the same on both.
+	 */
+	wrmsrl(MSR_AMD64_BP_CFG, val | chickenbit);
+}
+
+static void cf_check init_amd(struct cpuinfo_x86 *c)
 {
 	u32 l, h;
 
@@ -655,9 +1011,9 @@ static void init_amd(struct cpuinfo_x86 *c)
 	 * Errata 122 for all steppings (F+ have it disabled by default)
 	 */
 	if (c->x86 == 15) {
-		rdmsrl(MSR_K7_HWCR, value);
+		rdmsrl(MSR_K8_HWCR, value);
 		value |= 1 << 6;
-		wrmsrl(MSR_K7_HWCR, value);
+		wrmsrl(MSR_K8_HWCR, value);
 	}
 
 	/*
@@ -686,60 +1042,40 @@ static void init_amd(struct cpuinfo_x86 *c)
 	if (c == &boot_cpu_data && !cpu_has(c, X86_FEATURE_RSTR_FP_ERR_PTRS))
 		setup_force_cpu_cap(X86_BUG_FPU_PTRS);
 
-	/*
-	 * Attempt to set lfence to be Dispatch Serialising.  This MSR almost
-	 * certainly isn't virtualised (and Xen at least will leak the real
-	 * value in but silently discard writes), as well as being per-core
-	 * rather than per-thread, so do a full safe read/write/readback cycle
-	 * in the worst case.
-	 */
 	if (c->x86 == 0x0f || c->x86 == 0x11)
 		/* Always dispatch serialising on this hardare. */
 		__set_bit(X86_FEATURE_LFENCE_DISPATCH, c->x86_capability);
-	else /* Implicily "== 0x10 || >= 0x12" by being 64bit. */ {
-		if (rdmsr_safe(MSR_AMD64_DE_CFG, value))
-			/* Unable to read.  Assume the safer default. */
-			__clear_bit(X86_FEATURE_LFENCE_DISPATCH,
-				    c->x86_capability);
-		else if (value & AMD64_DE_CFG_LFENCE_SERIALISE)
-			/* Already dispatch serialising. */
-			__set_bit(X86_FEATURE_LFENCE_DISPATCH,
-				  c->x86_capability);
-		else if (wrmsr_safe(MSR_AMD64_DE_CFG,
-				    value | AMD64_DE_CFG_LFENCE_SERIALISE) ||
-			 rdmsr_safe(MSR_AMD64_DE_CFG, value) ||
-			 !(value & AMD64_DE_CFG_LFENCE_SERIALISE))
-			/* Attempt to set failed.  Assume the safer default. */
-			__clear_bit(X86_FEATURE_LFENCE_DISPATCH,
-				    c->x86_capability);
-		else
-			/* Successfully enabled! */
-			__set_bit(X86_FEATURE_LFENCE_DISPATCH,
-				  c->x86_capability);
-	}
+	else /* Implicily "== 0x10 || >= 0x12" by being 64bit. */
+		amd_init_lfence(c);
+
+	amd_init_ssbd(c);
+
+	if (c->x86 == 0x17)
+		amd_init_spectral_chicken();
+
+	/* Probe for NSCB on Zen2 CPUs when not virtualised */
+	if (!cpu_has_hypervisor && !cpu_has_nscb && c == &boot_cpu_data &&
+	    c->x86 == 0x17)
+		detect_zen2_null_seg_behaviour();
 
 	/*
-	 * If the user has explicitly chosen to disable Memory Disambiguation
-	 * to mitigiate Speculative Store Bypass, poke the appropriate MSR.
+	 * AMD CPUs before Zen2 don't clear segment bases/limits when loading
+	 * a NULL selector.
 	 */
-	if (opt_ssbd) {
-		int bit = -1;
-
-		switch (c->x86) {
-		case 0x15: bit = 54; break;
-		case 0x16: bit = 33; break;
-		case 0x17: bit = 10; break;
-		}
-
-		if (bit >= 0 && !rdmsr_safe(MSR_AMD64_LS_CFG, value)) {
-			value |= 1ull << bit;
-			wrmsr_safe(MSR_AMD64_LS_CFG, value);
-		}
-	}
+	if (c == &boot_cpu_data && !cpu_has_nscb)
+		setup_force_cpu_cap(X86_BUG_NULL_SEG);
 
 	/* MFENCE stops RDTSC speculation */
 	if (!cpu_has_lfence_dispatch)
 		__set_bit(X86_FEATURE_MFENCE_RDTSC, c->x86_capability);
+
+	/*
+	 * On pre-CLFLUSHOPT AMD CPUs, CLFLUSH is weakly ordered with
+	 * everything, including reads and writes to address, and
+	 * LFENCE/SFENCE instructions.
+	 */
+	if (c == &boot_cpu_data && !cpu_has_clflushopt)
+		setup_force_cpu_cap(X86_BUG_CLFLUSH_MFENCE);
 
 	switch(c->x86)
 	{
@@ -767,6 +1103,16 @@ static void init_amd(struct cpuinfo_x86 *c)
 			setup_clear_cpu_cap(X86_FEATURE_RDRAND);
 			warning_add(text);
 		}
+		break;
+
+	case 0x19:
+		/*
+		 * Zen3 (Fam19h model < 0x10) parts are not susceptible to
+		 * Branch Type Confusion, but predate the allocation of the
+		 * BTC_NO bit.  Fill it back in if we're not virtualised.
+		 */
+		if (!cpu_has_hypervisor && !cpu_has(c, X86_FEATURE_BTC_NO))
+			__set_bit(X86_FEATURE_BTC_NO, c->x86_capability);
 		break;
 	}
 
@@ -915,14 +1261,20 @@ static void init_amd(struct cpuinfo_x86 *c)
 	}
 
 	if (cpu_has(c, X86_FEATURE_EFRO)) {
-		rdmsr(MSR_K7_HWCR, l, h);
+		rdmsr(MSR_K8_HWCR, l, h);
 		l |= (1 << 27); /* Enable read-only APERF/MPERF bit */
-		wrmsr(MSR_K7_HWCR, l, h);
+		wrmsr(MSR_K8_HWCR, l, h);
 	}
 
 	/* Prevent TSC drift in non single-processor, single-core platforms. */
 	if ((smp_processor_id() == 1) && !cpu_has(c, X86_FEATURE_ITSC))
 		disable_c1_ramping();
+
+	amd_check_zenbleed();
+	amd_check_erratum_1485();
+
+	if (fam17_c6_disabled)
+		fam17_disable_c6(NULL);
 
 	check_syscfg_dram_mod_en();
 
@@ -933,3 +1285,40 @@ const struct cpu_dev amd_cpu_dev = {
 	.c_early_init	= early_init_amd,
 	.c_init		= init_amd,
 };
+
+static int __init cf_check amd_check_erratum_1474(void)
+{
+	/*
+	 * Errata #1474: A Core May Hang After About 1044 Days
+	 * Set up a timer to disable C6 after 1000 days uptime.
+	 */
+	s_time_t delta;
+
+	if (cpu_has_hypervisor ||
+	    (boot_cpu_data.x86 != 0x17 && boot_cpu_data.x86 != 0x18))
+		return 0;
+
+	/*
+	 * Deduct current TSC value, this would be relevant if kexec'ed for
+	 * example.  Might not be accurate, but worst case we end up disabling
+	 * C6 before strictly required, which would still be safe.
+	 *
+	 * NB: all affected models (Zen2) have invariant TSC and TSC adjust
+	 * MSR, so early_time_init() will have already cleared any TSC offset.
+	 */
+	delta = DAYS(1000) - tsc_ticks2ns(rdtsc());
+	if (delta > 0) {
+		static struct timer errata_c6;
+
+		init_timer(&errata_c6, fam17_disable_c6, NULL, 0);
+		set_timer(&errata_c6, NOW() + delta);
+	} else
+		fam17_disable_c6(NULL);
+
+	return 0;
+}
+/*
+ * Must be executed after early_time_init() for tsc_ticks2ns() to have been
+ * calibrated.  That prevents us doing the check in init_amd().
+ */
+presmp_initcall(amd_check_erratum_1474);

@@ -12,8 +12,10 @@
 #include <xen/bitops.h>
 #include <xen/errno.h>
 #include <xen/grant_table.h>
+#include <xen/guest_access.h>
 #include <xen/hypercall.h>
 #include <xen/init.h>
+#include <xen/ioreq.h>
 #include <xen/lib.h>
 #include <xen/livepatch.h>
 #include <xen/sched.h>
@@ -26,7 +28,6 @@
 #include <asm/current.h>
 #include <asm/event.h>
 #include <asm/gic.h>
-#include <asm/guest_access.h>
 #include <asm/guest_atomics.h>
 #include <asm/irq.h>
 #include <asm/p2m.h>
@@ -38,6 +39,7 @@
 #include <asm/vgic.h>
 #include <asm/vtimer.h>
 
+#include "vpci.h"
 #include "vuart.h"
 
 DEFINE_PER_CPU(struct vcpu *, curr_vcpu);
@@ -61,7 +63,7 @@ static void do_idle(void)
     rcu_idle_exit(cpu);
 }
 
-void idle_loop(void)
+static void noreturn idle_loop(void)
 {
     unsigned int cpu = smp_processor_id();
 
@@ -112,13 +114,13 @@ static void ctxt_switch_from(struct vcpu *p)
     p->arch.tpidr_el1 = READ_SYSREG(TPIDR_EL1);
 
     /* Arch timer */
-    p->arch.cntkctl = READ_SYSREG32(CNTKCTL_EL1);
+    p->arch.cntkctl = READ_SYSREG(CNTKCTL_EL1);
     virt_timer_save(p);
 
     if ( is_32bit_domain(p->domain) && cpu_has_thumbee )
     {
-        p->arch.teecr = READ_SYSREG32(TEECR32_EL1);
-        p->arch.teehbr = READ_SYSREG32(TEEHBR32_EL1);
+        p->arch.teecr = READ_SYSREG(TEECR32_EL1);
+        p->arch.teehbr = READ_SYSREG(TEEHBR32_EL1);
     }
 
 #ifdef CONFIG_ARM_32
@@ -135,7 +137,7 @@ static void ctxt_switch_from(struct vcpu *p)
     p->arch.ttbr1 = READ_SYSREG64(TTBR1_EL1);
     if ( is_32bit_domain(p->domain) )
         p->arch.dacr = READ_SYSREG(DACR32_EL2);
-    p->arch.par = READ_SYSREG64(PAR_EL1);
+    p->arch.par = read_sysreg_par();
 #if defined(CONFIG_ARM_32)
     p->arch.mair0 = READ_CP32(MAIR0);
     p->arch.mair1 = READ_CP32(MAIR1);
@@ -174,7 +176,7 @@ static void ctxt_switch_from(struct vcpu *p)
 
 static void ctxt_switch_to(struct vcpu *n)
 {
-    uint32_t vpidr;
+    register_t vpidr;
 
     /* When the idle VCPU is running, Xen will always stay in hypervisor
      * mode. Therefore we don't need to restore the context of an idle VCPU.
@@ -182,8 +184,8 @@ static void ctxt_switch_to(struct vcpu *n)
     if ( is_idle_vcpu(n) )
         return;
 
-    vpidr = READ_SYSREG32(MIDR_EL1);
-    WRITE_SYSREG32(vpidr, VPIDR_EL2);
+    vpidr = READ_SYSREG(MIDR_EL1);
+    WRITE_SYSREG(vpidr, VPIDR_EL2);
     WRITE_SYSREG(n->arch.vmpidr, VMPIDR_EL2);
 
     /* VGIC */
@@ -256,8 +258,8 @@ static void ctxt_switch_to(struct vcpu *n)
 
     if ( is_32bit_domain(n->domain) && cpu_has_thumbee )
     {
-        WRITE_SYSREG32(n->arch.teecr, TEECR32_EL1);
-        WRITE_SYSREG32(n->arch.teehbr, TEEHBR32_EL1);
+        WRITE_SYSREG(n->arch.teecr, TEECR32_EL1);
+        WRITE_SYSREG(n->arch.teehbr, TEEHBR32_EL1);
     }
 
 #ifdef CONFIG_ARM_32
@@ -273,8 +275,10 @@ static void ctxt_switch_to(struct vcpu *n)
 
     /* This is could trigger an hardware interrupt from the virtual
      * timer. The interrupt needs to be injected into the guest. */
-    WRITE_SYSREG32(n->arch.cntkctl, CNTKCTL_EL1);
+    WRITE_SYSREG(n->arch.cntkctl, CNTKCTL_EL1);
     virt_timer_restore(n);
+
+    WRITE_SYSREG(n->arch.mdcr_el2, MDCR_EL2);
 }
 
 /* Update per-VCPU guest runstate shared memory area (if registered). */
@@ -326,6 +330,9 @@ static void schedule_tail(struct vcpu *prev)
     /* Ensure that the vcpu has an up-to-date time base. */
     update_vcpu_system_time(current);
 }
+
+extern void noreturn return_to_new_vcpu32(void);
+extern void noreturn return_to_new_vcpu64(void);
 
 static void continue_new_vcpu(struct vcpu *prev)
 {
@@ -585,6 +592,10 @@ int arch_vcpu_create(struct vcpu *v)
 
     v->arch.hcr_el2 = get_default_hcr_flags();
 
+    v->arch.mdcr_el2 = HDCR_TDRA | HDCR_TDOSA | HDCR_TDA;
+    if ( !(v->domain->options & XEN_DOMCTL_CDF_vpmu) )
+        v->arch.mdcr_el2 |= HDCR_TPM | HDCR_TPMCR;
+
     if ( (rc = vcpu_vgic_init(v)) != 0 )
         goto fail;
 
@@ -620,10 +631,10 @@ void vcpu_switch_to_aarch64_mode(struct vcpu *v)
 int arch_sanitise_domain_config(struct xen_domctl_createdomain *config)
 {
     unsigned int max_vcpus;
+    unsigned int flags_required = (XEN_DOMCTL_CDF_hvm | XEN_DOMCTL_CDF_hap);
+    unsigned int flags_optional = (XEN_DOMCTL_CDF_iommu | XEN_DOMCTL_CDF_vpmu);
 
-    /* HVM and HAP must be set. IOMMU may or may not be */
-    if ( (config->flags & ~XEN_DOMCTL_CDF_iommu) !=
-         (XEN_DOMCTL_CDF_hvm | XEN_DOMCTL_CDF_hap) )
+    if ( (config->flags & ~flags_optional) != flags_required )
     {
         dprintk(XENLOG_INFO, "Unsupported configuration %#x\n",
                 config->flags);
@@ -684,7 +695,8 @@ int arch_sanitise_domain_config(struct xen_domctl_createdomain *config)
 }
 
 int arch_domain_create(struct domain *d,
-                       struct xen_domctl_createdomain *config)
+                       struct xen_domctl_createdomain *config,
+                       unsigned int flags)
 {
     int rc, count = 0;
 
@@ -695,6 +707,10 @@ int arch_domain_create(struct domain *d,
         return 0;
 
     ASSERT(config != NULL);
+
+#ifdef CONFIG_IOREQ_SERVER
+    ioreq_domain_init(d);
+#endif
 
     /* p2m_init relies on some value initialized by the IOMMU subsystem */
     if ( (rc = iommu_domain_init(d, config->iommu_opts)) != 0 )
@@ -726,6 +742,8 @@ int arch_domain_create(struct domain *d,
 
     if ( (rc = domain_vgic_register(d, &count)) != 0 )
         goto fail;
+
+    count += domain_vpci_get_num_mmio_handlers(d);
 
     if ( (rc = domain_io_init(d, count + MAX_IO_HANDLER)) != 0 )
         goto fail;
@@ -762,6 +780,9 @@ int arch_domain_create(struct domain *d,
     if ( is_hardware_domain(d) && (rc = domain_vuart_init(d)) )
         goto fail;
 
+    if ( (rc = domain_vpci_init(d)) != 0 )
+        goto fail;
+
     return 0;
 
 fail:
@@ -774,10 +795,10 @@ fail:
 void arch_domain_destroy(struct domain *d)
 {
     /* IOMMU page table is shared with P2M, always call
-     * iommu_domain_destroy() before p2m_teardown().
+     * iommu_domain_destroy() before p2m_final_teardown().
      */
     iommu_domain_destroy(d);
-    p2m_teardown(d);
+    p2m_final_teardown(d);
     domain_vgic_free(d);
     domain_vuart_free(d);
     free_xenheap_page(d->shared_info);
@@ -840,7 +861,7 @@ static int is_guest_pv32_psr(uint32_t psr)
 
 
 #ifdef CONFIG_ARM_64
-static int is_guest_pv64_psr(uint32_t psr)
+static int is_guest_pv64_psr(uint64_t psr)
 {
     if ( psr & PSR_MODE_BIT )
         return 0;
@@ -862,9 +883,8 @@ static int is_guest_pv64_psr(uint32_t psr)
 #endif
 
 /*
- * Initialise VCPU state. The context can be supplied by either the
- * toolstack (XEN_DOMCTL_setvcpucontext) or the guest
- * (VCPUOP_initialise) and therefore must be properly validated.
+ * Initialise vCPU state. The context may be supplied by an external entity, so
+ * we need to validate it.
  */
 int arch_set_info_guest(
     struct vcpu *v, vcpu_guest_context_u c)
@@ -918,7 +938,8 @@ int arch_set_info_guest(
 
 int arch_initialise_vcpu(struct vcpu *v, XEN_GUEST_HANDLE_PARAM(void) arg)
 {
-    return default_initialise_vcpu(v, arg);
+    ASSERT_UNREACHABLE();
+    return -EOPNOTSUPP;
 }
 
 int arch_vcpu_reset(struct vcpu *v)
@@ -975,10 +996,13 @@ static int relinquish_memory(struct domain *d, struct page_list_head *list)
  * function which may return -ERESTART.
  */
 enum {
-    PROG_tee = 1,
+    PROG_pci = 1,
+    PROG_tee,
     PROG_xen,
     PROG_page,
     PROG_mapping,
+    PROG_p2m,
+    PROG_p2m_pool,
     PROG_done,
 };
 
@@ -1009,6 +1033,16 @@ int domain_relinquish_resources(struct domain *d)
          */
         domain_vpl011_deinit(d);
 
+#ifdef CONFIG_IOREQ_SERVER
+        ioreq_server_destroy_all(d);
+#endif
+#ifdef CONFIG_HAS_PCI
+    PROGRESS(pci):
+        ret = pci_release_devices(d);
+        if ( ret )
+            return ret;
+#endif
+
     PROGRESS(tee):
         ret = tee_relinquish_resources(d);
         if (ret )
@@ -1029,6 +1063,16 @@ int domain_relinquish_resources(struct domain *d)
         if ( ret )
             return ret;
 
+    PROGRESS(p2m):
+        ret = p2m_teardown(d, true);
+        if ( ret )
+            return ret;
+
+    PROGRESS(p2m_pool):
+        ret = p2m_teardown_allocation(d);
+        if( ret )
+            return ret;
+
     PROGRESS(done):
         break;
 
@@ -1047,21 +1091,22 @@ void arch_dump_domain_info(struct domain *d)
 }
 
 
-long do_arm_vcpu_op(int cmd, unsigned int vcpuid, XEN_GUEST_HANDLE_PARAM(void) arg)
+long do_vcpu_op(int cmd, unsigned int vcpuid, XEN_GUEST_HANDLE_PARAM(void) arg)
 {
+    struct domain *d = current->domain;
+    struct vcpu *v;
+
+    if ( (v = domain_vcpu(d, vcpuid)) == NULL )
+        return -ENOENT;
+
     switch ( cmd )
     {
         case VCPUOP_register_vcpu_info:
         case VCPUOP_register_runstate_memory_area:
-            return do_vcpu_op(cmd, vcpuid, arg);
+            return common_vcpu_op(cmd, v, arg);
         default:
             return -EINVAL;
     }
-}
-
-long arch_do_vcpu_op(int cmd, struct vcpu *v, XEN_GUEST_HANDLE_PARAM(void) arg)
-{
-    return -ENOSYS;
 }
 
 void arch_dump_vcpu_info(struct vcpu *v)

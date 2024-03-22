@@ -17,7 +17,6 @@ RUN apt-get update && \
         zlib1g-dev \
         libncurses5-dev \
         libssl-dev \
-        python-dev \
         python3-dev \
         xorg-dev \
         uuid-dev \
@@ -29,6 +28,7 @@ RUN apt-get update && \
         pkg-config \
         flex \
         bison \
+        # gettext for Xen < 4.13
         gettext \
         acpica-tools \
         bin86 \

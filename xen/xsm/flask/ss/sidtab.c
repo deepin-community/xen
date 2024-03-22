@@ -3,9 +3,9 @@
  *
  * Author : Stephen Smalley, <sds@epoch.ncsc.mil>
  */
- 
+
 /* Ported to Xen 3.0, George Coker, <gscoker@alpha.ncsc.mil> */
- 
+
 #include <xen/lib.h>
 #include <xen/xmalloc.h>
 #include <xen/errno.h>
@@ -14,11 +14,11 @@
 #include "security.h"
 #include "sidtab.h"
 
-#define SIDTAB_HASH(sid) (sid & SIDTAB_HASH_MASK)
+#define SIDTAB_HASH(sid) ((sid) & SIDTAB_HASH_MASK)
 
-#define INIT_SIDTAB_LOCK(s) spin_lock_init(&s->lock)
-#define SIDTAB_LOCK(s) spin_lock(&s->lock)
-#define SIDTAB_UNLOCK(s) spin_unlock(&s->lock)
+#define INIT_SIDTAB_LOCK(s) spin_lock_init(&(s)->lock)
+#define SIDTAB_LOCK(s) spin_lock(&(s)->lock)
+#define SIDTAB_UNLOCK(s) spin_unlock(&(s)->lock)
 
 int sidtab_init(struct sidtab *s)
 {
@@ -192,7 +192,7 @@ void sidtab_map_remove_on_error(struct sidtab *s,
     return;
 }
 
-static inline u32 sidtab_search_context(struct sidtab *s, 
+static inline u32 sidtab_search_context(struct sidtab *s,
                                                         struct context *context)
 {
     int i;

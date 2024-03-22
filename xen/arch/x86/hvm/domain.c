@@ -39,7 +39,7 @@ static int check_segment(struct segment_register *reg, enum x86_segment seg)
     {
         if ( seg != x86_seg_ds && seg != x86_seg_es )
         {
-            gprintk(XENLOG_ERR, "Null selector provided for CS, SS or TR\n");
+            gprintk(XENLOG_ERR, "Null segment attributes for CS, SS or TR\n");
             return -EINVAL;
         }
         return 0;
@@ -275,7 +275,7 @@ int arch_set_info_hvm_guest(struct vcpu *v, const vcpu_hvm_context_t *ctx)
     if ( v->arch.hvm.guest_efer & EFER_LME )
         v->arch.hvm.guest_efer |= EFER_LMA;
 
-    if ( v->arch.hvm.guest_cr[4] & ~hvm_cr4_guest_valid_bits(d, false) )
+    if ( v->arch.hvm.guest_cr[4] & ~hvm_cr4_guest_valid_bits(d) )
     {
         gprintk(XENLOG_ERR, "Bad CR4 value: %#016lx\n",
                 v->arch.hvm.guest_cr[4]);

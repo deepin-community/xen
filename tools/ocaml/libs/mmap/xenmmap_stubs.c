@@ -21,6 +21,8 @@
 #include <errno.h>
 #include "mmap_stubs.h"
 
+#include <xen-tools/libs.h>
+
 #include <caml/mlvalues.h>
 #include <caml/memory.h>
 #include <caml/alloc.h>
@@ -28,7 +30,7 @@
 #include <caml/fail.h>
 #include <caml/callback.h>
 
-#define Intf_val(a) ((struct mmap_interface *) a)
+#define Intf_val(a) ((struct mmap_interface *)Data_abstract_val(a))
 
 static int mmap_interface_init(struct mmap_interface *intf,
                                int fd, int pflag, int mflag,
@@ -59,7 +61,9 @@ CAMLprim value stub_mmap_init(value fd, value pflag, value mflag,
 	default: caml_invalid_argument("maptype");
 	}
 
-	result = caml_alloc(sizeof(struct mmap_interface), Abstract_tag);
+	BUILD_BUG_ON((sizeof(struct mmap_interface) % sizeof(value)) != 0);
+	result = caml_alloc(Wsize_bsize(sizeof(struct mmap_interface)),
+			    Abstract_tag);
 
 	if (mmap_interface_init(Intf_val(result), Int_val(fd),
 	                        c_pflag, c_mflag,

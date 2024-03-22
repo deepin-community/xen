@@ -84,14 +84,17 @@
 /* Define curses header to use */
 #undef INCLUDE_CURSES_H
 
+/* Header path for INCLUDE_ENDIAN_H */
+#undef INCLUDE_ENDIAN_H
+
 /* Define extfs header to use */
 #undef INCLUDE_EXTFS_H
 
-/* libutil header file name */
-#undef INCLUDE_LIBUTIL_H
-
 /* IPXE path */
 #undef IPXE_PATH
+
+/* Xen's libexec path */
+#undef LIBEXEC_BIN
 
 /* OVMF path */
 #undef OVMF_PATH
@@ -125,6 +128,30 @@
 
 /* QMP proxy path */
 #undef STUBDOM_QMP_PROXY_PATH
+
+/* Xen's firmware dir */
+#undef XENFIRMWAREDIR
+
+/* Xen's config dir */
+#undef XEN_CONFIG_DIR
+
+/* Xen's dump directory */
+#undef XEN_DUMP_DIR
+
+/* Xen's lib dir */
+#undef XEN_LIB_DIR
+
+/* Xen's lock dir */
+#undef XEN_LOCK_DIR
+
+/* Xen's log dir */
+#undef XEN_LOG_DIR
+
+/* Xen's runstate path */
+#undef XEN_RUN_DIR
+
+/* Xen's script dir */
+#undef XEN_SCRIPT_DIR
 
 /* Enable large inode numbers on Mac OS X 10.5.  */
 #ifndef _DARWIN_USE_64_BIT_INODE

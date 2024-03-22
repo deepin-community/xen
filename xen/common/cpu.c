@@ -25,10 +25,10 @@ const cpumask_t cpumask_all = {
  */
 
 /* cpu_bit_bitmap[0] is empty - so we can back into it */
-#define MASK_DECLARE_1(x) [x+1][0] = 1UL << (x)
-#define MASK_DECLARE_2(x) MASK_DECLARE_1(x), MASK_DECLARE_1(x+1)
-#define MASK_DECLARE_4(x) MASK_DECLARE_2(x), MASK_DECLARE_2(x+2)
-#define MASK_DECLARE_8(x) MASK_DECLARE_4(x), MASK_DECLARE_4(x+4)
+#define MASK_DECLARE_1(x) [(x) + 1][0] = 1UL << (x)
+#define MASK_DECLARE_2(x) MASK_DECLARE_1(x), MASK_DECLARE_1((x) + 1)
+#define MASK_DECLARE_4(x) MASK_DECLARE_2(x), MASK_DECLARE_2((x) + 2)
+#define MASK_DECLARE_8(x) MASK_DECLARE_4(x), MASK_DECLARE_4((x) + 4)
 
 const unsigned long cpu_bit_bitmap[BITS_PER_LONG+1][BITS_TO_LONGS(NR_CPUS)] = {
 
@@ -39,6 +39,11 @@ const unsigned long cpu_bit_bitmap[BITS_PER_LONG+1][BITS_TO_LONGS(NR_CPUS)] = {
     MASK_DECLARE_8(48), MASK_DECLARE_8(56),
 #endif
 };
+
+#undef MASK_DECLARE_8
+#undef MASK_DECLARE_4
+#undef MASK_DECLARE_2
+#undef MASK_DECLARE_1
 
 static DEFINE_RWLOCK(cpu_add_remove_lock);
 
@@ -84,13 +89,13 @@ static int cpu_notifier_call_chain(unsigned int cpu, unsigned long action,
     return ret;
 }
 
-static void _take_cpu_down(void *unused)
+static void cf_check _take_cpu_down(void *unused)
 {
     cpu_notifier_call_chain(smp_processor_id(), CPU_DYING, NULL, true);
     __cpu_disable();
 }
 
-static int take_cpu_down(void *arg)
+static int cf_check take_cpu_down(void *arg)
 {
     _take_cpu_down(arg);
     return 0;

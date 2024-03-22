@@ -5,10 +5,13 @@
 #ifndef __XEN_COMPAT_H__
 #define __XEN_COMPAT_H__
 
+#include <xen/types.h>
+#ifdef CONFIG_HAS_COMPAT
+#include <asm/compat.h>
+#endif
+
 #ifdef CONFIG_COMPAT
 
-#include <xen/types.h>
-#include <asm/compat.h>
 #include <compat/xlat.h>
 
 #define __DEFINE_COMPAT_HANDLE(name, type) \
@@ -226,9 +229,6 @@ struct start_info;
 void xlat_start_info(struct start_info *, enum XLAT_start_info_console);
 struct vcpu_runstate_info;
 void xlat_vcpu_runstate_info(struct vcpu_runstate_info *);
-
-struct domain;
-int switch_compat(struct domain *);
 
 #else
 

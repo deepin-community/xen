@@ -32,7 +32,7 @@ static uint64_t period = MCE_PERIOD;
 static int adjust = 0;
 static int variable_period = 1;
 
-static void mce_checkregs (void *info)
+static void cf_check mce_checkregs(void *info)
 {
 	mctelem_cookie_t mctc;
 	struct mca_summary bs;
@@ -67,7 +67,7 @@ static void mce_checkregs (void *info)
 	}
 }
 
-static void mce_work_fn(void *data)
+static void cf_check mce_work_fn(void *data)
 { 
 	on_each_cpu(mce_checkregs, NULL, 1);
 
@@ -86,7 +86,7 @@ static void mce_work_fn(void *data)
 	adjust = 0;
 }
 
-static int __init init_nonfatal_mce_checker(void)
+static int __init cf_check init_nonfatal_mce_checker(void)
 {
 	struct cpuinfo_x86 *c = &boot_cpu_data;
 

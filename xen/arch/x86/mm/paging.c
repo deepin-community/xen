@@ -21,6 +21,7 @@
 
 #include <xen/init.h>
 #include <xen/guest_access.h>
+#include <xen/hypercall.h>
 #include <asm/paging.h>
 #include <asm/shadow.h>
 #include <asm/p2m.h>
@@ -47,6 +48,8 @@
 /* Per-CPU variable for enforcing the lock ordering */
 DEFINE_PER_CPU(int, mm_lock_level);
 
+#if PG_log_dirty
+
 /************************************************/
 /*              LOG DIRTY SUPPORT               */
 /************************************************/
@@ -72,7 +75,7 @@ static mfn_t paging_new_log_dirty_leaf(struct domain *d)
 {
     mfn_t mfn = paging_new_log_dirty_page(d);
 
-    if ( mfn_valid(mfn) )
+    if ( !mfn_eq(mfn, INVALID_MFN) )
         clear_domain_page(mfn);
 
     return mfn;
@@ -82,7 +85,8 @@ static mfn_t paging_new_log_dirty_leaf(struct domain *d)
 static mfn_t paging_new_log_dirty_node(struct domain *d)
 {
     mfn_t mfn = paging_new_log_dirty_page(d);
-    if ( mfn_valid(mfn) )
+
+    if ( !mfn_eq(mfn, INVALID_MFN) )
     {
         int i;
         mfn_t *node = map_domain_page(mfn);
@@ -96,7 +100,7 @@ static mfn_t paging_new_log_dirty_node(struct domain *d)
 /* get the top of the log-dirty bitmap trie */
 static mfn_t *paging_map_log_dirty_bitmap(struct domain *d)
 {
-    if ( likely(mfn_valid(d->arch.paging.log_dirty.top)) )
+    if ( likely(!mfn_eq(d->arch.paging.log_dirty.top, INVALID_MFN)) )
         return map_domain_page(d->arch.paging.log_dirty.top);
     return NULL;
 }
@@ -114,7 +118,7 @@ static int paging_free_log_dirty_bitmap(struct domain *d, int rc)
 
     paging_lock(d);
 
-    if ( !mfn_valid(d->arch.paging.log_dirty.top) )
+    if ( mfn_eq(d->arch.paging.log_dirty.top, INVALID_MFN) )
     {
         paging_unlock(d);
         return 0;
@@ -141,20 +145,20 @@ static int paging_free_log_dirty_bitmap(struct domain *d, int rc)
 
     for ( ; i4 < LOGDIRTY_NODE_ENTRIES; i4++, i3 = 0 )
     {
-        if ( !mfn_valid(l4[i4]) )
+        if ( mfn_eq(l4[i4], INVALID_MFN) )
             continue;
 
         l3 = map_domain_page(l4[i4]);
 
         for ( ; i3 < LOGDIRTY_NODE_ENTRIES; i3++ )
         {
-            if ( !mfn_valid(l3[i3]) )
+            if ( mfn_eq(l3[i3], INVALID_MFN) )
                 continue;
 
             l2 = map_domain_page(l3[i3]);
 
             for ( i2 = 0; i2 < LOGDIRTY_NODE_ENTRIES; i2++ )
-                if ( mfn_valid(l2[i2]) )
+                if ( !mfn_eq(l2[i2], INVALID_MFN) )
                     paging_free_log_dirty_page(d, l2[i2]);
 
             unmap_domain_page(l2);
@@ -209,7 +213,7 @@ static int paging_free_log_dirty_bitmap(struct domain *d, int rc)
     return rc;
 }
 
-int paging_log_dirty_enable(struct domain *d, bool log_global)
+static int paging_log_dirty_enable(struct domain *d, bool log_global)
 {
     int ret;
 
@@ -278,6 +282,7 @@ void paging_mark_pfn_dirty(struct domain *d, pfn_t pfn)
     if ( unlikely(!VALID_M2P(pfn_x(pfn))) )
         return;
 
+    BUILD_BUG_ON(paging_logdirty_levels() != 4);
     i1 = L1_LOGDIRTY_IDX(pfn);
     i2 = L2_LOGDIRTY_IDX(pfn);
     i3 = L3_LOGDIRTY_IDX(pfn);
@@ -286,35 +291,35 @@ void paging_mark_pfn_dirty(struct domain *d, pfn_t pfn)
     /* Recursive: this is called from inside the shadow code */
     paging_lock_recursive(d);
 
-    if ( unlikely(!mfn_valid(d->arch.paging.log_dirty.top)) ) 
+    if ( unlikely(mfn_eq(d->arch.paging.log_dirty.top, INVALID_MFN)) )
     {
          d->arch.paging.log_dirty.top = paging_new_log_dirty_node(d);
-         if ( unlikely(!mfn_valid(d->arch.paging.log_dirty.top)) )
+         if ( unlikely(mfn_eq(d->arch.paging.log_dirty.top, INVALID_MFN)) )
              goto out;
     }
 
     l4 = paging_map_log_dirty_bitmap(d);
     mfn = l4[i4];
-    if ( !mfn_valid(mfn) )
+    if ( mfn_eq(mfn, INVALID_MFN) )
         l4[i4] = mfn = paging_new_log_dirty_node(d);
     unmap_domain_page(l4);
-    if ( !mfn_valid(mfn) )
+    if ( mfn_eq(mfn, INVALID_MFN) )
         goto out;
 
     l3 = map_domain_page(mfn);
     mfn = l3[i3];
-    if ( !mfn_valid(mfn) )
+    if ( mfn_eq(mfn, INVALID_MFN) )
         l3[i3] = mfn = paging_new_log_dirty_node(d);
     unmap_domain_page(l3);
-    if ( !mfn_valid(mfn) )
+    if ( mfn_eq(mfn, INVALID_MFN) )
         goto out;
 
     l2 = map_domain_page(mfn);
     mfn = l2[i2];
-    if ( !mfn_valid(mfn) )
+    if ( mfn_eq(mfn, INVALID_MFN) )
         l2[i2] = mfn = paging_new_log_dirty_leaf(d);
     unmap_domain_page(l2);
-    if ( !mfn_valid(mfn) )
+    if ( mfn_eq(mfn, INVALID_MFN) )
         goto out;
 
     l1 = map_domain_page(mfn);
@@ -349,14 +354,14 @@ void paging_mark_dirty(struct domain *d, mfn_t gmfn)
     paging_mark_pfn_dirty(d, pfn);
 }
 
-
+#ifdef CONFIG_SHADOW_PAGING
 /* Is this guest page dirty? */
-int paging_mfn_is_dirty(struct domain *d, mfn_t gmfn)
+bool paging_mfn_is_dirty(const struct domain *d, mfn_t gmfn)
 {
     pfn_t pfn;
     mfn_t mfn, *l4, *l3, *l2;
     unsigned long *l1;
-    int rv;
+    bool dirty;
 
     ASSERT(paging_locked_by_me(d));
     ASSERT(paging_mode_log_dirty(d));
@@ -365,36 +370,37 @@ int paging_mfn_is_dirty(struct domain *d, mfn_t gmfn)
     pfn = _pfn(get_gpfn_from_mfn(mfn_x(gmfn)));
     /* Invalid pages can't be dirty. */
     if ( unlikely(!VALID_M2P(pfn_x(pfn))) )
-        return 0;
+        return false;
 
     mfn = d->arch.paging.log_dirty.top;
-    if ( !mfn_valid(mfn) )
-        return 0;
+    if ( mfn_eq(mfn, INVALID_MFN) )
+        return false;
 
     l4 = map_domain_page(mfn);
     mfn = l4[L4_LOGDIRTY_IDX(pfn)];
     unmap_domain_page(l4);
-    if ( !mfn_valid(mfn) )
-        return 0;
+    if ( mfn_eq(mfn, INVALID_MFN) )
+        return false;
 
     l3 = map_domain_page(mfn);
     mfn = l3[L3_LOGDIRTY_IDX(pfn)];
     unmap_domain_page(l3);
-    if ( !mfn_valid(mfn) )
-        return 0;
+    if ( mfn_eq(mfn, INVALID_MFN) )
+        return false;
 
     l2 = map_domain_page(mfn);
     mfn = l2[L2_LOGDIRTY_IDX(pfn)];
     unmap_domain_page(l2);
-    if ( !mfn_valid(mfn) )
-        return 0;
+    if ( mfn_eq(mfn, INVALID_MFN) )
+        return false;
 
     l1 = map_domain_page(mfn);
-    rv = test_bit(L1_LOGDIRTY_IDX(pfn), l1);
+    dirty = test_bit(L1_LOGDIRTY_IDX(pfn), l1);
     unmap_domain_page(l1);
-    return rv;
-}
 
+    return dirty;
+}
+#endif
 
 /* Read a domain's log-dirty bitmap and stats.  If the operation is a CLEAN,
  * clear the bitmap and stats as well. */
@@ -437,21 +443,23 @@ static int paging_log_dirty_op(struct domain *d,
               d->arch.paging.preempt.op != sc->op )
     {
         paging_unlock(d);
-        ASSERT(!resuming);
-        domain_unpause(d);
+        if ( !resuming )
+            domain_unpause(d);
         return -EBUSY;
     }
 
     clean = (sc->op == XEN_DOMCTL_SHADOW_OP_CLEAN);
 
-    PAGING_DEBUG(LOGDIRTY, "log-dirty %s: dom %u faults=%u dirty=%u\n",
+    PAGING_DEBUG(LOGDIRTY, "log-dirty %s: dom %u faults=%lu dirty=%lu\n",
                  (clean) ? "clean" : "peek",
                  d->domain_id,
                  d->arch.paging.log_dirty.fault_count,
                  d->arch.paging.log_dirty.dirty_count);
 
-    sc->stats.fault_count = d->arch.paging.log_dirty.fault_count;
-    sc->stats.dirty_count = d->arch.paging.log_dirty.dirty_count;
+    sc->stats.fault_count = min(d->arch.paging.log_dirty.fault_count,
+                                UINT32_MAX + 0UL);
+    sc->stats.dirty_count = min(d->arch.paging.log_dirty.dirty_count,
+                                UINT32_MAX + 0UL);
 
     if ( guest_handle_is_null(sc->dirty_bitmap) )
         /* caller may have wanted just to clean the state or access stats. */
@@ -472,17 +480,18 @@ static int paging_log_dirty_op(struct domain *d,
 
     for ( ; (pages < sc->pages) && (i4 < LOGDIRTY_NODE_ENTRIES); i4++, i3 = 0 )
     {
-        l3 = (l4 && mfn_valid(l4[i4])) ? map_domain_page(l4[i4]) : NULL;
+        l3 = ((l4 && !mfn_eq(l4[i4], INVALID_MFN)) ?
+              map_domain_page(l4[i4]) : NULL);
         for ( ; (pages < sc->pages) && (i3 < LOGDIRTY_NODE_ENTRIES); i3++ )
         {
-            l2 = ((l3 && mfn_valid(l3[i3])) ?
+            l2 = ((l3 && !mfn_eq(l3[i3], INVALID_MFN)) ?
                   map_domain_page(l3[i3]) : NULL);
             for ( i2 = 0;
                   (pages < sc->pages) && (i2 < LOGDIRTY_NODE_ENTRIES);
                   i2++ )
             {
                 unsigned int bytes = PAGE_SIZE;
-                l1 = ((l2 && mfn_valid(l2[i2])) ?
+                l1 = ((l2 && !mfn_eq(l2[i2], INVALID_MFN)) ?
                       map_domain_page(l2[i2]) : NULL);
                 if ( unlikely(((sc->pages - pages + 7) >> 3) < bytes) )
                     bytes = (unsigned int)((sc->pages - pages + 7) >> 3);
@@ -586,6 +595,7 @@ static int paging_log_dirty_op(struct domain *d,
     return rv;
 }
 
+#ifdef CONFIG_HVM
 void paging_log_dirty_range(struct domain *d,
                            unsigned long begin_pfn,
                            unsigned long nr,
@@ -615,6 +625,7 @@ void paging_log_dirty_range(struct domain *d,
 
     guest_flush_tlb_mask(d, d->dirty_cpumask);
 }
+#endif
 
 /*
  * Callers must supply log_dirty_ops for the log dirty code to call. This
@@ -627,6 +638,8 @@ void paging_log_dirty_init(struct domain *d, const struct log_dirty_ops *ops)
 {
     d->arch.paging.log_dirty.ops = ops;
 }
+
+#endif /* PG_log_dirty */
 
 /************************************************/
 /*           CODE FOR PAGING SUPPORT            */
@@ -667,7 +680,7 @@ void paging_vcpu_init(struct vcpu *v)
         shadow_vcpu_init(v);
 }
 
-
+#if PG_log_dirty
 int paging_domctl(struct domain *d, struct xen_domctl_shadow_op *sc,
                   XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl,
                   bool_t resuming)
@@ -748,7 +761,8 @@ int paging_domctl(struct domain *d, struct xen_domctl_shadow_op *sc,
         return shadow_domctl(d, sc, u_domctl);
 }
 
-long paging_domctl_continuation(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
+long do_paging_domctl_cont(
+    XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
 {
     struct xen_domctl op;
     struct domain *d;
@@ -788,6 +802,15 @@ long paging_domctl_continuation(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
 
     return ret;
 }
+#endif /* PG_log_dirty */
+
+void paging_vcpu_teardown(struct vcpu *v)
+{
+    if ( hap_enabled(v->domain) )
+        hap_vcpu_teardown(v);
+    else
+        shadow_vcpu_teardown(v);
+}
 
 /* Call when destroying a domain */
 int paging_teardown(struct domain *d)
@@ -803,10 +826,12 @@ int paging_teardown(struct domain *d)
     if ( preempted )
         return -ERESTART;
 
+#if PG_log_dirty
     /* clean up log dirty resources. */
     rc = paging_free_log_dirty_bitmap(d, 0);
     if ( rc == -ERESTART )
         return rc;
+#endif
 
     /* Move populate-on-demand cache back to domain_list for destruction */
     rc = p2m_pod_empty_cache(d);
@@ -934,27 +959,7 @@ void paging_update_nestedmode(struct vcpu *v)
         v->arch.paging.nestedmode = NULL;
     hvm_asid_flush_vcpu(v);
 }
-#endif
 
-int paging_write_p2m_entry(struct p2m_domain *p2m, unsigned long gfn,
-                           l1_pgentry_t *p, l1_pgentry_t new,
-                           unsigned int level)
-{
-    struct domain *d = p2m->domain;
-    struct vcpu *v = current;
-    int rc = 0;
-
-    if ( v->domain != d )
-        v = d->vcpu ? d->vcpu[0] : NULL;
-    if ( likely(v && paging_mode_enabled(d) && paging_get_hostmode(v) != NULL) )
-        rc = paging_get_hostmode(v)->write_p2m_entry(p2m, gfn, p, new, level);
-    else
-        safe_write_pte(p, new);
-
-    return rc;
-}
-
-#ifdef CONFIG_HVM
 int __init paging_set_allocation(struct domain *d, unsigned int pages,
                                  bool *preempted)
 {
@@ -972,6 +977,49 @@ int __init paging_set_allocation(struct domain *d, unsigned int pages,
     return rc;
 }
 #endif
+
+int arch_get_paging_mempool_size(struct domain *d, uint64_t *size)
+{
+    int rc;
+
+    if ( is_pv_domain(d) )                 /* TODO: Relax in due course */
+        return -EOPNOTSUPP;
+
+    if ( hap_enabled(d) )
+        rc = hap_get_allocation_bytes(d, size);
+    else
+        rc = shadow_get_allocation_bytes(d, size);
+
+    return rc;
+}
+
+int arch_set_paging_mempool_size(struct domain *d, uint64_t size)
+{
+    unsigned long pages = size >> PAGE_SHIFT;
+    bool preempted = false;
+    int rc;
+
+    if ( is_pv_domain(d) )                 /* TODO: Relax in due course */
+        return -EOPNOTSUPP;
+
+    if ( size & ~PAGE_MASK ||              /* Non page-sized request? */
+         pages != (unsigned int)pages )    /* Overflow $X_set_allocation()? */
+        return -EINVAL;
+
+    paging_lock(d);
+    if ( hap_enabled(d) )
+        rc = hap_set_allocation(d, pages, &preempted);
+    else
+        rc = shadow_set_allocation(d, pages, &preempted);
+    paging_unlock(d);
+
+    /*
+     * TODO: Adjust $X_set_allocation() so this is true.
+    ASSERT(preempted == (rc == -ERESTART));
+     */
+
+    return preempted ? -ERESTART : rc;
+}
 
 /*
  * Local variables:

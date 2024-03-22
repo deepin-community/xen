@@ -86,13 +86,13 @@ static int pt_irq_vector(struct periodic_time *pt, enum hvm_intsrc src)
         return pt->irq;
 
     isa_irq = pt->irq;
-    gsi = hvm_isa_irq_to_gsi(isa_irq);
 
     if ( src == hvm_intsrc_pic )
         return (v->domain->arch.hvm.vpic[isa_irq >> 3].irq_base
                 + (isa_irq & 7));
 
     ASSERT(src == hvm_intsrc_lapic);
+    gsi = pt->source == PTSRC_isa ? hvm_isa_irq_to_gsi(isa_irq) : pt->irq;
     vector = vioapic_get_vector(v->domain, gsi);
     if ( vector < 0 )
     {
@@ -271,7 +271,7 @@ void pt_restore_timer(struct vcpu *v)
     pt_vcpu_unlock(v);
 }
 
-static void pt_timer_fn(void *data)
+static void cf_check pt_timer_fn(void *data)
 {
     struct periodic_time *pt = data;
 
@@ -592,7 +592,7 @@ static void pt_adjust_vcpu(struct periodic_time *pt, struct vcpu *v)
     if ( pt->vcpu == NULL )
         return;
 
-    write_lock(&pt->vcpu->domain->arch.hvm.pl_time->pt_migrate);
+    write_lock(&v->domain->arch.hvm.pl_time->pt_migrate);
 
     if ( pt->vcpu == v )
         goto out;
@@ -613,7 +613,7 @@ static void pt_adjust_vcpu(struct periodic_time *pt, struct vcpu *v)
     pt_vcpu_unlock(v);
 
  out:
-    write_unlock(&pt->vcpu->domain->arch.hvm.pl_time->pt_migrate);
+    write_unlock(&v->domain->arch.hvm.pl_time->pt_migrate);
 }
 
 void pt_adjust_global_vcpu_target(struct vcpu *v)
@@ -661,14 +661,19 @@ static void pt_resume(struct periodic_time *pt)
 
 void pt_may_unmask_irq(struct domain *d, struct periodic_time *vlapic_pt)
 {
-    int i;
-
     if ( d )
     {
-        pt_resume(&d->arch.vpit.pt0);
-        pt_resume(&d->arch.hvm.pl_time->vrtc.pt);
-        for ( i = 0; i < HPET_TIMER_NUM; i++ )
-            pt_resume(&d->arch.hvm.pl_time->vhpet.pt[i]);
+        if ( has_vpit(d) )
+            pt_resume(&d->arch.vpit.pt0);
+        if ( has_vrtc(d) )
+            pt_resume(&d->arch.hvm.pl_time->vrtc.pt);
+        if ( has_vhpet(d) )
+        {
+            unsigned int i;
+
+            for ( i = 0; i < HPET_TIMER_NUM; i++ )
+                pt_resume(&d->arch.hvm.pl_time->vhpet.pt[i]);
+        }
     }
 
     if ( vlapic_pt )

@@ -28,6 +28,11 @@
 #include <asm/p2m.h>
 #include <asm/monitor.h>
 #include <asm/vm_event.h>
+
+#ifdef CONFIG_MEM_SHARING
+#include <asm/mem_sharing.h>
+#endif
+
 #include <xsm/xsm.h>
 #include <public/hvm/params.h>
 
@@ -168,7 +173,7 @@ static void vm_event_wake_queued(struct domain *d, struct vm_event_domain *ved)
  * call vm_event_wake() again, ensuring that any blocked vCPUs will get
  * unpaused once all the queued vCPUs have made it through.
  */
-void vm_event_wake(struct domain *d, struct vm_event_domain *ved)
+static void vm_event_wake(struct domain *d, struct vm_event_domain *ved)
 {
     if ( !list_empty(&ved->wq.list) )
         vm_event_wake_queued(d, ved);
@@ -390,9 +395,20 @@ static int vm_event_resume(struct domain *d, struct vm_event_domain *ved)
         /* Check flags which apply only when the vCPU is paused */
         if ( atomic_read(&v->vm_event_pause_count) )
         {
-#ifdef CONFIG_HAS_MEM_PAGING
+#ifdef CONFIG_MEM_PAGING
             if ( rsp.reason == VM_EVENT_REASON_MEM_PAGING )
                 p2m_mem_paging_resume(d, &rsp);
+#endif
+#ifdef CONFIG_MEM_SHARING
+            if ( mem_sharing_is_fork(d) )
+            {
+                bool reset_state = rsp.flags & VM_EVENT_FLAG_RESET_FORK_STATE;
+                bool reset_mem = rsp.flags & VM_EVENT_FLAG_RESET_FORK_MEMORY;
+
+                if ( (reset_state || reset_mem) &&
+                     mem_sharing_fork_reset(d, reset_state, reset_mem) )
+                    ASSERT_UNREACHABLE();
+            }
 #endif
 
             /*
@@ -423,6 +439,9 @@ static int vm_event_resume(struct domain *d, struct vm_event_domain *ved)
 
             if ( rsp.flags & VM_EVENT_FLAG_GET_NEXT_INTERRUPT )
                 vm_event_monitor_next_interrupt(v);
+
+            if ( rsp.flags & VM_EVENT_FLAG_RESET_VMTRACE )
+                vm_event_reset_vmtrace(v);
 
             if ( rsp.flags & VM_EVENT_FLAG_VCPU_PAUSED )
                 vm_event_vcpu_unpause(v);
@@ -518,23 +537,23 @@ int __vm_event_claim_slot(struct domain *d, struct vm_event_domain *ved,
         return vm_event_grab_slot(ved, current->domain != d);
 }
 
-#ifdef CONFIG_HAS_MEM_PAGING
+#ifdef CONFIG_MEM_PAGING
 /* Registered with Xen-bound event channel for incoming notifications. */
-static void mem_paging_notification(struct vcpu *v, unsigned int port)
+static void cf_check mem_paging_notification(struct vcpu *v, unsigned int port)
 {
     vm_event_resume(v->domain, v->domain->vm_event_paging);
 }
 #endif
 
 /* Registered with Xen-bound event channel for incoming notifications. */
-static void monitor_notification(struct vcpu *v, unsigned int port)
+static void cf_check monitor_notification(struct vcpu *v, unsigned int port)
 {
     vm_event_resume(v->domain, v->domain->vm_event_monitor);
 }
 
 #ifdef CONFIG_MEM_SHARING
 /* Registered with Xen-bound event channel for incoming notifications. */
-static void mem_sharing_notification(struct vcpu *v, unsigned int port)
+static void cf_check mem_sharing_notification(struct vcpu *v, unsigned int port)
 {
     vm_event_resume(v->domain, v->domain->vm_event_share);
 }
@@ -543,7 +562,7 @@ static void mem_sharing_notification(struct vcpu *v, unsigned int port)
 /* Clean up on domain destruction */
 void vm_event_cleanup(struct domain *d)
 {
-#ifdef CONFIG_HAS_MEM_PAGING
+#ifdef CONFIG_MEM_PAGING
     if ( vm_event_check_ring(d->vm_event_paging) )
     {
         /* Destroying the wait queue head means waking up all
@@ -610,7 +629,7 @@ int vm_event_domctl(struct domain *d, struct xen_domctl_vm_event_op *vec)
 
     switch ( vec->mode )
     {
-#ifdef CONFIG_HAS_MEM_PAGING
+#ifdef CONFIG_MEM_PAGING
     case XEN_DOMCTL_VM_EVENT_OP_PAGING:
     {
         rc = -EINVAL;
@@ -636,7 +655,7 @@ int vm_event_domctl(struct domain *d, struct xen_domctl_vm_event_op *vec)
 
             rc = -EXDEV;
             /* Disallow paging in a PoD guest */
-            if ( p2m_pod_entry_count(p2m_get_hostp2m(d)) )
+            if ( p2m_pod_active(d) )
                 break;
 
             /* domain_pause() not required here, see XSA-99 */

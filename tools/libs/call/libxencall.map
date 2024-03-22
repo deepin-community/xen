@@ -9,7 +9,6 @@ VERS_1.0 {
 		xencall3;
 		xencall4;
 		xencall5;
-		xencall6;
 
 		xencall_alloc_buffer;
 		xencall_free_buffer;
@@ -27,3 +26,8 @@ VERS_1.2 {
 	global:
 		xencall_fd;
 } VERS_1.1;
+
+VERS_1.3 {
+	global:
+		xencall2L;
+} VERS_1.2;

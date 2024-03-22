@@ -1,0 +1,20 @@
+xen (4.11.1+92-g6c33308a8d-1) unstable; urgency=high
+
+    This update contains the mitigations for the Microarchitectural Data
+    Sampling speculative side channel attacks. Only Intel based processors are
+    affected.
+
+    Note that these fixes will only have effect when also loading updated cpu
+    microcode with MD_CLEAR functionality. When using the intel-microcode
+    package to include microcode in the dom0 initrd, it has to be loaded by
+    Xen. Please refer to the hypervisor command line documentation about the
+    'ucode=scan' option.
+
+    For the fixes to be fully effective, it is currently also needed to disable
+    hyper-threading, which can be done in BIOS settings, or by using smt=no on
+    the hypervisor command line.
+
+    Additional information is available in the upstream Xen security advisory:
+    https://xenbits.xen.org/xsa/advisory-297.html
+
+ -- Hans van Kranenburg <hans@knorrie.org>  Tue, 18 Jun 2019 09:50:19 +0200

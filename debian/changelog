@@ -1,8 +1,410 @@
-xen (4.14.3-1deepin) unstable; urgency=medium
+xen (4.17.3+10-g091466ba55-1) unstable; urgency=medium
 
-  * Backport patches for redefinition errors. Thanks Costin Lupu!
+  * Update to new upstream version 4.17.3+10-g091466ba55, which also contains
+    security fixes for the following issues:
+    - arm32: The cache may not be properly cleaned/invalidated (take two)
+      XSA-447 CVE-2023-46837
+    - pci: phantom functions assigned to incorrect contexts
+      XSA-449 CVE-2023-46839
+    - VT-d: Failure to quarantine devices in !HVM builds
+      XSA-450 CVE-2023-46840
+  * Note that the following XSA are not listed, because...
+    - XSA-448 has patches for the Linux kernel.
+  * Compilation with Python 3.12 has been fixed in upstream commit 4000522008
+    ("Only compile the hypervisor with -Wdeclaration-after-statement")
+    (Closes: #1062048)
 
- -- Tianyu Chen <sweetyfish@deepin.org>  Mon, 14 Aug 2023 13:13:00 +0800
+ -- Hans van Kranenburg <hans@knorrie.org>  Sun, 04 Feb 2024 13:45:17 +0100
+
+xen (4.17.2+76-ge1f9cb16e2-1) unstable; urgency=medium
+
+  * Update to new upstream version 4.17.2-76-ge1f9cb16e2, which also contains
+    security fixes for the following issues: (Closes: #1056928)
+    - x86/AMD: mismatch in IOMMU quarantine page table levels
+      XSA-445 CVE-2023-46835
+    - x86: BTC/SRSO fixes not fully effective
+      XSA-446 CVE-2023-46836
+
+ -- Maximilian Engelhardt <maxi@daemonizer.de>  Wed, 29 Nov 2023 20:17:30 +0100
+
+xen (4.17.2+55-g0b56bed864-1) unstable; urgency=medium
+
+  * Update to new upstream version 4.17.2+55-g0b56bed864, which also contains
+    security fixes for the following issues:
+    - arm32: The cache may not be properly cleaned/invalidated
+      XSA-437 CVE-2023-34321
+    - top-level shadow reference dropped too early for 64-bit PV guests
+      XSA-438 CVE-2023-34322
+    - x86/AMD: Divide speculative information leak
+      XSA-439 CVE-2023-20588
+    - xenstored: A transaction conflict can crash C Xenstored
+      XSA-440 CVE-2023-34323
+    - x86/AMD: missing IOMMU TLB flushing
+      XSA-442 CVE-2023-34326
+    - Multiple vulnerabilities in libfsimage disk handling
+      XSA-443 CVE-2023-34325
+    - x86/AMD: Debug Mask handling
+      XSA-444 CVE-2023-34327 CVE-2023-34328
+  * Note that the following XSA are not listed, because...
+    - XSA-441 has patches for the Linux kernel.
+
+ -- Hans van Kranenburg <hans@knorrie.org>  Thu, 12 Oct 2023 19:25:55 +0200
+
+xen (4.17.2-1) unstable; urgency=medium
+
+  * Update to new upstream version 4.17.2, which also contains
+    security fixes for the following issues: (Closes: #1042102)
+    - x86/AMD: Zenbleed
+      XSA-433 CVE-2023-20593
+    - x86/AMD: Speculative Return Stack Overflow
+      XSA-434 CVE-2023-20569
+    - x86/Intel: Gather Data Sampling
+      XSA-435 CVE-2022-40982
+    - arm: Guests can trigger a deadlock on Cortex-A77
+      XSA-436 CVE-2023-34320
+  * Note that the following XSA are not listed, because...
+    - XSA-432 has patches for the Linux kernel.
+
+ -- Maximilian Engelhardt <maxi@daemonizer.de>  Sun, 20 Aug 2023 16:08:59 +0200
+
+xen (4.17.1+2-gb773c48e36-1) unstable; urgency=medium
+
+  * Update to new upstream version 4.17.1+2-gb773c48e36, which also contains
+    security fixes for the following issues:
+    - x86 shadow paging arbitrary pointer dereference
+      XSA-430 CVE-2022-42335
+      (Closes: #1034842)
+    - Mishandling of guest SSBD selection on AMD hardware
+      XSA-431 CVE-2022-42336
+
+ -- Maximilian Engelhardt <maxi@daemonizer.de>  Thu, 18 May 2023 21:26:30 +0200
+
+xen (4.17.0+74-g3eac216e6e-1) unstable; urgency=medium
+
+  * Update to new upstream version 4.17.0+74-g3eac216e6e, which also contains
+    security fixes for the following issues: (Closes: #1033297)
+    - x86 shadow plus log-dirty mode use-after-free
+      XSA-427 CVE-2022-42332
+    - x86/HVM pinned cache attributes mis-handling
+      XSA-428 CVE-2022-42333 CVE-2022-42334
+    - x86: speculative vulnerability in 32bit SYSCALL path
+      XSA-429 CVE-2022-42331
+
+ -- Maximilian Engelhardt <maxi@daemonizer.de>  Thu, 23 Mar 2023 22:22:48 +0100
+
+xen (4.17.0+46-gaaf74a532c-1) unstable; urgency=medium
+
+  * Update to new upstream version 4.17.0+46-gaaf74a532c, which also contains
+    security fixes for the following issues:
+     - x86: Cross-Thread Return Address Predictions
+       XSA-426 CVE-2022-27672
+       (Closes: #1031567)
+  * debian/shuffle-boot-files: fix typo
+  * debian/changelog: Fix bug number typo.
+  * debian/changelog: Remove duplicate 'Note that'
+
+ -- Hans van Kranenburg <hans@knorrie.org>  Fri, 24 Feb 2023 18:06:42 +0100
+
+xen (4.17.0+24-g2f8851c37f-2) unstable; urgency=medium
+
+  * Upload to unstable now, since we got message from the OCaml team that we
+    are not bothering them while they're doing their stack rebuild.
+
+ -- Hans van Kranenburg <hans@knorrie.org>  Mon, 06 Feb 2023 14:27:40 +0100
+
+xen (4.17.0+24-g2f8851c37f-2~exp1) experimental; urgency=medium
+
+  * Upload to experimental NEW to avoid disrupting ocaml transition.
+
+ -- Ian Jackson <ijackson@chiark.greenend.org.uk>  Sun, 05 Feb 2023 13:07:44 +0000
+
+xen (4.17.0+24-g2f8851c37f-1) unstable; urgency=medium
+
+  * Update to new upstream version 4.17.0+24-g2f8851c37f, which also contains
+    security fixes for the following issues:
+     - Guests can cause Xenstore crash via soft reset
+       XSA-425 CVE-2022-42330
+       (Closes: #1029830)
+  * d/control: update build dependency to libext2fs-dev
+  * debian: switch to debhelper compat version 13
+  * d/rules: 'dh_missing --fail-missing' is default in dh compat 13
+  * d/control: change Depends from lsb-base to sysvinit-utils
+  * debian: split debug files out of xen-hypervisor-V-F and xen-utils-V. This
+    means that we now start to ship additional separate *-dbg packages.
+  * d/xen-utils-common.xendomains.default: remove XENDOMAINS_SYSRQ
+  * d/xen-utils-common.xendomains.default: adjust to upstream template
+  * debian: remove old leftovers from config file handling
+  * d/control: set Rules-Requires-Root: no
+  * d/xen-hypervisor-common.lintian-overrides: ignore false positive about
+    'debian-news-entry-has-unknown-version'
+  * d/rules: use pkg-info.mk and do Maintainer parsing in d/rules
+  * Update patch 'Display Debian package version in hypervisor log' to use
+    the DEB_VERSION and DEB_MAINTAINER variables that are now available.
+
+  [ Diederik de Haas ]
+  * d/control: Drop markdown B-D for documentation
+  * ci: Update reason why arm64 crossbuild is disabled
+
+  [ Hans van Kranenburg ]
+  * d/copyright: rewrite the file from scratch and make it up to date
+  * d/shuffle-boot-files: Add a note about d/not-installed
+  * d/shuffle-boot-files: Also handle debug files (Closes: #995233)
+
+ -- Maximilian Engelhardt <maxi@daemonizer.de>  Wed, 01 Feb 2023 21:52:15 +0100
+
+xen (4.17.0-1) unstable; urgency=medium
+
+  * Update to new upstream version 4.17.0.
+  * No new security fixes are included.
+  * Note that the following XSA are not listed, because...
+    - XSA-423 and XSA-424 have patches for the Linux kernel.
+  * debian/control: update Standards-Version to 4.6.2
+  * debian/control: update Build-Depends for ocaml
+
+ -- Maximilian Engelhardt <maxi@daemonizer.de>  Wed, 21 Dec 2022 22:34:51 +0100
+
+xen (4.17.0~rc4-1~exp1) experimental; urgency=medium
+
+  Significant changes:
+  * Update to new upstream version 4.17.0~rc4.
+
+  Changes related to upgrading to Xen 4.17:
+  * debian/control: adjust to 4.17
+  * Drop "libxl: Fix unneededly rebuilding build.o(pic)", no longer needed
+  * Refresh remaining patches if needed
+
+ -- Maximilian Engelhardt <maxi@daemonizer.de>  Wed, 07 Dec 2022 21:01:04 +0100
+
+xen (4.16.2+90-g0d39a6d1ae-1) unstable; urgency=medium
+
+  * Update to new upstream version 4.16.2+90-g0d39a6d1ae, which also contains
+    security fixes for the following issues:
+     - Xenstore: guests can let run xenstored out of memory
+       XSA-326 CVE-2022-42311 CVE-2022-42312 CVE-2022-42313 CVE-2022-42314
+       CVE-2022-42315 CVE-2022-42316 CVE-2022-42317 CVE-2022-42318
+     - Arm: unbounded memory consumption for 2nd-level page tables
+       XSA-409 CVE-2022-33747
+     - P2M pool freeing may take excessively long
+       XSA-410 CVE-2022-33746
+     - lock order inversion in transitive grant copy handling
+       XSA-411 CVE-2022-33748
+     - x86: unintended memory sharing between guests
+       XSA-412 CVE-2022-42327
+     - Xenstore: Guests can crash xenstored
+       XSA-414 CVE-2022-42309
+     - Xenstore: Guests can create orphaned Xenstore nodes
+       XSA-415 CVE-2022-42310
+     - Xenstore: Guests can cause Xenstore to not free temporary memory
+       XSA-416 CVE-2022-42319
+     - Xenstore: Guests can get access to Xenstore nodes of deleted domains
+       XSA-417 CVE-2022-42320
+     - Xenstore: Guests can crash xenstored via exhausting the stack
+       XSA-418 CVE-2022-42321
+     - Xenstore: Cooperating guests can create arbitrary numbers of nodes
+       XSA-419 CVE-2022-42322 CVE-2022-42323
+     - Oxenstored 32->31 bit integer truncation issues
+       XSA-420 CVE-2022-42324
+     - Xenstore: Guests can create arbitrary number of nodes via transactions
+       XSA-421 CVE-2022-42325 CVE-2022-42326
+     - x86: Multiple speculative security issues
+       XSA-422 CVE-2022-23824
+   * Note that the following XSA are not listed, because...
+     - XSA-413 applies to XAPI which is not included in Debian
+   * Drop the "x86/CPUID: surface suitable value in EBX of XSTATE subleaf 1"
+     patch again because it's included in upstream changes now.
+
+ -- Hans van Kranenburg <hans@knorrie.org>  Wed, 16 Nov 2022 12:50:33 +0100
+
+xen (4.16.2-2) unstable; urgency=medium
+
+  * debian/control: Add libzstd-dev as Build-Depends
+  * Pick upstream commit c3bd0b83ea ("x86/CPUID: surface suitable value in EBX
+    of XSTATE subleaf 1") to fix compatibility with Linux 5.19.
+    (Closes: #1020787)
+
+ -- Hans van Kranenburg <hans@knorrie.org>  Wed, 28 Sep 2022 19:03:14 +0200
+
+xen (4.16.2-1) unstable; urgency=medium
+
+  * Update to new upstream version 4.16.2, which also contains
+    security fixes for the following issues:
+    - x86 pv: Race condition in typeref acquisition
+      XSA-401 CVE-2022-26362
+    - x86 pv: Insufficient care with non-coherent mappings
+      XSA-402 CVE-2022-26363 CVE-2022-26364
+    - Linux disk/nic frontends data leaks
+      XSA-403 CVE-2022-26365 CVE-2022-33740 CVE-2022-33741 CVE-2022-33742
+      Note that this XSA also contains patches that have to be applied to the
+      Linux kernel to make use of the new mitigations.
+    - x86: MMIO Stale Data vulnerabilities
+      XSA-404 CVE-2022-21123 CVE-2022-21125 CVE-2022-21166
+    - Retbleed - arbitrary speculative code execution with return instructions
+      XSA-407 CVE-2022-23816 CVE-2022-23825 CVE-2022-29900
+    - insufficient TLB flush for x86 PV guests in shadow mode
+      XSA-408 CVE-2022-33745
+  * Note that the following XSA are not listed, because...
+    - XSA-405 and XSA-406 have patches for the Linux kernel.
+  * d/.../grub.d/xen.cfg: Redirect output when running grub-mkconfig so that
+    we do not wrongly cause text to end up being part of the generated grub
+    configuration. (Closes: #1016547)
+  * Clean up lintian overrides that are reported as unused.
+  * Move comments about lintian overrides above the override line itself,
+    instead of being below, as instructed by the lintian documentation.
+  * Deal with formatting changes in lintian output, which invalidate
+    overrides we have. Also see Debian bug #1007002 for more information.
+
+ -- Hans van Kranenburg <hans@knorrie.org>  Tue, 23 Aug 2022 13:25:38 +0200
+
+xen (4.16.1-1) unstable; urgency=medium
+
+  * Update to new upstream version 4.16.1, which also contains security fixes
+    for the following issues:
+    - Racy interactions between dirty vram tracking and paging log dirty
+      hypercalls
+      XSA-397 CVE-2022-26356
+    - Multiple speculative security issues
+      XSA-398 (no CVE yet)
+    - race in VT-d domain ID cleanup
+      XSA-399 CVE-2022-26357
+    - IOMMU: RMRR (VT-d) and unity map (AMD-Vi) handling issues
+      XSA-400 CVE-2022-26358 CVE-2022-26359 CVE-2022-26360 CVE-2022-26361
+  * Note that the following XSA are not listed, because...
+    - XSA-396 has patches for the Linux kernel.
+  * Don't ship NEWS in libxen* packages. Instead, only ship relevant NEWS
+    items for actual hypervisor and/or utils packages they belong to.
+    (Closes: #962267)
+  * d/control: make xen-hypervisor-common arch specific, just like
+    xen-utils-common.
+  * d/control: stop recommending qemu-system-x86 on arm, because qemu is not
+    being built with xen support on arm...
+  * Add a patch for tools/libs/light/Makefile which prevents build.o and
+    build.opic to be rebuilt unneededly during the package install phase,
+    causing a FTBFS because it triggers the use of ccache, which is not
+    allowed in the install phase of building the Debian packages.
+
+  Improvements related to Qemu integration:  [Michael Tokarev]
+  * d/xen-utils-common.xen.init: properly disable qemu monitor/serial/parallel
+    devices for qemu started at boot.
+  * debian: switch from recommending qemu-system-x86 to qemu-system-xen and
+    mention this change in the NEWS file.
+  * Add patch "give meaningful error message if qemu device model is
+    unavailable" to give a useful error message only in case the domU needs
+    the qemu device model which is not installed, instead of giving a warning
+    about missing qemu even if it is not used by this domain.
+
+  Documentation, grammar and spelling fixes and improvements:
+  * d/control: drop obsolete paragraph about separate xen linux kernel package
+  * d/control: Harmonize the capitalization of the 'Xen' word  [Diederik de Haas]
+  * d/control: Improve spelling and grammar  [Diederik de Haas]`
+
+ -- Hans van Kranenburg <hans@knorrie.org>  Mon, 09 May 2022 22:29:23 +0200
+
+xen (4.16.0+51-g0941d6cb-1) unstable; urgency=medium
+
+  * Update to new upstream version 4.16.0+51-g0941d6cb, which also contains
+    security fixes for the following issues:
+    - arm: guest_physmap_remove_page not removing the p2m mappings
+      XSA-393 CVE-2022-23033
+    - A PV guest could DoS Xen while unmapping a grant
+      XSA-394 CVE-2022-23034
+    - Insufficient cleanup of passed-through device IRQs
+      XSA-395 CVE-2022-23035
+  * Note that the following XSA are not listed, because...
+    - XSA-391 and XSA-392 have patches for the Linux kernel.
+  * Upload to unstable now, which obsoletes the Xen 4.14 FTBFS issue.
+    (Closes: #1002658)
+
+ -- Hans van Kranenburg <hans@knorrie.org>  Sat, 19 Feb 2022 20:29:32 +0100
+
+xen (4.16.0-1~exp1) experimental; urgency=medium
+
+  Significant changes:
+  * Update to new upstream version 4.16.0. This also includes a security fix
+    for the following issue, which was not applicable to Xen 4.14 yet:
+    - certain VT-d IOMMUs may not work in shared page table mode
+      XSA-390 CVE-2021-28710
+  * No longer build any package for the i386 architecture. It was already not
+    possible to use x86_32 hardware because the i386 packages already
+    shipped a 64-bit hypervisor and PV shim. Running 32-bit utils with a
+    64-bit hypervisor requires using a compatibility layer that is fragile and
+    becomes harder to maintain and test upstream. This change ends the 'grace
+    period' in which users should have moved to using a fully 64-bit dom0.
+    - debian/{control,rules,salsa-ci.yml,xen-utils-V.install.vsn-in}: make the
+      necessary changes
+    - Remove the Recommends on libc6-xen, which already actually does not
+      exist any more. (Closes: #992909)
+    - Drop patch "tools/tests/x86_emulator: Pass -no-pie -fno-pic to gcc on
+      x86_32" because it is not relevant any more.
+
+  Changes related to upgrading to Xen 4.16:
+  * debian/control: adjust to 4.16  [Maximilian Engelhardt]
+  * Drop patches that have been applied upstream
+  * Refresh remaining patches if needed
+  * debian: follow upstream removal of '.sh' suffix in xl bash_completion file
+    [Maximilian Engelhardt]
+  * debian/control, debian/libxenstore*: ship a libxenstore4 package instead
+    of libxenstore3.0, since upstream bumped the soname
+    [Maximilian Engelhardt]
+
+  Packaging minor fixes and improvements  [Maximilian Engelhardt]:
+  * debian/rules: set SOURCE_BASE_DIR to the top level build dir so that the
+    "Display Debian package version in hypervisor log" patch can use it.
+  * Add patch "xen/arch/x86: make objdump output user locale agnostic" to fix
+    reproducable builds. This patch will also be sent upstream.
+  * d/rules: remove reproducible=+fixfilepath from DEB_BUILD_MAINT_OPTIONS
+  * d/salsa-ci.yml: Explicitly set RELEASE variable to unstable
+  * d/salsa-ci.yml: disable cross building as it's currently not working
+  * debian: call update-grub when installing/removing xen-hypervisor-common
+    (Closes: #988901)
+  * debian: fix dependency generation for python after dh-python was fixed
+    first. (Closes: #976597)
+  * debian/rules: remove unused pybuild settings
+
+  Packaging minor fixes and improvements:
+  * Improve patches for building the PV shim separately. This enables to
+    drop the extra Revert of an upstream commit that was done in
+    4.14.0+80-gd101b417b7-1~exp1:
+    - Drop patch: Revert "pvshim: make PV shim build selectable from
+      configure"
+    - Update patch "[...] Respect caller's CONFIG_PV_SHIM" to follow moving
+      of a line to a different file
+    - Drop patch: "tools/firmware/Makefile: CONFIG_PV_SHIM: enable only on
+      x86_64" because that's now already the default upstream
+  * debian/control.md5sum: remove this obsolete file
+  * Merge patches "vif-common: disable handle_iptable" and
+    "t/h/L/vif-common.sh: fix handle_iptable return value" into a single
+    patch, since the latter was a fix for the first.
+  * debian/control: change the Uploaders email address for Ian Jackson,
+    since he does not work at Citrix any more now
+
+ -- Hans van Kranenburg <hans@knorrie.org>  Mon, 17 Jan 2022 18:36:02 +0100
+
+xen (4.14.3+32-g9de3671772-1) unstable; urgency=medium
+
+  * Update to new upstream version 4.14.3+32-g9de3671772, which also contains
+    security fixes for the following issues:
+    - guests may exceed their designated memory limit
+      XSA-385 CVE-2021-28706
+    - PCI devices with RMRRs not deassigned correctly
+      XSA-386 CVE-2021-28702
+    - PoD operations on misaligned GFNs
+      XSA-388 CVE-2021-28704 CVE-2021-28707 CVE-2021-28708
+    - issues with partially successful P2M updates on x86
+      XSA-389 CVE-2021-28705 CVE-2021-28709
+  * Note that the following XSA are not listed, because...
+    - XSA-387 only applies to Xen 4.13 and older
+    - XSA-390 only applies to Xen 4.15
+  * Pick the following upstream commits to fix a regression which prevents
+    amd64 type hardware to fully power off. The issue was introduced in
+    version 4.14.0+88-g1d1d1f5391-1 after including upstream commits to
+    improve Raspberry Pi 4 support. (Closes: #994899):
+    - 8b6d55c126 ("x86/ACPI: fix mapping of FACS")
+    - f390941a92 ("x86/DMI: fix table mapping when one lives above 1Mb")
+    - 0f089bbf43 ("x86/ACPI: fix S3 wakeup vector mapping")
+    - 16ca5b3f87 ("x86/ACPI: don't invalidate S5 data when S3 wakeup vector
+                   cannot be determined")
+
+ -- Hans van Kranenburg <hans@knorrie.org>  Sat, 27 Nov 2021 15:09:47 +0100
 
 xen (4.14.3-1) unstable; urgency=high
 

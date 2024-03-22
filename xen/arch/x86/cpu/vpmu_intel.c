@@ -18,9 +18,9 @@
  * Author: Haitao Shan <haitao.shan@intel.com>
  */
 
+#include <xen/err.h>
 #include <xen/sched.h>
 #include <xen/xenoprof.h>
-#include <xen/irq.h>
 #include <asm/system.h>
 #include <asm/regs.h>
 #include <asm/types.h>
@@ -90,8 +90,8 @@ static uint64_t __read_mostly global_ovf_ctrl_mask, global_ctrl_mask;
 static unsigned int __read_mostly regs_sz;
 /* Offset into context of the beginning of PMU register block */
 static const unsigned int regs_off =
-        sizeof(((struct xen_pmu_intel_ctxt *)0)->fixed_counters) +
-        sizeof(((struct xen_pmu_intel_ctxt *)0)->arch_counters);
+    sizeof_field(struct xen_pmu_intel_ctxt, fixed_counters) +
+    sizeof_field(struct xen_pmu_intel_ctxt, arch_counters);
 
 /*
  * QUIRK to workaround an issue on various family 6 cpus.
@@ -282,13 +282,20 @@ static inline void __core2_vpmu_save(struct vcpu *v)
     for ( i = 0; i < fixed_pmc_cnt; i++ )
         rdmsrl(MSR_CORE_PERF_FIXED_CTR0 + i, fixed_counters[i]);
     for ( i = 0; i < arch_pmc_cnt; i++ )
+    {
         rdmsrl(MSR_IA32_PERFCTR0 + i, xen_pmu_cntr_pair[i].counter);
+        rdmsrl(MSR_P6_EVNTSEL(i), xen_pmu_cntr_pair[i].control);
+    }
 
     if ( !is_hvm_vcpu(v) )
         rdmsrl(MSR_CORE_PERF_GLOBAL_STATUS, core2_vpmu_cxt->global_status);
+    /* Save MSR to private context to make it fork-friendly */
+    else if ( mem_sharing_enabled(v->domain) )
+        vmx_read_guest_msr(v, MSR_CORE_PERF_GLOBAL_CTRL,
+                           &core2_vpmu_cxt->global_ctrl);
 }
 
-static int core2_vpmu_save(struct vcpu *v, bool_t to_guest)
+static int cf_check core2_vpmu_save(struct vcpu *v, bool to_guest)
 {
     struct vpmu_struct *vpmu = vcpu_vpmu(v);
 
@@ -346,6 +353,10 @@ static inline void __core2_vpmu_load(struct vcpu *v)
         core2_vpmu_cxt->global_ovf_ctrl = 0;
         wrmsrl(MSR_CORE_PERF_GLOBAL_CTRL, core2_vpmu_cxt->global_ctrl);
     }
+    /* Restore MSR from context when used with a fork */
+    else if ( mem_sharing_is_fork(v->domain) )
+        vmx_write_guest_msr(v, MSR_CORE_PERF_GLOBAL_CTRL,
+                            core2_vpmu_cxt->global_ctrl);
 }
 
 static int core2_vpmu_verify(struct vcpu *v)
@@ -407,7 +418,7 @@ static int core2_vpmu_verify(struct vcpu *v)
     return 0;
 }
 
-static int core2_vpmu_load(struct vcpu *v, bool_t from_guest)
+static int cf_check core2_vpmu_load(struct vcpu *v, bool from_guest)
 {
     struct vpmu_struct *vpmu = vcpu_vpmu(v);
 
@@ -443,7 +454,7 @@ static int core2_vpmu_load(struct vcpu *v, bool_t from_guest)
     return 0;
 }
 
-static int core2_vpmu_alloc_resource(struct vcpu *v)
+static int cf_check core2_vpmu_alloc_resource(struct vcpu *v)
 {
     struct vpmu_struct *vpmu = vcpu_vpmu(v);
     struct xen_pmu_intel_ctxt *core2_vpmu_cxt = NULL;
@@ -461,11 +472,18 @@ static int core2_vpmu_alloc_resource(struct vcpu *v)
             goto out_err;
     }
 
-    core2_vpmu_cxt = xzalloc_bytes(sizeof(*core2_vpmu_cxt) +
-                                   sizeof(uint64_t) * fixed_pmc_cnt +
-                                   sizeof(struct xen_pmu_cntr_pair) *
-                                   arch_pmc_cnt);
+    vpmu->priv_context_size = sizeof(uint64_t);
+    vpmu->context_size = sizeof(struct xen_pmu_intel_ctxt) +
+                         fixed_pmc_cnt * sizeof(uint64_t) +
+                         arch_pmc_cnt * sizeof(struct xen_pmu_cntr_pair);
+    /* Calculate and add the padding for alignment */
+    vpmu->context_size += vpmu->context_size %
+                          sizeof(struct xen_pmu_intel_ctxt);
+
+    core2_vpmu_cxt = _xzalloc(vpmu->context_size,
+                              sizeof(struct xen_pmu_intel_ctxt));
     p = xzalloc(uint64_t);
+
     if ( !core2_vpmu_cxt || !p )
         goto out_err;
 
@@ -522,8 +540,7 @@ static int core2_vpmu_msr_common_check(u32 msr_index, int *type, int *index)
     return 1;
 }
 
-static int core2_vpmu_do_wrmsr(unsigned int msr, uint64_t msr_content,
-                               uint64_t supported)
+static int cf_check core2_vpmu_do_wrmsr(unsigned int msr, uint64_t msr_content)
 {
     int i, tmp;
     int type = -1, index = -1;
@@ -534,8 +551,6 @@ static int core2_vpmu_do_wrmsr(unsigned int msr, uint64_t msr_content,
 
     if ( !core2_vpmu_msr_common_check(msr, &type, &index) )
         return -EINVAL;
-
-    ASSERT(!supported);
 
     if ( (type == MSR_TYPE_COUNTER) && (msr_content & fixed_counters_mask) )
         /* Writing unsupported bits to a fixed counter */
@@ -693,7 +708,7 @@ static int core2_vpmu_do_wrmsr(unsigned int msr, uint64_t msr_content,
     return 0;
 }
 
-static int core2_vpmu_do_rdmsr(unsigned int msr, uint64_t *msr_content)
+static int cf_check core2_vpmu_do_rdmsr(unsigned int msr, uint64_t *msr_content)
 {
     int type = -1, index = -1;
     struct vcpu *v = current;
@@ -733,7 +748,7 @@ static int core2_vpmu_do_rdmsr(unsigned int msr, uint64_t *msr_content)
 }
 
 /* Dump vpmu info on console, called in the context of keyhandler 'q'. */
-static void core2_vpmu_dump(const struct vcpu *v)
+static void cf_check core2_vpmu_dump(const struct vcpu *v)
 {
     const struct vpmu_struct *vpmu = vcpu_vpmu(v);
     unsigned int i;
@@ -778,7 +793,7 @@ static void core2_vpmu_dump(const struct vcpu *v)
     }
 }
 
-static int core2_vpmu_do_interrupt(struct cpu_user_regs *regs)
+static int cf_check core2_vpmu_do_interrupt(struct cpu_user_regs *regs)
 {
     struct vcpu *v = current;
     u64 msr_content;
@@ -805,7 +820,7 @@ static int core2_vpmu_do_interrupt(struct cpu_user_regs *regs)
     return 1;
 }
 
-static void core2_vpmu_destroy(struct vcpu *v)
+static void cf_check core2_vpmu_destroy(struct vcpu *v)
 {
     struct vpmu_struct *vpmu = vcpu_vpmu(v);
 
@@ -819,27 +834,14 @@ static void core2_vpmu_destroy(struct vcpu *v)
     vpmu_clear(vpmu);
 }
 
-static const struct arch_vpmu_ops core2_vpmu_ops = {
-    .do_wrmsr = core2_vpmu_do_wrmsr,
-    .do_rdmsr = core2_vpmu_do_rdmsr,
-    .do_interrupt = core2_vpmu_do_interrupt,
-    .arch_vpmu_destroy = core2_vpmu_destroy,
-    .arch_vpmu_save = core2_vpmu_save,
-    .arch_vpmu_load = core2_vpmu_load,
-    .arch_vpmu_dump = core2_vpmu_dump
-};
-
-int vmx_vpmu_initialise(struct vcpu *v)
+static int cf_check vmx_vpmu_initialise(struct vcpu *v)
 {
     struct vpmu_struct *vpmu = vcpu_vpmu(v);
     u64 msr_content;
     static bool_t ds_warned;
 
-    if ( vpmu_mode == XENPMU_MODE_OFF )
-        return 0;
-
     if ( v->domain->arch.cpuid->basic.pmu_version <= 1 ||
-         v->domain->arch.cpuid->basic.pmu_version >= 5 )
+         v->domain->arch.cpuid->basic.pmu_version >= 6 )
         return -EINVAL;
 
     if ( (arch_pmc_cnt + fixed_pmc_cnt) == 0 )
@@ -893,12 +895,25 @@ int vmx_vpmu_initialise(struct vcpu *v)
     if ( is_pv_vcpu(v) && !core2_vpmu_alloc_resource(v) )
         return -EIO;
 
-    vpmu->arch_vpmu_ops = &core2_vpmu_ops;
-
     return 0;
 }
 
-int __init core2_vpmu_init(void)
+static const struct arch_vpmu_ops __initconst_cf_clobber core2_vpmu_ops = {
+    .initialise = vmx_vpmu_initialise,
+    .do_wrmsr = core2_vpmu_do_wrmsr,
+    .do_rdmsr = core2_vpmu_do_rdmsr,
+    .do_interrupt = core2_vpmu_do_interrupt,
+    .arch_vpmu_destroy = core2_vpmu_destroy,
+    .arch_vpmu_save = core2_vpmu_save,
+    .arch_vpmu_load = core2_vpmu_load,
+    .arch_vpmu_dump = core2_vpmu_dump,
+
+#ifdef CONFIG_MEM_SHARING
+    .allocate_context = core2_vpmu_alloc_resource,
+#endif
+};
+
+const struct arch_vpmu_ops *__init core2_vpmu_init(void)
 {
     unsigned int version = 0;
     unsigned int i;
@@ -909,8 +924,9 @@ int __init core2_vpmu_init(void)
     switch ( version )
     {
     case 4:
-        printk(XENLOG_INFO "VPMU: PMU version 4 is not fully supported. "
-               "Emulating version 3\n");
+    case 5:
+        printk(XENLOG_INFO "VPMU: PMU version %u is not fully supported. "
+               "Emulating version 3\n", version);
         /* FALLTHROUGH */
 
     case 2:
@@ -920,13 +936,13 @@ int __init core2_vpmu_init(void)
     default:
         printk(XENLOG_WARNING "VPMU: PMU version %u is not supported\n",
                version);
-        return -EINVAL;
+        return ERR_PTR(-EINVAL);
     }
 
     if ( current_cpu_data.x86 != 6 )
     {
         printk(XENLOG_WARNING "VPMU: only family 6 is supported\n");
-        return -EINVAL;
+        return ERR_PTR(-EINVAL);
     }
 
     arch_pmc_cnt = core2_get_arch_pmc_count();
@@ -971,9 +987,9 @@ int __init core2_vpmu_init(void)
         printk(XENLOG_WARNING
                "VPMU: Register bank does not fit into VPMU share page\n");
         arch_pmc_cnt = fixed_pmc_cnt = 0;
-        return -ENOSPC;
+        return ERR_PTR(-ENOSPC);
     }
 
-    return 0;
+    return &core2_vpmu_ops;
 }
 

@@ -23,14 +23,17 @@
 #include <asm/msi.h>
 #include <asm/p2m.h>
 
-#define VMSIX_SIZE(num) offsetof(struct vpci_msix, entries[num])
-
 #define VMSIX_ADDR_IN_RANGE(addr, vpci, nr)                               \
     ((addr) >= vmsix_table_addr(vpci, nr) &&                              \
      (addr) < vmsix_table_addr(vpci, nr) + vmsix_table_size(vpci, nr))
 
-static uint32_t control_read(const struct pci_dev *pdev, unsigned int reg,
-                             void *data)
+#define VMSIX_ADDR_SAME_PAGE(addr, vpci, nr)                              \
+    (PFN_DOWN(addr) >= PFN_DOWN(vmsix_table_addr(vpci, nr)) &&            \
+     PFN_DOWN(addr) <= PFN_DOWN(vmsix_table_addr(vpci, nr) +              \
+                                vmsix_table_size(vpci, nr) - 1))
+
+static uint32_t cf_check control_read(
+    const struct pci_dev *pdev, unsigned int reg, void *data)
 {
     const struct vpci_msix *msix = data;
 
@@ -39,19 +42,18 @@ static uint32_t control_read(const struct pci_dev *pdev, unsigned int reg,
            (msix->masked ? PCI_MSIX_FLAGS_MASKALL : 0);
 }
 
-static int update_entry(struct vpci_msix_entry *entry,
-                        const struct pci_dev *pdev, unsigned int nr)
+static void update_entry(struct vpci_msix_entry *entry,
+                         const struct pci_dev *pdev, unsigned int nr)
 {
-    uint8_t slot = PCI_SLOT(pdev->devfn), func = PCI_FUNC(pdev->devfn);
     int rc = vpci_msix_arch_disable_entry(entry, pdev);
 
     /* Ignore ENOENT, it means the entry wasn't setup. */
     if ( rc && rc != -ENOENT )
     {
         gprintk(XENLOG_WARNING,
-                "%04x:%02x:%02x.%u: unable to disable entry %u for update: %d\n",
-                pdev->seg, pdev->bus, slot, func, nr, rc);
-        return rc;
+                "%pp: unable to disable entry %u for update: %d\n",
+                &pdev->sbdf, nr, rc);
+        return;
     }
 
     rc = vpci_msix_arch_enable_entry(entry, pdev,
@@ -59,20 +61,18 @@ static int update_entry(struct vpci_msix_entry *entry,
                                                       VPCI_MSIX_TABLE));
     if ( rc )
     {
-        gprintk(XENLOG_WARNING,
-                "%04x:%02x:%02x.%u: unable to enable entry %u: %d\n",
-                pdev->seg, pdev->bus, slot, func, nr, rc);
+        gprintk(XENLOG_WARNING, "%pp: unable to enable entry %u: %d\n",
+                &pdev->sbdf, nr, rc);
         /* Entry is likely not properly configured. */
-        return rc;
+        return;
     }
 
-    return 0;
+    entry->updated = false;
 }
 
-static void control_write(const struct pci_dev *pdev, unsigned int reg,
-                          uint32_t val, void *data)
+static void cf_check control_write(
+    const struct pci_dev *pdev, unsigned int reg, uint32_t val, void *data)
 {
-    uint8_t slot = PCI_SLOT(pdev->devfn), func = PCI_FUNC(pdev->devfn);
     struct vpci_msix *msix = data;
     bool new_masked = val & PCI_MSIX_FLAGS_MASKALL;
     bool new_enabled = val & PCI_MSIX_FLAGS_ENABLE;
@@ -95,13 +95,8 @@ static void control_write(const struct pci_dev *pdev, unsigned int reg,
     if ( new_enabled && !new_masked && (!msix->enabled || msix->masked) )
     {
         for ( i = 0; i < msix->max_entries; i++ )
-        {
-            if ( msix->entries[i].masked || !msix->entries[i].updated ||
-                 update_entry(&msix->entries[i], pdev, i) )
-                continue;
-
-            msix->entries[i].updated = false;
-        }
+            if ( !msix->entries[i].masked && msix->entries[i].updated )
+                update_entry(&msix->entries[i], pdev, i);
     }
     else if ( !new_enabled && msix->enabled )
     {
@@ -133,9 +128,8 @@ static void control_write(const struct pci_dev *pdev, unsigned int reg,
                 /* Ignore non-present entry. */
                 break;
             default:
-                gprintk(XENLOG_WARNING,
-                        "%04x:%02x:%02x.%u: unable to disable entry %u: %d\n",
-                        pdev->seg, pdev->bus, slot, func, i, rc);
+                gprintk(XENLOG_WARNING, "%pp: unable to disable entry %u: %d\n",
+                        &pdev->sbdf, i, rc);
                 return;
             }
         }
@@ -160,14 +154,14 @@ static struct vpci_msix *msix_find(const struct domain *d, unsigned long addr)
 
         for ( i = 0; i < ARRAY_SIZE(msix->tables); i++ )
             if ( bars[msix->tables[i] & PCI_MSIX_BIRMASK].enabled &&
-                 VMSIX_ADDR_IN_RANGE(addr, msix->pdev->vpci, i) )
+                 VMSIX_ADDR_SAME_PAGE(addr, msix->pdev->vpci, i) )
                 return msix;
     }
 
     return NULL;
 }
 
-static int msix_accept(struct vcpu *v, unsigned long addr)
+static int cf_check msix_accept(struct vcpu *v, unsigned long addr)
 {
     return !!msix_find(v->domain, addr);
 }
@@ -180,8 +174,7 @@ static bool access_allowed(const struct pci_dev *pdev, unsigned long addr,
         return true;
 
     gprintk(XENLOG_WARNING,
-            "%04x:%02x:%02x.%u: unaligned or invalid size MSI-X table access\n",
-            pdev->seg, pdev->bus, PCI_SLOT(pdev->devfn), PCI_FUNC(pdev->devfn));
+            "%pp: unaligned or invalid size MSI-X table access\n", &pdev->sbdf);
 
     return false;
 }
@@ -194,8 +187,176 @@ static struct vpci_msix_entry *get_entry(struct vpci_msix *msix,
     return &msix->entries[(addr - start) / PCI_MSIX_ENTRY_SIZE];
 }
 
-static int msix_read(struct vcpu *v, unsigned long addr, unsigned int len,
-                     unsigned long *data)
+static void __iomem *get_table(struct vpci *vpci, unsigned int slot)
+{
+    struct vpci_msix *msix = vpci->msix;
+    paddr_t addr = 0;
+
+    ASSERT(spin_is_locked(&vpci->lock));
+
+    if ( likely(msix->table[slot]) )
+        return msix->table[slot];
+
+    switch ( slot )
+    {
+    case VPCI_MSIX_TBL_TAIL:
+        addr = vmsix_table_size(vpci, VPCI_MSIX_TABLE);
+        fallthrough;
+    case VPCI_MSIX_TBL_HEAD:
+        addr += vmsix_table_addr(vpci, VPCI_MSIX_TABLE);
+        break;
+
+    case VPCI_MSIX_PBA_TAIL:
+        addr = vmsix_table_size(vpci, VPCI_MSIX_PBA);
+        fallthrough;
+    case VPCI_MSIX_PBA_HEAD:
+        addr += vmsix_table_addr(vpci, VPCI_MSIX_PBA);
+        break;
+
+    default:
+        ASSERT_UNREACHABLE();
+        return NULL;
+    }
+
+    msix->table[slot] = ioremap(round_pgdown(addr), PAGE_SIZE);
+
+    return msix->table[slot];
+}
+
+unsigned int get_slot(const struct vpci *vpci, unsigned long addr)
+{
+    unsigned long pfn = PFN_DOWN(addr);
+
+    /*
+     * The logic below relies on having the tables identity mapped to the guest
+     * address space, or for the `addr` parameter to be translated into its
+     * host physical memory address equivalent.
+     */
+
+    if ( pfn == PFN_DOWN(vmsix_table_addr(vpci, VPCI_MSIX_TABLE)) )
+        return VPCI_MSIX_TBL_HEAD;
+    if ( pfn == PFN_DOWN(vmsix_table_addr(vpci, VPCI_MSIX_TABLE) +
+                         vmsix_table_size(vpci, VPCI_MSIX_TABLE) - 1) )
+        return VPCI_MSIX_TBL_TAIL;
+    if ( pfn == PFN_DOWN(vmsix_table_addr(vpci, VPCI_MSIX_PBA)) )
+        return VPCI_MSIX_PBA_HEAD;
+    if ( pfn == PFN_DOWN(vmsix_table_addr(vpci, VPCI_MSIX_PBA) +
+                         vmsix_table_size(vpci, VPCI_MSIX_PBA) - 1) )
+        return VPCI_MSIX_PBA_TAIL;
+
+    ASSERT_UNREACHABLE();
+    return -1;
+}
+
+static bool adjacent_handle(const struct vpci_msix *msix, unsigned long addr)
+{
+    unsigned int i;
+
+    if ( VMSIX_ADDR_IN_RANGE(addr, msix->pdev->vpci, VPCI_MSIX_PBA) )
+        return true;
+
+    if ( VMSIX_ADDR_IN_RANGE(addr, msix->pdev->vpci, VPCI_MSIX_TABLE) )
+        return false;
+
+    for ( i = 0; i < ARRAY_SIZE(msix->tables); i++ )
+        if ( VMSIX_ADDR_SAME_PAGE(addr, msix->pdev->vpci, i) )
+            return true;
+
+    return false;
+}
+
+static int adjacent_read(const struct domain *d, const struct vpci_msix *msix,
+                         unsigned long addr, unsigned int len,
+                         unsigned long *data)
+{
+    const void __iomem *mem;
+    struct vpci *vpci = msix->pdev->vpci;
+    unsigned int slot;
+
+    *data = ~0ul;
+
+    if ( !adjacent_handle(msix, addr + len - 1) )
+        return X86EMUL_OKAY;
+
+    if ( VMSIX_ADDR_IN_RANGE(addr, vpci, VPCI_MSIX_PBA) &&
+         !access_allowed(msix->pdev, addr, len) )
+        /* PBA accesses must be aligned and 4 or 8 bytes in size. */
+        return X86EMUL_OKAY;
+
+    slot = get_slot(vpci, addr);
+    if ( slot >= ARRAY_SIZE(msix->table) )
+        return X86EMUL_OKAY;
+
+    if ( unlikely(!IS_ALIGNED(addr, len)) )
+    {
+        unsigned int i;
+
+        gprintk(XENLOG_DEBUG, "%pp: unaligned read to MSI-X related page\n",
+                &msix->pdev->sbdf);
+
+        /*
+         * Split unaligned accesses into byte sized ones. Shouldn't happen in
+         * the first place, but devices shouldn't have registers in the same 4K
+         * page as the MSIX tables either.
+         *
+         * It's unclear whether this could cause issues if a guest expects
+         * registers to be accessed atomically, it better use an aligned access
+         * if it has such expectations.
+         */
+        for ( i = 0; i < len; i++ )
+        {
+            unsigned long partial = ~0ul;
+            int rc = adjacent_read(d, msix, addr + i, 1, &partial);
+
+            if ( rc != X86EMUL_OKAY )
+                return rc;
+
+            *data &= ~(0xfful << (i * 8));
+            *data |= (partial & 0xff) << (i * 8);
+        }
+
+        return X86EMUL_OKAY;
+    }
+
+    spin_lock(&vpci->lock);
+    mem = get_table(vpci, slot);
+    if ( !mem )
+    {
+        spin_unlock(&vpci->lock);
+        gprintk(XENLOG_WARNING,
+                "%pp: unable to map MSI-X page, returning all bits set\n",
+                &msix->pdev->sbdf);
+        return X86EMUL_OKAY;
+    }
+
+    switch ( len )
+    {
+    case 1:
+        *data = readb(mem + PAGE_OFFSET(addr));
+        break;
+
+    case 2:
+        *data = readw(mem + PAGE_OFFSET(addr));
+        break;
+
+    case 4:
+        *data = readl(mem + PAGE_OFFSET(addr));
+        break;
+
+    case 8:
+        *data = readq(mem + PAGE_OFFSET(addr));
+        break;
+
+    default:
+        ASSERT_UNREACHABLE();
+    }
+    spin_unlock(&vpci->lock);
+
+    return X86EMUL_OKAY;
+}
+
+static int cf_check msix_read(
+    struct vcpu *v, unsigned long addr, unsigned int len, unsigned long *data)
 {
     const struct domain *d = v->domain;
     struct vpci_msix *msix = msix_find(d, addr);
@@ -207,35 +368,11 @@ static int msix_read(struct vcpu *v, unsigned long addr, unsigned int len,
     if ( !msix )
         return X86EMUL_RETRY;
 
+    if ( adjacent_handle(msix, addr) )
+        return adjacent_read(d, msix, addr, len, data);
+
     if ( !access_allowed(msix->pdev, addr, len) )
         return X86EMUL_OKAY;
-
-    if ( VMSIX_ADDR_IN_RANGE(addr, msix->pdev->vpci, VPCI_MSIX_PBA) )
-    {
-        /*
-         * Access to PBA.
-         *
-         * TODO: note that this relies on having the PBA identity mapped to the
-         * guest address space. If this changes the address will need to be
-         * translated.
-         */
-        switch ( len )
-        {
-        case 4:
-            *data = readl(addr);
-            break;
-
-        case 8:
-            *data = readq(addr);
-            break;
-
-        default:
-            ASSERT_UNREACHABLE();
-            break;
-        }
-
-        return X86EMUL_OKAY;
-    }
 
     spin_lock(&msix->pdev->vpci->lock);
     entry = get_entry(msix, addr);
@@ -271,8 +408,88 @@ static int msix_read(struct vcpu *v, unsigned long addr, unsigned int len,
     return X86EMUL_OKAY;
 }
 
-static int msix_write(struct vcpu *v, unsigned long addr, unsigned int len,
-                      unsigned long data)
+static int adjacent_write(const struct domain *d, const struct vpci_msix *msix,
+                          unsigned long addr, unsigned int len,
+                          unsigned long data)
+{
+    void __iomem *mem;
+    struct vpci *vpci = msix->pdev->vpci;
+    unsigned int slot;
+
+    if ( !adjacent_handle(msix, addr + len - 1) )
+        return X86EMUL_OKAY;
+
+    /*
+     * Only check start and end of the access because the size of the PBA is
+     * assumed to be equal or bigger (8 bytes) than the length of any access
+     * handled here.
+     */
+    if ( VMSIX_ADDR_IN_RANGE(addr, vpci, VPCI_MSIX_PBA) &&
+         (!access_allowed(msix->pdev, addr, len) || !is_hardware_domain(d)) )
+        /* Ignore writes to PBA for DomUs, it's undefined behavior. */
+        return X86EMUL_OKAY;
+
+    slot = get_slot(vpci, addr);
+    if ( slot >= ARRAY_SIZE(msix->table) )
+        return X86EMUL_OKAY;
+
+    if ( unlikely(!IS_ALIGNED(addr, len)) )
+    {
+        unsigned int i;
+
+        gprintk(XENLOG_DEBUG, "%pp: unaligned write to MSI-X related page\n",
+                &msix->pdev->sbdf);
+
+        for ( i = 0; i < len; i++ )
+        {
+            int rc = adjacent_write(d, msix, addr + i, 1, data >> (i * 8));
+
+            if ( rc != X86EMUL_OKAY )
+                return rc;
+        }
+
+        return X86EMUL_OKAY;
+    }
+
+    spin_lock(&vpci->lock);
+    mem = get_table(vpci, slot);
+    if ( !mem )
+    {
+        spin_unlock(&vpci->lock);
+        gprintk(XENLOG_WARNING,
+                "%pp: unable to map MSI-X page, dropping write\n",
+                &msix->pdev->sbdf);
+        return X86EMUL_OKAY;
+    }
+
+    switch ( len )
+    {
+    case 1:
+        writeb(data, mem + PAGE_OFFSET(addr));
+        break;
+
+    case 2:
+        writew(data, mem + PAGE_OFFSET(addr));
+        break;
+
+    case 4:
+        writel(data, mem + PAGE_OFFSET(addr));
+        break;
+
+    case 8:
+        writeq(data, mem + PAGE_OFFSET(addr));
+        break;
+
+    default:
+        ASSERT_UNREACHABLE();
+    }
+    spin_unlock(&vpci->lock);
+
+    return X86EMUL_OKAY;
+}
+
+static int cf_check msix_write(
+    struct vcpu *v, unsigned long addr, unsigned int len, unsigned long data)
 {
     const struct domain *d = v->domain;
     struct vpci_msix *msix = msix_find(d, addr);
@@ -282,32 +499,11 @@ static int msix_write(struct vcpu *v, unsigned long addr, unsigned int len,
     if ( !msix )
         return X86EMUL_RETRY;
 
+    if ( adjacent_handle(msix, addr) )
+        return adjacent_write(d, msix, addr, len, data);
+
     if ( !access_allowed(msix->pdev, addr, len) )
         return X86EMUL_OKAY;
-
-    if ( VMSIX_ADDR_IN_RANGE(addr, msix->pdev->vpci, VPCI_MSIX_PBA) )
-    {
-        /* Ignore writes to PBA for DomUs, it's behavior is undefined. */
-        if ( is_hardware_domain(d) )
-        {
-            switch ( len )
-            {
-            case 4:
-                writel(data, addr);
-                break;
-
-            case 8:
-                writeq(data, addr);
-                break;
-
-            default:
-                ASSERT_UNREACHABLE();
-                break;
-            }
-        }
-
-        return X86EMUL_OKAY;
-    }
 
     spin_lock(&msix->pdev->vpci->lock);
     entry = get_entry(msix, addr);
@@ -370,10 +566,7 @@ static int msix_write(struct vcpu *v, unsigned long addr, unsigned int len,
              * data fields Xen needs to disable and enable the entry in order
              * to pick up the changes.
              */
-            if ( update_entry(entry, pdev, vmsix_entry_nr(msix, entry)) )
-                break;
-
-            entry->updated = false;
+            update_entry(entry, pdev, vmsix_entry_nr(msix, entry));
         }
         else
             vpci_msix_arch_mask_entry(entry, pdev, entry->masked);
@@ -424,32 +617,52 @@ int vpci_make_msix_hole(const struct pci_dev *pdev)
             case p2m_mmio_direct:
                 if ( mfn_x(mfn) == start )
                 {
-                    clear_identity_p2m_entry(d, start);
+                    p2m_remove_identity_entry(d, start);
                     break;
                 }
                 /* fallthrough. */
             default:
                 put_gfn(d, start);
                 gprintk(XENLOG_WARNING,
-                        "%04x:%02x:%02x.%u: existing mapping (mfn: %" PRI_mfn
+                        "%pp: existing mapping (mfn: %" PRI_mfn
                         "type: %d) at %#lx clobbers MSIX MMIO area\n",
-                        pdev->seg, pdev->bus, PCI_SLOT(pdev->devfn),
-                        PCI_FUNC(pdev->devfn), mfn_x(mfn), t, start);
+                        &pdev->sbdf, mfn_x(mfn), t, start);
                 return -EEXIST;
             }
             put_gfn(d, start);
         }
     }
 
+    if ( is_hardware_domain(d) )
+    {
+        /*
+         * For dom0 only: remove any hypervisor mappings of the MSIX or PBA
+         * related areas, as dom0 is capable of moving the position of the BARs
+         * in the host address space.
+         *
+         * We rely on being called with the vPCI lock held once the domain is
+         * running, so the maps are not in use.
+         */
+        for ( i = 0; i < ARRAY_SIZE(pdev->vpci->msix->table); i++ )
+            if ( pdev->vpci->msix->table[i] )
+            {
+                /* If there are any maps, the domain must be running. */
+                ASSERT(spin_is_locked(&pdev->vpci->lock));
+                iounmap(pdev->vpci->msix->table[i]);
+                pdev->vpci->msix->table[i] = NULL;
+            }
+    }
+
     return 0;
 }
 
-static int init_msix(struct pci_dev *pdev)
+static int cf_check init_msix(struct pci_dev *pdev)
 {
     struct domain *d = pdev->domain;
     uint8_t slot = PCI_SLOT(pdev->devfn), func = PCI_FUNC(pdev->devfn);
     unsigned int msix_offset, i, max_entries;
     uint16_t control;
+    struct vpci_msix *msix;
     int rc;
 
     msix_offset = pci_find_cap_offset(pdev->seg, pdev->bus, slot, func,
@@ -461,33 +674,37 @@ static int init_msix(struct pci_dev *pdev)
 
     max_entries = msix_table_size(control);
 
-    pdev->vpci->msix = xzalloc_bytes(VMSIX_SIZE(max_entries));
-    if ( !pdev->vpci->msix )
+    msix = xzalloc_flex_struct(struct vpci_msix, entries, max_entries);
+    if ( !msix )
         return -ENOMEM;
 
-    pdev->vpci->msix->max_entries = max_entries;
-    pdev->vpci->msix->pdev = pdev;
-
-    pdev->vpci->msix->tables[VPCI_MSIX_TABLE] =
-        pci_conf_read32(pdev->sbdf, msix_table_offset_reg(msix_offset));
-    pdev->vpci->msix->tables[VPCI_MSIX_PBA] =
-        pci_conf_read32(pdev->sbdf, msix_pba_offset_reg(msix_offset));
-
-    for ( i = 0; i < pdev->vpci->msix->max_entries; i++)
+    rc = vpci_add_register(pdev->vpci, control_read, control_write,
+                           msix_control_reg(msix_offset), 2, msix);
+    if ( rc )
     {
-        pdev->vpci->msix->entries[i].masked = true;
-        vpci_msix_arch_init_entry(&pdev->vpci->msix->entries[i]);
+        xfree(msix);
+        return rc;
     }
 
-    rc = vpci_add_register(pdev->vpci, control_read, control_write,
-                           msix_control_reg(msix_offset), 2, pdev->vpci->msix);
-    if ( rc )
-        return rc;
+    msix->max_entries = max_entries;
+    msix->pdev = pdev;
+
+    msix->tables[VPCI_MSIX_TABLE] =
+        pci_conf_read32(pdev->sbdf, msix_table_offset_reg(msix_offset));
+    msix->tables[VPCI_MSIX_PBA] =
+        pci_conf_read32(pdev->sbdf, msix_pba_offset_reg(msix_offset));
+
+    for ( i = 0; i < max_entries; i++)
+    {
+        msix->entries[i].masked = true;
+        vpci_msix_arch_init_entry(&msix->entries[i]);
+    }
 
     if ( list_empty(&d->arch.hvm.msix_tables) )
         register_mmio_handler(d, &vpci_msix_table_ops);
 
-    list_add(&pdev->vpci->msix->next, &d->arch.hvm.msix_tables);
+    pdev->vpci->msix = msix;
+    list_add(&msix->next, &d->arch.hvm.msix_tables);
 
     return 0;
 }

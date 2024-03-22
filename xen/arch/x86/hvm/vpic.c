@@ -41,7 +41,7 @@
 #define vpic_lock(v)   spin_lock(__vpic_lock(v))
 #define vpic_unlock(v) spin_unlock(__vpic_lock(v))
 #define vpic_is_locked(v) spin_is_locked(__vpic_lock(v))
-#define vpic_elcr_mask(v) (vpic->is_master ? (uint8_t)0xf8 : (uint8_t)0xde);
+#define vpic_elcr_mask(v) ((v)->is_master ? 0xf8 : 0xde)
 
 /* Return the highest priority found in mask. Return 8 if none. */
 #define VPIC_PRIO_NONE 8
@@ -101,11 +101,14 @@ static void vpic_update_int_output(struct hvm_hw_vpic *vpic)
     irq = vpic_get_highest_priority_irq(vpic);
     TRACE_3D(TRC_HVM_EMUL_PIC_INT_OUTPUT, vpic->int_output, vpic->is_master,
              irq);
-    if ( vpic->int_output == (irq >= 0) )
+    if ( vpic->int_output == (!vpic->init_state && irq >= 0) )
         return;
 
-    /* INT line transition L->H or H->L. */
-    vpic->int_output = !vpic->int_output;
+    /*
+     * INT line transition L->H or H->L.
+     * Force line status to L when in init mode.
+     */
+    vpic->int_output = !vpic->init_state && !vpic->int_output;
 
     if ( vpic->int_output )
     {
@@ -184,8 +187,9 @@ static int vpic_intack(struct hvm_hw_vpic *vpic)
 static void vpic_ioport_write(
     struct hvm_hw_vpic *vpic, uint32_t addr, uint32_t val)
 {
-    int priority, cmd, irq;
-    uint8_t mask, unmasked = 0;
+    int priority, cmd;
+    uint8_t mask;
+    bool unmasked = false;
 
     vpic_lock(vpic);
 
@@ -193,11 +197,12 @@ static void vpic_ioport_write(
     {
         if ( val & 0x10 )
         {
+            unsigned int pending = vpic->isr | (vpic->irr & ~vpic->elcr);
+
             /* ICW1 */
             /* Clear edge-sensing logic. */
             vpic->irr &= vpic->elcr;
 
-            unmasked = vpic->imr;
             /* No interrupts masked or in service. */
             vpic->imr = vpic->isr = 0;
 
@@ -217,6 +222,24 @@ static void vpic_ioport_write(
             }
 
             vpic->init_state = ((val & 3) << 2) | 1;
+            vpic_update_int_output(vpic);
+            vpic_unlock(vpic);
+
+            /*
+             * Forward the EOI of any pending or in service interrupt that has
+             * been cleared from IRR or ISR, or else the dpci logic will get
+             * out of sync with the state of the interrupt controller.
+             */
+            while ( pending )
+            {
+                unsigned int pin = __scanbit(pending, 8);
+
+                ASSERT(pin < 8);
+                hvm_dpci_eoi(current->domain,
+                             hvm_isa_irq_to_gsi((addr >> 7) ? (pin | 8) : pin));
+                __clear_bit(pin, &pending);
+            }
+            return;
         }
         else if ( val & 0x08 )
         {
@@ -230,6 +253,8 @@ static void vpic_ioport_write(
         }
         else
         {
+            unsigned int pin;
+
             /* OCW2 */
             cmd = val >> 5;
             switch ( cmd )
@@ -246,22 +271,22 @@ static void vpic_ioport_write(
                 priority = vpic_get_priority(vpic, mask);
                 if ( priority == VPIC_PRIO_NONE )
                     break;
-                irq = (priority + vpic->priority_add) & 7;
-                vpic->isr &= ~(1 << irq);
-                if ( cmd == 5 )
-                    vpic->priority_add = (irq + 1) & 7;
-                break;
+                pin = (priority + vpic->priority_add) & 7;
+                goto common_eoi;
+
             case 3: /* Specific EOI                */
             case 7: /* Specific EOI & Rotate       */
-                irq = val & 7;
-                vpic->isr &= ~(1 << irq);
-                if ( cmd == 7 )
-                    vpic->priority_add = (irq + 1) & 7;
+                pin = val & 7;
+
+            common_eoi:
+                vpic->isr &= ~(1 << pin);
+                if ( cmd == 7 || cmd == 5 )
+                    vpic->priority_add = (pin + 1) & 7;
                 /* Release lock and EOI the physical interrupt (if any). */
                 vpic_update_int_output(vpic);
                 vpic_unlock(vpic);
                 hvm_dpci_eoi(current->domain,
-                             hvm_isa_irq_to_gsi((addr >> 7) ? (irq | 8) : irq));
+                             hvm_isa_irq_to_gsi((addr >> 7) ? (pin | 8) : pin));
                 return; /* bail immediately */
             case 6: /* Set Priority                */
                 vpic->priority_add = (val + 1) & 7;
@@ -289,13 +314,17 @@ static void vpic_ioport_write(
             /* ICW3 */
             vpic->init_state++;
             if ( !(vpic->init_state & 4) )
+            {
                 vpic->init_state = 0; /* No ICW4: init done */
+                unmasked = true;
+            }
             break;
         case 3:
             /* ICW4 */
             vpic->special_fully_nested_mode = (val >> 4) & 1;
             vpic->auto_eoi = (val >> 1) & 1;
             vpic->init_state = 0;
+            unmasked = true;
             break;
         }
     }
@@ -322,7 +351,7 @@ static uint32_t vpic_ioport_read(struct hvm_hw_vpic *vpic, uint32_t addr)
     return vpic->imr;
 }
 
-static int vpic_intercept_pic_io(
+static int cf_check vpic_intercept_pic_io(
     int dir, unsigned int port, unsigned int bytes, uint32_t *val)
 {
     struct hvm_hw_vpic *vpic;
@@ -344,7 +373,7 @@ static int vpic_intercept_pic_io(
     return X86EMUL_OKAY;
 }
 
-static int vpic_intercept_elcr_io(
+static int cf_check vpic_intercept_elcr_io(
     int dir, unsigned int port, unsigned int bytes, uint32_t *val)
 {
     struct hvm_hw_vpic *vpic;
@@ -371,7 +400,7 @@ static int vpic_intercept_elcr_io(
     return X86EMUL_OKAY;
 }
 
-static int vpic_save(struct vcpu *v, hvm_domain_context_t *h)
+static int cf_check vpic_save(struct vcpu *v, hvm_domain_context_t *h)
 {
     struct domain *d = v->domain;
     struct hvm_hw_vpic *s;
@@ -391,7 +420,7 @@ static int vpic_save(struct vcpu *v, hvm_domain_context_t *h)
     return 0;
 }
 
-static int vpic_load(struct domain *d, hvm_domain_context_t *h)
+static int cf_check vpic_load(struct domain *d, hvm_domain_context_t *h)
 {
     struct hvm_hw_vpic *s;
     unsigned int inst = hvm_load_instance(h);
@@ -483,14 +512,15 @@ void vpic_irq_negative_edge(struct domain *d, int irq)
 
 int vpic_ack_pending_irq(struct vcpu *v)
 {
-    int irq;
+    int irq, accept;
     struct hvm_hw_vpic *vpic = &v->domain->arch.hvm.vpic[0];
 
     ASSERT(has_vpic(v->domain));
 
-    TRACE_2D(TRC_HVM_EMUL_PIC_PEND_IRQ_CALL, vlapic_accept_pic_intr(v),
-             vpic->int_output);
-    if ( !vlapic_accept_pic_intr(v) || !vpic->int_output )
+    accept = vlapic_accept_pic_intr(v);
+
+    TRACE_2D(TRC_HVM_EMUL_PIC_PEND_IRQ_CALL, accept, vpic->int_output);
+    if ( !accept || !vpic->int_output )
         return -1;
 
     irq = vpic_intack(vpic);

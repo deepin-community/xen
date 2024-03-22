@@ -5,7 +5,7 @@
 
 etc/xen/scripts
 etc/xen/xl*
-etc/bash_completion.d/xl.sh => usr/share/bash-completion/completions/xl
+etc/bash_completion.d/xl => usr/share/bash-completion/completions/xl
 
 etc/default/xendomains
 etc/default/xencommons => usr/share/xen-utils-common/default.xen

@@ -3,8 +3,20 @@
 #include <stdbool.h>
 #include <string.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #include <xen-tools/libs.h>
+
+#include "xenstore_lib.h"
+
+/* Header of the node record in tdb. */
+struct xs_tdb_record_hdr {
+	uint64_t generation;
+	uint32_t num_perms;
+	uint32_t datalen;
+	uint32_t childlen;
+	struct xs_permissions perms[0];
+};
 
 /* Is A == B ? */
 #define streq(a,b) (strcmp((a),(b)) == 0)
@@ -21,10 +33,20 @@ static inline bool strends(const char *a, const char *b)
 	return streq(a + strlen(a) - strlen(b), b);
 }
 
-void barf(const char *fmt, ...) __attribute__((noreturn));
-void barf_perror(const char *fmt, ...) __attribute__((noreturn));
+/*
+ * Write NUL bytes for aligning state data to 8 bytes.
+ */
+const char *dump_state_align(FILE *fp);
 
-extern void (*xprintf)(const char *fmt, ...);
+#define PRINTF_ATTRIBUTE(a1, a2) __attribute__((format (printf, a1, a2)))
+
+#define __noreturn __attribute__((noreturn))
+
+void barf(const char *fmt, ...) __noreturn PRINTF_ATTRIBUTE(1, 2);
+void barf_perror(const char *fmt, ...) __noreturn PRINTF_ATTRIBUTE(1, 2);
+
+/* Function pointer as xprintf() can be configured at runtime. */
+extern void (*xprintf)(const char *fmt, ...) PRINTF_ATTRIBUTE(1, 2);
 
 #define eprintf(_fmt, _args...) xprintf("[ERR] %s" _fmt, __FUNCTION__, ##_args)
 

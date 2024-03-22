@@ -4,33 +4,17 @@ Subject: Remove static solaris support from pygrub
 
 Patch-Name: tools-pygrub-remove-static-solaris-support
 ---
- tools/pygrub/src/pygrub | 51 +------------------------------------------------
- 1 file changed, 1 insertion(+), 50 deletions(-)
+ tools/pygrub/src/pygrub | 41 +----------------------------------------
+ 1 file changed, 1 insertion(+), 40 deletions(-)
 
 diff --git a/tools/pygrub/src/pygrub b/tools/pygrub/src/pygrub
-index ce7ab0e..8d48cf4 100755
+index 49e6274..e610b87 100755
 --- a/tools/pygrub/src/pygrub
 +++ b/tools/pygrub/src/pygrub
-@@ -18,7 +18,6 @@ import os, sys, string, struct, tempfile, re, traceback, stat, errno
- import copy
- import logging
- import platform
--import xen.lowlevel.xc
- 
- import curses, _curses, curses.textpad, curses.ascii
- import getopt
-@@ -668,51 +667,6 @@ def run_grub(file, entry, fs, cfg_args):
+@@ -795,42 +795,6 @@ def run_grub(file, entry, fs, cfg_args):
  
      return grubcfg
  
--def supports64bitPVguest():
--    xc = xen.lowlevel.xc.xc()
--    caps = xc.xeninfo()['xen_caps'].split(" ")
--    for cap in caps:
--        if cap == "xen-3.0-x86_64":
--            return True
--    return False
--
 -# If nothing has been specified, look for a Solaris domU. If found, perform the
 -# necessary tweaks.
 -def sniff_solaris(fs, cfg):
@@ -39,8 +23,7 @@ index ce7ab0e..8d48cf4 100755
 -        return cfg
 -
 -    if not cfg["kernel"]:
--        if supports64bitPVguest() and \
--          fs.file_exists("/platform/i86xpv/kernel/amd64/unix"):
+-        if fs.file_exists("/platform/i86xpv/kernel/amd64/unix"):
 -            cfg["kernel"] = "/platform/i86xpv/kernel/amd64/unix"
 -            cfg["ramdisk"] = "/platform/i86pc/amd64/boot_archive"
 -        elif fs.file_exists("/platform/i86xpv/kernel/unix"):
@@ -71,7 +54,7 @@ index ce7ab0e..8d48cf4 100755
  def sniff_netware(fs, cfg):
      if not fs.file_exists("/nwserver/xnloader.sys"):
          return cfg
-@@ -901,10 +855,7 @@ if __name__ == "__main__":
+@@ -1039,10 +1003,7 @@ if __name__ == "__main__":
          try:
              fs = xenfsimage.open(file, offset, bootfsoptions)
  

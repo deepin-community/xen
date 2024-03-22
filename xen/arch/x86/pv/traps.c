@@ -22,21 +22,12 @@
 #include <xen/event.h>
 #include <xen/hypercall.h>
 #include <xen/lib.h>
-#include <xen/trace.h>
 #include <xen/softirq.h>
 
-#include <asm/apic.h>
+#include <asm/pv/trace.h>
 #include <asm/shared.h>
 #include <asm/traps.h>
 #include <irq_vectors.h>
-
-void do_entry_int82(struct cpu_user_regs *regs)
-{
-    if ( unlikely(untrusted_msi) )
-        check_for_unexpected_msi((uint8_t)regs->entry_vector);
-
-    pv_hypercall(regs);
-}
 
 void pv_inject_event(const struct x86_event *event)
 {
@@ -98,9 +89,9 @@ void pv_inject_event(const struct x86_event *event)
 
     if ( unlikely(null_trap_bounce(curr, tb)) )
     {
-        gprintk(XENLOG_WARNING,
-                "Unhandled %s fault/trap [#%d, ec=%04x]\n",
-                trapstr(vector), vector, error_code);
+        gprintk(XENLOG_ERR,
+                "Unhandled: vec %u, %s[%04x]\n",
+                vector, vector_name(vector), error_code);
 
         if ( vector == TRAP_page_fault )
             show_page_walk(event->cr2);
@@ -139,7 +130,7 @@ bool set_guest_nmi_trapbounce(void)
 
 static DEFINE_PER_CPU(struct vcpu *, softirq_nmi_vcpu);
 
-static void nmi_softirq(void)
+static void cf_check nmi_softirq(void)
 {
     struct vcpu **v_ptr = &this_cpu(softirq_nmi_vcpu);
 
@@ -155,12 +146,14 @@ static void nmi_softirq(void)
 
 void __init pv_trap_init(void)
 {
+#ifdef CONFIG_PV32
     /* The 32-on-64 hypercall vector is only accessible from ring 1. */
     _set_gate(idt_table + HYPERCALL_VECTOR,
-              SYS_DESC_trap_gate, 1, entry_int82);
+              SYS_DESC_irq_gate, 1, entry_int82);
+#endif
 
     /* Fast trap for int80 (faster than taking the #GP-fixup path). */
-    _set_gate(idt_table + LEGACY_SYSCALL_VECTOR, SYS_DESC_trap_gate, 3,
+    _set_gate(idt_table + LEGACY_SYSCALL_VECTOR, SYS_DESC_irq_gate, 3,
               &int80_direct_trap);
 
     open_softirq(NMI_SOFTIRQ, nmi_softirq);

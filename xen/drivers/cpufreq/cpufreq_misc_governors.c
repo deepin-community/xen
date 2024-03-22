@@ -26,8 +26,8 @@
 static unsigned int __read_mostly userspace_cmdline_freq;
 static DEFINE_PER_CPU(unsigned int, cpu_set_freq);
 
-static int cpufreq_governor_userspace(struct cpufreq_policy *policy,
-                                      unsigned int event)
+static int cf_check cpufreq_governor_userspace(
+    struct cpufreq_policy *policy, unsigned int event)
 {
     int ret = 0;
     unsigned int cpu;
@@ -81,7 +81,7 @@ int write_userspace_scaling_setspeed(unsigned int cpu, unsigned int freq)
     return __cpufreq_driver_target(policy, freq, CPUFREQ_RELATION_L);
 }
 
-static bool_t __init
+static bool __init cf_check
 cpufreq_userspace_handle_option(const char *name, const char *val)
 {
     if (!strcmp(name, "speed") && val) {
@@ -91,7 +91,7 @@ cpufreq_userspace_handle_option(const char *name, const char *val)
     return 0;
 }
 
-static int cpufreq_userspace_cpu_callback(
+static int cf_check cpufreq_userspace_cpu_callback(
     struct notifier_block *nfb, unsigned long action, void *hcpu)
 {
     unsigned int cpu = (unsigned long)hcpu;
@@ -116,7 +116,7 @@ struct cpufreq_governor cpufreq_gov_userspace = {
     .handle_option = cpufreq_userspace_handle_option
 };
 
-static int __init cpufreq_gov_userspace_init(void)
+static int __init cf_check cpufreq_gov_userspace_init(void)
 {
     unsigned int cpu;
 
@@ -131,8 +131,8 @@ __initcall(cpufreq_gov_userspace_init);
 /*
  * cpufreq performance governor
  */
-static int cpufreq_governor_performance(struct cpufreq_policy *policy,
-                                      unsigned int event)
+static int cf_check cpufreq_governor_performance(
+    struct cpufreq_policy *policy, unsigned int event)
 {
     int ret = 0;
 
@@ -160,7 +160,7 @@ struct cpufreq_governor cpufreq_gov_performance = {
     .governor = cpufreq_governor_performance,
 };
 
-static int __init cpufreq_gov_performance_init(void)
+static int __init cf_check cpufreq_gov_performance_init(void)
 {
     return cpufreq_register_governor(&cpufreq_gov_performance);
 }
@@ -170,8 +170,8 @@ __initcall(cpufreq_gov_performance_init);
 /*
  * cpufreq powersave governor
  */
-static int cpufreq_governor_powersave(struct cpufreq_policy *policy,
-                                      unsigned int event)
+static int cf_check cpufreq_governor_powersave(
+    struct cpufreq_policy *policy, unsigned int event)
 {
     int ret = 0;
 
@@ -199,7 +199,7 @@ struct cpufreq_governor cpufreq_gov_powersave = {
     .governor = cpufreq_governor_powersave,
 };
 
-static int __init cpufreq_gov_powersave_init(void)
+static int __init cf_check cpufreq_gov_powersave_init(void)
 {
     return cpufreq_register_governor(&cpufreq_gov_powersave);
 }

@@ -20,10 +20,16 @@
 #include "iommu.h"
 #include "../ats.h"
 
+#define CMD_COMPLETION_INIT 0
+#define CMD_COMPLETION_DONE 1
+
 static void send_iommu_command(struct amd_iommu *iommu,
                                const uint32_t cmd[4])
 {
     uint32_t tail;
+    unsigned long flags;
+
+    spin_lock_irqsave(&iommu->lock, flags);
 
     tail = iommu->cmd_buffer.tail + sizeof(cmd_entry_t);
     if ( tail == iommu->cmd_buffer.size )
@@ -33,10 +39,8 @@ static void send_iommu_command(struct amd_iommu *iommu,
                            IOMMU_CMD_BUFFER_HEAD_OFFSET) &
                      IOMMU_RING_BUFFER_PTR_MASK) )
     {
-        printk_once(XENLOG_ERR
-                    "AMD IOMMU %04x:%02x:%02x.%u: no cmd slot available\n",
-                    iommu->seg, PCI_BUS(iommu->bdf),
-                    PCI_SLOT(iommu->bdf), PCI_FUNC(iommu->bdf));
+        printk_once(XENLOG_ERR "AMD IOMMU %pp: no cmd slot available\n",
+                    &PCI_SBDF(iommu->seg, iommu->bdf));
         cpu_relax();
     }
 
@@ -46,41 +50,41 @@ static void send_iommu_command(struct amd_iommu *iommu,
     iommu->cmd_buffer.tail = tail;
 
     writel(tail, iommu->mmio_base + IOMMU_CMD_BUFFER_TAIL_OFFSET);
+
+    spin_unlock_irqrestore(&iommu->lock, flags);
 }
 
 static void flush_command_buffer(struct amd_iommu *iommu,
                                  unsigned int timeout_base)
 {
-    uint32_t cmd[4];
+    static DEFINE_PER_CPU(uint64_t, poll_slot);
+    uint64_t *this_poll_slot = &this_cpu(poll_slot);
+    paddr_t addr = virt_to_maddr(this_poll_slot);
+    /* send a COMPLETION_WAIT command to flush command buffer */
+    uint32_t cmd[4] = {
+        addr | MASK_INSR(IOMMU_CONTROL_ENABLED,
+                         IOMMU_COMP_WAIT_S_FLAG_MASK),
+        (addr >> 32) | MASK_INSR(IOMMU_CMD_COMPLETION_WAIT,
+                                 IOMMU_CMD_OPCODE_MASK),
+        CMD_COMPLETION_DONE
+    };
     s_time_t start, timeout;
     static unsigned int __read_mostly threshold = 1;
 
-    /* RW1C 'ComWaitInt' in status register */
-    writel(IOMMU_STATUS_COMP_WAIT_INT,
-           iommu->mmio_base + IOMMU_STATUS_MMIO_OFFSET);
+    ACCESS_ONCE(*this_poll_slot) = CMD_COMPLETION_INIT;
 
-    /* send an empty COMPLETION_WAIT command to flush command buffer */
-    cmd[3] = cmd[2] = 0;
-    set_field_in_reg_u32(IOMMU_CMD_COMPLETION_WAIT, 0,
-                         IOMMU_CMD_OPCODE_MASK,
-                         IOMMU_CMD_OPCODE_SHIFT, &cmd[1]);
-    set_field_in_reg_u32(IOMMU_CONTROL_ENABLED, 0,
-                         IOMMU_COMP_WAIT_I_FLAG_MASK,
-                         IOMMU_COMP_WAIT_I_FLAG_SHIFT, &cmd[0]);
     send_iommu_command(iommu, cmd);
 
     start = NOW();
     timeout = start + (timeout_base ?: 100) * MILLISECS(threshold);
-    while ( !(readl(iommu->mmio_base + IOMMU_STATUS_MMIO_OFFSET) &
-              IOMMU_STATUS_COMP_WAIT_INT) )
+    while ( ACCESS_ONCE(*this_poll_slot) != CMD_COMPLETION_DONE )
     {
         if ( timeout && NOW() > timeout )
         {
             threshold |= threshold << 1;
             printk(XENLOG_WARNING
-                   "AMD IOMMU %04x:%02x:%02x.%u: %scompletion wait taking too long\n",
-                   iommu->seg, PCI_BUS(iommu->bdf),
-                   PCI_SLOT(iommu->bdf), PCI_FUNC(iommu->bdf),
+                   "AMD IOMMU %pp: %scompletion wait taking too long\n",
+                   &PCI_SBDF(iommu->seg, iommu->bdf),
                    timeout_base ? "iotlb " : "");
             timeout = 0;
         }
@@ -89,9 +93,8 @@ static void flush_command_buffer(struct amd_iommu *iommu,
 
     if ( !timeout )
         printk(XENLOG_WARNING
-               "AMD IOMMU %04x:%02x:%02x.%u: %scompletion wait took %lums\n",
-               iommu->seg, PCI_BUS(iommu->bdf),
-               PCI_SLOT(iommu->bdf), PCI_FUNC(iommu->bdf),
+               "AMD IOMMU %pp: %scompletion wait took %lums\n",
+               &PCI_SBDF(iommu->seg, iommu->bdf),
                timeout_base ? "iotlb " : "",
                (NOW() - start) / 10000000);
 }
@@ -275,7 +278,6 @@ static void invalidate_iommu_all(struct amd_iommu *iommu)
 void amd_iommu_flush_iotlb(u8 devfn, const struct pci_dev *pdev,
                            daddr_t daddr, unsigned int order)
 {
-    unsigned long flags;
     struct amd_iommu *iommu;
     unsigned int req_id, queueid, maxpend;
 
@@ -285,37 +287,31 @@ void amd_iommu_flush_iotlb(u8 devfn, const struct pci_dev *pdev,
     if ( !pci_ats_enabled(pdev->seg, pdev->bus, pdev->devfn) )
         return;
 
-    iommu = find_iommu_for_device(pdev->seg, PCI_BDF2(pdev->bus, pdev->devfn));
+    iommu = find_iommu_for_device(pdev->seg, pdev->sbdf.bdf);
 
     if ( !iommu )
     {
-        AMD_IOMMU_DEBUG("%s: Can't find iommu for %04x:%02x:%02x.%u\n",
-                        __func__, pdev->seg, pdev->bus,
-                        PCI_SLOT(pdev->devfn), PCI_FUNC(pdev->devfn));
+        AMD_IOMMU_WARN("can't find IOMMU for %pp\n",
+                       &PCI_SBDF(pdev->seg, pdev->bus, devfn));
         return;
     }
 
     if ( !iommu_has_cap(iommu, PCI_CAP_IOTLB_SHIFT) )
         return;
 
-    req_id = get_dma_requestor_id(iommu->seg, PCI_BDF2(pdev->bus, devfn));
+    req_id = get_dma_requestor_id(iommu->seg, PCI_BDF(pdev->bus, devfn));
     queueid = req_id;
     maxpend = pdev->ats.queue_depth & 0xff;
 
     /* send INVALIDATE_IOTLB_PAGES command */
-    spin_lock_irqsave(&iommu->lock, flags);
     invalidate_iotlb_pages(iommu, maxpend, 0, queueid, daddr, req_id, order);
     flush_command_buffer(iommu, iommu_dev_iotlb_timeout);
-    spin_unlock_irqrestore(&iommu->lock, flags);
 }
 
-static void amd_iommu_flush_all_iotlbs(struct domain *d, daddr_t daddr,
+static void amd_iommu_flush_all_iotlbs(const struct domain *d, daddr_t daddr,
                                        unsigned int order)
 {
     struct pci_dev *pdev;
-
-    if ( !ats_enabled )
-        return;
 
     for_each_pdev( d, pdev )
     {
@@ -333,21 +329,27 @@ static void amd_iommu_flush_all_iotlbs(struct domain *d, daddr_t daddr,
 static void _amd_iommu_flush_pages(struct domain *d,
                                    daddr_t daddr, unsigned int order)
 {
-    unsigned long flags;
     struct amd_iommu *iommu;
     unsigned int dom_id = d->domain_id;
 
     /* send INVALIDATE_IOMMU_PAGES command */
     for_each_amd_iommu ( iommu )
     {
-        spin_lock_irqsave(&iommu->lock, flags);
         invalidate_iommu_pages(iommu, daddr, dom_id, order);
         flush_command_buffer(iommu, 0);
-        spin_unlock_irqrestore(&iommu->lock, flags);
     }
 
     if ( ats_enabled )
+    {
         amd_iommu_flush_all_iotlbs(d, daddr, order);
+
+        /*
+         * Hidden devices are associated with DomXEN but usable by the
+         * hardware domain. Hence they need dealing with here as well.
+         */
+        if ( is_hardware_domain(d) )
+            amd_iommu_flush_all_iotlbs(dom_xen, daddr, order);
+    }
 }
 
 void amd_iommu_flush_all_pages(struct domain *d)
@@ -361,39 +363,35 @@ void amd_iommu_flush_pages(struct domain *d,
     _amd_iommu_flush_pages(d, __dfn_to_daddr(dfn), order);
 }
 
-void amd_iommu_flush_device(struct amd_iommu *iommu, uint16_t bdf)
+void amd_iommu_flush_device(struct amd_iommu *iommu, uint16_t bdf,
+                            domid_t domid)
 {
-    ASSERT( spin_is_locked(&iommu->lock) );
-
     invalidate_dev_table_entry(iommu, bdf);
     flush_command_buffer(iommu, 0);
+
+    /* Also invalidate IOMMU TLB entries when flushing the DTE. */
+    if ( domid != DOMID_INVALID )
+    {
+        invalidate_iommu_pages(iommu, INV_IOMMU_ALL_PAGES_ADDRESS, domid, 0);
+        flush_command_buffer(iommu, 0);
+    }
 }
 
 void amd_iommu_flush_intremap(struct amd_iommu *iommu, uint16_t bdf)
 {
-    ASSERT( spin_is_locked(&iommu->lock) );
-
     invalidate_interrupt_table(iommu, bdf);
     flush_command_buffer(iommu, 0);
 }
 
 void amd_iommu_flush_all_caches(struct amd_iommu *iommu)
 {
-    ASSERT( spin_is_locked(&iommu->lock) );
-
     invalidate_iommu_all(iommu);
     flush_command_buffer(iommu, 0);
 }
 
 void amd_iommu_send_guest_cmd(struct amd_iommu *iommu, u32 cmd[])
 {
-    unsigned long flags;
-
-    spin_lock_irqsave(&iommu->lock, flags);
-
     send_iommu_command(iommu, cmd);
     /* TBD: Timeout selection may require peeking into cmd[]. */
     flush_command_buffer(iommu, 0);
-
-    spin_unlock_irqrestore(&iommu->lock, flags);
 }

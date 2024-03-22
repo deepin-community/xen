@@ -24,8 +24,8 @@
 
 /* The number of levels in the shadow pagetable is entirely determined
  * by the number of levels in the guest pagetable */
-#if GUEST_PAGING_LEVELS == 4
-#define SHADOW_PAGING_LEVELS 4
+#if GUEST_PAGING_LEVELS != 2
+#define SHADOW_PAGING_LEVELS GUEST_PAGING_LEVELS
 #else
 #define SHADOW_PAGING_LEVELS 3
 #endif
@@ -43,7 +43,7 @@
 #define SHADOW_L1_PAGETABLE_SHIFT        12
 #define SHADOW_L2_PAGETABLE_SHIFT        21
 #define SHADOW_L3_PAGETABLE_SHIFT        30
-#else /* SHADOW_PAGING_LEVELS == 4 */
+#elif SHADOW_PAGING_LEVELS == 4
 #define SHADOW_L1_PAGETABLE_ENTRIES     512
 #define SHADOW_L2_PAGETABLE_ENTRIES     512
 #define SHADOW_L3_PAGETABLE_ENTRIES     512
@@ -58,9 +58,7 @@
 typedef l1_pgentry_t shadow_l1e_t;
 typedef l2_pgentry_t shadow_l2e_t;
 typedef l3_pgentry_t shadow_l3e_t;
-#if SHADOW_PAGING_LEVELS >= 4
 typedef l4_pgentry_t shadow_l4e_t;
-#endif
 
 /* Access functions for them */
 static inline paddr_t shadow_l1e_get_paddr(shadow_l1e_t sl1e)
@@ -69,10 +67,8 @@ static inline paddr_t shadow_l2e_get_paddr(shadow_l2e_t sl2e)
 { return l2e_get_paddr(sl2e); }
 static inline paddr_t shadow_l3e_get_paddr(shadow_l3e_t sl3e)
 { return l3e_get_paddr(sl3e); }
-#if SHADOW_PAGING_LEVELS >= 4
 static inline paddr_t shadow_l4e_get_paddr(shadow_l4e_t sl4e)
 { return l4e_get_paddr(sl4e); }
-#endif
 
 static inline mfn_t shadow_l1e_get_mfn(shadow_l1e_t sl1e)
 { return l1e_get_mfn(sl1e); }
@@ -80,10 +76,8 @@ static inline mfn_t shadow_l2e_get_mfn(shadow_l2e_t sl2e)
 { return l2e_get_mfn(sl2e); }
 static inline mfn_t shadow_l3e_get_mfn(shadow_l3e_t sl3e)
 { return l3e_get_mfn(sl3e); }
-#if SHADOW_PAGING_LEVELS >= 4
 static inline mfn_t shadow_l4e_get_mfn(shadow_l4e_t sl4e)
 { return l4e_get_mfn(sl4e); }
-#endif
 
 static inline u32 shadow_l1e_get_flags(shadow_l1e_t sl1e)
 { return l1e_get_flags(sl1e); }
@@ -91,10 +85,8 @@ static inline u32 shadow_l2e_get_flags(shadow_l2e_t sl2e)
 { return l2e_get_flags(sl2e); }
 static inline u32 shadow_l3e_get_flags(shadow_l3e_t sl3e)
 { return l3e_get_flags(sl3e); }
-#if SHADOW_PAGING_LEVELS >= 4
 static inline u32 shadow_l4e_get_flags(shadow_l4e_t sl4e)
 { return l4e_get_flags(sl4e); }
-#endif
 
 static inline shadow_l1e_t
 shadow_l1e_remove_flags(shadow_l1e_t sl1e, u32 flags)
@@ -109,10 +101,8 @@ static inline shadow_l2e_t shadow_l2e_empty(void)
 { return l2e_empty(); }
 static inline shadow_l3e_t shadow_l3e_empty(void)
 { return l3e_empty(); }
-#if SHADOW_PAGING_LEVELS >= 4
 static inline shadow_l4e_t shadow_l4e_empty(void)
 { return l4e_empty(); }
-#endif
 
 static inline shadow_l1e_t shadow_l1e_from_mfn(mfn_t mfn, u32 flags)
 { return l1e_from_mfn(mfn, flags); }
@@ -120,10 +110,8 @@ static inline shadow_l2e_t shadow_l2e_from_mfn(mfn_t mfn, u32 flags)
 { return l2e_from_mfn(mfn, flags); }
 static inline shadow_l3e_t shadow_l3e_from_mfn(mfn_t mfn, u32 flags)
 { return l3e_from_mfn(mfn, flags); }
-#if SHADOW_PAGING_LEVELS >= 4
 static inline shadow_l4e_t shadow_l4e_from_mfn(mfn_t mfn, u32 flags)
 { return l4e_from_mfn(mfn, flags); }
-#endif
 
 #define shadow_l1_table_offset(a) l1_table_offset(a)
 #define shadow_l2_table_offset(a) l2_table_offset(a)
@@ -207,8 +195,7 @@ static inline shadow_l4e_t shadow_l4e_from_mfn(mfn_t mfn, u32 flags)
 #define SH_type_l1_shadow  SH_type_l1_pae_shadow
 #define SH_type_fl1_shadow SH_type_fl1_pae_shadow
 #define SH_type_l2_shadow  SH_type_l2_pae_shadow
-#define SH_type_l2h_shadow SH_type_l2h_pae_shadow
-#else
+#elif GUEST_PAGING_LEVELS == 4
 #define SH_type_l1_shadow  SH_type_l1_64_shadow
 #define SH_type_fl1_shadow SH_type_fl1_64_shadow
 #define SH_type_l2_shadow  SH_type_l2_64_shadow
@@ -216,6 +203,8 @@ static inline shadow_l4e_t shadow_l4e_from_mfn(mfn_t mfn, u32 flags)
 #define SH_type_l3_shadow  SH_type_l3_64_shadow
 #define SH_type_l4_shadow  SH_type_l4_64_shadow
 #endif
+
+#if GUEST_PAGING_LEVELS
 
 /* macros for dealing with the naming of the internal function names of the
  * shadow code's external entry points.
@@ -262,14 +251,7 @@ static inline shadow_l4e_t shadow_l4e_from_mfn(mfn_t mfn, u32 flags)
 #define sh_rm_write_access_from_sl1p INTERNAL_NAME(sh_rm_write_access_from_sl1p)
 #endif
 
-/* sh_make_monitor_table depends only on the number of shadow levels */
-#define sh_make_monitor_table \
-        SHADOW_SH_NAME(sh_make_monitor_table, SHADOW_PAGING_LEVELS)
-#define sh_destroy_monitor_table \
-        SHADOW_SH_NAME(sh_destroy_monitor_table, SHADOW_PAGING_LEVELS)
-
-mfn_t sh_make_monitor_table(struct vcpu *v);
-void sh_destroy_monitor_table(struct vcpu *v, mfn_t mmfn);
+#endif /* GUEST_PAGING_LEVELS */
 
 #if SHADOW_PAGING_LEVELS == 3
 #define MFN_FITS_IN_HVM_CR3(_MFN) !(mfn_x(_MFN) >> 20)
@@ -279,6 +261,26 @@ void sh_destroy_monitor_table(struct vcpu *v, mfn_t mmfn);
 #define SH_PRI_gpte PRI_gpte
 #define SH_PRI_gfn  PRI_gfn
 
+int shadow_set_l1e(struct domain *d, shadow_l1e_t *sl1e,
+                   shadow_l1e_t new_sl1e, p2m_type_t new_type,
+                   mfn_t sl1mfn);
+int shadow_set_l2e(struct domain *d, shadow_l2e_t *sl2e,
+                   shadow_l2e_t new_sl2e, mfn_t sl2mfn,
+                   unsigned int type_fl1_shadow,
+                   mfn_t (*next_page)(mfn_t smfn));
+int shadow_set_l3e(struct domain *d, shadow_l3e_t *sl3e,
+                   shadow_l3e_t new_sl3e, mfn_t sl3mfn);
+int shadow_set_l4e(struct domain *d, shadow_l4e_t *sl4e,
+                   shadow_l4e_t new_sl4e, mfn_t sl4mfn);
+
+static void inline
+shadow_put_page_from_l1e(shadow_l1e_t sl1e, struct domain *d)
+{
+    if ( !shadow_mode_refcounts(d) )
+        return;
+
+    put_page_from_l1e(sl1e, d);
+}
 
 #if (SHADOW_OPTIMIZATIONS & SHOPT_FAST_FAULT_PATH)
 /******************************************************************************
@@ -292,9 +294,18 @@ void sh_destroy_monitor_table(struct vcpu *v, mfn_t mmfn);
  * This is only feasible for PAE and 64bit Xen: 32-bit non-PAE PTEs don't
  * have reserved bits that we can use for this.  And even there it can only
  * be used if we can be certain the processor doesn't use all 52 address bits.
+ *
+ * For the MMIO encoding (see below) we need the bottom 4 bits for
+ * identifying the kind of entry and a full GFN's worth of bits to encode
+ * the originating frame number.  Set all remaining bits to trigger
+ * reserved bit faults, if (see above) the hardware permits triggering such.
  */
 
-#define SH_L1E_MAGIC 0xffffffff00000001ULL
+#ifdef CONFIG_BIGMEM
+# define SH_L1E_MAGIC_MASK (0xfffff00000000000UL | _PAGE_PRESENT)
+#else
+# define SH_L1E_MAGIC_MASK (0xfffffff000000000UL | _PAGE_PRESENT)
+#endif
 
 static inline bool sh_have_pte_rsvd_bits(void)
 {
@@ -303,7 +314,8 @@ static inline bool sh_have_pte_rsvd_bits(void)
 
 static inline bool sh_l1e_is_magic(shadow_l1e_t sl1e)
 {
-    return (sl1e.l1 & SH_L1E_MAGIC) == SH_L1E_MAGIC;
+    BUILD_BUG_ON(!(PADDR_MASK & PAGE_MASK & SH_L1E_MAGIC_MASK));
+    return (sl1e.l1 & SH_L1E_MAGIC_MASK) == SH_L1E_MAGIC_MASK;
 }
 
 /* Guest not present: a single magic value */
@@ -329,24 +341,30 @@ static inline bool sh_l1e_is_gnp(shadow_l1e_t sl1e)
 
 /*
  * MMIO: an invalid PTE that contains the GFN of the equivalent guest l1e.
- * We store 28 bits of GFN in bits 4:32 of the entry.
+ * We store the GFN in bits 4:35 (BIGMEM: 4:43) of the entry.
  * The present bit is set, and the U/S and R/W bits are taken from the guest.
  * Bit 3 is always 0, to differentiate from gnp above.
  */
-#define SH_L1E_MMIO_MAGIC       0xffffffff00000001ULL
-#define SH_L1E_MMIO_MAGIC_MASK  0xffffffff00000009ULL
-#define SH_L1E_MMIO_GFN_MASK    0x00000000fffffff0ULL
+#define SH_L1E_MMIO_MAGIC       SH_L1E_MAGIC_MASK
+#define SH_L1E_MMIO_MAGIC_BIT   8
+#define SH_L1E_MMIO_MAGIC_MASK  (SH_L1E_MMIO_MAGIC | SH_L1E_MMIO_MAGIC_BIT)
+#define SH_L1E_MMIO_GFN_MASK    ~(SH_L1E_MMIO_MAGIC_MASK | _PAGE_RW | _PAGE_USER)
 
 static inline shadow_l1e_t sh_l1e_mmio(gfn_t gfn, u32 gflags)
 {
     unsigned long gfn_val = MASK_INSR(gfn_x(gfn), SH_L1E_MMIO_GFN_MASK);
+    shadow_l1e_t sl1e = { (SH_L1E_MMIO_MAGIC | gfn_val |
+                           (gflags & (_PAGE_USER | _PAGE_RW))) };
+
+    BUILD_BUG_ON(SH_L1E_MMIO_MAGIC_BIT <= _PAGE_RW);
+    BUILD_BUG_ON(SH_L1E_MMIO_MAGIC_BIT <= _PAGE_USER);
 
     if ( !sh_have_pte_rsvd_bits() ||
-         gfn_x(gfn) != MASK_EXTR(gfn_val, SH_L1E_MMIO_GFN_MASK) )
-        return shadow_l1e_empty();
+         (cpu_has_bug_l1tf &&
+          !is_l1tf_safe_maddr(shadow_l1e_get_paddr(sl1e))) )
+        sl1e = shadow_l1e_empty();
 
-    return (shadow_l1e_t) { (SH_L1E_MMIO_MAGIC | gfn_val |
-                             (gflags & (_PAGE_USER | _PAGE_RW))) };
+    return sl1e;
 }
 
 static inline bool sh_l1e_is_mmio(shadow_l1e_t sl1e)

@@ -21,6 +21,7 @@
  */
 
 #include <xen/guest_access.h>
+#include <xen/softirq.h>
 #include <xen/version.h>
 
 #include <asm/hvm/support.h>
@@ -255,6 +256,7 @@ int hvm_save(struct domain *d, hvm_domain_context_t *h)
                            v, i);
                     return -ENODATA;
                 }
+                process_pending_softirqs();
             }
         }
         else
@@ -268,6 +270,7 @@ int hvm_save(struct domain *d, hvm_domain_context_t *h)
                        d->domain_id, i);
                 return -ENODATA;
             }
+            process_pending_softirqs();
         }
     }
 
@@ -344,6 +347,7 @@ int hvm_load(struct domain *d, hvm_domain_context_t *h)
                    d->domain_id, desc->typecode, desc->instance, rc);
             return rc;
         }
+        process_pending_softirqs();
     }
 
     /* Not reached */

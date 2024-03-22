@@ -11,7 +11,9 @@
 #include <xen/lib.h>
 #include <xen/kernel.h>
 #include <xen/init.h>
+#include <xen/efi.h>
 #include <xen/device_tree.h>
+#include <xen/lib.h>
 #include <xen/libfdt/libfdt.h>
 #include <xen/sort.h>
 #include <xsm/xsm.h>
@@ -36,10 +38,7 @@ static bool __init device_tree_node_compatible(const void *fdt, int node,
                                                const char *match)
 {
     int len, l;
-    int mlen;
     const void *prop;
-
-    mlen = strlen(match);
 
     prop = fdt_getprop(fdt, node, "compatible", &len);
     if ( prop == NULL )
@@ -61,6 +60,53 @@ void __init device_tree_get_reg(const __be32 **cell, u32 address_cells,
 {
     *start = dt_next_cell(address_cells, cell);
     *size = dt_next_cell(size_cells, cell);
+}
+
+static int __init device_tree_get_meminfo(const void *fdt, int node,
+                                          const char *prop_name,
+                                          u32 address_cells, u32 size_cells,
+                                          void *data, enum membank_type type)
+{
+    const struct fdt_property *prop;
+    unsigned int i, banks;
+    const __be32 *cell;
+    u32 reg_cells = address_cells + size_cells;
+    paddr_t start, size;
+    struct meminfo *mem = data;
+
+    if ( address_cells < 1 || size_cells < 1 )
+    {
+        printk("fdt: property `%s': invalid #address-cells or #size-cells",
+               prop_name);
+        return -EINVAL;
+    }
+
+    prop = fdt_get_property(fdt, node, prop_name, NULL);
+    if ( !prop )
+        return -ENOENT;
+
+    cell = (const __be32 *)prop->data;
+    banks = fdt32_to_cpu(prop->len) / (reg_cells * sizeof (u32));
+
+    for ( i = 0; i < banks && mem->nr_banks < NR_MEM_BANKS; i++ )
+    {
+        device_tree_get_reg(&cell, address_cells, size_cells, &start, &size);
+        /* Some DT may describe empty bank, ignore them */
+        if ( !size )
+            continue;
+        mem->bank[mem->nr_banks].start = start;
+        mem->bank[mem->nr_banks].size = size;
+        mem->bank[mem->nr_banks].type = type;
+        mem->nr_banks++;
+    }
+
+    if ( i < banks )
+    {
+        printk("Warning: Max number of supported memory regions reached.\n");
+        return -ENOSPC;
+    }
+
+    return 0;
 }
 
 u32 __init device_tree_get_u32(const void *fdt, int node,
@@ -139,42 +185,8 @@ static int __init process_memory_node(const void *fdt, int node,
                                       u32 address_cells, u32 size_cells,
                                       void *data)
 {
-    const struct fdt_property *prop;
-    int i;
-    int banks;
-    const __be32 *cell;
-    paddr_t start, size;
-    u32 reg_cells = address_cells + size_cells;
-    struct meminfo *mem = data;
-
-    if ( address_cells < 1 || size_cells < 1 )
-    {
-        printk("fdt: node `%s': invalid #address-cells or #size-cells",
-               name);
-        return -EINVAL;
-    }
-
-    prop = fdt_get_property(fdt, node, "reg", NULL);
-    if ( !prop )
-        return -ENOENT;
-
-    cell = (const __be32 *)prop->data;
-    banks = fdt32_to_cpu(prop->len) / (reg_cells * sizeof (u32));
-
-    for ( i = 0; i < banks && mem->nr_banks < NR_MEM_BANKS; i++ )
-    {
-        device_tree_get_reg(&cell, address_cells, size_cells, &start, &size);
-        /* Some DT may describe empty bank, ignore them */
-        if ( !size )
-            continue;
-        mem->bank[mem->nr_banks].start = start;
-        mem->bank[mem->nr_banks].size = size;
-        mem->nr_banks++;
-    }
-
-    if ( i < banks )
-        return -ENOSPC;
-    return 0;
+    return device_tree_get_meminfo(fdt, node, "reg", address_cells, size_cells,
+                                   data, MEMBANK_DEFAULT);
 }
 
 static int __init process_reserved_memory_node(const void *fdt, int node,
@@ -282,24 +294,40 @@ static void __init process_multiboot_node(const void *fdt, int node,
                      kind, start, domU);
 }
 
-static void __init process_chosen_node(const void *fdt, int node,
-                                       const char *name,
-                                       u32 address_cells, u32 size_cells)
+static int __init process_chosen_node(const void *fdt, int node,
+                                      const char *name,
+                                      u32 address_cells, u32 size_cells)
 {
     const struct fdt_property *prop;
     paddr_t start, end;
     int len;
+
+    if ( fdt_get_property(fdt, node, "xen,static-heap", NULL) )
+    {
+        int rc;
+
+        printk("Checking for static heap in /chosen\n");
+
+        rc = device_tree_get_meminfo(fdt, node, "xen,static-heap",
+                                     address_cells, size_cells,
+                                     &bootinfo.reserved_mem,
+                                     MEMBANK_STATIC_HEAP);
+        if ( rc )
+            return rc;
+
+        bootinfo.static_heap = true;
+    }
 
     printk("Checking for initrd in /chosen\n");
 
     prop = fdt_get_property(fdt, node, "linux,initrd-start", &len);
     if ( !prop )
         /* No initrd present. */
-        return;
+        return 0;
     if ( len != sizeof(u32) && len != sizeof(u64) )
     {
         printk("linux,initrd-start property has invalid length %d\n", len);
-        return;
+        return -EINVAL;
     }
     start = dt_read_number((void *)&prop->data, dt_size_to_cells(len));
 
@@ -307,12 +335,12 @@ static void __init process_chosen_node(const void *fdt, int node,
     if ( !prop )
     {
         printk("linux,initrd-end not present but -start was\n");
-        return;
+        return -EINVAL;
     }
     if ( len != sizeof(u32) && len != sizeof(u64) )
     {
         printk("linux,initrd-end property has invalid length %d\n", len);
-        return;
+        return -EINVAL;
     }
     end = dt_read_number((void *)&prop->data, dt_size_to_cells(len));
 
@@ -320,13 +348,197 @@ static void __init process_chosen_node(const void *fdt, int node,
     {
         printk("linux,initrd limits invalid: %"PRIpaddr" >= %"PRIpaddr"\n",
                   start, end);
-        return;
+        return -EINVAL;
     }
 
     printk("Initrd %"PRIpaddr"-%"PRIpaddr"\n", start, end);
 
     add_boot_module(BOOTMOD_RAMDISK, start, end-start, false);
+
+    return 0;
 }
+
+static int __init process_domain_node(const void *fdt, int node,
+                                      const char *name,
+                                      u32 address_cells, u32 size_cells)
+{
+    const struct fdt_property *prop;
+
+    printk("Checking for \"xen,static-mem\" in domain node\n");
+
+    prop = fdt_get_property(fdt, node, "xen,static-mem", NULL);
+    if ( !prop )
+        /* No "xen,static-mem" present. */
+        return 0;
+
+    return device_tree_get_meminfo(fdt, node, "xen,static-mem", address_cells,
+                                   size_cells, &bootinfo.reserved_mem,
+                                   MEMBANK_STATIC_DOMAIN);
+}
+
+#ifdef CONFIG_STATIC_SHM
+static int __init process_shm_node(const void *fdt, int node,
+                                   uint32_t address_cells, uint32_t size_cells)
+{
+    const struct fdt_property *prop, *prop_id, *prop_role;
+    const __be32 *cell;
+    paddr_t paddr, gaddr, size;
+    struct meminfo *mem = &bootinfo.reserved_mem;
+    unsigned int i;
+    int len;
+    bool owner = false;
+    const char *shm_id;
+
+    if ( address_cells < 1 || size_cells < 1 )
+    {
+        printk("fdt: invalid #address-cells or #size-cells for static shared memory node.\n");
+        return -EINVAL;
+    }
+
+    /*
+     * "xen,shm-id" property holds an arbitrary string with a strict limit
+     * on the number of characters, MAX_SHM_ID_LENGTH
+     */
+    prop_id = fdt_get_property(fdt, node, "xen,shm-id", NULL);
+    if ( !prop_id )
+        return -ENOENT;
+    shm_id = (const char *)prop_id->data;
+    if ( strnlen(shm_id, MAX_SHM_ID_LENGTH) == MAX_SHM_ID_LENGTH )
+    {
+        printk("fdt: invalid xen,shm-id %s, it must be limited to %u characters\n",
+               shm_id, MAX_SHM_ID_LENGTH);
+        return -EINVAL;
+    }
+
+    /*
+     * "role" property is optional and if it is defined explicitly,
+     * it must be either `owner` or `borrower`.
+     */
+    prop_role = fdt_get_property(fdt, node, "role", NULL);
+    if ( prop_role )
+    {
+        if ( !strcmp(prop_role->data, "owner") )
+            owner = true;
+        else if ( strcmp(prop_role->data, "borrower") )
+        {
+            printk("fdt: invalid `role` property for static shared memory node.\n");
+            return -EINVAL;
+        }
+    }
+
+    /*
+     * xen,shared-mem = <paddr, gaddr, size>;
+     * Memory region starting from physical address #paddr of #size shall
+     * be mapped to guest physical address #gaddr as static shared memory
+     * region.
+     */
+    prop = fdt_get_property(fdt, node, "xen,shared-mem", &len);
+    if ( !prop )
+        return -ENOENT;
+
+    if ( len != dt_cells_to_size(address_cells + size_cells + address_cells) )
+    {
+        if ( len == dt_cells_to_size(size_cells + address_cells) )
+            printk("fdt: host physical address must be chosen by users at the moment.\n");
+
+        printk("fdt: invalid `xen,shared-mem` property.\n");
+        return -EINVAL;
+    }
+
+    cell = (const __be32 *)prop->data;
+    device_tree_get_reg(&cell, address_cells, address_cells, &paddr, &gaddr);
+    size = dt_next_cell(size_cells, &cell);
+
+    if ( !size )
+    {
+        printk("fdt: the size for static shared memory region can not be zero\n");
+        return -EINVAL;
+    }
+
+    for ( i = 0; i < mem->nr_banks; i++ )
+    {
+        /*
+         * Meet the following check:
+         * 1) The shm ID matches and the region exactly match
+         * 2) The shm ID doesn't match and the region doesn't overlap
+         * with an existing one
+         */
+        if ( paddr == mem->bank[i].start && size == mem->bank[i].size )
+        {
+            if ( strncmp(shm_id, mem->bank[i].shm_id, MAX_SHM_ID_LENGTH) == 0 )
+                break;
+            else
+            {
+                printk("fdt: xen,shm-id %s does not match for all the nodes using the same region.\n",
+                       shm_id);
+                return -EINVAL;
+            }
+        }
+        else
+        {
+            paddr_t end = paddr + size;
+            paddr_t bank_end = mem->bank[i].start + mem->bank[i].size;
+
+            if ( (end <= paddr) || (bank_end <= mem->bank[i].start) )
+            {
+                printk("fdt: static shared memory region %s overflow\n", shm_id);
+                return -EINVAL;
+            }
+
+            if ( (end <= mem->bank[i].start) || (paddr >= bank_end) )
+            {
+                if ( strcmp(shm_id, mem->bank[i].shm_id) != 0 )
+                    continue;
+                else
+                {
+                    printk("fdt: different shared memory region could not share the same shm ID %s\n",
+                           shm_id);
+                    return -EINVAL;
+                }
+            }
+            else
+            {
+                printk("fdt: shared memory region overlap with an existing entry %#"PRIpaddr" - %#"PRIpaddr"\n",
+                        mem->bank[i].start, bank_end);
+                return -EINVAL;
+            }
+        }
+    }
+
+    if ( i == mem->nr_banks )
+    {
+        if ( i < NR_MEM_BANKS )
+        {
+            /* Static shared memory shall be reserved from any other use. */
+            safe_strcpy(mem->bank[mem->nr_banks].shm_id, shm_id);
+            mem->bank[mem->nr_banks].start = paddr;
+            mem->bank[mem->nr_banks].size = size;
+            mem->bank[mem->nr_banks].type = MEMBANK_STATIC_DOMAIN;
+            mem->nr_banks++;
+        }
+        else
+        {
+            printk("Warning: Max number of supported memory regions reached.\n");
+            return -ENOSPC;
+        }
+    }
+    /*
+     * keep a count of the number of borrowers, which later may be used
+     * to calculate the reference count.
+     */
+    if ( !owner )
+        mem->bank[i].nr_shm_borrowers++;
+
+    return 0;
+}
+#else
+static int __init process_shm_node(const void *fdt, int node,
+                                   uint32_t address_cells, uint32_t size_cells)
+{
+    printk("CONFIG_STATIC_SHM must be enabled for parsing static shared memory nodes\n");
+    return -EINVAL;
+}
+#endif
 
 static int __init early_scan_node(const void *fdt,
                                   int node, const char *name, int depth,
@@ -335,7 +547,12 @@ static int __init early_scan_node(const void *fdt,
 {
     int rc = 0;
 
-    if ( device_tree_node_matches(fdt, node, "memory") )
+    /*
+     * If Xen has been booted via UEFI, the memory banks are
+     * populated. So we should skip the parsing.
+     */
+    if ( !efi_enabled(EFI_BOOT) &&
+         device_tree_node_matches(fdt, node, "memory") )
         rc = process_memory_node(fdt, node, name, depth,
                                  address_cells, size_cells, &bootinfo.mem);
     else if ( depth == 1 && !dt_node_cmp(name, "reserved-memory") )
@@ -345,7 +562,11 @@ static int __init early_scan_node(const void *fdt,
               device_tree_node_compatible(fdt, node, "multiboot,module" )))
         process_multiboot_node(fdt, node, name, address_cells, size_cells);
     else if ( depth == 1 && device_tree_node_matches(fdt, node, "chosen") )
-        process_chosen_node(fdt, node, name, address_cells, size_cells);
+        rc = process_chosen_node(fdt, node, name, address_cells, size_cells);
+    else if ( depth == 2 && device_tree_node_compatible(fdt, node, "xen,domain") )
+        rc = process_domain_node(fdt, node, name, address_cells, size_cells);
+    else if ( depth <= 3 && device_tree_node_compatible(fdt, node, "xen,domain-shared-memory-v1") )
+        rc = process_shm_node(fdt, node, address_cells, size_cells);
 
     if ( rc < 0 )
         printk("fdt: node `%s': parsing failed\n", name);
@@ -411,6 +632,13 @@ static int __init cmp_memory_node(const void *key, const void *elem)
     return 0;
 }
 
+static void __init swap_memory_node(void *_a, void *_b, size_t size)
+{
+    struct membank *a = _a, *b = _b;
+
+    SWAP(*a, *b);
+}
+
 /**
  * boot_fdt_info - initialize bootinfo from a DTB
  * @fdt: flattened device tree binary
@@ -430,12 +658,12 @@ size_t __init boot_fdt_info(const void *fdt, paddr_t paddr)
     device_tree_for_each_node((void *)fdt, 0, early_scan_node, NULL);
 
     /*
-     * On Arm64 setup_xenheap_mappings() expects to be called with the lowest
+     * On Arm64 setup_directmap_mappings() expects to be called with the lowest
      * bank in memory first. There is no requirement that the DT will provide
      * the banks sorted in ascending order. So sort them through.
      */
     sort(bootinfo.mem.bank, bootinfo.mem.nr_banks, sizeof(struct membank),
-         cmp_memory_node, NULL);
+         cmp_memory_node, swap_memory_node);
 
     early_print_info();
 

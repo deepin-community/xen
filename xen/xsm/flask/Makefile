@@ -4,51 +4,54 @@ obj-y += flask_op.o
 
 obj-y += ss/
 
-CFLAGS-y += -I./include
+CFLAGS-y += -iquote $(obj)/include
+CFLAGS-y += -I$(srcdir)/include
 
 AWK = awk
 
-CONFIG_SHELL := $(shell if [ -x "$$BASH" ]; then echo $$BASH; \
-          else if [ -x /bin/bash ]; then echo /bin/bash; \
-          else echo sh; fi ; fi)
+FLASK_H_DEPEND := $(addprefix $(srcdir)/policy/,security_classes initial_sids)
+AV_H_DEPEND := $(srcdir)/policy/access_vectors
 
-FLASK_H_DEPEND = policy/security_classes policy/initial_sids
-AV_H_DEPEND = policy/access_vectors
+FLASK_H_FILES := flask.h class_to_string.h initial_sid_to_string.h
+AV_H_FILES := av_perm_to_string.h av_permissions.h
+ALL_H_FILES := $(addprefix include/,$(FLASK_H_FILES) $(AV_H_FILES))
 
-FLASK_H_FILES = include/flask.h include/class_to_string.h include/initial_sid_to_string.h
-AV_H_FILES = include/av_perm_to_string.h include/av_permissions.h
-ALL_H_FILES = $(FLASK_H_FILES) $(AV_H_FILES)
-
-$(obj-y) ss/built_in.o: $(ALL_H_FILES)
+# Adding prerequisite to descending into ss/ folder only when not running
+# `make *clean`.
+ifeq ($(filter %/Makefile.clean,$(MAKEFILE_LIST)),)
+$(addprefix $(obj)/,$(obj-y)) $(obj)/ss: $(addprefix $(obj)/,$(ALL_H_FILES))
+endif
 extra-y += $(ALL_H_FILES)
 
-mkflask := policy/mkflask.sh
+mkflask := $(srcdir)/policy/mkflask.sh
 quiet_cmd_mkflask = MKFLASK $@
-cmd_mkflask = $(CONFIG_SHELL) $(mkflask) $(AWK) include $(FLASK_H_DEPEND)
+cmd_mkflask = $(SHELL) $(mkflask) $(AWK) $(obj)/include $(FLASK_H_DEPEND)
 
-$(subst include/,%/,$(FLASK_H_FILES)): $(FLASK_H_DEPEND) $(mkflask) FORCE
+$(addprefix $(obj)/%/,$(FLASK_H_FILES)): $(FLASK_H_DEPEND) $(mkflask) FORCE
 	$(call if_changed,mkflask)
 
-mkaccess := policy/mkaccess_vector.sh
+mkaccess := $(srcdir)/policy/mkaccess_vector.sh
 quiet_cmd_mkaccess = MKACCESS VECTOR $@
-cmd_mkaccess = $(CONFIG_SHELL) $(mkaccess) $(AWK) $(AV_H_DEPEND)
+cmd_mkaccess = $(SHELL) $(mkaccess) $(AWK) $(obj)/include $(AV_H_DEPEND)
 
-$(subst include/,%/,$(AV_H_FILES)): $(AV_H_DEPEND) $(mkaccess) FORCE
+$(addprefix $(obj)/%/,$(AV_H_FILES)): $(AV_H_DEPEND) $(mkaccess) FORCE
 	$(call if_changed,mkaccess)
 
 obj-bin-$(CONFIG_XSM_FLASK_POLICY) += flask-policy.o
-flask-policy.o: policy.bin
+$(obj)/flask-policy.o: $(obj)/policy.bin
 
-flask-policy.S: $(XEN_ROOT)/xen/tools/binfile
-	$(SHELL) $(XEN_ROOT)/xen/tools/binfile -i $@ policy.bin xsm_flask_init_policy
+$(obj)/flask-policy.S: BINFILE_FLAGS := -i
+$(obj)/flask-policy.S: $(srctree)/tools/binfile FORCE
+	$(call if_changed,binfile,$(obj)/policy.bin xsm_flask_init_policy)
+targets += flask-policy.S
 
-FLASK_BUILD_DIR := $(CURDIR)
+FLASK_BUILD_DIR := $(abs_objtree)/$(obj)
 POLICY_SRC := $(FLASK_BUILD_DIR)/xenpolicy-$(XEN_FULLVERSION)
 
-policy.bin: FORCE
-	$(MAKE) -f $(XEN_ROOT)/tools/flask/policy/Makefile.common -C $(XEN_ROOT)/tools/flask/policy FLASK_BUILD_DIR=$(FLASK_BUILD_DIR)
+$(obj)/policy.bin: FORCE
+	$(MAKE) -f $(XEN_ROOT)/tools/flask/policy/Makefile.common \
+	        -C $(XEN_ROOT)/tools/flask/policy \
+	        FLASK_BUILD_DIR=$(FLASK_BUILD_DIR) POLICY_FILENAME=$(POLICY_SRC)
 	cmp -s $(POLICY_SRC) $@ || cp $(POLICY_SRC) $@
 
-.PHONY: clean
-clean::
-	rm -f $(ALL_H_FILES) *.o $(DEPS_RM) policy.* $(POLICY_SRC) flask-policy.S
+clean-files := policy.* $(POLICY_SRC)

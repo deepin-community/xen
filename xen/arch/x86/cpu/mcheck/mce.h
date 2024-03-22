@@ -70,7 +70,7 @@ extern void x86_mce_vector_register(x86_mce_vector_t);
  * Common generic MCE handler that implementations may nominate
  * via x86_mce_vector_register.
  */
-extern void mcheck_cmn_handler(const struct cpu_user_regs *regs);
+void cf_check mcheck_cmn_handler(const struct cpu_user_regs *regs);
 
 /* Register a handler for judging whether mce is recoverable. */
 typedef bool (*mce_recoverable_t)(uint64_t status);
@@ -168,6 +168,12 @@ static inline int mce_vendor_bank_msr(const struct vcpu *v, uint32_t msr)
     case X86_VENDOR_INTEL:
         if (msr >= MSR_IA32_MC0_CTL2 &&
             msr < MSR_IA32_MCx_CTL2(v->arch.vmce.mcg_cap & MCG_CAP_COUNT) )
+            return 1;
+        fallthrough;
+
+    case X86_VENDOR_CENTAUR:
+    case X86_VENDOR_SHANGHAI:
+        if (msr == MSR_P5_MC_ADDR || msr == MSR_P5_MC_TYPE)
             return 1;
         break;
 

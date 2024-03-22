@@ -68,13 +68,8 @@
 #define cap_num_fault_regs(c)  ((((c) >> 40) & 0xff) + 1)
 #define cap_pgsel_inv(c)       (((c) >> 39) & 1)
 
-#define cap_super_page_val(c)  (((c) >> 34) & 0xf)
-#define cap_super_offset(c)    (((find_first_bit(&cap_super_page_val(c), 4)) \
-                                 * OFFSET_STRIDE) + 21)
-#define cap_sps_2mb(c)         ((c >> 34) & 1)
-#define cap_sps_1gb(c)         ((c >> 35) & 1)
-#define cap_sps_512gb(c)       ((c >> 36) & 1)
-#define cap_sps_1tb(c)         ((c >> 37) & 1)
+#define cap_sps_2mb(c)         (((c) >> 34) & 1)
+#define cap_sps_1gb(c)         (((c) >> 35) & 1)
 
 #define cap_fault_reg_offset(c)    ((((c) >> 24) & 0x3ff) * 16)
 
@@ -87,7 +82,7 @@
 #define cap_plmr(c)        (((c) >> 5) & 1)
 #define cap_rwbf(c)        (((c) >> 4) & 1)
 #define cap_afl(c)        (((c) >> 3) & 1)
-#define cap_ndoms(c)        (1 << (4 + 2 * ((c) & 0x7)))
+#define cap_ndoms(c)        (1U << (4 + 2 * ((c) & 0x7)))
 
 /*
  * Extended Capability Register
@@ -95,14 +90,14 @@
 
 #define ecap_niotlb_iunits(e)    ((((e) >> 24) & 0xff) + 1)
 #define ecap_iotlb_offset(e)     ((((e) >> 8) & 0x3ff) * 16)
-#define ecap_coherent(e)         ((e >> 0) & 0x1)
-#define ecap_queued_inval(e)     ((e >> 1) & 0x1)
-#define ecap_dev_iotlb(e)        ((e >> 2) & 0x1)
-#define ecap_intr_remap(e)       ((e >> 3) & 0x1)
-#define ecap_eim(e)              ((e >> 4) & 0x1)
-#define ecap_cache_hints(e)      ((e >> 5) & 0x1)
-#define ecap_pass_thru(e)        ((e >> 6) & 0x1)
-#define ecap_snp_ctl(e)          ((e >> 7) & 0x1)
+#define ecap_coherent(e)         (((e) >> 0) & 1)
+#define ecap_queued_inval(e)     (((e) >> 1) & 1)
+#define ecap_dev_iotlb(e)        (((e) >> 2) & 1)
+#define ecap_intr_remap(e)       (((e) >> 3) & 1)
+#define ecap_eim(e)              (((e) >> 4) & 1)
+#define ecap_cache_hints(e)      (((e) >> 5) & 1)
+#define ecap_pass_thru(e)        (((e) >> 6) & 1)
+#define ecap_snp_ctl(e)          (((e) >> 7) & 1)
 
 /* IOTLB_REG */
 #define DMA_TLB_FLUSH_GRANU_OFFSET  60
@@ -111,49 +106,49 @@
 #define DMA_TLB_PSI_FLUSH (((u64)3) << 60)
 #define DMA_TLB_IIRG(x) (((x) >> 60) & 7) 
 #define DMA_TLB_IAIG(val) (((val) >> 57) & 7)
-#define DMA_TLB_DID(x) (((u64)(x & 0xffff)) << 32)
+#define DMA_TLB_DID(x) (((uint64_t)((x) & 0xffff)) << 32)
 
 #define DMA_TLB_READ_DRAIN (((u64)1) << 49)
 #define DMA_TLB_WRITE_DRAIN (((u64)1) << 48)
 #define DMA_TLB_IVT (((u64)1) << 63)
 
-#define DMA_TLB_IVA_ADDR(x) ((((u64)x) >> 12) << 12)
-#define DMA_TLB_IVA_HINT(x) ((((u64)x) & 1) << 6)
+#define DMA_TLB_IVA_ADDR(x) (((uint64_t)(x) >> 12) << 12)
+#define DMA_TLB_IVA_HINT(x) (((uint64_t)(x) & 1) << 6)
 
 /* GCMD_REG */
-#define DMA_GCMD_TE     (((u64)1) << 31)
-#define DMA_GCMD_SRTP   (((u64)1) << 30)
-#define DMA_GCMD_SFL    (((u64)1) << 29)
-#define DMA_GCMD_EAFL   (((u64)1) << 28)
-#define DMA_GCMD_WBF    (((u64)1) << 27)
-#define DMA_GCMD_QIE    (((u64)1) << 26)
-#define DMA_GCMD_IRE    (((u64)1) << 25)
-#define DMA_GCMD_SIRTP  (((u64)1) << 24)
-#define DMA_GCMD_CFI    (((u64)1) << 23)
+#define DMA_GCMD_TE     (1u << 31)
+#define DMA_GCMD_SRTP   (1u << 30)
+#define DMA_GCMD_SFL    (1u << 29)
+#define DMA_GCMD_EAFL   (1u << 28)
+#define DMA_GCMD_WBF    (1u << 27)
+#define DMA_GCMD_QIE    (1u << 26)
+#define DMA_GCMD_IRE    (1u << 25)
+#define DMA_GCMD_SIRTP  (1u << 24)
+#define DMA_GCMD_CFI    (1u << 23)
 
 /* GSTS_REG */
-#define DMA_GSTS_TES    (((u64)1) << 31)
-#define DMA_GSTS_RTPS   (((u64)1) << 30)
-#define DMA_GSTS_FLS    (((u64)1) << 29)
-#define DMA_GSTS_AFLS   (((u64)1) << 28)
-#define DMA_GSTS_WBFS   (((u64)1) << 27)
-#define DMA_GSTS_QIES   (((u64)1) <<26)
-#define DMA_GSTS_IRES   (((u64)1) <<25)
-#define DMA_GSTS_SIRTPS (((u64)1) << 24)
-#define DMA_GSTS_CFIS   (((u64)1) <<23)
+#define DMA_GSTS_TES    (1u << 31)
+#define DMA_GSTS_RTPS   (1u << 30)
+#define DMA_GSTS_FLS    (1u << 29)
+#define DMA_GSTS_AFLS   (1u << 28)
+#define DMA_GSTS_WBFS   (1u << 27)
+#define DMA_GSTS_QIES   (1u << 26)
+#define DMA_GSTS_IRES   (1u << 25)
+#define DMA_GSTS_SIRTPS (1u << 24)
+#define DMA_GSTS_CFIS   (1u << 23)
 
 /* PMEN_REG */
-#define DMA_PMEN_EPM    (((u32)1) << 31)
-#define DMA_PMEN_PRS    (((u32)1) << 0)
+#define DMA_PMEN_EPM    (1u << 31)
+#define DMA_PMEN_PRS    (1u <<  0)
 
 /* CCMD_REG */
 #define DMA_CCMD_INVL_GRANU_OFFSET  61
 #define DMA_CCMD_ICC   (((u64)1) << 63)
-#define DMA_CCMD_GLOBAL_INVL (((u64)1) << 61)
-#define DMA_CCMD_DOMAIN_INVL (((u64)2) << 61)
-#define DMA_CCMD_DEVICE_INVL (((u64)3) << 61)
+#define DMA_CCMD_GLOBAL_INVL ((uint64_t)1 << DMA_CCMD_INVL_GRANU_OFFSET)
+#define DMA_CCMD_DOMAIN_INVL ((uint64_t)2 << DMA_CCMD_INVL_GRANU_OFFSET)
+#define DMA_CCMD_DEVICE_INVL ((uint64_t)3 << DMA_CCMD_INVL_GRANU_OFFSET)
+#define DMA_CCMD_CIRG(x) (((uint64_t)3 << DMA_CCMD_INVL_GRANU_OFFSET) & (x))
 #define DMA_CCMD_FM(m) (((u64)((m) & 0x3)) << 32)
-#define DMA_CCMD_CIRG(x) ((((u64)3) << 61) & x)
 #define DMA_CCMD_MASK_NOBIT 0
 #define DMA_CCMD_MASK_1BIT 1
 #define DMA_CCMD_MASK_2BIT 2
@@ -161,29 +156,29 @@
 #define DMA_CCMD_SID(s) (((u64)((s) & 0xffff)) << 16)
 #define DMA_CCMD_DID(d) ((u64)((d) & 0xffff))
 
-#define DMA_CCMD_CAIG_MASK(x) (((u64)x) & ((u64) 0x3 << 59))
+#define DMA_CCMD_CAIG_MASK(x) ((uint64_t)(x) & ((uint64_t)3 << 59))
 
 /* FECTL_REG */
-#define DMA_FECTL_IM (((u64)1) << 31)
+#define DMA_FECTL_IM (1u << 31)
 
 /* FSTS_REG */
-#define DMA_FSTS_PFO ((u64)1 << 0)
-#define DMA_FSTS_PPF ((u64)1 << 1)
-#define DMA_FSTS_AFO ((u64)1 << 2)
-#define DMA_FSTS_APF ((u64)1 << 3)
-#define DMA_FSTS_IQE ((u64)1 << 4)
-#define DMA_FSTS_ICE ((u64)1 << 5)
-#define DMA_FSTS_ITE ((u64)1 << 6)
+#define DMA_FSTS_PFO (1u << 0)
+#define DMA_FSTS_PPF (1u << 1)
+#define DMA_FSTS_AFO (1u << 2)
+#define DMA_FSTS_APF (1u << 3)
+#define DMA_FSTS_IQE (1u << 4)
+#define DMA_FSTS_ICE (1u << 5)
+#define DMA_FSTS_ITE (1u << 6)
 #define DMA_FSTS_FAULTS (DMA_FSTS_PFO | DMA_FSTS_AFO | DMA_FSTS_APF | \
                          DMA_FSTS_IQE | DMA_FSTS_ICE | DMA_FSTS_ITE)
 #define dma_fsts_fault_record_index(s) (((s) >> 8) & 0xff)
 
 /* FRCD_REG, 32 bits access */
-#define DMA_FRCD_F (((u64)1) << 31)
-#define dma_frcd_type(d) ((d >> 30) & 1)
-#define dma_frcd_fault_reason(c) (c & 0xff)
-#define dma_frcd_source_id(c) (c & 0xffff)
-#define dma_frcd_page_addr(d) (d & (((u64)-1) << 12)) /* low 64 bit */
+#define DMA_FRCD_F (1u << 31)
+#define dma_frcd_type(d) (((d) >> 30) & 1)
+#define dma_frcd_fault_reason(c) ((c) & 0xff)
+#define dma_frcd_source_id(c) ((c) & 0xffff)
+#define dma_frcd_page_addr(d) ((d) & ((uint64_t)-1 << 12)) /* low 64 bit */
 
 /*
  * 0: Present
@@ -202,10 +197,13 @@ struct root_entry {
     do {(root).val |= ((value) & PAGE_MASK_4K);} while(0)
 
 struct context_entry {
-    u64 lo;
-    u64 hi;
+    union {
+        struct {
+            uint64_t lo, hi;
+        };
+        __uint128_t full;
+    };
 };
-#define ROOT_ENTRY_NR (PAGE_SIZE_4K/sizeof(struct root_entry))
 #define context_present(c) ((c).lo & 1)
 #define context_fault_disable(c) (((c).lo >> 1) & 1)
 #define context_translation_type(c) (((c).lo >> 2) & 3)
@@ -234,20 +232,20 @@ struct context_entry {
 
 /* page table handling */
 #define LEVEL_STRIDE       (9)
-#define LEVEL_MASK         ((1 << LEVEL_STRIDE) - 1)
+#define LEVEL_MASK         (PTE_NUM - 1UL)
 #define PTE_NUM            (1 << LEVEL_STRIDE)
 #define level_to_agaw(val) ((val) - 2)
 #define agaw_to_level(val) ((val) + 2)
-#define agaw_to_width(val) (30 + val * LEVEL_STRIDE)
-#define width_to_agaw(w)   ((w - 30)/LEVEL_STRIDE)
-#define level_to_offset_bits(l) (12 + (l - 1) * LEVEL_STRIDE)
+#define agaw_to_width(val) (30 + (val) * LEVEL_STRIDE)
+#define width_to_agaw(w)   (((w) - 30)/LEVEL_STRIDE)
+#define level_to_offset_bits(l) (12 + ((l) - 1) * LEVEL_STRIDE)
 #define address_level_offset(addr, level) \
-            ((addr >> level_to_offset_bits(level)) & LEVEL_MASK)
+            (((addr) >> level_to_offset_bits(level)) & LEVEL_MASK)
 #define offset_level_address(offset, level) \
             ((u64)(offset) << level_to_offset_bits(level))
 #define level_mask(l) (((u64)(-1)) << level_to_offset_bits(l))
 #define level_size(l) (1 << level_to_offset_bits(l))
-#define align_to_level(addr, l) ((addr + level_size(l) - 1) & level_mask(l))
+#define align_to_level(addr, l) (((addr) + level_size(l) - 1) & level_mask(l))
 
 /*
  * 0: readable
@@ -255,7 +253,10 @@ struct context_entry {
  * 2-6: reserved
  * 7: super page
  * 8-11: available
- * 12-63: Host physcial address
+ * 12-51: Host physcial address
+ * 52-61: available (52-55 used for DMA_PTE_CONTIG_MASK)
+ * 62: reserved
+ * 63: available
  */
 struct dma_pte {
     u64 val;
@@ -265,6 +266,7 @@ struct dma_pte {
 #define DMA_PTE_PROT (DMA_PTE_READ | DMA_PTE_WRITE)
 #define DMA_PTE_SP   (1 << 7)
 #define DMA_PTE_SNP  (1 << 11)
+#define DMA_PTE_CONTIG_MASK  (0xfull << PADDR_BITS)
 #define dma_clear_pte(p)    do {(p).val = 0;} while(0)
 #define dma_set_pte_readable(p) do {(p).val |= DMA_PTE_READ;} while(0)
 #define dma_set_pte_writable(p) do {(p).val |= DMA_PTE_WRITE;} while(0)
@@ -278,7 +280,7 @@ struct dma_pte {
 #define dma_pte_write(p) (dma_pte_prot(p) & DMA_PTE_WRITE)
 #define dma_pte_addr(p) ((p).val & PADDR_MASK & PAGE_MASK_4K)
 #define dma_set_pte_addr(p, addr) do {\
-            (p).val |= ((addr) & PAGE_MASK_4K); } while (0)
+            (p).val |= ((addr) & PADDR_MASK & PAGE_MASK_4K); } while (0)
 #define dma_pte_present(p) (((p).val & DMA_PTE_PROT) != 0)
 #define dma_pte_superpage(p) (((p).val & DMA_PTE_SP) != 0)
 
@@ -451,36 +453,11 @@ struct qinval_entry {
     }q;
 };
 
-/* Each entry is 16 bytes, so 2^8 entries per page */
-#define QINVAL_ENTRY_ORDER  ( PAGE_SHIFT - 4 )
-#define QINVAL_MAX_ENTRY_NR (1u << (7 + QINVAL_ENTRY_ORDER))
-
-/* Status data flag */
-#define QINVAL_STAT_INIT  0
-#define QINVAL_STAT_DONE  1
-
-/* Queue invalidation head/tail shift */
-#define QINVAL_INDEX_SHIFT 4
-
-#define qinval_present(v) ((v).lo & 1)
-#define qinval_fault_disable(v) (((v).lo >> 1) & 1)
-
-#define qinval_set_present(v) do {(v).lo |= 1;} while(0)
-#define qinval_clear_present(v) do {(v).lo &= ~1;} while(0)
-
-#define RESERVED_VAL        0
-
 #define TYPE_INVAL_CONTEXT      0x1
 #define TYPE_INVAL_IOTLB        0x2
 #define TYPE_INVAL_DEVICE_IOTLB 0x3
 #define TYPE_INVAL_IEC          0x4
 #define TYPE_INVAL_WAIT         0x5
-
-#define NOTIFY_TYPE_POLL        1
-#define NOTIFY_TYPE_INTR        1
-#define INTERRUTP_FLAG          1
-#define STATUS_WRITE            1
-#define FENCE_FLAG              1
 
 #define IEC_GLOBAL_INVL         0
 #define IEC_INDEX_INVL          1
@@ -491,8 +468,6 @@ struct qinval_entry {
 
 #define VTD_PAGE_TABLE_LEVEL_3  3
 #define VTD_PAGE_TABLE_LEVEL_4  4
-
-#define MAX_IOMMU_REGS 0xc0
 
 extern struct list_head acpi_drhd_units;
 extern struct list_head acpi_rmrr_units;
@@ -505,7 +480,7 @@ struct vtd_iommu {
     u32 nr_pt_levels;
     u64	cap;
     u64	ecap;
-    spinlock_t lock; /* protect context, domain ids */
+    spinlock_t lock; /* protect context */
     spinlock_t register_lock; /* protect iommu register handling */
     u64 root_maddr; /* root entry machine address */
     nodeid_t node;
@@ -531,8 +506,9 @@ struct vtd_iommu {
     } flush;
 
     struct list_head ats_devices;
+    unsigned long *pseudo_domid_map; /* "pseudo" domain id bitmap */
     unsigned long *domid_bitmap;  /* domain id bitmap */
-    u16 *domid_map;               /* domain id mapping array */
+    domid_t *domid_map;           /* domain id mapping array */
     uint32_t version;
 };
 

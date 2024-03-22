@@ -3,150 +3,237 @@ ifneq ($(CONFIG_COMPAT),)
 compat-arch-$(CONFIG_X86) := x86_32
 
 headers-y := \
-    compat/argo.h \
-    compat/callback.h \
+    compat/arch-$(compat-arch-y).h \
     compat/elfnote.h \
     compat/event_channel.h \
     compat/features.h \
-    compat/grant_table.h \
-    compat/hypfs.h \
-    compat/kexec.h \
     compat/memory.h \
     compat/nmi.h \
     compat/physdev.h \
     compat/platform.h \
+    compat/pmu.h \
     compat/sched.h \
-    compat/trace.h \
     compat/vcpu.h \
     compat/version.h \
     compat/xen.h \
-    compat/xenoprof.h
+    compat/xlat.h
 headers-$(CONFIG_X86)     += compat/arch-x86/pmu.h
 headers-$(CONFIG_X86)     += compat/arch-x86/xen-mca.h
 headers-$(CONFIG_X86)     += compat/arch-x86/xen.h
 headers-$(CONFIG_X86)     += compat/arch-x86/xen-$(compat-arch-y).h
-headers-$(CONFIG_X86)     += compat/hvm/dm_op.h
-headers-$(CONFIG_X86)     += compat/hvm/hvm_op.h
-headers-$(CONFIG_X86)     += compat/hvm/hvm_vcpu.h
-headers-y                 += compat/arch-$(compat-arch-y).h compat/pmu.h compat/xlat.h
+headers-$(CONFIG_ARGO)    += compat/argo.h
+headers-$(CONFIG_PV)      += compat/callback.h
+headers-$(CONFIG_GRANT_TABLE) += compat/grant_table.h
+headers-$(CONFIG_PV_SHIM) += compat/grant_table.h
+headers-$(CONFIG_HVM)     += compat/hvm/dm_op.h
+headers-$(CONFIG_HVM)     += compat/hvm/hvm_op.h
+headers-$(CONFIG_HVM)     += compat/hvm/hvm_vcpu.h
+headers-$(CONFIG_HYPFS)   += compat/hypfs.h
+headers-$(CONFIG_KEXEC)   += compat/kexec.h
+headers-$(CONFIG_TRACEBUFFER) += compat/trace.h
+headers-$(CONFIG_XENOPROF) += compat/xenoprof.h
 headers-$(CONFIG_XSM_FLASK) += compat/xsm/flask_op.h
+
+headers-n := $(sort $(filter-out $(headers-y),$(headers-n) $(headers-)))
 
 cppflags-y                := -include public/xen-compat.h -DXEN_GENERATING_COMPAT_HEADERS
 cppflags-$(CONFIG_X86)    += -m32
 
-# 8-byte types are 4-byte aligned on x86_32 ...
-ifeq ($(CONFIG_CC_IS_CLANG),y)
-prefix-$(CONFIG_X86)      := \#pragma pack(push, 4)
-suffix-$(CONFIG_X86)      := \#pragma pack(pop)
-else
-prefix-$(CONFIG_X86)      := \#pragma pack(4)
-suffix-$(CONFIG_X86)      := \#pragma pack()
 endif
 
-endif
-
-public-$(CONFIG_X86) := $(wildcard public/arch-x86/*.h public/arch-x86/*/*.h)
-public-$(CONFIG_ARM) := $(wildcard public/arch-arm/*.h public/arch-arm/*/*.h)
+public-$(CONFIG_X86) := $(wildcard $(srcdir)/public/arch-x86/*.h $(srcdir)/public/arch-x86/*/*.h)
+public-$(CONFIG_ARM) := $(wildcard $(srcdir)/public/arch-arm/*.h $(srcdir)/public/arch-arm/*/*.h)
 
 .PHONY: all
-all: $(headers-y)
+all: $(addprefix $(obj)/,$(headers-y) $(headers-n))
 
-compat/%.h: compat/%.i Makefile $(BASEDIR)/tools/compat-build-header.py
-	set -e; id=_$$(echo $@ | tr '[:lower:]-/.' '[:upper:]___'); \
-	echo "#ifndef $$id" >$@.new; \
-	echo "#define $$id" >>$@.new; \
-	echo "#include <xen/compat.h>" >>$@.new; \
-	$(if $(filter-out compat/arch-%.h,$@),echo "#include <$(patsubst compat/%,public/%,$@)>" >>$@.new;) \
-	$(if $(prefix-y),echo "$(prefix-y)" >>$@.new;) \
-	grep -v '^# [0-9]' $< | \
-	$(PYTHON) $(BASEDIR)/tools/compat-build-header.py | uniq >>$@.new; \
-	$(if $(suffix-y),echo "$(suffix-y)" >>$@.new;) \
-	echo "#endif /* $$id */" >>$@.new
-	mv -f $@.new $@
+quiet_cmd_compat_h = GEN     $@
+cmd_compat_h = \
+    $(PYTHON) $(srctree)/tools/compat-build-header.py <$< $(patsubst $(obj)/%,%,$@) >>$@.new; \
+    mv -f $@.new $@
 
-compat/%.i: compat/%.c Makefile
-	$(CPP) $(filter-out -Wa$(comma)% -include %/include/xen/config.h,$(XEN_CFLAGS)) $(cppflags-y) -o $@ $<
+quiet_cmd_stub_h = GEN     $@
+cmd_stub_h = echo '/* empty */' >$@
 
-compat/%.c: public/%.h xlat.lst Makefile $(BASEDIR)/tools/compat-build-source.py
-	mkdir -p $(@D)
-	grep -v 'DEFINE_XEN_GUEST_HANDLE(long)' $< | \
-	$(PYTHON) $(BASEDIR)/tools/compat-build-source.py >$@.new
-	mv -f $@.new $@
+quiet_cmd_compat_i = CPP     $@
+cmd_compat_i = $(CPP) $(filter-out -Wa$(comma)% -include %/include/xen/config.h,$(XEN_CFLAGS)) $(cppflags-y) -o $@ $<
 
-compat/.xlat/%.h: compat/%.h compat/.xlat/%.lst $(BASEDIR)/tools/get-fields.sh Makefile
-	export PYTHON=$(PYTHON); \
-	while read what name; do \
-		$(SHELL) $(BASEDIR)/tools/get-fields.sh "$$what" compat_$$name $< || exit $$?; \
-	done <$(patsubst compat/%,compat/.xlat/%,$(basename $<)).lst >$@.new
-	mv -f $@.new $@
+quiet_cmd_compat_c = GEN     $@
+cmd_compat_c = \
+   $(PYTHON) $(srctree)/tools/compat-build-source.py $(srcdir)/xlat.lst <$< >$@.new; \
+   mv -f $@.new $@
 
-.PRECIOUS: compat/.xlat/%.lst
-compat/.xlat/%.lst: xlat.lst Makefile
-	mkdir -p $(@D)
-	grep -v '^[[:blank:]]*#' $< | sed -ne 's,@arch@,$(compat-arch-y),g' -re 's,[[:blank:]]+$*\.h[[:blank:]]*$$,,p' >$@.new
+quiet_cmd_xlat_headers = GEN     $@
+cmd_xlat_headers = \
+    while read what name; do \
+        $(SHELL) $(srctree)/tools/get-fields.sh "$$what" compat_$$name $< || exit $$?; \
+    done <$(patsubst $(obj)/compat/%,$(obj)/compat/.xlat/%,$(basename $<)).lst >$@.new; \
+    mv -f $@.new $@
+
+targets += $(headers-y)
+$(obj)/compat/%.h: $(obj)/compat/%.i $(srctree)/tools/compat-build-header.py FORCE
+	$(call if_changed,compat_h)
+
+# Placeholders may be needed in case files in $(headers-y) include files we
+# don't otherwise generate.  Real dependencies would need spelling out explicitly,
+# for them to appear in $(headers-y) instead.
+targets += $(headers-n)
+$(addprefix $(obj)/,$(headers-n)): FORCE
+	$(call if_changed,stub_h)
+
+.PRECIOUS: $(obj)/compat/%.i
+targets += $(patsubst %.h, %.i, $(headers-y))
+$(obj)/compat/%.i: $(obj)/compat/%.c FORCE
+	$(call if_changed,compat_i)
+
+.PRECIOUS: $(obj)/compat/%.c
+targets += $(patsubst %.h, %.c, $(headers-y))
+$(obj)/compat/%.c: $(src)/public/%.h $(srcdir)/xlat.lst $(srctree)/tools/compat-build-source.py FORCE
+	$(call if_changed,compat_c)
+
+targets += $(patsubst compat/%, compat/.xlat/%, $(headers-y))
+$(obj)/compat/.xlat/%.h: $(obj)/compat/%.h $(obj)/compat/.xlat/%.lst $(srctree)/tools/get-fields.sh FORCE
+	$(call if_changed,xlat_headers)
+
+quiet_cmd_xlat_lst = GEN     $@
+cmd_xlat_lst = \
+	grep -v '^[[:blank:]]*$(pound)' $< | sed -ne 's,@arch@,$(compat-arch-y),g' -re 's,[[:blank:]]+$*\.h[[:blank:]]*$$,,p' >$@.new; \
 	$(call move-if-changed,$@.new,$@)
 
-xlat-y := $(shell sed -ne 's,@arch@,$(compat-arch-y),g' -re 's,^[?!][[:blank:]]+[^[:blank:]]+[[:blank:]]+,,p' xlat.lst | uniq)
+.PRECIOUS: $(obj)/compat/.xlat/%.lst
+targets += $(patsubst compat/%.h, compat/.xlat/%.lst, $(headers-y))
+$(obj)/compat/.xlat/%.lst: $(srcdir)/xlat.lst FORCE
+	$(call if_changed,xlat_lst)
+
+xlat-y := $(shell sed -ne 's,@arch@,$(compat-arch-y),g' -re 's,^[?!][[:blank:]]+[^[:blank:]]+[[:blank:]]+,,p' $(srcdir)/xlat.lst | uniq)
 xlat-y := $(filter $(patsubst compat/%,%,$(headers-y)),$(xlat-y))
 
-compat/xlat.h: $(addprefix compat/.xlat/,$(xlat-y)) config/auto.conf Makefile
-	cat $(filter %.h,$^) >$@.new
+quiet_cmd_xlat_h = GEN     $@
+cmd_xlat_h = \
+	cat $(filter %.h,$^) >$@.new; \
 	mv -f $@.new $@
+
+$(obj)/compat/xlat.h: $(addprefix $(obj)/compat/.xlat/,$(xlat-y)) FORCE
+	$(call if_changed,xlat_h)
+
+quiet_cmd_genhyp = GEN     $@
+define cmd_genhyp
+    awk -f $(srctree)/scripts/gen_hypercall.awk <$< >$@
+endef
+
+all: $(obj)/xen/hypercall-defs.h
+
+$(obj)/xen/hypercall-defs.h: $(obj)/hypercall-defs.i $(srctree)/scripts/gen_hypercall.awk FORCE
+	$(call if_changed,genhyp)
+
+targets += hypercall-defs.i xen/hypercall-defs.h
 
 ifeq ($(XEN_TARGET_ARCH),$(XEN_COMPILE_ARCH))
 
-all: headers.chk headers99.chk headers++.chk
+all: $(obj)/headers.chk $(obj)/headers99.chk $(obj)/headers++.chk
 
-PUBLIC_HEADERS := $(filter-out public/arch-% public/dom0_ops.h, $(wildcard public/*.h public/*/*.h) $(public-y))
+public-hdrs-path := $(srcdir)/public
 
-PUBLIC_C99_HEADERS := public/io/9pfs.h public/io/pvcalls.h
-PUBLIC_ANSI_HEADERS := $(filter-out public/%ctl.h public/xsm/% public/%hvm/save.h $(PUBLIC_C99_HEADERS), $(PUBLIC_HEADERS))
+public-list-headers = $(wildcard $1/*.h $1/*/*.h)
+public-filter-headers = $(filter-out $(addprefix $(public-hdrs-path)/, $($1-filter)), $($1))
 
-public/io/9pfs.h-prereq := string
-public/io/pvcalls.h-prereq := string
+public-headers := $(call public-list-headers, $(public-hdrs-path)) $(public-y)
+public-ansi-headers := $(public-headers)
+public-c99-headers := $(addprefix $(public-hdrs-path)/, io/9pfs.h io/pvcalls.h)
 
-headers.chk: $(PUBLIC_ANSI_HEADERS) Makefile
+public-headers-filter := dom0_ops.h arch-%
+public-ansi-headers-filter := %ctl.h xsm/% %hvm/save.h $(public-headers-filter) \
+    $(patsubst $(public-hdrs-path)/%,%,$(public-c99-headers))
+public-c99-headers-filter :=
+
+PUBLIC_HEADERS := $(call public-filter-headers,public-headers)
+PUBLIC_ANSI_HEADERS := $(call public-filter-headers,public-ansi-headers)
+PUBLIC_C99_HEADERS := $(call public-filter-headers,public-c99-headers)
+
+$(src)/public/io/9pfs.h-prereq := string
+$(src)/public/io/pvcalls.h-prereq := string
+
+quiet_cmd_header_chk = CHK     $@
+cmd_header_chk = \
 	for i in $(filter %.h,$^); do \
 	    $(CC) -x c -ansi -Wall -Werror -include stdint.h \
 	          -S -o /dev/null $$i || exit 1; \
 	    echo $$i; \
-	done >$@.new
+	done >$@.new; \
 	mv $@.new $@
 
-headers99.chk: $(PUBLIC_C99_HEADERS) Makefile
-	rm -f $@.new
-	$(foreach i, $(filter %.h,$^),                                        \
-	    echo "#include "\"$(i)\"                                          \
+quiet_cmd_headers99_chk = CHK     $@
+define cmd_headers99_chk
+	rm -f $@.new; \
+	get_prereq() {                                                        \
+	    case $$1 in                                                       \
+	    $(foreach i, $(filter %.h,$^),                                    \
+	    $(if $($(patsubst $(srctree)/%,%,$(i))-prereq),                   \
+	        $(i)$(close)                                                  \
+	        echo "$(foreach j, $($(patsubst $(srctree)/%,%,$(i))-prereq), \
+	                -include $(j).h)";;))                                 \
+	    *) ;;                                                             \
+	    esac;                                                             \
+	};                                                                    \
+	for i in $(filter %.h,$^); do                                         \
+	    echo "#include "\"$$i\"                                           \
 	    | $(CC) -x c -std=c99 -Wall -Werror                               \
-	      -include stdint.h $(foreach j, $($(i)-prereq), -include $(j).h) \
+	      -include stdint.h                                               \
+	      $$(get_prereq $$i)                                              \
 	      -S -o /dev/null -                                               \
-	    || exit $$?; echo $(i) >> $@.new;)
+	    || exit $$?; echo $$i >> $@.new;                                  \
+	done;                                                                 \
 	mv $@.new $@
+endef
 
-headers++.chk: $(PUBLIC_HEADERS) Makefile
-	rm -f $@.new
+quiet_cmd_headerscxx_chk = CHK     $@
+define cmd_headerscxx_chk
+	rm -f $@.new; \
 	if ! $(CXX) -v >/dev/null 2>&1; then                                  \
 	    touch $@.new;                                                     \
 	    exit 0;                                                           \
 	fi;                                                                   \
-	$(foreach i, $(filter %.h,$^),                                        \
-	    echo "#include "\"$(i)\"                                          \
+	get_prereq() {                                                        \
+	    case $$1 in                                                       \
+	    $(foreach i, $(filter %.h,$^),                                    \
+	    $(if $($(patsubst $(srctree)/%,%,$(i))-prereq),                   \
+	        $(i)$(close)                                                  \
+	        echo "$(foreach j, $($(patsubst $(srctree)/%,%,$(i))-prereq), \
+	                -include c$(j))";;))                                  \
+	    *) ;;                                                             \
+	    esac;                                                             \
+	};                                                                    \
+	for i in $(filter %.h,$^); do                                         \
+	    echo "#include "\"$$i\"                                           \
 	    | $(CXX) -x c++ -std=gnu++98 -Wall -Werror -D__XEN_TOOLS__        \
-	      -include stdint.h -include public/xen.h                         \
-	      $(foreach j, $($(i)-prereq), -include c$(j)) -S -o /dev/null -  \
-	    || exit $$?; echo $(i) >> $@.new;)
+	      -include stdint.h -include $(srcdir)/public/xen.h               \
+	      $$(get_prereq $$i)                                              \
+	      -S -o /dev/null -                                               \
+	    || exit $$?; echo $$i >> $@.new; done;                            \
 	mv $@.new $@
+endef
+
+targets += headers.chk
+$(obj)/headers.chk: $(PUBLIC_ANSI_HEADERS) FORCE
+	$(call if_changed,header_chk)
+
+targets += headers99.chk
+$(obj)/headers99.chk: $(PUBLIC_C99_HEADERS) FORCE
+	$(call if_changed,headers99_chk)
+
+targets += headers++.chk
+$(obj)/headers++.chk: $(PUBLIC_HEADERS) FORCE
+	$(call if_changed,headerscxx_chk)
 
 endif
 
 ifeq ($(XEN_TARGET_ARCH),x86_64)
 .PHONY: lib-x86-all
 lib-x86-all:
-	$(MAKE) -C xen/lib/x86 all
+	@mkdir -p $(obj)/xen/lib/x86
+	$(MAKE) -C $(obj)/xen/lib/x86 -f $(abs_srctree)/$(src)/xen/lib/x86/Makefile all
 
 all: lib-x86-all
 endif
 
-clean::
-	rm -rf compat config generated headers*.chk
-	rm -f $(BASEDIR)/include/xen/lib/x86/cpuid-autogen.h
+clean-files := compat config generated xen/lib/x86/cpuid-autogen.h

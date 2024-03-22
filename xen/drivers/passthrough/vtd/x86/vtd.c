@@ -42,17 +42,7 @@ void *map_vtd_domain_page(u64 maddr)
     return map_domain_page(_mfn(paddr_to_pfn(maddr)));
 }
 
-void unmap_vtd_domain_page(void *va)
+void unmap_vtd_domain_page(const void *va)
 {
     unmap_domain_page(va);
-}
-
-unsigned int get_cache_line_size(void)
-{
-    return ((cpuid_ebx(1) >> 8) & 0xff) * 8;
-}
-
-void flush_all_cache()
-{
-    wbinvd();
 }

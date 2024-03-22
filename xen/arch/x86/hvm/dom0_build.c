@@ -58,9 +58,6 @@
 static unsigned int __initdata acpi_intr_overrides;
 static struct acpi_madt_interrupt_override __initdata *intsrcovr;
 
-static unsigned int __initdata acpi_nmi_sources;
-static struct acpi_madt_nmi_source __initdata *nmisrc;
-
 static unsigned int __initdata order_stats[MAX_ORDER + 1];
 
 static void __init print_order_stats(const struct domain *d)
@@ -113,10 +110,9 @@ static int __init pvh_populate_memory_range(struct domain *d,
         { .align = PFN_DOWN(MB(2)), .order = PAGE_ORDER_2M },
         { .align = PFN_DOWN(KB(4)), .order = PAGE_ORDER_4K },
     };
-    unsigned int max_order = MAX_ORDER, i = 0;
+    unsigned int max_order = MAX_ORDER;
     struct page_info *page;
     int rc;
-#define MAP_MAX_ITER 64
 
     while ( nr_pages != 0 )
     {
@@ -174,8 +170,7 @@ static int __init pvh_populate_memory_range(struct domain *d,
             continue;
         }
 
-        rc = guest_physmap_add_page(d, _gfn(start), page_to_mfn(page),
-                                    order);
+        rc = p2m_add_page(d, _gfn(start), page_to_mfn(page), order, p2m_ram_rw);
         if ( rc != 0 )
         {
             printk("Failed to populate memory: [%#lx,%#lx): %d\n",
@@ -185,12 +180,16 @@ static int __init pvh_populate_memory_range(struct domain *d,
         start += 1UL << order;
         nr_pages -= 1UL << order;
         order_stats[order]++;
-        if ( (++i % MAP_MAX_ITER) == 0 )
-            process_pending_softirqs();
+        /*
+         * Process pending softirqs on every successful loop: it's unknown
+         * whether the p2m/IOMMU code will have split the page into multiple
+         * smaller entries, and thus the time consumed would be much higher
+         * than populating a single entry.
+         */
+        process_pending_softirqs();
     }
 
     return 0;
-#undef MAP_MAX_ITER
 }
 
 /* Steal RAM from the end of a memory region. */
@@ -461,15 +460,21 @@ static int __init pvh_populate_p2m(struct domain *d)
         }
     }
 
-    /* Non-RAM regions of space below 1MB get identity mapped. */
+    /* Identity map everything below 1MB that's not already mapped. */
     for ( i = rc = 0; i < MB1_PAGES; ++i )
     {
         p2m_type_t p2mt;
+        mfn_t mfn = get_gfn_query(d, i, &p2mt);
 
-        if ( mfn_eq(get_gfn_query(d, i, &p2mt), INVALID_MFN) )
+        if ( mfn_eq(mfn, INVALID_MFN) )
             rc = set_mmio_p2m_entry(d, _gfn(i), _mfn(i), PAGE_ORDER_4K);
         else
-            ASSERT(p2mt == p2m_ram_rw);
+            /*
+             * If the p2m entry is already set it must belong to a reserved
+             * region (e.g. RMRR/IVMD) and be identity mapped, or else be a
+             * RAM region.
+             */
+            ASSERT(p2mt == p2m_ram_rw || mfn_eq(mfn, _mfn(i)));
         put_gfn(d, i);
         if ( rc )
         {
@@ -567,7 +572,7 @@ static int __init pvh_load_kernel(struct domain *d, const module_t *image,
     elf_set_verbose(&elf);
 #endif
     elf_parse_binary(&elf);
-    if ( (rc = elf_xen_parse(&elf, &parms)) != 0 )
+    if ( (rc = elf_xen_parse(&elf, &parms, true)) != 0 )
     {
         printk("Unable to parse kernel for ELFNOTES\n");
         return rc;
@@ -623,7 +628,22 @@ static int __init pvh_load_kernel(struct domain *d, const module_t *image,
 
         mod.paddr = last_addr;
         mod.size = initrd->mod_end;
-        last_addr += ROUNDUP(initrd->mod_end, PAGE_SIZE);
+        last_addr += ROUNDUP(initrd->mod_end, elf_64bit(&elf) ? 8 : 4);
+        if ( initrd->string )
+        {
+            char *str = __va(initrd->string);
+            size_t len = strlen(str) + 1;
+
+            rc = hvm_copy_to_guest_phys(last_addr, str, len, v);
+            if ( rc )
+            {
+                printk("Unable to copy module command line\n");
+                return rc;
+            }
+            mod.cmdline_paddr = last_addr;
+            last_addr += len;
+        }
+        last_addr = ROUNDUP(last_addr, PAGE_SIZE);
     }
 
     /* Free temporary buffers. */
@@ -722,40 +742,21 @@ static int __init pvh_setup_cpus(struct domain *d, paddr_t entry,
     return 0;
 }
 
-static int __init acpi_count_intr_ovr(struct acpi_subtable_header *header,
-                                     const unsigned long end)
+static int __init cf_check acpi_count_intr_ovr(
+    struct acpi_subtable_header *header, const unsigned long end)
 {
     acpi_intr_overrides++;
     return 0;
 }
 
-static int __init acpi_set_intr_ovr(struct acpi_subtable_header *header,
-                                    const unsigned long end)
+static int __init cf_check acpi_set_intr_ovr(
+    struct acpi_subtable_header *header, const unsigned long end)
 {
     const struct acpi_madt_interrupt_override *intr =
         container_of(header, struct acpi_madt_interrupt_override, header);
 
     *intsrcovr = *intr;
     intsrcovr++;
-
-    return 0;
-}
-
-static int __init acpi_count_nmi_src(struct acpi_subtable_header *header,
-                                     const unsigned long end)
-{
-    acpi_nmi_sources++;
-    return 0;
-}
-
-static int __init acpi_set_nmi_src(struct acpi_subtable_header *header,
-                                   const unsigned long end)
-{
-    const struct acpi_madt_nmi_source *src =
-        container_of(header, struct acpi_madt_nmi_source, header);
-
-    *nmisrc = *src;
-    nmisrc++;
 
     return 0;
 }
@@ -775,16 +776,11 @@ static int __init pvh_setup_acpi_madt(struct domain *d, paddr_t *addr)
     acpi_table_parse_madt(ACPI_MADT_TYPE_INTERRUPT_OVERRIDE,
                           acpi_count_intr_ovr, UINT_MAX);
 
-    /* Count number of NMI sources in the MADT. */
-    acpi_table_parse_madt(ACPI_MADT_TYPE_NMI_SOURCE, acpi_count_nmi_src,
-                          UINT_MAX);
-
     max_vcpus = dom0_max_vcpus();
     /* Calculate the size of the crafted MADT. */
     size = sizeof(*madt);
     size += sizeof(*io_apic) * nr_ioapics;
     size += sizeof(*intsrcovr) * acpi_intr_overrides;
-    size += sizeof(*nmisrc) * acpi_nmi_sources;
     size += sizeof(*x2apic) * max_vcpus;
 
     madt = xzalloc_bytes(size);
@@ -840,12 +836,7 @@ static int __init pvh_setup_acpi_madt(struct domain *d, paddr_t *addr)
     acpi_table_parse_madt(ACPI_MADT_TYPE_INTERRUPT_OVERRIDE, acpi_set_intr_ovr,
                           acpi_intr_overrides);
 
-    /* Setup NMI sources. */
-    nmisrc = (void *)intsrcovr;
-    acpi_table_parse_madt(ACPI_MADT_TYPE_NMI_SOURCE, acpi_set_nmi_src,
-                          acpi_nmi_sources);
-
-    ASSERT(((void *)nmisrc - (void *)madt) == size);
+    ASSERT(((void *)intsrcovr - (void *)madt) == size);
     madt->header.length = size;
     /*
      * Calling acpi_tb_checksum here is a layering violation, but
@@ -1247,6 +1238,12 @@ int __init dom0_construct_pvh(struct domain *d, const module_t *image,
     {
         printk("Failed to setup Dom0 ACPI tables: %d\n", rc);
         return rc;
+    }
+
+    if ( opt_dom0_verbose )
+    {
+        printk("Dom%u memory map:\n", d->domain_id);
+        print_e820_memory_map(d->arch.e820, d->arch.nr_e820);
     }
 
     printk("WARNING: PVH is an experimental mode with limited functionality\n");

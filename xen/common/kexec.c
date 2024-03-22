@@ -10,6 +10,7 @@
 #include <xen/lib.h>
 #include <xen/acpi.h>
 #include <xen/ctype.h>
+#include <xen/elfcore.h>
 #include <xen/errno.h>
 #include <xen/guest_access.h>
 #include <xen/param.h>
@@ -34,7 +35,7 @@
 #include <compat/kexec.h>
 #endif
 
-bool_t kexecing = FALSE;
+bool __read_mostly kexecing;
 
 /* Memory regions to store the per cpu register state etc. on a crash. */
 typedef struct { Elf_Note * start; size_t size; } crash_note_range_t;
@@ -103,7 +104,7 @@ static void *crash_heap_current = NULL, *crash_heap_end = NULL;
  * < and below are synonyomous, the latter being useful for grub2 systems
  * which would otherwise require escaping of the < option
  */
-static int __init parse_crashkernel(const char *str)
+static int __init cf_check parse_crashkernel(const char *str)
 {
     const char *cur;
     int rc = 0;
@@ -200,7 +201,7 @@ custom_param("crashkernel", parse_crashkernel);
  * - all will allocate additional structures such as domain and vcpu structs
  *       low so the crash kernel can perform an extended analysis of state.
  */
-static int __init parse_low_crashinfo(const char *str)
+static int __init cf_check parse_low_crashinfo(const char *str)
 {
 
     if ( !strlen(str) )
@@ -229,7 +230,7 @@ custom_param("low_crashinfo", parse_low_crashinfo);
  *
  * <addr> will be rounded down to the nearest power of two.  Defaults to 64G
  */
-static int __init parse_crashinfo_maxaddr(const char *str)
+static int __init cf_check parse_crashinfo_maxaddr(const char *str)
 {
     u64 addr;
     const char *q;
@@ -372,15 +373,17 @@ static int kexec_common_shutdown(void)
     return 0;
 }
 
-void kexec_crash(void)
+void kexec_crash(enum crash_reason reason)
 {
     int pos;
+
+    keyhandler_crash_action(reason);
 
     pos = (test_bit(KEXEC_FLAG_CRASH_POS, &kexec_flags) != 0);
     if ( !test_bit(KEXEC_IMAGE_CRASH_BASE + pos, &kexec_flags) )
         return;
 
-    kexecing = TRUE;
+    kexecing = true;
 
     if ( kexec_common_shutdown() != 0 )
         return;
@@ -392,11 +395,11 @@ void kexec_crash(void)
     BUG();
 }
 
-static long kexec_reboot(void *_image)
+static long cf_check kexec_reboot(void *_image)
 {
     struct kexec_image *image = _image;
 
-    kexecing = TRUE;
+    kexecing = true;
 
     kexec_common_shutdown();
     machine_reboot_kexec(image);
@@ -405,10 +408,10 @@ static long kexec_reboot(void *_image)
     return 0;
 }
 
-static void do_crashdump_trigger(unsigned char key)
+static void cf_check do_crashdump_trigger(unsigned char key)
 {
     printk("'%c' pressed -> triggering crashdump\n", key);
-    kexec_crash();
+    kexec_crash(CRASHREASON_DEBUGKEY);
     printk(" * no crash kernel loaded!\n");
 }
 
@@ -528,7 +531,7 @@ static int kexec_init_cpu_notes(const unsigned long cpu)
     return ret;
 }
 
-static int cpu_callback(
+static int cf_check cpu_callback(
     struct notifier_block *nfb, unsigned long action, void *hcpu)
 {
     unsigned long cpu = (unsigned long)hcpu;
@@ -567,7 +570,7 @@ void __init kexec_early_calculations(void)
         crashinfo_maxaddr_bits = fls64(crashinfo_maxaddr) - 1;
 }
 
-static int __init kexec_init(void)
+static int __init cf_check kexec_init(void)
 {
     void *cpu = (void *)(unsigned long)smp_processor_id();
 
@@ -839,7 +842,7 @@ static int kexec_exec(XEN_GUEST_HANDLE_PARAM(void) uarg)
         ret = continue_hypercall_on_cpu(0, kexec_reboot, image);
         break;
     case KEXEC_TYPE_CRASH:
-        kexec_crash(); /* Does not return */
+        kexec_crash(CRASHREASON_KEXECCMD); /* Does not return */
         break;
     }
 
@@ -1268,7 +1271,7 @@ long do_kexec_op(unsigned long op, XEN_GUEST_HANDLE_PARAM(void) uarg)
 }
 
 #ifdef CONFIG_COMPAT
-int compat_kexec_op(unsigned long op, XEN_GUEST_HANDLE_PARAM(void) uarg)
+int compat_kexec_op(unsigned int op, XEN_GUEST_HANDLE_PARAM(void) uarg)
 {
     return do_kexec_op_internal(op, uarg, 1);
 }

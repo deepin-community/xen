@@ -12,13 +12,16 @@
 #include <irq_vectors.h>
 
 ENTRY(entry_int82)
-        ASM_CLAC
+        ENDBR64
+        ALTERNATIVE "", clac, X86_FEATURE_XEN_SMAP
         pushq $0
         movl  $HYPERCALL_VECTOR, 4(%rsp)
         SAVE_ALL compat=1 /* DPL1 gate, restricted to 32bit PV guests only. */
 
-        SPEC_CTRL_ENTRY_FROM_PV /* Req: %rsp=regs/cpuinfo, Clob: acd */
+        SPEC_CTRL_ENTRY_FROM_PV /* Req: %rsp=regs/cpuinfo, %rdx=0, Clob: acd */
         /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
+
+        sti
 
         CR4_PV32_RESTORE
 
@@ -193,43 +196,7 @@ ENTRY(cr4_pv32_restore)
         xor   %eax, %eax
         ret
 
-        .section .text.entry, "ax", @progbits
-
-/* See lstar_enter for entry register state. */
-ENTRY(cstar_enter)
-#ifdef CONFIG_XEN_SHSTK
-        ALTERNATIVE "", "setssbsy", X86_FEATURE_XEN_SHSTK
-#endif
-        /* sti could live here when we don't switch page tables below. */
-        CR4_PV32_RESTORE
-        movq  8(%rsp),%rax /* Restore %rax. */
-        movq  $FLAT_USER_SS32, 8(%rsp) /* Assume a 64bit domain.  Compat handled lower. */
-        pushq %r11
-        pushq $FLAT_USER_CS32
-        pushq %rcx
-        pushq $0
-        movl  $TRAP_syscall, 4(%rsp)
-        SAVE_ALL
-
-        SPEC_CTRL_ENTRY_FROM_PV /* Req: %rsp=regs/cpuinfo, Clob: acd */
-        /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
-
-        GET_STACK_END(bx)
-        mov   STACK_CPUINFO_FIELD(xen_cr3)(%rbx), %rcx
-        test  %rcx, %rcx
-        jz    .Lcstar_cr3_okay
-        movb  $0, STACK_CPUINFO_FIELD(use_pv_cr3)(%rbx)
-        mov   %rcx, %cr3
-        /* %r12 is still zero at this point. */
-        mov   %r12, STACK_CPUINFO_FIELD(xen_cr3)(%rbx)
-.Lcstar_cr3_okay:
-        sti
-
-        movq  STACK_CPUINFO_FIELD(current_vcpu)(%rbx), %rbx
-        movq  VCPU_domain(%rbx),%rcx
-        cmpb  $0,DOMAIN_is_32bit_pv(%rcx)
-        je    switch_to_kernel
-
+ENTRY(compat_syscall)
         /* Fix up reported %cs/%ss for compat domains. */
         movl  $FLAT_COMPAT_USER_SS, UREGS_ss(%rsp)
         movl  $FLAT_COMPAT_USER_CS, UREGS_cs(%rsp)
@@ -258,8 +225,6 @@ UNLIKELY_END(compat_syscall_gpf)
         movb  %cl,TRAPBOUNCE_flags(%rdx)
         jmp   .Lcompat_bounce_exception
 
-        .text
-
 ENTRY(compat_sysenter)
         CR4_PV32_RESTORE
         movq  VCPU_trap_ctxt(%rbx),%rcx
@@ -286,7 +251,7 @@ ENTRY(compat_int80_direct_trap)
 compat_create_bounce_frame:
         ASSERT_INTERRUPTS_ENABLED
         mov   %fs,%edi
-        ASM_STAC
+        ALTERNATIVE "", stac, X86_FEATURE_XEN_SMAP
         testb $2,UREGS_cs+8(%rsp)
         jz    1f
         /* Push new frame at registered guest-OS stack base. */
@@ -333,7 +298,7 @@ compat_create_bounce_frame:
         movl  TRAPBOUNCE_error_code(%rdx),%eax
 .Lft8:  movl  %eax,%fs:(%rsi)           # ERROR CODE
 1:
-        ASM_CLAC
+        ALTERNATIVE "", clac, X86_FEATURE_XEN_SMAP
         /* Rewrite our stack frame and return to guest-OS mode. */
         /* IA32 Ref. Vol. 3: TF, VM, RF and NT flags are cleared on trap. */
         andl  $~(X86_EFLAGS_VM|X86_EFLAGS_RF|\
@@ -379,7 +344,7 @@ compat_crash_page_fault_4:
         addl  $4,%esi
 compat_crash_page_fault:
 .Lft14: mov   %edi,%fs
-        ASM_CLAC
+        ALTERNATIVE "", clac, X86_FEATURE_XEN_SMAP
         movl  %esi,%edi
         call  show_page_walk
         jmp   dom_crash_sync_extable

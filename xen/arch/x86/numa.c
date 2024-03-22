@@ -19,9 +19,6 @@
 #include <xen/sched.h>
 #include <xen/softirq.h>
 
-static int numa_setup(const char *s);
-custom_param("numa", numa_setup);
-
 #ifndef Dprintk
 #define Dprintk(x...)
 #endif
@@ -68,20 +65,21 @@ int srat_disabled(void)
 static int __init populate_memnodemap(const struct node *nodes,
                                       int numnodes, int shift, nodeid_t *nodeids)
 {
-    unsigned long spdx, epdx;
     int i, res = -1;
 
     memset(memnodemap, NUMA_NO_NODE, memnodemapsize * sizeof(*memnodemap));
     for ( i = 0; i < numnodes; i++ )
     {
-        spdx = paddr_to_pdx(nodes[i].start);
-        epdx = paddr_to_pdx(nodes[i].end - 1) + 1;
-        if ( spdx >= epdx )
+        unsigned long spdx = paddr_to_pdx(nodes[i].start);
+        unsigned long epdx = paddr_to_pdx(nodes[i].end - 1);
+
+        if ( spdx > epdx )
             continue;
         if ( (epdx >> shift) >= memnodemapsize )
             return 0;
         do {
-            if ( memnodemap[spdx >> shift] != NUMA_NO_NODE )
+            if ( memnodemap[spdx >> shift] != NUMA_NO_NODE &&
+                 (!nodeids || memnodemap[spdx >> shift] != nodeids[i]) )
                 return -1;
 
             if ( !nodeids )
@@ -90,7 +88,7 @@ static int __init populate_memnodemap(const struct node *nodes,
                 memnodemap[spdx >> shift] = nodeids[i];
 
             spdx += (1UL << shift);
-        } while ( spdx < epdx );
+        } while ( spdx <= epdx );
         res = 1;
     }
 
@@ -113,11 +111,11 @@ static int __init allocate_cachealigned_memnodemap(void)
 }
 
 /*
- * The LSB of all start and end addresses in the node map is the value of the
+ * The LSB of all start addresses in the node map is the value of the
  * maximum possible shift.
  */
 static int __init extract_lsb_from_nodes(const struct node *nodes,
-                                         int numnodes)
+                                         int numnodes, const nodeid_t *nodeids)
 {
     int i, nodes_used = 0;
     unsigned long spdx, epdx;
@@ -129,8 +127,10 @@ static int __init extract_lsb_from_nodes(const struct node *nodes,
         epdx = paddr_to_pdx(nodes[i].end - 1) + 1;
         if ( spdx >= epdx )
             continue;
-        bitfield |= spdx;
-        nodes_used++;
+        if ( i && (!nodeids || nodeids[i - 1] != nodeids[i]) )
+            bitfield |= spdx;
+        if ( !i || !nodeids || nodeids[i - 1] != nodeids[i] )
+            nodes_used++;
         if ( epdx > memtop )
             memtop = epdx;
     }
@@ -138,7 +138,7 @@ static int __init extract_lsb_from_nodes(const struct node *nodes,
         i = BITS_PER_LONG - 1;
     else
         i = find_first_bit(&bitfield, sizeof(unsigned long)*8);
-    memnodemapsize = (memtop >> i) + 1;
+    memnodemapsize = ((memtop - 1) >> i) + 1;
     return i;
 }
 
@@ -147,7 +147,7 @@ int __init compute_hash_shift(struct node *nodes, int numnodes,
 {
     int shift;
 
-    shift = extract_lsb_from_nodes(nodes, numnodes);
+    shift = extract_lsb_from_nodes(nodes, numnodes, nodeids);
     if ( memnodemapsize <= ARRAY_SIZE(_memnodemap) )
         memnodemap = _memnodemap;
     else if ( allocate_cachealigned_memnodemap() )
@@ -165,12 +165,10 @@ int __init compute_hash_shift(struct node *nodes, int numnodes,
     return shift;
 }
 /* initialize NODE_DATA given nodeid and start/end */
-void __init setup_node_bootmem(nodeid_t nodeid, u64 start, u64 end)
-{ 
-    unsigned long start_pfn, end_pfn;
-
-    start_pfn = start >> PAGE_SHIFT;
-    end_pfn = end >> PAGE_SHIFT;
+void __init setup_node_bootmem(nodeid_t nodeid, paddr_t start, paddr_t end)
+{
+    unsigned long start_pfn = paddr_to_pfn(start);
+    unsigned long end_pfn = paddr_to_pfn(end);
 
     NODE_DATA(nodeid)->node_start_pfn = start_pfn;
     NODE_DATA(nodeid)->node_spanned_pages = end_pfn - start_pfn;
@@ -201,11 +199,12 @@ void __init numa_init_array(void)
 static int numa_fake __initdata = 0;
 
 /* Numa emulation */
-static int __init numa_emulation(u64 start_pfn, u64 end_pfn)
+static int __init numa_emulation(unsigned long start_pfn,
+                                 unsigned long end_pfn)
 {
     int i;
     struct node nodes[MAX_NUMNODES];
-    u64 sz = ((end_pfn - start_pfn)<<PAGE_SHIFT) / numa_fake;
+    uint64_t sz = pfn_to_paddr(end_pfn - start_pfn) / numa_fake;
 
     /* Kludge needed for the hash function */
     if ( hweight64(sz) > 1 )
@@ -221,9 +220,9 @@ static int __init numa_emulation(u64 start_pfn, u64 end_pfn)
     memset(&nodes,0,sizeof(nodes));
     for ( i = 0; i < numa_fake; i++ )
     {
-        nodes[i].start = (start_pfn<<PAGE_SHIFT) + i*sz;
+        nodes[i].start = pfn_to_paddr(start_pfn) + i * sz;
         if ( i == numa_fake - 1 )
-            sz = (end_pfn<<PAGE_SHIFT) - nodes[i].start;
+            sz = pfn_to_paddr(end_pfn) - nodes[i].start;
         nodes[i].end = nodes[i].start + sz;
         printk(KERN_INFO "Faking node %d at %"PRIx64"-%"PRIx64" (%"PRIu64"MB)\n",
                i,
@@ -249,6 +248,8 @@ static int __init numa_emulation(u64 start_pfn, u64 end_pfn)
 void __init numa_initmem_init(unsigned long start_pfn, unsigned long end_pfn)
 { 
     int i;
+    paddr_t start = pfn_to_paddr(start_pfn);
+    paddr_t end = pfn_to_paddr(end_pfn);
 
 #ifdef CONFIG_NUMA_EMU
     if ( numa_fake && !numa_emulation(start_pfn, end_pfn) )
@@ -256,27 +257,28 @@ void __init numa_initmem_init(unsigned long start_pfn, unsigned long end_pfn)
 #endif
 
 #ifdef CONFIG_ACPI_NUMA
-    if ( !numa_off && !acpi_scan_nodes((u64)start_pfn << PAGE_SHIFT,
-         (u64)end_pfn << PAGE_SHIFT) )
+    if ( !numa_off && !acpi_scan_nodes(start, end) )
         return;
 #endif
 
     printk(KERN_INFO "%s\n",
            numa_off ? "NUMA turned off" : "No NUMA configuration found");
 
-    printk(KERN_INFO "Faking a node at %016"PRIx64"-%016"PRIx64"\n",
-           (u64)start_pfn << PAGE_SHIFT,
-           (u64)end_pfn << PAGE_SHIFT);
+    printk(KERN_INFO "Faking a node at %"PRIpaddr"-%"PRIpaddr"\n",
+           start, end);
     /* setup dummy node covering all memory */
     memnode_shift = BITS_PER_LONG - 1;
     memnodemap = _memnodemap;
+    /* Dummy node only uses 1 slot in reality */
+    memnodemap[0] = 0;
+    memnodemapsize = 1;
+
     nodes_clear(node_online_map);
     node_set_online(0);
     for ( i = 0; i < nr_cpu_ids; i++ )
         numa_set_node(i, 0);
     cpumask_copy(&node_to_cpumask[0], cpumask_of(0));
-    setup_node_bootmem(0, (u64)start_pfn << PAGE_SHIFT,
-                    (u64)end_pfn << PAGE_SHIFT);
+    setup_node_bootmem(0, start, end);
 }
 
 void numa_add_cpu(int cpu)
@@ -290,7 +292,7 @@ void numa_set_node(int cpu, nodeid_t node)
 }
 
 /* [numa=off] */
-static __init int numa_setup(const char *opt)
+static int __init cf_check numa_setup(const char *opt)
 {
     if ( !strncmp(opt,"off",3) )
         numa_off = true;
@@ -317,6 +319,7 @@ static __init int numa_setup(const char *opt)
 
     return 0;
 } 
+custom_param("numa", numa_setup);
 
 /*
  * Setup early cpu_to_node.
@@ -367,7 +370,7 @@ unsigned int __init arch_get_dma_bitsize(void)
                  + PAGE_SHIFT, 32);
 }
 
-static void dump_numa(unsigned char key)
+static void cf_check dump_numa(unsigned char key)
 {
     s_time_t now = NOW();
     unsigned int i, j, n;
@@ -502,7 +505,7 @@ static void dump_numa(unsigned char key)
     rcu_read_unlock(&domlist_read_lock);
 }
 
-static __init int register_numa_trigger(void)
+static int __init cf_check register_numa_trigger(void)
 {
     register_keyhandler('u', dump_numa, "dump NUMA info", 1);
     return 0;

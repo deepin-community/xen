@@ -22,14 +22,15 @@ RUN zypper install -y --no-recommends \
         flex \
         gcc \
         gcc-c++ \
+        # gettext-tools for Xen < 4.13
         gettext-tools \
         git \
         glib2-devel \
         glibc-devel \
+        # glibc-devel-32bit for Xen < 4.15
         glibc-devel-32bit \
         gzip \
         hostname \
-        libSDL2-devel \
         libaio-devel \
         libbz2-devel \
         libext2fs-devel \
@@ -54,6 +55,9 @@ RUN zypper install -y --no-recommends \
         pandoc \
         patch \
         pkg-config \
+        'pkgconfig(libpci)' \
+        'pkgconfig(sdl)' \
+        'pkgconfig(sdl2)' \
         python \
         python-devel \
         python3-devel \
@@ -65,5 +69,7 @@ RUN zypper install -y --no-recommends \
         which \
         xz-devel \
         zlib-devel \
+        # QEMU
+        ninja \
         && \
         zypper clean -a

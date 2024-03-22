@@ -1,0 +1,3 @@
+? flavour = amd64
+usr/lib/debug/usr/lib/xen-*/boot/*
+?

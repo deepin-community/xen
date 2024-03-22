@@ -32,6 +32,7 @@
  * passed to the guest when appropriate battery ports are read/written to.
  */
 
+#define _GNU_SOURCE         /* for asprintf() */
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
@@ -101,7 +102,7 @@ FILE *get_next_battery_file(DIR *battery_dir,
 {
     FILE *file = 0;
     struct dirent *dir_entries;
-    char file_name[284];
+    char *file_name;
     int ret;
     
     do 
@@ -112,16 +113,16 @@ FILE *get_next_battery_file(DIR *battery_dir,
         if ( strlen(dir_entries->d_name) < 4 )
             continue;
         if ( battery_info_type == BIF ) 
-            ret = snprintf(file_name, sizeof(file_name), BATTERY_INFO_FILE_PATH,
+            ret = asprintf(&file_name, BATTERY_INFO_FILE_PATH,
                      dir_entries->d_name);
         else 
-            ret = snprintf(file_name, sizeof(file_name), BATTERY_STATE_FILE_PATH,
+            ret = asprintf(&file_name, BATTERY_STATE_FILE_PATH,
                      dir_entries->d_name);
         /* This should not happen but is needed to pass gcc checks */
         if (ret < 0)
             continue;
-        file_name[sizeof(file_name) - 1] = '\0';
         file = fopen(file_name, "r");
+        free(file_name);
     } while ( !file );
 
     return file;
@@ -507,18 +508,18 @@ int main(int argc, char *argv[])
 #ifndef RUN_STANDALONE
     daemonize();
 #endif
-    xs = (struct xs_handle *)xs_daemon_open();
+    xs = xs_open(0);
     if ( xs == NULL ) 
         return -1;
 
     if ( write_one_time_battery_info() == 0 ) 
     {
-        xs_daemon_close(xs);
+        xs_close(xs);
         return -1;
     }
 
     wait_for_and_update_battery_status_request();
-    xs_daemon_close(xs);
+    xs_close(xs);
     return 0;
 }
 

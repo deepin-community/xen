@@ -33,9 +33,48 @@ verstring="${verstring%.gz}"
 #
 # So, e.g. debian/tmp/boot/xen-4.14.1-pre.gz will end up in our package
 # as debian/xen-hypervisor-4.14-amd64/boot/xen-4.14-amd64.gz
+#
+# Finally, note that we're not just renaming the files here, we are
+# actually manually doing part of the install process here. Afterwards,
+# we can ignore the content of debian/tmp/boot/. See the d/not-installed
+# file for this. The boot/ location is mentioned in there.
 find "$t/boot" -type f -print | while read f; do
 	basename="${f#$t/boot/}"
 	head="${basename%$verstring*}"
 	tail="${basename#*$verstring}"
 	cp -v "$f" "${dest}/${head}${version}-${flavour}${tail}"
+done
+
+# For /usr/lib/debug, we make similar changes to the file names, before we
+# actually install them into the locations for our binary packages.
+#
+# After executing the upstream build process, we at first end up a situation
+# that looks like the following (small part from 'tree' output):
+#
+# [...]
+# ├── usr
+# │   ├── lib
+# │   │   ├── debug
+# │   │   │   ├── usr
+# │   │   │   │   └── lib
+# │   │   │   │       └── xen-4.17
+# │   │   │   │           └── boot
+# │   │   │   │               └── xen-shim-syms
+# │   │   │   ├── xen-4.17.0.efi.map
+# │   │   │   ├── xen-syms-4.17.0
+# │   │   │   └── xen-syms-4.17.0.map
+# [...]
+#
+# In this case we also want to strip off the .0 (or e.g. .3-pre) so that
+# the file names do not change when we do a package update with new
+# upstream stable branch line code. We especially do want this to
+# prevent filenames from changing during a stable security update.
+#
+# For consistency with the file names in boot/, we also add the flavour
+# name here. So, for example xen-4.17.0.efi.map is renamed to
+# xen-4.17-amd64.efi.map
+find "$t/usr/lib/debug" -maxdepth 1 -name 'xen*' -type f -print | while read f; do
+	head="${f%$verstring*}"
+	tail="${f#*$verstring}"
+	mv -v "$f" "${head}${version}-${flavour}${tail}"
 done

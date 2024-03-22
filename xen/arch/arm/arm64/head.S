@@ -21,11 +21,9 @@
  */
 
 #include <asm/page.h>
-#include <asm/asm_defns.h>
 #include <asm/early_printk.h>
 #include <efi/efierr.h>
 #include <asm/arm64/efibind.h>
-#include <asm/arm64/macros.h>
 
 #define PT_PT     0xf7f /* nG=1 AF=1 SH=11 AP=01 NS=1 ATTR=111 T=1 P=1 */
 #define PT_MEM    0xf7d /* nG=1 AF=1 SH=11 AP=01 NS=1 ATTR=111 T=0 P=1 */
@@ -73,7 +71,7 @@
  *  x19 - paddr(start)
  *  x20 - phys offset
  *  x21 - DTB address (boot cpu only)
- *  x22 - is_secondary_cpu
+ *  x22 -
  *  x23 - UART address
  *  x24 -
  *  x25 -
@@ -135,6 +133,7 @@
         add \xb, \xb, x20
 .endm
 
+        .section .text.header, "ax", %progbits
         /*.aarch64*/
 
         /*
@@ -296,17 +295,15 @@ real_start_efi:
         sub   x20, x19, x0           /* x20 := phys-offset */
 
         /* Using the DTB in the .dtb section? */
-#ifdef CONFIG_DTB_FILE
+.ifnes CONFIG_DTB_FILE,""
         load_paddr x21, _sdtb
-#endif
+.endif
 
         /* Initialize the UART if earlyprintk has been enabled. */
 #ifdef CONFIG_EARLY_PRINTK
         bl    init_uart
 #endif
         PRINT("- Boot CPU booting -\r\n")
-
-        mov   x22, #0                /* x22 := is_secondary_cpu */
 
         bl    check_cpu_mode
         bl    cpu_init
@@ -345,8 +342,6 @@ GLOBAL(init_secondary)
         ldr   x0, =start
         adr   x19, start             /* x19 := paddr (start) */
         sub   x20, x19, x0           /* x20 := phys-offset */
-
-        mov   x22, #1                /* x22 := is_secondary_cpu */
 
         mrs   x0, mpidr_el1
         ldr   x13, =(~MPIDR_HWID_MASK)
@@ -475,12 +470,19 @@ cpu_init:
         ldr   x0, =(TCR_RES1|TCR_SH0_IS|TCR_ORGN0_WBWA|TCR_IRGN0_WBWA|TCR_T0SZ(64-48))
         /* ID_AA64MMFR0_EL1[3:0] (PARange) corresponds to TCR_EL2[18:16] (PS) */
         mrs   x1, ID_AA64MMFR0_EL1
+        /* Limit to 48 bits, 256TB PA range (#5) */
+        ubfm  x1, x1, #0, #3
+        mov   x2, #5
+        cmp   x1, x2
+        csel  x1, x1, x2, lt
+
         bfi   x0, x1, #16, #3
 
         msr   tcr_el2, x0
 
         ldr   x0, =SCTLR_EL2_SET
         msr   SCTLR_EL2, x0
+        isb
 
         /*
          * Ensure that any exceptions encountered at EL2
@@ -492,12 +494,23 @@ cpu_init:
 ENDPROC(cpu_init)
 
 /*
+ * Macro to find the slot number at a given page-table level
+ *
+ * slot:     slot computed
+ * virt:     virtual address
+ * lvl:      page-table level
+ */
+.macro get_table_slot, slot, virt, lvl
+        ubfx  \slot, \virt, #XEN_PT_LEVEL_SHIFT(\lvl), #XEN_PT_LPAE_SHIFT
+.endm
+
+/*
  * Macro to create a page table entry in \ptbl to \tbl
  *
  * ptbl:    table symbol where the entry will be created
  * tbl:     table symbol to point to
  * virt:    virtual address
- * shift:   #imm page table shift
+ * lvl:     page-table level
  * tmp1:    scratch register
  * tmp2:    scratch register
  * tmp3:    scratch register
@@ -509,9 +522,8 @@ ENDPROC(cpu_init)
  *
  * Note that all parameters using registers should be distinct.
  */
-.macro create_table_entry, ptbl, tbl, virt, shift, tmp1, tmp2, tmp3
-        lsr   \tmp1, \virt, #\shift
-        and   \tmp1, \tmp1, #LPAE_ENTRY_MASK/* \tmp1 := slot in \tlb */
+.macro create_table_entry, ptbl, tbl, virt, lvl, tmp1, tmp2, tmp3
+        get_table_slot \tmp1, \virt, \lvl   /* \tmp1 := slot in \tlb */
 
         load_paddr \tmp2, \tbl
         mov   \tmp3, #PT_PT                 /* \tmp3 := right for linear PT */
@@ -542,8 +554,7 @@ ENDPROC(cpu_init)
 .macro create_mapping_entry, ptbl, virt, phys, tmp1, tmp2, tmp3, type=PT_MEM_L3
         and   \tmp3, \phys, #THIRD_MASK     /* \tmp3 := PAGE_ALIGNED(phys) */
 
-        lsr   \tmp1, \virt, #THIRD_SHIFT
-        and   \tmp1, \tmp1, #LPAE_ENTRY_MASK/* \tmp1 := slot in \tlb */
+        get_table_slot \tmp1, \virt, 3      /* \tmp1 := slot in \tlb */
 
         mov   \tmp2, #\type                 /* \tmp2 := right for section PT */
         orr   \tmp2, \tmp2, \tmp3           /*          + PAGE_ALIGNED(phys) */
@@ -571,9 +582,9 @@ ENDPROC(cpu_init)
 create_page_tables:
         /* Prepare the page-tables for mapping Xen */
         ldr   x0, =XEN_VIRT_START
-        create_table_entry boot_pgtable, boot_first, x0, ZEROETH_SHIFT, x1, x2, x3
-        create_table_entry boot_first, boot_second, x0, FIRST_SHIFT, x1, x2, x3
-        create_table_entry boot_second, boot_third, x0, SECOND_SHIFT, x1, x2, x3
+        create_table_entry boot_pgtable, boot_first, x0, 0, x1, x2, x3
+        create_table_entry boot_first, boot_second, x0, 1, x1, x2, x3
+        create_table_entry boot_second, boot_third, x0, 2, x1, x2, x3
 
         /* Map Xen */
         adr_l x4, boot_third
@@ -588,7 +599,7 @@ create_page_tables:
 1:      str   x2, [x4, x1]           /* Map vaddr(start) */
         add   x2, x2, #PAGE_SIZE     /* Next page */
         add   x1, x1, #8             /* Next slot */
-        cmp   x1, #(LPAE_ENTRIES<<3) /* 512 entries per page */
+        cmp   x1, #(XEN_PT_LPAE_ENTRIES<<3) /* 512 entries per page */
         b.lt  1b
 
         /*
@@ -610,10 +621,10 @@ create_page_tables:
          * XEN_ZEROETH_SLOT, then the 1:1 mapping will use its own set of
          * page-tables from the first level.
          */
-        lsr   x0, x19, #ZEROETH_SHIFT   /* x0 := zeroeth slot */
+        get_table_slot x0, x19, 0       /* x0 := zeroeth slot */
         cmp   x0, #XEN_ZEROETH_SLOT
         beq   1f
-        create_table_entry boot_pgtable, boot_first_id, x19, ZEROETH_SHIFT, x0, x1, x2
+        create_table_entry boot_pgtable, boot_first_id, x19, 0, x0, x1, x2
         b     link_from_first_id
 
 1:
@@ -622,11 +633,10 @@ create_page_tables:
          * then the 1:1 mapping will use its own set of page-tables from
          * the second level.
          */
-        lsr   x0, x19, #FIRST_SHIFT
-        and   x0, x0, #LPAE_ENTRY_MASK  /* x0 := first slot */
+        get_table_slot x0, x19, 1      /* x0 := first slot */
         cmp   x0, #XEN_FIRST_SLOT
         beq   1f
-        create_table_entry boot_first, boot_second_id, x19, FIRST_SHIFT, x0, x1, x2
+        create_table_entry boot_first, boot_second_id, x19, 1, x0, x1, x2
         b     link_from_second_id
 
 1:
@@ -636,17 +646,16 @@ create_page_tables:
          * third level. For slot XEN_SECOND_SLOT, Xen is not yet able to handle
          * it.
          */
-        lsr   x0, x19, #SECOND_SHIFT
-        and   x0, x0, #LPAE_ENTRY_MASK  /* x0 := first slot */
+        get_table_slot x0, x19, 2     /* x0 := second slot */
         cmp   x0, #XEN_SECOND_SLOT
         beq   virtphys_clash
-        create_table_entry boot_second, boot_third_id, x19, SECOND_SHIFT, x0, x1, x2
+        create_table_entry boot_second, boot_third_id, x19, 2, x0, x1, x2
         b     link_from_third_id
 
 link_from_first_id:
-        create_table_entry boot_first_id, boot_second_id, x19, FIRST_SHIFT, x0, x1, x2
+        create_table_entry boot_first_id, boot_second_id, x19, 1, x0, x1, x2
 link_from_second_id:
-        create_table_entry boot_second_id, boot_third_id, x19, SECOND_SHIFT, x0, x1, x2
+        create_table_entry boot_second_id, boot_third_id, x19, 2, x0, x1, x2
 link_from_third_id:
         create_mapping_entry boot_third_id, x19, x19, x0, x1, x2
         ret
@@ -703,7 +712,7 @@ remove_identity_mapping:
          * Find the zeroeth slot used. Remove the entry from zeroeth
          * table if the slot is not XEN_ZEROETH_SLOT.
          */
-        lsr   x1, x19, #ZEROETH_SHIFT   /* x1 := zeroeth slot */
+        get_table_slot x1, x19, 0       /* x1 := zeroeth slot */
         cmp   x1, #XEN_ZEROETH_SLOT
         beq   1f
         /* It is not in slot XEN_ZEROETH_SLOT, remove the entry. */
@@ -716,8 +725,7 @@ remove_identity_mapping:
          * Find the first slot used. Remove the entry for the first
          * table if the slot is not XEN_FIRST_SLOT.
          */
-        lsr   x1, x19, #FIRST_SHIFT
-        and   x1, x1, #LPAE_ENTRY_MASK  /* x1 := first slot */
+        get_table_slot x1, x19, 1       /* x1 := first slot */
         cmp   x1, #XEN_FIRST_SLOT
         beq   1f
         /* It is not in slot XEN_FIRST_SLOT, remove the entry. */
@@ -730,8 +738,7 @@ remove_identity_mapping:
          * Find the second slot used. Remove the entry for the first
          * table if the slot is not XEN_SECOND_SLOT.
          */
-        lsr   x1, x19, #SECOND_SHIFT
-        and   x1, x1, #LPAE_ENTRY_MASK  /* x1 := first slot */
+        get_table_slot x1, x19, 2       /* x1 := second slot */
         cmp   x1, #XEN_SECOND_SLOT
         beq   identity_mapping_removed
         /* It is not in slot 1, remove the entry */
@@ -739,7 +746,7 @@ remove_identity_mapping:
         str   xzr, [x0, x1, lsl #3]
 
 identity_mapping_removed:
-        /* See asm-arm/arm64/flushtlb.h for the explanation of the sequence. */
+        /* See asm/arm64/flushtlb.h for the explanation of the sequence. */
         dsb   nshst
         tlbi  alle2
         dsb   nsh
@@ -769,7 +776,7 @@ setup_fixmap:
 #endif
         /* Map fixmap into boot_second */
         ldr   x0, =FIXMAP_ADDR(0)
-        create_table_entry boot_second, xen_fixmap, x0, SECOND_SHIFT, x1, x2, x3
+        create_table_entry boot_second, xen_fixmap, x0, 2, x1, x2, x3
         /* Ensure any page table updates made above have occurred. */
         dsb   nshst
 
@@ -802,6 +809,7 @@ ENDPROC(launch)
 fail:   PRINT("- Boot failed -\r\n")
 1:      wfe
         b     1b
+ENDPROC(fail)
 
 GLOBAL(_end_boot)
 
@@ -832,6 +840,7 @@ ENTRY(switch_ttbr)
         isb
 
         ret
+ENDPROC(switch_ttbr)
 
 #ifdef CONFIG_EARLY_PRINTK
 /*
@@ -849,6 +858,7 @@ init_uart:
 #endif
         PRINT("- UART enabled -\r\n")
         ret
+ENDPROC(init_uart)
 
 /* Print early debug messages.
  * x0: Nul-terminated string to print.
@@ -864,17 +874,19 @@ puts:
         ret
 ENDPROC(puts)
 
-/* Print a 32-bit number in hex.  Specific to the PL011 UART.
+/*
+ * Print a 64-bit number in hex.
  * x0: Number to print.
  * x23: Early UART base address
- * Clobbers x0-x3 */
+ * Clobbers x0-x3
+ */
 putn:
         adr   x1, hex
-        mov   x3, #8
+        mov   x3, #16
 1:
         early_uart_ready x23, 2
-        and   x2, x0, #0xf0000000    /* Mask off the top nybble */
-        lsr   x2, x2, #28
+        and   x2, x0, #(0xf<<60)     /* Mask off the top nybble */
+        lsr   x2, x2, #60
         ldrb  w2, [x1, x2]           /* Convert to a char */
         early_uart_transmit x23, w2
         lsl   x0, x0, #4             /* Roll it through one nybble at a time */

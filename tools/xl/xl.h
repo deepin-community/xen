@@ -17,17 +17,16 @@
 
 #include <assert.h>
 
-#include "_paths.h"
 #include <xentoollog.h>
 
 struct cmd_spec {
-    char *cmd_name;
+    const char *cmd_name;
     int (*cmd_impl)(int argc, char **argv);
     int can_dryrun;
     int modifies;
-    char *cmd_desc;
-    char *cmd_usage;
-    char *cmd_option;
+    const char *cmd_desc;
+    const char *cmd_usage;
+    const char *cmd_option;
 };
 
 struct domain_create {
@@ -35,7 +34,6 @@ struct domain_create {
     int daemonize;
     int monitor; /* handle guest reboots etc */
     int paused;
-    int dryrun;
     int quiet;
     int vnc;
     int vncautopass;
@@ -218,10 +216,10 @@ int main_qemu_monitor_command(int argc, char **argv);
 void help(const char *command);
 
 extern const char *common_domname;
-extern struct cmd_spec cmd_table[];
-extern int cmdtable_len;
+extern const struct cmd_spec cmd_table[];
+extern const int cmdtable_len;
 /* Look up a command in the table, allowing unambiguous truncation */
-struct cmd_spec *cmdtable_lookup(const char *s);
+const struct cmd_spec *cmdtable_lookup(const char *s);
 
 extern libxl_ctx *ctx;
 extern xentoollog_logger_stdiostream *logger;
@@ -269,6 +267,7 @@ extern int run_hotplug_scripts;
 extern int dryrun_only;
 extern int claim_mode;
 extern bool progress_use_cr;
+extern bool timestamps;
 extern xentoollog_level minmsglevel;
 #define minmsglevel_default XTL_PROGRESS
 extern char *lockfile;
@@ -281,6 +280,7 @@ extern char *default_colo_proxy_script;
 extern char *blkdev_start;
 extern int max_grant_frames;
 extern int max_maptrack_frames;
+extern int max_grant_version;
 extern libxl_bitmap global_vm_affinity_mask;
 extern libxl_bitmap global_hvm_affinity_mask;
 extern libxl_bitmap global_pv_affinity_mask;

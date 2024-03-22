@@ -3,6 +3,7 @@
  *
  */
 
+#include <xen/hypercall.h>
 #include <compat/grant_table.h>
 
 #define xen_grant_entry_v1 grant_entry_v1
@@ -55,13 +56,17 @@ CHECK_gnttab_swap_grant_ref;
 CHECK_gnttab_cache_flush;
 #undef xen_gnttab_cache_flush
 
-int compat_grant_table_op(unsigned int cmd,
-                          XEN_GUEST_HANDLE_PARAM(void) cmp_uop,
-                          unsigned int count)
+int compat_grant_table_op(
+    unsigned int cmd, XEN_GUEST_HANDLE_PARAM(void) cmp_uop, unsigned int count)
 {
     int rc = 0;
     unsigned int i, cmd_op;
     XEN_GUEST_HANDLE_PARAM(void) cnt_uop;
+
+#ifdef CONFIG_PV_SHIM
+    if ( unlikely(pv_shim) )
+        return pv_shim_grant_table_op(cmd, cmp_uop, count);
+#endif
 
     set_xen_guest_handle(cnt_uop, NULL);
     cmd_op = cmd & GNTTABOP_CMD_MASK;

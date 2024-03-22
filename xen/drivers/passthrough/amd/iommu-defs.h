@@ -106,6 +106,7 @@ struct amd_iommu_dte {
     bool tv:1;
     unsigned int :5;
     unsigned int had:2;
+#define IOMMU_MAX_PT_LEVELS 6
     unsigned int paging_mode:3;
     uint64_t pt_root:40;
     bool ppr:1;
@@ -178,11 +179,8 @@ struct amd_iommu_dte {
 #define IOMMU_COMP_WAIT_DATA_BUFFER_SIZE	8
 #define IOMMU_COMP_WAIT_DATA_BUFFER_ALIGNMENT	8
 #define IOMMU_COMP_WAIT_S_FLAG_MASK		0x00000001
-#define IOMMU_COMP_WAIT_S_FLAG_SHIFT		0
 #define IOMMU_COMP_WAIT_I_FLAG_MASK		0x00000002
-#define IOMMU_COMP_WAIT_I_FLAG_SHIFT		1
 #define IOMMU_COMP_WAIT_F_FLAG_MASK		0x00000004
-#define IOMMU_COMP_WAIT_F_FLAG_SHIFT		2
 #define IOMMU_COMP_WAIT_ADDR_LOW_MASK		0xFFFFFFF8
 #define IOMMU_COMP_WAIT_ADDR_LOW_SHIFT		3
 #define IOMMU_COMP_WAIT_ADDR_HIGH_MASK		0x000FFFFF
@@ -448,11 +446,13 @@ union amd_iommu_x2apic_control {
 #define IOMMU_PAGE_TABLE_U32_PER_ENTRY	(IOMMU_PAGE_TABLE_ENTRY_SIZE / 4)
 #define IOMMU_PAGE_TABLE_ALIGNMENT	4096
 
+#define IOMMU_PTE_CONTIG_MASK           0x1e /* The ign0 field below. */
+
 union amd_iommu_pte {
     uint64_t raw;
     struct {
         bool pr:1;
-        unsigned int ign0:4;
+        unsigned int ign0:4; /* Covered by IOMMU_PTE_CONTIG_MASK. */
         bool a:1;
         bool d:1;
         unsigned int ign1:2;

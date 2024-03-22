@@ -15,7 +15,6 @@
 #include <xen/pfn.h>
 #include <asm/device.h>
 #include <asm/numa.h>
-#include <asm/pci.h>
 
 /*
  * The PCI interface treats multi-function devices as independent
@@ -30,16 +29,23 @@
 #define PCI_BUS(bdf)    (((bdf) >> 8) & 0xff)
 #define PCI_SLOT(bdf)   (((bdf) >> 3) & 0x1f)
 #define PCI_FUNC(bdf)   ((bdf) & 0x07)
-#define PCI_DEVFN(d,f)  ((((d) & 0x1f) << 3) | ((f) & 0x07))
-#define PCI_DEVFN2(bdf) ((bdf) & 0xff)
-#define PCI_BDF(b,d,f)  ((((b) & 0xff) << 8) | PCI_DEVFN(d,f))
-#define PCI_BDF2(b,df)  ((((b) & 0xff) << 8) | ((df) & 0xff))
-#define PCI_SBDF(s,b,d,f) \
-    ((pci_sbdf_t){ .sbdf = (((s) & 0xffff) << 16) | PCI_BDF(b, d, f) })
-#define PCI_SBDF2(s,bdf) \
+
+#define PCI_DEVFN1_(df)   ((df) & 0xff)
+#define PCI_DEVFN2_(d, f) ((((d) & 0x1f) << 3) | ((f) & 7))
+#define PCI_SBDF4_(s, b, d, f...) \
+    ((pci_sbdf_t){ .sbdf = (((s) & 0xffff) << 16) | PCI_BDF(b, d, ##f) })
+#define PCI_SBDF3_ PCI_SBDF4_
+#define PCI_SBDF2_(s, bdf) \
     ((pci_sbdf_t){ .sbdf = (((s) & 0xffff) << 16) | ((bdf) & 0xffff) })
-#define PCI_SBDF3(s,b,df) \
-    ((pci_sbdf_t){ .sbdf = (((s) & 0xffff) << 16) | PCI_BDF2(b, df) })
+
+#define PCI__(what, nr) PCI_##what##nr##_
+#define PCI_(what, nr)  PCI__(what, nr)
+
+#define PCI_DEVFN(d, f...)   PCI_(DEVFN, count_args(d, ##f))(d, ##f)
+#define PCI_BDF(b, d, f...)  ((((b) & 0xff) << 8) | PCI_DEVFN(d, ##f))
+#define PCI_SBDF(s, b, d...) PCI_(SBDF, count_args(s, b, ##d))(s, b, ##d)
+
+#define ECAM_REG_OFFSET(addr)  ((addr) & 0x00000fff)
 
 typedef union {
     uint32_t sbdf;
@@ -61,6 +67,8 @@ typedef union {
         uint16_t                seg;
     };
 } pci_sbdf_t;
+
+#include <asm/pci.h>
 
 struct pci_dev_info {
     /*
@@ -105,6 +113,9 @@ struct pci_dev {
     /* Device with errata, ignore the BARs. */
     bool ignore_bars;
 
+    /* Device misbehaving, prevent assigning it to guests. */
+    bool broken;
+
     enum pdev_type {
         DEV_TYPE_PCI_UNKNOWN,
         DEV_TYPE_PCIe_ENDPOINT,
@@ -148,16 +159,12 @@ struct pci_dev {
 void pcidevs_lock(void);
 void pcidevs_unlock(void);
 bool_t __must_check pcidevs_locked(void);
-bool_t __must_check pcidevs_trylock(void);
 
 bool_t pci_known_segment(u16 seg);
 bool_t pci_device_detect(u16 seg, u8 bus, u8 dev, u8 func);
 int scan_pci_devices(void);
 enum pdev_type pdev_type(u16 seg, u8 bus, u8 devfn);
 int find_upstream_bridge(u16 seg, u8 *bus, u8 *devfn, u8 *secbus);
-struct pci_dev *pci_lock_pdev(int seg, int bus, int devfn);
-struct pci_dev *pci_lock_domain_pdev(
-    struct domain *, int seg, int bus, int devfn);
 
 void setup_hwdom_pci_devices(struct domain *,
                             int (*)(u8 devfn, struct pci_dev *));
@@ -170,10 +177,8 @@ int pci_add_device(u16 seg, u8 bus, u8 devfn,
 int pci_remove_device(u16 seg, u8 bus, u8 devfn);
 int pci_ro_device(int seg, int bus, int devfn);
 int pci_hide_device(unsigned int seg, unsigned int bus, unsigned int devfn);
-struct pci_dev *pci_get_pdev(int seg, int bus, int devfn);
-struct pci_dev *pci_get_real_pdev(int seg, int bus, int devfn);
-struct pci_dev *pci_get_pdev_by_domain(const struct domain *, int seg,
-                                       int bus, int devfn);
+struct pci_dev *pci_get_pdev(const struct domain *d, pci_sbdf_t sbdf);
+struct pci_dev *pci_get_real_pdev(pci_sbdf_t sbdf);
 void pci_check_disable_device(u16 seg, u8 bus, u8 devfn);
 
 uint8_t pci_conf_read8(pci_sbdf_t sbdf, unsigned int reg);
@@ -211,5 +216,14 @@ struct pirq;
 int msixtbl_pt_register(struct domain *, struct pirq *, uint64_t gtable);
 void msixtbl_pt_unregister(struct domain *, struct pirq *);
 void msixtbl_pt_cleanup(struct domain *d);
+
+#ifdef CONFIG_HVM
+int arch_pci_clean_pirqs(struct domain *d);
+#else
+static inline int arch_pci_clean_pirqs(struct domain *d)
+{
+    return 0;
+}
+#endif /* CONFIG_HVM */
 
 #endif /* __XEN_PCI_H__ */

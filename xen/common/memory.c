@@ -8,22 +8,23 @@
  */
 
 #include <xen/domain_page.h>
-#include <xen/types.h>
+#include <xen/errno.h>
+#include <xen/event.h>
+#include <xen/grant_table.h>
+#include <xen/guest_access.h>
+#include <xen/hypercall.h>
+#include <xen/iocap.h>
+#include <xen/ioreq.h>
 #include <xen/lib.h>
+#include <xen/mem_access.h>
 #include <xen/mm.h>
+#include <xen/numa.h>
+#include <xen/paging.h>
 #include <xen/param.h>
 #include <xen/perfc.h>
 #include <xen/sched.h>
-#include <xen/event.h>
-#include <xen/paging.h>
-#include <xen/iocap.h>
-#include <xen/guest_access.h>
-#include <xen/hypercall.h>
-#include <xen/errno.h>
-#include <xen/numa.h>
-#include <xen/mem_access.h>
 #include <xen/trace.h>
-#include <xen/grant_table.h>
+#include <xen/types.h>
 #include <asm/current.h>
 #include <asm/hardirq.h>
 #include <asm/p2m.h>
@@ -57,11 +58,11 @@ struct memop_args {
 static unsigned int __read_mostly domu_max_order = CONFIG_DOMU_MAX_ORDER;
 static unsigned int __read_mostly ctldom_max_order = CONFIG_CTLDOM_MAX_ORDER;
 static unsigned int __read_mostly hwdom_max_order = CONFIG_HWDOM_MAX_ORDER;
-#ifdef HAS_PASSTHROUGH
+#ifdef CONFIG_HAS_PASSTHROUGH
 static unsigned int __read_mostly ptdom_max_order = CONFIG_PTDOM_MAX_ORDER;
 #endif
 
-static int __init parse_max_order(const char *s)
+static int __init cf_check parse_max_order(const char *s)
 {
     if ( *s != ',' )
         domu_max_order = simple_strtoul(s, &s, 0);
@@ -69,7 +70,7 @@ static int __init parse_max_order(const char *s)
         ctldom_max_order = simple_strtoul(s, &s, 0);
     if ( *s == ',' && *++s != ',' )
         hwdom_max_order = simple_strtoul(s, &s, 0);
-#ifdef HAS_PASSTHROUGH
+#ifdef CONFIG_HAS_PASSTHROUGH
     if ( *s == ',' && *++s != ',' )
         ptdom_max_order = simple_strtoul(s, &s, 0);
 #endif
@@ -82,7 +83,7 @@ static unsigned int max_order(const struct domain *d)
 {
     unsigned int order = domu_max_order;
 
-#ifdef HAS_PASSTHROUGH
+#ifdef CONFIG_HAS_PASSTHROUGH
     if ( cache_flush_permitted(d) && order < ptdom_max_order )
         order = ptdom_max_order;
 #endif
@@ -244,6 +245,29 @@ static void populate_physmap(struct memop_args *a)
 
                 mfn = _mfn(gpfn);
             }
+            else if ( is_domain_using_staticmem(d) )
+            {
+                /*
+                 * No easy way to guarantee the retrieved pages are contiguous,
+                 * so forbid non-zero-order requests here.
+                 */
+                if ( a->extent_order != 0 )
+                {
+                    gdprintk(XENLOG_WARNING,
+                             "Cannot allocate static order-%u pages for %pd\n",
+                             a->extent_order, d);
+                    goto out;
+                }
+
+                mfn = acquire_reserved_page(d, a->memflags);
+                if ( mfn_eq(mfn, INVALID_MFN) )
+                {
+                    gdprintk(XENLOG_WARNING,
+                             "%pd: failed to retrieve a reserved page\n",
+                             d);
+                    goto out;
+                }
+            }
             else
             {
                 page = alloc_domheap_pages(d, a->extent_order, a->memflags);
@@ -267,7 +291,8 @@ static void populate_physmap(struct memop_args *a)
                 mfn = page_to_mfn(page);
             }
 
-            guest_physmap_add_page(d, _gfn(gpfn), mfn, a->extent_order);
+            if ( guest_physmap_add_page(d, _gfn(gpfn), mfn, a->extent_order) )
+                goto out;
 
             if ( !paging_mode_translate(d) &&
                  /* Inform the domain of the new page's machine address. */
@@ -293,7 +318,9 @@ int guest_remove_page(struct domain *d, unsigned long gmfn)
     p2m_type_t p2mt;
 #endif
     mfn_t mfn;
+#ifdef CONFIG_HAS_PASSTHROUGH
     bool *dont_flush_p, dont_flush;
+#endif
     int rc;
 
 #ifdef CONFIG_X86
@@ -384,13 +411,17 @@ int guest_remove_page(struct domain *d, unsigned long gmfn)
      * Since we're likely to free the page below, we need to suspend
      * xenmem_add_to_physmap()'s suppressing of IOMMU TLB flushes.
      */
+#ifdef CONFIG_HAS_PASSTHROUGH
     dont_flush_p = &this_cpu(iommu_dont_flush_iotlb);
     dont_flush = *dont_flush_p;
     *dont_flush_p = false;
+#endif
 
     rc = guest_physmap_remove_page(d, _gfn(gmfn), mfn, 0);
 
+#ifdef CONFIG_HAS_PASSTHROUGH
     *dont_flush_p = dont_flush;
+#endif
 
     /*
      * With the lack of an IOMMU on some platforms, domains with DMA-capable
@@ -707,13 +738,13 @@ static long memory_exchange(XEN_GUEST_HANDLE_PARAM(xen_memory_exchange_t) arg)
          */
         while ( (page = page_list_remove_head(&in_chunk_list)) )
         {
-            unsigned long gfn;
+            gfn_t gfn;
 
             mfn = page_to_mfn(page);
-            gfn = mfn_to_gmfn(d, mfn_x(mfn));
+            gfn = mfn_to_gfn(d, mfn);
             /* Pages were unshared above */
-            BUG_ON(SHARED_M2P(gfn));
-            if ( guest_physmap_remove_page(d, _gfn(gfn), mfn, 0) )
+            BUG_ON(SHARED_M2P(gfn_x(gfn)));
+            if ( guest_physmap_remove_page(d, gfn, mfn, 0) )
                 domain_crash(d);
             free_domheap_page(page);
         }
@@ -721,8 +752,8 @@ static long memory_exchange(XEN_GUEST_HANDLE_PARAM(xen_memory_exchange_t) arg)
         /* Assign each output page to the domain. */
         for ( j = 0; (page = page_list_remove_head(&out_chunk_list)); ++j )
         {
-            if ( assign_pages(d, page, exch.out.extent_order,
-                              MEMF_no_refcount) )
+            if ( assign_page(page, exch.out.extent_order, d,
+                             MEMF_no_refcount) )
             {
                 unsigned long dec_count;
                 bool_t drop_dom_ref;
@@ -758,8 +789,8 @@ static long memory_exchange(XEN_GUEST_HANDLE_PARAM(xen_memory_exchange_t) arg)
             }
 
             mfn = page_to_mfn(page);
-            guest_physmap_add_page(d, _gfn(gpfn), mfn,
-                                   exch.out.extent_order);
+            rc = guest_physmap_add_page(d, _gfn(gpfn), mfn,
+                                        exch.out.extent_order) ?: rc;
 
             if ( !paging_mode_translate(d) &&
                  __copy_mfn_to_guest_offset(exch.out.extent_start,
@@ -790,7 +821,7 @@ static long memory_exchange(XEN_GUEST_HANDLE_PARAM(xen_memory_exchange_t) arg)
      * cleared PGC_allocated.
      */
     while ( (page = page_list_remove_head(&in_chunk_list)) )
-        if ( assign_pages(d, page, 0, MEMF_no_refcount) )
+        if ( assign_pages(page, 1, d, MEMF_no_refcount) )
         {
             BUG_ON(!d->is_dying);
             free_domheap_page(page);
@@ -818,7 +849,14 @@ int xenmem_add_to_physmap(struct domain *d, struct xen_add_to_physmap *xatp,
     union add_to_physmap_extra extra = {};
     struct page_info *pages[16];
 
-    ASSERT(paging_mode_translate(d));
+    if ( !paging_mode_translate(d) )
+    {
+        ASSERT_UNREACHABLE();
+        return -EACCES;
+    }
+
+    if ( gfn_eq(_gfn(xatp->gpfn), INVALID_GFN) )
+        return -EINVAL;
 
     if ( xatp->space == XENMAPSPACE_gmfn_foreign )
         extra.foreign_domid = DOMID_INVALID;
@@ -830,15 +868,29 @@ int xenmem_add_to_physmap(struct domain *d, struct xen_add_to_physmap *xatp,
     if ( xatp->size < start )
         return -EILSEQ;
 
+    if ( xatp->gpfn + xatp->size < xatp->gpfn ||
+         xatp->idx + xatp->size < xatp->idx )
+    {
+        /*
+         * Make sure INVALID_GFN is the highest representable value, i.e.
+         * guaranteeing that it won't fall in the middle of the
+         * [xatp->gpfn, xatp->gpfn + xatp->size) range checked above.
+         */
+        BUILD_BUG_ON(INVALID_GFN_RAW + 1);
+        return -EOVERFLOW;
+    }
+
     xatp->idx += start;
     xatp->gpfn += start;
     xatp->size -= start;
 
+#ifdef CONFIG_HAS_PASSTHROUGH
     if ( is_iommu_enabled(d) )
     {
        this_cpu(iommu_dont_flush_iotlb) = 1;
        extra.ppage = &pages[0];
     }
+#endif
 
     while ( xatp->size > done )
     {
@@ -854,14 +906,16 @@ int xenmem_add_to_physmap(struct domain *d, struct xen_add_to_physmap *xatp,
             ++extra.ppage;
 
         /* Check for continuation if it's not the last iteration. */
-        if ( (++done >= ARRAY_SIZE(pages) && extra.ppage) ||
-             (xatp->size > done && hypercall_preempt_check()) )
+        if ( xatp->size > ++done &&
+             ((done >= ARRAY_SIZE(pages) && extra.ppage) ||
+              hypercall_preempt_check()) )
         {
             rc = start + done;
             break;
         }
     }
 
+#ifdef CONFIG_HAS_PASSTHROUGH
     if ( is_iommu_enabled(d) )
     {
         int ret;
@@ -870,7 +924,7 @@ int xenmem_add_to_physmap(struct domain *d, struct xen_add_to_physmap *xatp,
         this_cpu(iommu_dont_flush_iotlb) = 0;
 
         ret = iommu_iotlb_flush(d, _dfn(xatp->idx - done), done,
-                                IOMMU_FLUSHF_added | IOMMU_FLUSHF_modified);
+                                IOMMU_FLUSHF_modified);
         if ( unlikely(ret) && rc >= 0 )
             rc = ret;
 
@@ -888,6 +942,7 @@ int xenmem_add_to_physmap(struct domain *d, struct xen_add_to_physmap *xatp,
         if ( unlikely(ret) && rc >= 0 )
             rc = ret;
     }
+#endif
 
     return rc;
 }
@@ -897,6 +952,17 @@ static int xenmem_add_to_physmap_batch(struct domain *d,
                                        unsigned int extent)
 {
     union add_to_physmap_extra extra = {};
+
+    /*
+     * In some configurations, (!HVM, COVERAGE), the xenmem_add_to_physmap_one()
+     * call doesn't succumb to dead-code-elimination. Duplicate the short-circut
+     * from xatp_permission_check() to try and help the compiler out.
+     */
+    if ( !paging_mode_translate(d) )
+    {
+        ASSERT_UNREACHABLE();
+        return -EACCES;
+    }
 
     if ( unlikely(xatpb->size < extent) )
         return -EILSEQ;
@@ -933,6 +999,9 @@ static int xenmem_add_to_physmap_batch(struct domain *d,
              unlikely(__copy_from_guest_offset(&gpfn, xatpb->gpfns,
                                                extent, 1)) )
             return -EFAULT;
+
+        if ( gfn_eq(_gfn(gpfn), INVALID_GFN) )
+            return -EINVAL;
 
         rc = xenmem_add_to_physmap_one(d, xatpb->space, extra,
                                        idx, _gfn(gpfn));
@@ -1005,15 +1074,18 @@ struct get_reserved_device_memory {
     unsigned int used_entries;
 };
 
-static int get_reserved_device_memory(xen_pfn_t start, xen_ulong_t nr,
-                                      u32 id, void *ctxt)
+static int cf_check get_reserved_device_memory(
+    xen_pfn_t start, xen_ulong_t nr, u32 id, void *ctxt)
 {
     struct get_reserved_device_memory *grdm = ctxt;
-    uint32_t sbdf = PCI_SBDF3(grdm->map.dev.pci.seg, grdm->map.dev.pci.bus,
-                              grdm->map.dev.pci.devfn).sbdf;
+    uint32_t sbdf = PCI_SBDF(grdm->map.dev.pci.seg, grdm->map.dev.pci.bus,
+                             grdm->map.dev.pci.devfn).sbdf;
 
     if ( !(grdm->map.flags & XENMEM_RDM_ALL) && (sbdf != id) )
         return 0;
+
+    if ( !nr )
+        return 1;
 
     if ( grdm->used_entries < grdm->map.nr_entries )
     {
@@ -1048,63 +1120,138 @@ static long xatp_permission_check(struct domain *d, unsigned int space)
     return xsm_add_to_physmap(XSM_TARGET, current->domain, d);
 }
 
-static int acquire_grant_table(struct domain *d, unsigned int id,
-                               unsigned long frame,
-                               unsigned int nr_frames,
-                               xen_pfn_t mfn_list[])
+unsigned int ioreq_server_max_frames(const struct domain *d)
 {
-    unsigned int i = nr_frames;
+    unsigned int nr = 0;
 
-    /* Iterate backwards in case table needs to grow */
-    while ( i-- != 0 )
+#ifdef CONFIG_IOREQ_SERVER
+    if ( is_hvm_domain(d) )
+        /* One frame for the buf-ioreq ring, and one frame per 128 vcpus. */
+        nr = 1 + DIV_ROUND_UP(d->max_vcpus * sizeof(struct ioreq), PAGE_SIZE);
+#endif
+
+    return nr;
+}
+
+/*
+ * Return 0 on any kind of error.  Caller converts to -EINVAL.
+ *
+ * All nonzero values should be repeatable (i.e. derived from some fixed
+ * property of the domain), and describe the full resource (i.e. mapping the
+ * result of this call will be the entire resource).
+ */
+static unsigned int resource_max_frames(const struct domain *d,
+                                        unsigned int type, unsigned int id)
+{
+    switch ( type )
     {
-        mfn_t mfn = INVALID_MFN;
-        int rc;
+    case XENMEM_resource_grant_table:
+        return gnttab_resource_max_frames(d, id);
 
-        switch ( id )
-        {
-        case XENMEM_resource_grant_table_id_shared:
-            rc = gnttab_get_shared_frame(d, frame + i, &mfn);
-            break;
+    case XENMEM_resource_ioreq_server:
+        return ioreq_server_max_frames(d);
 
-        case XENMEM_resource_grant_table_id_status:
-            rc = gnttab_get_status_frame(d, frame + i, &mfn);
-            break;
+    case XENMEM_resource_vmtrace_buf:
+        return d->vmtrace_size >> PAGE_SHIFT;
 
-        default:
-            rc = -EINVAL;
-            break;
-        }
+    default:
+        return -EOPNOTSUPP;
+    }
+}
 
+static int acquire_ioreq_server(struct domain *d,
+                                unsigned int id,
+                                unsigned int frame,
+                                unsigned int nr_frames,
+                                xen_pfn_t mfn_list[])
+{
+#ifdef CONFIG_IOREQ_SERVER
+    ioservid_t ioservid = id;
+    unsigned int i;
+    int rc;
+
+    if ( !is_hvm_domain(d) )
+        return -EINVAL;
+
+    if ( id != (unsigned int)ioservid )
+        return -EINVAL;
+
+    for ( i = 0; i < nr_frames; i++ )
+    {
+        mfn_t mfn;
+
+        rc = ioreq_server_get_frame(d, id, frame + i, &mfn);
         if ( rc )
             return rc;
 
-        ASSERT(!mfn_eq(mfn, INVALID_MFN));
         mfn_list[i] = mfn_x(mfn);
     }
 
-    return 0;
+    /* Success.  Passed nr_frames back to the caller. */
+    return nr_frames;
+#else
+    return -EOPNOTSUPP;
+#endif
+}
+
+static int acquire_vmtrace_buf(
+    struct domain *d, unsigned int id, unsigned int frame,
+    unsigned int nr_frames, xen_pfn_t mfn_list[])
+{
+    const struct vcpu *v = domain_vcpu(d, id);
+    unsigned int i;
+    mfn_t mfn;
+
+    if ( !v )
+        return -ENOENT;
+
+    if ( !v->vmtrace.pg ||
+         (frame + nr_frames) > (d->vmtrace_size >> PAGE_SHIFT) )
+        return -EINVAL;
+
+    mfn = page_to_mfn(v->vmtrace.pg);
+
+    for ( i = 0; i < nr_frames; i++ )
+        mfn_list[i] = mfn_x(mfn) + frame + i;
+
+    return nr_frames;
+}
+
+/*
+ * Returns -errno on error, or positive in the range [1, nr_frames] on
+ * success.  Returning less than nr_frames contitutes a request for a
+ * continuation.  Callers can depend on frame + nr_frames not overflowing.
+ */
+static int _acquire_resource(
+    struct domain *d, unsigned int type, unsigned int id, unsigned int frame,
+    unsigned int nr_frames, xen_pfn_t mfn_list[])
+{
+    switch ( type )
+    {
+    case XENMEM_resource_grant_table:
+        return gnttab_acquire_resource(d, id, frame, nr_frames, mfn_list);
+
+    case XENMEM_resource_ioreq_server:
+        return acquire_ioreq_server(d, id, frame, nr_frames, mfn_list);
+
+    case XENMEM_resource_vmtrace_buf:
+        return acquire_vmtrace_buf(d, id, frame, nr_frames, mfn_list);
+
+    default:
+        return -EOPNOTSUPP;
+    }
 }
 
 static int acquire_resource(
-    XEN_GUEST_HANDLE_PARAM(xen_mem_acquire_resource_t) arg)
+    XEN_GUEST_HANDLE_PARAM(xen_mem_acquire_resource_t) arg,
+    unsigned long start_extent)
 {
     struct domain *d, *currd = current->domain;
     xen_mem_acquire_resource_t xmar;
-    /*
-     * The mfn_list and gfn_list (below) arrays are ok on stack for the
-     * moment since they are small, but if they need to grow in future
-     * use-cases then per-CPU arrays or heap allocations may be required.
-     */
-    xen_pfn_t mfn_list[32];
+    unsigned int max_frames;
     int rc;
 
-    /*
-     * FIXME: Until foreign pages inserted into the P2M are properly
-     *        reference counted, it is unsafe to allow mapping of
-     *        resource pages unless the caller is the hardware domain.
-     */
-    if ( paging_mode_translate(currd) && !is_hardware_domain(currd) )
+    if ( !arch_acquire_resource_check(currd) )
         return -EACCES;
 
     if ( copy_from_guest(&xmar, arg, 1) )
@@ -1113,21 +1260,18 @@ static int acquire_resource(
     if ( xmar.pad != 0 )
         return -EINVAL;
 
-    if ( guest_handle_is_null(xmar.frame_list) )
-    {
-        if ( xmar.nr_frames )
-            return -EINVAL;
-
-        xmar.nr_frames = ARRAY_SIZE(mfn_list);
-
-        if ( __copy_field_to_guest(arg, &xmar, nr_frames) )
-            return -EFAULT;
-
-        return 0;
-    }
-
-    if ( xmar.nr_frames > ARRAY_SIZE(mfn_list) )
-        return -E2BIG;
+    /*
+     * The ABI is rather unfortunate.  nr_frames (and therefore the total size
+     * of the resource) is 32bit, while frame (the offset within the resource
+     * we'd like to start at) is 64bit.
+     *
+     * Reject values oustide the of the range of nr_frames, as well as
+     * combinations of frame and nr_frame which overflow, to simplify the rest
+     * of the logic.
+     */
+    if ( (xmar.frame >> 32) ||
+         ((xmar.frame + xmar.nr_frames) >> 32) )
+        return -EINVAL;
 
     rc = rcu_lock_remote_domain_by_id(xmar.domid, &d);
     if ( rc )
@@ -1137,44 +1281,108 @@ static int acquire_resource(
     if ( rc )
         goto out;
 
-    switch ( xmar.type )
-    {
-    case XENMEM_resource_grant_table:
-        rc = acquire_grant_table(d, xmar.id, xmar.frame, xmar.nr_frames,
-                                 mfn_list);
-        break;
+    max_frames = resource_max_frames(d, xmar.type, xmar.id);
 
-    default:
-        rc = arch_acquire_resource(d, xmar.type, xmar.id, xmar.frame,
-                                   xmar.nr_frames, mfn_list);
-        break;
-    }
-
-    if ( rc )
+    rc = -EINVAL;
+    if ( !max_frames )
         goto out;
 
-    if ( !paging_mode_translate(currd) )
+    if ( guest_handle_is_null(xmar.frame_list) )
     {
-        if ( copy_to_guest(xmar.frame_list, mfn_list, xmar.nr_frames) )
-            rc = -EFAULT;
+        if ( xmar.nr_frames || start_extent )
+            goto out;
+
+        xmar.nr_frames = max_frames;
+        rc = __copy_field_to_guest(arg, &xmar, nr_frames) ? -EFAULT : 0;
+        goto out;
     }
-    else
-    {
-        xen_pfn_t gfn_list[ARRAY_SIZE(mfn_list)];
-        unsigned int i;
 
-        if ( copy_from_guest(gfn_list, xmar.frame_list, xmar.nr_frames) )
-            rc = -EFAULT;
+    /*
+     * Limiting nr_frames at (UINT_MAX >> MEMOP_EXTENT_SHIFT) isn't ideal.  If
+     * it ever becomes a practical problem, we can switch to mutating
+     * xmar.{frame,nr_frames,frame_list} in guest memory.
+     */
+    rc = -EINVAL;
+    if ( start_extent >= xmar.nr_frames ||
+         xmar.nr_frames > (UINT_MAX >> MEMOP_EXTENT_SHIFT) )
+        goto out;
 
-        for ( i = 0; !rc && i < xmar.nr_frames; i++ )
+    /* Adjust for work done on previous continuations. */
+    xmar.nr_frames -= start_extent;
+    xmar.frame += start_extent;
+    guest_handle_add_offset(xmar.frame_list, start_extent);
+
+    do {
+        /*
+         * Arbitrary size.  Not too much stack space, and a reasonable stride
+         * for continuation checks.
+         */
+        xen_pfn_t mfn_list[32];
+        unsigned int todo = MIN(ARRAY_SIZE(mfn_list), xmar.nr_frames), done;
+
+        rc = _acquire_resource(d, xmar.type, xmar.id, xmar.frame,
+                               todo, mfn_list);
+        if ( rc < 0 )
+            goto out;
+
+        done = rc;
+        rc = 0;
+        if ( done == 0 || done > todo )
         {
-            rc = set_foreign_p2m_entry(currd, gfn_list[i],
-                                       _mfn(mfn_list[i]));
-            /* rc should be -EIO for any iteration other than the first */
-            if ( rc && i )
-                rc = -EIO;
+            ASSERT_UNREACHABLE();
+            rc = -EINVAL;
+            goto out;
         }
-    }
+
+        /* Adjust guest frame_list appropriately. */
+        if ( !paging_mode_translate(currd) )
+        {
+            if ( copy_to_guest(xmar.frame_list, mfn_list, done) )
+                rc = -EFAULT;
+        }
+        else
+        {
+            xen_pfn_t gfn_list[ARRAY_SIZE(mfn_list)];
+            unsigned int i;
+
+            if ( copy_from_guest(gfn_list, xmar.frame_list, done) )
+                rc = -EFAULT;
+
+            for ( i = 0; !rc && i < done; i++ )
+            {
+                rc = set_foreign_p2m_entry(currd, d, gfn_list[i],
+                                           _mfn(mfn_list[i]));
+                /* rc should be -EIO for any iteration other than the first */
+                if ( rc && i )
+                    rc = -EIO;
+            }
+        }
+
+        if ( rc )
+            goto out;
+
+        xmar.nr_frames -= done;
+        xmar.frame += done;
+        guest_handle_add_offset(xmar.frame_list, done);
+        start_extent += done;
+
+        /*
+         * Explicit continuation request from _acquire_resource(), or we've
+         * still got more work to do.
+         */
+        if ( done < todo ||
+             (xmar.nr_frames && hypercall_preempt_check()) )
+        {
+            rc = hypercall_create_continuation(
+                __HYPERVISOR_memory_op, "lh",
+                XENMEM_acquire_resource | (start_extent << MEMOP_EXTENT_SHIFT),
+                arg);
+            goto out;
+        }
+
+    } while ( xmar.nr_frames );
+
+    rc = 0;
 
  out:
     rcu_unlock_domain(d);
@@ -1188,7 +1396,6 @@ long do_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
     long rc;
     struct xen_memory_reservation reservation;
     struct memop_args args;
-    domid_t domid;
     unsigned long start_extent = cmd >> MEMOP_EXTENT_SHIFT;
     int op = cmd & MEMOP_CMD_MASK;
 
@@ -1254,21 +1461,16 @@ long do_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
 
         rc = args.nr_done;
 
-        if ( args.preempted )
-            return hypercall_create_continuation(
-                __HYPERVISOR_memory_op, "lh",
-                op | (rc << MEMOP_EXTENT_SHIFT), arg);
-
 #ifdef CONFIG_X86
         if ( pv_shim && op == XENMEM_decrease_reservation )
-            /*
-             * Only call pv_shim_offline_memory when the hypercall has
-             * finished. Note that nr_done is used to cope in case the
-             * hypercall has failed and only part of the extents where
-             * processed.
-             */
-            pv_shim_offline_memory(args.nr_done, args.extent_order);
+            pv_shim_offline_memory(args.nr_done - start_extent,
+                                   args.extent_order);
 #endif
+
+        if ( args.preempted )
+           return hypercall_create_continuation(
+                __HYPERVISOR_memory_op, "lh",
+                op | (rc << MEMOP_EXTENT_SHIFT), arg);
 
         break;
 
@@ -1289,13 +1491,16 @@ long do_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
     case XENMEM_current_reservation:
     case XENMEM_maximum_reservation:
     case XENMEM_maximum_gpfn:
+    {
+        struct xen_memory_domain domain;
+
         if ( unlikely(start_extent) )
             return -EINVAL;
 
-        if ( copy_from_guest(&domid, arg, 1) )
+        if ( copy_from_guest(&domain, arg, 1) )
             return -EFAULT;
 
-        d = rcu_lock_domain_by_any_id(domid);
+        d = rcu_lock_domain_by_any_id(domain.domid);
         if ( d == NULL )
             return -ESRCH;
 
@@ -1323,6 +1528,7 @@ long do_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
         rcu_unlock_domain(d);
 
         break;
+    }
 
     case XENMEM_add_to_physmap:
     {
@@ -1641,7 +1847,8 @@ long do_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
 
     case XENMEM_acquire_resource:
         rc = acquire_resource(
-            guest_handle_cast(arg, xen_mem_acquire_resource_t));
+            guest_handle_cast(arg, xen_mem_acquire_resource_t),
+            start_extent);
         break;
 
     default:
@@ -1702,7 +1909,7 @@ int check_get_page_from_gfn(struct domain *d, gfn_t gfn, bool readonly,
 
     page = get_page_from_gfn(d, gfn_x(gfn), &p2mt, q);
 
-#ifdef CONFIG_HAS_MEM_PAGING
+#ifdef CONFIG_MEM_PAGING
     if ( p2m_is_paging(p2mt) )
     {
         if ( page )

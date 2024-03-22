@@ -9,6 +9,7 @@
  * GNU General Public License for more details.
  */
 
+#include <xen/compile.h>
 #include <xen/mm.h>
 #include <xen/sched.h>
 #include <xen/acpi.h>
@@ -42,17 +43,18 @@ static int __init acpi_iomem_deny_access(struct domain *d)
     status = acpi_get_table(ACPI_SIG_SPCR, 0,
                             (struct acpi_table_header **)&spcr);
 
-    if ( ACPI_FAILURE(status) )
+    if ( ACPI_SUCCESS(status) )
     {
-        printk("Failed to get SPCR table\n");
-        return -EINVAL;
+        mfn = spcr->serial_port.address >> PAGE_SHIFT;
+        /* Deny MMIO access for UART */
+        rc = iomem_deny_access(d, mfn, mfn + 1);
+        if ( rc )
+            return rc;
     }
-
-    mfn = spcr->serial_port.address >> PAGE_SHIFT;
-    /* Deny MMIO access for UART */
-    rc = iomem_deny_access(d, mfn, mfn + 1);
-    if ( rc )
-        return rc;
+    else
+    {
+        printk("Failed to get SPCR table, Xen console may be unavailable\n");
+    }
 
     /* Deny MMIO access for GIC regions */
     return gic_iomem_deny_access(d);
@@ -90,7 +92,7 @@ static int __init acpi_make_hypervisor_node(const struct kernel_info *kinfo,
                                             struct membank tbl_add[])
 {
     const char compat[] =
-        "xen,xen-"__stringify(XEN_VERSION)"."__stringify(XEN_SUBVERSION)"\0"
+        "xen,xen-" XEN_VERSION_STRING "\0"
         "xen,xen";
     int res;
     /* Convenience alias */

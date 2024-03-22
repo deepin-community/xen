@@ -7,10 +7,6 @@
 #include <xen/types.h>
 #include <xen/xmalloc.h>
 
-#define STATIC
-#define INIT __init
-#define INITDATA __initdata
-
 #define malloc xmalloc_bytes
 #define free xfree
 
@@ -19,9 +15,9 @@
 
 #else
 
-#define STATIC static
-#define INIT
-#define INITDATA
+#undef __init /* tools/libs/guest/xg_private.h has its own one */
+#define __init
+#define __initdata
 
 #define large_malloc malloc
 #define large_free free

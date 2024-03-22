@@ -4,9 +4,11 @@
  * Copyright (c) 2003-2004, K A Fraser (University of Cambridge)
  */
 
+#define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #define XC_WANT_COMPAT_MAP_FOREIGN_API
 #include <xenctrl.h>
+#include <xenguest.h>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -17,7 +19,6 @@
 #include <arpa/inet.h>
 
 #include <xen/elfnote.h>
-#include "xc_dom.h"
 #include <xen/hvm/hvm_info_table.h>
 #include <xen/hvm/params.h>
 
@@ -116,7 +117,7 @@ static PyObject *pyxc_domain_create(XcObject *self,
                                     PyObject *args,
                                     PyObject *kwds)
 {
-    uint32_t dom = 0, target = 0;
+    uint32_t dom = 0, target = 0, max_grant_version = 2;
     int      ret;
     size_t   i;
     PyObject *pyhandle = NULL;
@@ -132,12 +133,13 @@ static PyObject *pyxc_domain_create(XcObject *self,
     };
 
     static char *kwd_list[] = { "domid", "ssidref", "handle", "flags",
-                                "target", "max_vcpus", NULL };
+                                "target", "max_vcpus", "max_grant_version",
+                                NULL };
 
-    if ( !PyArg_ParseTupleAndKeywords(args, kwds, "|iiOiii", kwd_list,
+    if ( !PyArg_ParseTupleAndKeywords(args, kwds, "|iiOiiii", kwd_list,
                                       &dom, &config.ssidref, &pyhandle,
                                       &config.flags, &target,
-                                      &config.max_vcpus) )
+                                      &config.max_vcpus, &max_grant_version) )
         return NULL;
     if ( pyhandle != NULL )
     {
@@ -162,6 +164,7 @@ static PyObject *pyxc_domain_create(XcObject *self,
 #else
 #error Architecture not supported
 #endif
+    config.grant_opts = XEN_DOMCTL_GRANT_version(max_grant_version);
 
     if ( (ret = xc_domain_create(self->xc_handle, &dom, &config)) < 0 )
         return pyxc_error_to_exception(self->xc_handle);
@@ -1192,8 +1195,7 @@ static PyObject *pyxc_shadow_control(PyObject *self,
                                       &dom, &op) )
         return NULL;
     
-    if ( xc_shadow_control(xc->xc_handle, dom, op, NULL, 0, NULL, 0, NULL) 
-         < 0 )
+    if ( xc_shadow_control(xc->xc_handle, dom, op, NULL, 0) < 0 )
         return pyxc_error_to_exception(xc->xc_handle);
     
     Py_INCREF(zero);
@@ -1208,7 +1210,7 @@ static PyObject *pyxc_shadow_mem_control(PyObject *self,
     int op;
     uint32_t dom;
     int mbarg = -1;
-    unsigned long mb;
+    unsigned int mb;
 
     static char *kwd_list[] = { "dom", "mb", NULL };
 
@@ -1223,7 +1225,7 @@ static PyObject *pyxc_shadow_mem_control(PyObject *self,
         mb = mbarg;
         op = XEN_DOMCTL_SHADOW_OP_SET_ALLOCATION;
     }
-    if ( xc_shadow_control(xc->xc_handle, dom, op, NULL, 0, &mb, 0, NULL) < 0 )
+    if ( xc_shadow_control(xc->xc_handle, dom, op, &mb, 0) < 0 )
         return pyxc_error_to_exception(xc->xc_handle);
     
     mbarg = mb;
@@ -1463,20 +1465,6 @@ static PyObject *pyxc_domain_set_tsc_info(XcObject *self, PyObject *args)
         return NULL;
 
     if (xc_domain_set_tsc_info(self->xc_handle, dom, tsc_mode, 0, 0, 0) != 0)
-        return pyxc_error_to_exception(self->xc_handle);
-
-    Py_INCREF(zero);
-    return zero;
-}
-
-static PyObject *pyxc_domain_disable_migrate(XcObject *self, PyObject *args)
-{
-    uint32_t dom;
-
-    if (!PyArg_ParseTuple(args, "i", &dom))
-        return NULL;
-
-    if (xc_domain_disable_migrate(self->xc_handle, dom) != 0)
         return pyxc_error_to_exception(self->xc_handle);
 
     Py_INCREF(zero);
@@ -1787,7 +1775,7 @@ static PyObject *pyflask_load(PyObject *self, PyObject *args, PyObject *kwds)
 {
     xc_interface *xc_handle;
     char *policy;
-    uint32_t len;
+    Py_ssize_t len;
     int ret;
 
     static char *kwd_list[] = { "policy", NULL };
@@ -2304,13 +2292,6 @@ static PyMethodDef pyxc_methods[] = {
       " dom        [int]: Domain whose TSC mode is being set.\n"
       " tsc_mode   [int]: 0=default (monotonic, but native where possible)\n"
       "                   1=always emulate 2=never emulate\n"
-      "Returns: [int] 0 on success; -1 on error.\n" },
-
-    { "domain_disable_migrate",
-      (PyCFunction)pyxc_domain_disable_migrate,
-      METH_VARARGS, "\n"
-      "Marks domain as non-migratable AND non-restoreable\n"
-      " dom        [int]: Domain whose TSC mode is being set.\n"
       "Returns: [int] 0 on success; -1 on error.\n" },
 
     { "domain_send_trigger",

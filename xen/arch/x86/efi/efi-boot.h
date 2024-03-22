@@ -86,10 +86,12 @@ static void __init efi_arch_relocate_image(unsigned long delta)
                 }
                 break;
             case PE_BASE_RELOC_DIR64:
-                if ( in_page_tables(addr) )
-                    blexit(L"Unexpected relocation type");
                 if ( delta )
+                {
                     *(u64 *)addr += delta;
+                    if ( in_page_tables(addr) )
+                        *(u64 *)addr += xen_phys_start;
+                }
                 break;
             default:
                 blexit(L"Unsupported relocation type");
@@ -183,7 +185,9 @@ static void __init efi_arch_process_memory_map(EFI_SYSTEM_TABLE *SystemTable,
             /* fall through */
         case EfiLoaderCode:
         case EfiLoaderData:
-            if ( desc->Attribute & EFI_MEMORY_WB )
+            if ( desc->Attribute & EFI_MEMORY_RUNTIME )
+                type = E820_RESERVED;
+            else if ( desc->Attribute & EFI_MEMORY_WB )
                 type = E820_RAM;
             else
         case EfiUnusableMemory:
@@ -272,13 +276,20 @@ static void __init noreturn efi_arch_post_exit_boot(void)
     unreachable();
 }
 
-static void __init efi_arch_cfg_file_early(EFI_FILE_HANDLE dir_handle, char *section)
+static void __init efi_arch_cfg_file_early(const EFI_LOADED_IMAGE *image,
+                                           EFI_FILE_HANDLE dir_handle,
+                                           const char *section)
 {
 }
 
-static void __init efi_arch_cfg_file_late(EFI_FILE_HANDLE dir_handle, char *section)
+static void __init efi_arch_cfg_file_late(const EFI_LOADED_IMAGE *image,
+                                          EFI_FILE_HANDLE dir_handle,
+                                          const char *section)
 {
     union string name;
+
+    if ( read_section(image, L"ucode", &ucode, NULL) )
+        return;
 
     name.s = get_value(&cfg, section, "ucode");
     if ( !name.s )
@@ -294,7 +305,7 @@ static void __init efi_arch_cfg_file_late(EFI_FILE_HANDLE dir_handle, char *sect
 
 static void __init efi_arch_handle_cmdline(CHAR16 *image_name,
                                            CHAR16 *cmdline_options,
-                                           char *cfgfile_options)
+                                           const char *cfgfile_options)
 {
     union string name;
 
@@ -495,6 +506,13 @@ static void __init efi_arch_video_init(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop,
 #ifdef CONFIG_VIDEO
     int bpp = 0;
 
+    if ( !gop->Mode->FrameBufferBase || !mode_info->HorizontalResolution ||
+         !mode_info->VerticalResolution )
+    {
+        PrintErr(L"Invalid Frame Buffer configuration found\r\n");
+        return;
+    }
+
     switch ( mode_info->PixelFormat )
     {
     case PixelRedGreenBlueReserved8BitPerColor:
@@ -559,6 +577,57 @@ static void __init efi_arch_video_init(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop,
 #endif
 }
 
+#ifdef CONFIG_VIDEO
+static bool __init copy_edid(const void *buf, unsigned int size)
+{
+    /*
+     * Be conservative - for both undersized and oversized blobs it is unclear
+     * what to actually do with them. The more that unlike the VESA BIOS
+     * interface we also have no associated "capabilities" value (which might
+     * carry a hint as to possible interpretation).
+     */
+    if ( size != ARRAY_SIZE(boot_edid_info) )
+        return false;
+
+    memcpy(boot_edid_info, buf, size);
+    boot_edid_caps = 0;
+
+    return true;
+}
+#endif
+
+static void __init efi_arch_edid(EFI_HANDLE gop_handle)
+{
+#ifdef CONFIG_VIDEO
+    static EFI_GUID __initdata active_guid = EFI_EDID_ACTIVE_PROTOCOL_GUID;
+    static EFI_GUID __initdata discovered_guid = EFI_EDID_DISCOVERED_PROTOCOL_GUID;
+    EFI_EDID_ACTIVE_PROTOCOL *active_edid;
+    EFI_EDID_DISCOVERED_PROTOCOL *discovered_edid;
+    EFI_STATUS status;
+
+    status = efi_bs->OpenProtocol(gop_handle, &active_guid,
+                                  (void **)&active_edid, efi_ih, NULL,
+                                  EFI_OPEN_PROTOCOL_GET_PROTOCOL);
+    if ( status == EFI_SUCCESS &&
+         copy_edid(active_edid->Edid, active_edid->SizeOfEdid) )
+        return;
+
+    /*
+     * In case an override is in place which doesn't fit copy_edid(), also try
+     * obtaining the discovered EDID in the hope that it's better than nothing.
+     *
+     * Note that attempting to use the information in
+     * EFI_EDID_DISCOVERED_PROTOCOL when there's an override provided by
+     * EFI_EDID_ACTIVE_PROTOCOL might lead to issues.
+     */
+    status = efi_bs->OpenProtocol(gop_handle, &discovered_guid,
+                                  (void **)&discovered_edid, efi_ih, NULL,
+                                  EFI_OPEN_PROTOCOL_GET_PROTOCOL);
+    if ( status == EFI_SUCCESS )
+        copy_edid(discovered_edid->Edid, discovered_edid->SizeOfEdid);
+#endif
+}
+
 static void __init efi_arch_memory_setup(void)
 {
     unsigned int i;
@@ -617,10 +686,10 @@ static void __init efi_arch_memory_setup(void)
      * appropriate l2 slots to map.
      */
 #define l2_4G_offset(a)                                                 \
-    (((UINTN)(a) >> L2_PAGETABLE_SHIFT) & (4 * L2_PAGETABLE_ENTRIES - 1))
+    (((a) >> L2_PAGETABLE_SHIFT) & (4 * L2_PAGETABLE_ENTRIES - 1))
 
-    for ( i  = l2_4G_offset(_start);
-          i <= l2_4G_offset(_end - 1); ++i )
+    for ( i  = l2_4G_offset((UINTN)_start);
+          i <= l2_4G_offset((UINTN)_end - 1); ++i )
     {
         l2_pgentry_t pte = l2e_from_paddr(i << L2_PAGETABLE_SHIFT,
                                           __PAGE_HYPERVISOR | _PAGE_PSE);
@@ -635,8 +704,9 @@ static void __init efi_arch_memory_setup(void)
 #undef l2_4G_offset
 }
 
-static void __init efi_arch_handle_module(struct file *file, const CHAR16 *name,
-                                          char *options)
+static void __init efi_arch_handle_module(const struct file *file,
+                                          const CHAR16 *name,
+                                          const char *options)
 {
     union string local_name;
     void *ptr;
@@ -675,20 +745,20 @@ static void __init efi_arch_cpu(void)
 
     boot_tsc_stamp = rdtsc();
 
-    caps[cpufeat_word(X86_FEATURE_HYPERVISOR)] = cpuid_ecx(1);
+    caps[FEATURESET_1c] = cpuid_ecx(1);
 
     if ( (eax >> 16) == 0x8000 && eax > 0x80000000 )
     {
-        caps[cpufeat_word(X86_FEATURE_SYSCALL)] = cpuid_edx(0x80000001);
+        caps[FEATURESET_e1d] = cpuid_edx(0x80000001);
 
         if ( cpu_has_nx )
-            trampoline_efer |= EFER_NX;
+            trampoline_efer |= EFER_NXE;
     }
 }
 
 static void __init efi_arch_blexit(void)
 {
-    if ( ucode.addr )
+    if ( ucode.need_to_free )
         efi_bs->FreePages(ucode.addr, PFN_UP(ucode.size));
 }
 
@@ -699,7 +769,7 @@ static void __init efi_arch_halt(void)
         halt();
 }
 
-static void __init efi_arch_load_addr_check(EFI_LOADED_IMAGE *loaded_image)
+static void __init efi_arch_load_addr_check(const EFI_LOADED_IMAGE *loaded_image)
 {
     xen_phys_start = (UINTN)loaded_image->ImageBase;
     if ( (xen_phys_start + loaded_image->ImageSize - 1) >> 32 )
@@ -719,6 +789,7 @@ static void __init efi_arch_flush_dcache_area(const void *vaddr, UINTN size) { }
 void __init efi_multiboot2(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
 {
     EFI_GRAPHICS_OUTPUT_PROTOCOL *gop;
+    EFI_HANDLE gop_handle;
     UINTN cols, gop_mode = ~0, rows;
 
     __set_bit(EFI_BOOT, &efi_flags);
@@ -732,10 +803,14 @@ void __init efi_multiboot2(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
                            &cols, &rows) == EFI_SUCCESS )
         efi_arch_console_init(cols, rows);
 
-    gop = efi_get_gop();
+    gop = efi_get_gop(&gop_handle);
 
     if ( gop )
+    {
         gop_mode = efi_find_gop_mode(gop, 0, 0, 0);
+
+        efi_arch_edid(gop_handle);
+    }
 
     efi_arch_edd();
     efi_arch_cpu();
@@ -747,6 +822,8 @@ void __init efi_multiboot2(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
 
     if ( gop )
         efi_set_gop_mode(gop, gop_mode);
+
+    efi_relocate_esrt(SystemTable);
 
     efi_exit_boot(ImageHandle, SystemTable);
 }

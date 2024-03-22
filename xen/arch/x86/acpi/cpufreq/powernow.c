@@ -24,21 +24,14 @@
 #include <xen/types.h>
 #include <xen/errno.h>
 #include <xen/init.h>
-#include <xen/delay.h>
 #include <xen/cpumask.h>
-#include <xen/timer.h>
 #include <xen/xmalloc.h>
-#include <asm/bug.h>
 #include <asm/msr.h>
-#include <asm/io.h>
 #include <asm/processor.h>
 #include <asm/cpufeature.h>
 #include <acpi/acpi.h>
 #include <acpi/cpufreq/cpufreq.h>
 
-#define CPUID_FREQ_VOLT_CAPABILITIES    0x80000007
-#define CPB_CAPABLE             0x00000200
-#define USE_HW_PSTATE           0x00000080
 #define HW_PSTATE_MASK          0x00000007
 #define HW_PSTATE_VALID_MASK    0x80000000
 #define HW_PSTATE_MAX_MASK      0x000000f0
@@ -51,12 +44,12 @@
 
 #define ARCH_CPU_FLAG_RESUME	1
 
-static void transition_pstate(void *pstate)
+static void cf_check transition_pstate(void *pstate)
 {
     wrmsrl(MSR_PSTATE_CTRL, *(unsigned int *)pstate);
 }
 
-static void update_cpb(void *data)
+static void cf_check update_cpb(void *data)
 {
     struct cpufreq_policy *policy = data;
 
@@ -74,8 +67,8 @@ static void update_cpb(void *data)
     }
 }
 
-static int powernow_cpufreq_update (int cpuid,
-				     struct cpufreq_policy *policy)
+static int cf_check powernow_cpufreq_update(
+    int cpuid, struct cpufreq_policy *policy)
 {
     if (!cpumask_test_cpu(cpuid, &cpu_online_map))
         return -EINVAL;
@@ -85,8 +78,9 @@ static int powernow_cpufreq_update (int cpuid,
     return 0;
 }
 
-static int powernow_cpufreq_target(struct cpufreq_policy *policy,
-                               unsigned int target_freq, unsigned int relation)
+static int cf_check powernow_cpufreq_target(
+    struct cpufreq_policy *policy,
+    unsigned int target_freq, unsigned int relation)
 {
     struct acpi_cpufreq_data *data = cpufreq_drv_data[policy->cpu];
     struct processor_performance *perf;
@@ -172,7 +166,7 @@ struct amd_cpu_data {
     u32 max_hw_pstate;
 };
 
-static void get_cpu_data(void *arg)
+static void cf_check get_cpu_data(void *arg)
 {
     struct amd_cpu_data *data = arg;
     struct processor_performance *perf = data->perf;
@@ -187,7 +181,7 @@ static void get_cpu_data(void *arg)
         amd_fixup_frequency(&perf->states[i]);
 }
 
-static int powernow_cpufreq_verify(struct cpufreq_policy *policy)
+static int cf_check powernow_cpufreq_verify(struct cpufreq_policy *policy)
 {
     struct acpi_cpufreq_data *data;
     struct processor_performance *perf;
@@ -204,28 +198,7 @@ static int powernow_cpufreq_verify(struct cpufreq_policy *policy)
     return cpufreq_frequency_table_verify(policy, data->freq_table);
 }
 
-static void feature_detect(void *info)
-{
-    struct cpufreq_policy *policy = info;
-    unsigned int edx;
-
-    if ( cpu_has_aperfmperf )
-    {
-        policy->aperf_mperf = 1;
-        cpufreq_driver.getavg = get_measured_perf;
-    }
-
-    edx = cpuid_edx(CPUID_FREQ_VOLT_CAPABILITIES);
-    if ((edx & CPB_CAPABLE) == CPB_CAPABLE) {
-        policy->turbo = CPUFREQ_TURBO_ENABLED;
-        if (cpufreq_verbose)
-            printk(XENLOG_INFO
-                   "CPU%u: Core Boost/Turbo detected and enabled\n",
-                   smp_processor_id());
-    }
-}
-
-static int powernow_cpufreq_cpu_init(struct cpufreq_policy *policy)
+static int cf_check powernow_cpufreq_cpu_init(struct cpufreq_policy *policy)
 {
     unsigned int i;
     unsigned int valid_states = 0;
@@ -310,9 +283,9 @@ static int powernow_cpufreq_cpu_init(struct cpufreq_policy *policy)
     if (result)
         goto err_freqfree;
 
-    if (c->cpuid_level >= 6)
-        on_selected_cpus(cpumask_of(cpu), feature_detect, policy, 1);
-      
+    if ( cpu_has(c, X86_FEATURE_CPB) )
+        policy->turbo = CPUFREQ_TURBO_ENABLED;
+
     /*
      * the first call to ->target() should result in us actually
      * writing something to the appropriate registers.
@@ -331,7 +304,7 @@ err_unreg:
     return result;
 }
 
-static int powernow_cpufreq_cpu_exit(struct cpufreq_policy *policy)
+static int cf_check powernow_cpufreq_cpu_exit(struct cpufreq_policy *policy)
 {
     struct acpi_cpufreq_data *data = cpufreq_drv_data[policy->cpu];
 
@@ -353,25 +326,10 @@ static const struct cpufreq_driver __initconstrel powernow_cpufreq_driver = {
     .update = powernow_cpufreq_update
 };
 
-unsigned int __init powernow_register_driver()
+unsigned int __init powernow_register_driver(void)
 {
-    unsigned int i, ret = 0;
+    if ( !cpu_has_hw_pstate )
+        return -ENODEV;
 
-    for_each_online_cpu(i) {
-        struct cpuinfo_x86 *c = &cpu_data[i];
-        if (!(c->x86_vendor & (X86_VENDOR_AMD | X86_VENDOR_HYGON)))
-            ret = -ENODEV;
-        else
-        {
-            u32 eax, ebx, ecx, edx;
-            cpuid(CPUID_FREQ_VOLT_CAPABILITIES, &eax, &ebx, &ecx, &edx);
-            if ((edx & USE_HW_PSTATE) != USE_HW_PSTATE)
-                ret = -ENODEV;
-        }
-        if (ret)
-            return ret;
-    }
-
-    ret = cpufreq_register_driver(&powernow_cpufreq_driver);
-    return ret;
+    return cpufreq_register_driver(&powernow_cpufreq_driver);
 }

@@ -134,4 +134,20 @@ void arch_iommu_domain_destroy(struct domain *d)
 
 void __hwdom_init arch_iommu_hwdom_init(struct domain *d)
 {
+    /* Set to false options not supported on ARM. */
+    if ( iommu_hwdom_inclusive )
+        printk(XENLOG_WARNING "map-inclusive dom0-iommu option is not supported on ARM\n");
+    iommu_hwdom_inclusive = false;
+    if ( iommu_hwdom_reserved == 1 )
+        printk(XENLOG_WARNING "map-reserved dom0-iommu option is not supported on ARM\n");
+    iommu_hwdom_reserved = 0;
+}
+
+/*
+ * Unlike x86, Arm doesn't support mem-sharing, mem-paging and log-dirty (yet).
+ * So there is no restriction to use the IOMMU.
+ */
+bool arch_iommu_use_permitted(const struct domain *d)
+{
+    return true;
 }

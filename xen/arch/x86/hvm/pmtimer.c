@@ -124,7 +124,7 @@ static void pmt_update_time(PMTState *s)
 /* This function should be called soon after each time the MSB of the
  * pmtimer register rolls over, to make sure we update the status
  * registers and SCI at least once per rollover */
-static void pmt_timer_callback(void *opaque)
+static void cf_check pmt_timer_callback(void *opaque)
 {
     PMTState *s = opaque;
     uint32_t pmt_cycles_until_flip;
@@ -152,7 +152,7 @@ static void pmt_timer_callback(void *opaque)
 }
 
 /* Handle port I/O to the PM1a_STS and PM1a_EN registers */
-static int handle_evt_io(
+static int cf_check handle_evt_io(
     int dir, unsigned int port, unsigned int bytes, uint32_t *val)
 {
     struct vcpu *v = current;
@@ -216,7 +216,7 @@ static int handle_evt_io(
 
 
 /* Handle port I/O to the TMR_VAL register */
-static int handle_pmt_io(
+static int cf_check handle_pmt_io(
     int dir, unsigned int port, unsigned int bytes, uint32_t *val)
 {
     struct vcpu *v = current;
@@ -249,7 +249,7 @@ static int handle_pmt_io(
     return X86EMUL_OKAY;
 }
 
-static int acpi_save(struct vcpu *v, hvm_domain_context_t *h)
+static int cf_check acpi_save(struct vcpu *v, hvm_domain_context_t *h)
 {
     struct domain *d = v->domain;
     struct hvm_hw_acpi *acpi = &d->arch.hvm.acpi;
@@ -281,7 +281,7 @@ static int acpi_save(struct vcpu *v, hvm_domain_context_t *h)
     return rc;
 }
 
-static int acpi_load(struct domain *d, hvm_domain_context_t *h)
+static int cf_check acpi_load(struct domain *d, hvm_domain_context_t *h)
 {
     struct hvm_hw_acpi *acpi = &d->arch.hvm.acpi;
     PMTState *s = &d->arch.hvm.pl_time->vpmt;

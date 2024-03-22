@@ -19,6 +19,7 @@
 #include <asm/io_apic.h>
 #include <asm/p2m.h>
 #include <asm/setup.h>
+#include <asm/spec_ctrl.h>
 
 struct memsize {
     long nr_pages;
@@ -114,7 +115,7 @@ static int __init parse_amt(const char *s, const char **ps, struct memsize *sz)
     return 0;
 }
 
-static int __init parse_dom0_mem(const char *s)
+static int __init cf_check parse_dom0_mem(const char *s)
 {
     int ret;
 
@@ -143,7 +144,7 @@ custom_param("dom0_mem", parse_dom0_mem);
 static unsigned int __initdata opt_dom0_max_vcpus_min = 1;
 static unsigned int __initdata opt_dom0_max_vcpus_max = UINT_MAX;
 
-static int __init parse_dom0_max_vcpus(const char *s)
+static int __init cf_check parse_dom0_max_vcpus(const char *s)
 {
     if ( *s == '-' )                   /* -M */
         opt_dom0_max_vcpus_max = simple_strtoul(s + 1, &s, 0);
@@ -167,32 +168,39 @@ static __initdata unsigned int dom0_pxms[MAX_NUMNODES] =
     { [0 ... MAX_NUMNODES - 1] = ~0 };
 bool __initdata dom0_affinity_relaxed;
 
-static int __init parse_dom0_nodes(const char *s)
+static int __init cf_check parse_dom0_nodes(const char *s)
 {
+    const char *ss;
+    int rc = 0;
+
     do {
+        ss = strchr(s, ',');
+        if ( !ss )
+            ss = strchr(s, '\0');
+
         if ( isdigit(*s) )
         {
-            if ( dom0_nr_pxms >= ARRAY_SIZE(dom0_pxms) )
-                return -E2BIG;
-            dom0_pxms[dom0_nr_pxms] = simple_strtoul(s, &s, 0);
-            if ( !*s || *s == ',' )
-                ++dom0_nr_pxms;
-        }
-        else if ( !strncmp(s, "relaxed", 7) && (!s[7] || s[7] == ',') )
-        {
-            dom0_affinity_relaxed = true;
-            s += 7;
-        }
-        else if ( !strncmp(s, "strict", 6) && (!s[6] || s[6] == ',') )
-        {
-            dom0_affinity_relaxed = false;
-            s += 6;
-        }
-        else
-            return -EINVAL;
-    } while ( *s++ == ',' );
+            const char *endp;
 
-    return s[-1] ? -EINVAL : 0;
+            if ( dom0_nr_pxms >= ARRAY_SIZE(dom0_pxms) )
+                rc = -E2BIG;
+            else if ( (dom0_pxms[dom0_nr_pxms] = simple_strtoul(s, &endp, 0),
+                       endp != ss) )
+                rc = -EINVAL;
+            else
+                dom0_nr_pxms++;
+        }
+        else if ( !cmdline_strcmp(s, "relaxed") )
+            dom0_affinity_relaxed = true;
+        else if ( !cmdline_strcmp(s, "strict") )
+            dom0_affinity_relaxed = false;
+        else
+            rc = -EINVAL;
+
+        s = ss + 1;
+    } while ( *ss );
+
+    return rc;
 }
 custom_param("dom0_nodes", parse_dom0_nodes);
 
@@ -256,8 +264,9 @@ bool __initdata opt_dom0_shadow;
 #endif
 bool __initdata opt_dom0_pvh = !IS_ENABLED(CONFIG_PV);
 bool __initdata opt_dom0_verbose = IS_ENABLED(CONFIG_VERBOSE_DEBUG);
+bool __initdata opt_dom0_msr_relaxed;
 
-static int __init parse_dom0_param(const char *s)
+static int __init cf_check parse_dom0_param(const char *s)
 {
     const char *ss;
     int rc = 0;
@@ -282,6 +291,8 @@ static int __init parse_dom0_param(const char *s)
         else if ( IS_ENABLED(CONFIG_PV) &&
                   (val = parse_boolean("cpuid-faulting", s, ss)) >= 0 )
             opt_dom0_cpuid_faulting = val;
+        else if ( (val = parse_boolean("msr-relaxed", s, ss)) >= 0 )
+            opt_dom0_msr_relaxed = val;
         else
             rc = -EINVAL;
 
@@ -303,20 +314,33 @@ unsigned int __initdata dom0_memflags = MEMF_no_dma|MEMF_exact_node;
 unsigned long __init dom0_paging_pages(const struct domain *d,
                                        unsigned long nr_pages)
 {
-    /* Copied from: libxl_get_required_shadow_memory() */
+    /* Keep in sync with libxl__get_required_paging_memory(). */
     unsigned long memkb = nr_pages * (PAGE_SIZE / 1024);
 
-    memkb = 4 * (256 * d->max_vcpus + 2 * (memkb / 1024));
+    memkb = 4 * (256 * d->max_vcpus +
+                 (is_pv_domain(d) ? opt_dom0_shadow || opt_pv_l1tf_hwdom
+                                  : 1 + opt_dom0_shadow) *
+                 (memkb / 1024));
 
-    return ((memkb + 1023) / 1024) << (20 - PAGE_SHIFT);
+    return DIV_ROUND_UP(memkb, 1024) << (20 - PAGE_SHIFT);
+}
+
+
+/*
+ * If allocation isn't specified, reserve 1/16th of available memory for
+ * things like DMA buffers. This reservation is clamped to a maximum of 128MB.
+ */
+static unsigned long __init default_nr_pages(unsigned long avail)
+{
+    return avail - (pv_shim ? pv_shim_mem(avail)
+                            : min(avail / 16, 128UL << (20 - PAGE_SHIFT)));
 }
 
 unsigned long __init dom0_compute_nr_pages(
     struct domain *d, struct elf_dom_parms *parms, unsigned long initrd_len)
 {
     nodeid_t node;
-    unsigned long avail = 0, nr_pages, min_pages, max_pages;
-    bool need_paging;
+    unsigned long avail = 0, nr_pages, min_pages, max_pages, iommu_pages = 0;
 
     /* The ordering of operands is to work around a clang5 issue. */
     if ( CONFIG_DOM0_MEM[0] && !dom0_mem_set )
@@ -334,52 +358,46 @@ unsigned long __init dom0_compute_nr_pages(
         avail -= d->max_vcpus - 1;
 
     /* Reserve memory for iommu_dom0_init() (rough estimate). */
-    if ( is_iommu_enabled(d) )
+    if ( is_iommu_enabled(d) && !iommu_hwdom_passthrough )
     {
         unsigned int s;
 
         for ( s = 9; s < BITS_PER_LONG; s += 9 )
-            avail -= max_pdx >> s;
+            iommu_pages += max_pdx >> s;
+
+        avail -= iommu_pages;
     }
 
-    need_paging = is_hvm_domain(d) &&
-        (!iommu_use_hap_pt(d) || !paging_mode_hap(d));
-    for ( ; ; need_paging = false )
+    if ( paging_mode_enabled(d) || opt_dom0_shadow || opt_pv_l1tf_hwdom )
     {
-        nr_pages = get_memsize(&dom0_size, avail);
-        min_pages = get_memsize(&dom0_min_size, avail);
-        max_pages = get_memsize(&dom0_max_size, avail);
+        unsigned long cpu_pages;
+
+        nr_pages = get_memsize(&dom0_size, avail) ?: default_nr_pages(avail);
 
         /*
-         * If allocation isn't specified, reserve 1/16th of available memory
-         * for things like DMA buffers. This reservation is clamped to a
-         * maximum of 128MB.
+         * Clamp according to min/max limits and available memory
+         * (preliminary).
          */
-        if ( !nr_pages )
-        {
-            nr_pages = avail - (pv_shim ? pv_shim_mem(avail)
-                                 : min(avail / 16, 128UL << (20 - PAGE_SHIFT)));
-            if ( is_hvm_domain(d) && !need_paging )
-                /*
-                 * Temporary workaround message until internal (paging) memory
-                 * accounting required to build a pvh dom0 is improved.
-                 */
-                printk("WARNING: PVH dom0 without dom0_mem set is still unstable. "
-                       "If you get crashes during boot, try adding a dom0_mem parameter\n");
-        }
-
-
-        /* Clamp according to min/max limits and available memory. */
-        nr_pages = max(nr_pages, min_pages);
-        nr_pages = min(nr_pages, max_pages);
+        nr_pages = max(nr_pages, get_memsize(&dom0_min_size, avail));
+        nr_pages = min(nr_pages, get_memsize(&dom0_max_size, avail));
         nr_pages = min(nr_pages, avail);
 
-        if ( !need_paging )
-            break;
+        cpu_pages = dom0_paging_pages(d, nr_pages);
 
-        /* Reserve memory for shadow or HAP. */
-        avail -= dom0_paging_pages(d, nr_pages);
+        if ( !iommu_use_hap_pt(d) )
+            avail -= cpu_pages;
+        else if ( cpu_pages > iommu_pages )
+            avail -= cpu_pages - iommu_pages;
     }
+
+    nr_pages = get_memsize(&dom0_size, avail) ?: default_nr_pages(avail);
+    min_pages = get_memsize(&dom0_min_size, avail);
+    max_pages = get_memsize(&dom0_max_size, avail);
+
+    /* Clamp according to min/max limits and available memory (final). */
+    nr_pages = max(nr_pages, min_pages);
+    nr_pages = min(nr_pages, max_pages);
+    nr_pages = min(nr_pages, avail);
 
     if ( is_pv_domain(d) &&
          (parms->p2m_base == UNSET_ADDR) && !memsize_gt_zero(&dom0_size) &&
@@ -521,8 +539,11 @@ int __init dom0_setup_permissions(struct domain *d)
                                          MSI_ADDR_DEST_ID_MASK));
     /* HyperTransport range. */
     if ( boot_cpu_data.x86_vendor & (X86_VENDOR_AMD | X86_VENDOR_HYGON) )
-        rc |= iomem_deny_access(d, paddr_to_pfn(0xfdULL << 32),
-                                paddr_to_pfn((1ULL << 40) - 1));
+    {
+        mfn = paddr_to_pfn(1UL <<
+                           (boot_cpu_data.x86 < 0x17 ? 40 : paddr_bits));
+        rc |= iomem_deny_access(d, mfn - paddr_to_pfn(3UL << 32), mfn - 1);
+    }
 
     /* Remove access to E820_UNUSABLE I/O regions above 1MB. */
     for ( i = 0; i < e820.nr_map; i++ )

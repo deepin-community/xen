@@ -65,9 +65,6 @@ understands.
 - CONTAINER_NO_PULL: If set to 1, the script will not pull from docker hub.
   This is useful when testing container locally.
 
-- XEN_CONFIG_EXPERT: If this is defined in your shell it will be
-  automatically passed through to the container.
-
 If your docker host has Linux kernel > 4.11, and you want to use containers
 that run old glibc (for example, CentOS 6 or SLES11SP4), you may need to add
 
@@ -91,5 +88,30 @@ you have access to do so and have your Docker logged into the registry.
 To login you must run `docker login registry.gitlab.com`. For more
 information see the [registry help].
 
+This example shows how to refresh a container for a rolling release
+such as openSUSE Tumbleweed. Login with the gitlab.com credentials.
+
+```
+docker login registry.gitlab.com/xen-project/xen
+make -C automation/build suse/opensuse-tumbleweed
+env CONTAINER_NO_PULL=1 \
+  CONTAINER=tumbleweed \
+  automation/scripts/containerize bash -exc './configure && make'
+make -C automation/build suse/opensuse-tumbleweed PUSH=1
+```
+
 [registry]: https://gitlab.com/xen-project/xen/container_registry
 [registry help]: https://gitlab.com/help/user/project/container_registry
+
+
+Building/Running container for a different architecture
+-------------------------------------------------------
+
+On a x86 host, it is possible to build and run containers for other arch (like
+running a container made for Arm) with docker taking care of running the
+appropriate software to emulate that arch. For this, simply install the package
+`qemu-user-static`, and that's it. Then you can start an Arm container on x86
+host like you would start an x86 container.
+
+If that doesn't work, you might find some information on
+[multiarch/qemu-user-static](https://github.com/multiarch/qemu-user-static).

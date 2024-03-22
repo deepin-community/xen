@@ -43,10 +43,14 @@ cpumask_t cpu_possible_map;
 
 struct cpuinfo_arm cpu_data[NR_CPUS];
 
+/* maxcpus: maximum number of CPUs to activate. */
+static unsigned int __initdata max_cpus;
+integer_param("maxcpus", max_cpus);
+
 /* CPU logical map: map xen cpuid to an MPIDR */
 register_t __cpu_logical_map[NR_CPUS] = { [0 ... NR_CPUS-1] = MPIDR_INVALID };
 
-/* Fake one node for now. See also include/asm-arm/numa.h */
+/* Fake one node for now. See also asm/numa.h */
 nodemask_t __read_mostly node_online_map = { { [0] = 1UL } };
 
 /* Xen stack for bringing up the first CPU. */
@@ -79,15 +83,17 @@ DEFINE_PER_CPU_READ_MOSTLY(cpumask_var_t, cpu_core_mask);
 static bool __read_mostly opt_hmp_unsafe = false;
 boolean_param("hmp-unsafe", opt_hmp_unsafe);
 
-static void setup_cpu_sibling_map(int cpu)
+static int setup_cpu_sibling_map(int cpu)
 {
     if ( !zalloc_cpumask_var(&per_cpu(cpu_sibling_mask, cpu)) ||
          !zalloc_cpumask_var(&per_cpu(cpu_core_mask, cpu)) )
-        panic("No memory for CPU sibling/core maps\n");
+        return -ENOMEM;
 
     /* A CPU is a sibling with itself and is always on its own core. */
     cpumask_set_cpu(cpu, per_cpu(cpu_sibling_mask, cpu));
     cpumask_set_cpu(cpu, per_cpu(cpu_core_mask, cpu));
+
+    return 0;
 }
 
 static void remove_cpu_sibling_map(int cpu)
@@ -124,7 +130,7 @@ static void __init dt_smp_init_cpus(void)
     bool bootcpu_valid = false;
     int rc;
 
-    mpidr = boot_cpu_data.mpidr.bits & MPIDR_HWID_MASK;
+    mpidr = system_cpuinfo.mpidr.bits & MPIDR_HWID_MASK;
 
     if ( !cpus )
     {
@@ -277,24 +283,31 @@ void __init smp_init_cpus(void)
                     "unless the cpu affinity of all domains is specified.\n");
 }
 
-int __init
-smp_get_max_cpus (void)
+unsigned int __init smp_get_max_cpus(void)
 {
-    int i, max_cpus = 0;
+    unsigned int i, cpus = 0;
 
-    for ( i = 0; i < nr_cpu_ids; i++ )
+    if ( ( !max_cpus ) || ( max_cpus > nr_cpu_ids ) )
+        max_cpus = nr_cpu_ids;
+
+    for ( i = 0; i < max_cpus; i++ )
         if ( cpu_possible(i) )
-            max_cpus++;
+            cpus++;
 
-    return max_cpus;
+    return cpus;
 }
 
 void __init
 smp_prepare_cpus(void)
 {
+    int rc;
+
     cpumask_copy(&cpu_present_map, &cpu_possible_map);
 
-    setup_cpu_sibling_map(0);
+    rc = setup_cpu_sibling_map(0);
+    if ( rc )
+        panic("Unable to allocate CPU sibling/core maps\n");
+
 }
 
 /* Boot the current CPU */
@@ -318,14 +331,26 @@ void start_secondary(void)
      * is manually specified for all domains). Better to park them for
      * now.
      */
-    if ( !opt_hmp_unsafe &&
-         current_cpu_data.midr.bits != boot_cpu_data.midr.bits )
+    if ( current_cpu_data.midr.bits != system_cpuinfo.midr.bits )
     {
-        printk(XENLOG_ERR "CPU%u MIDR (0x%x) does not match boot CPU MIDR (0x%x),\n"
-               "disable cpu (see big.LITTLE.txt under docs/).\n",
-               smp_processor_id(), current_cpu_data.midr.bits,
-               boot_cpu_data.midr.bits);
-        stop_cpu();
+        if ( !opt_hmp_unsafe )
+        {
+            printk(XENLOG_ERR
+                   "CPU%u MIDR (0x%"PRIregister") does not match boot CPU MIDR (0x%"PRIregister"),\n"
+                   XENLOG_ERR "disable cpu (see big.LITTLE.txt under docs/).\n",
+                   smp_processor_id(), current_cpu_data.midr.bits,
+                   system_cpuinfo.midr.bits);
+            stop_cpu();
+        }
+        else
+        {
+            printk(XENLOG_ERR
+                   "CPU%u MIDR (0x%"PRIregister") does not match boot CPU MIDR (0x%"PRIregister"),\n"
+                   XENLOG_ERR "hmp-unsafe turned on so tainting Xen and keep core on!!\n",
+                   smp_processor_id(), current_cpu_data.midr.bits,
+                   system_cpuinfo.midr.bits);
+            add_taint(TAINT_CPU_OUT_OF_SPEC);
+         }
     }
 
     if ( dcache_line_bytes != read_dcache_line_bytes() )
@@ -336,18 +361,18 @@ void start_secondary(void)
         stop_cpu();
     }
 
+    /*
+     * system features must be updated only if we do not stop the core or
+     * we might disable features due to a non used core (for example when
+     * booting on big cores on a big.LITTLE system with hmp_unsafe)
+     */
+    update_system_features(&current_cpu_data);
+
     mmu_init_secondary_cpu();
 
     gic_init_secondary_cpu();
 
-    init_secondary_IRQ();
-
-    init_maintenance_interrupt();
-    init_timer_interrupt();
-
     set_current(idle_vcpu[cpuid]);
-
-    setup_cpu_sibling_map(cpuid);
 
     /* Run local notifiers */
     notify_cpu_starting(cpuid);
@@ -361,9 +386,19 @@ void start_secondary(void)
     cpumask_set_cpu(cpuid, &cpu_online_map);
 
     local_irq_enable();
+
+    /*
+     * Calling request_irq() after local_irq_enable() on secondary cores
+     * will make sure the assertion condition in alloc_xenheap_pages(),
+     * i.e. !in_irq && local_irq_enabled() is satisfied.
+     */
+    init_maintenance_interrupt();
+    init_timer_interrupt();
+
     local_abort_enable();
 
     check_local_cpu_errata();
+    check_local_cpu_features();
 
     printk(XENLOG_DEBUG "CPU %u booted.\n", smp_processor_id());
 
@@ -507,9 +542,19 @@ static int cpu_smpboot_callback(struct notifier_block *nfb,
                                 void *hcpu)
 {
     unsigned int cpu = (unsigned long)hcpu;
+    unsigned int rc = 0;
 
     switch ( action )
     {
+    case CPU_UP_PREPARE:
+        rc = setup_cpu_sibling_map(cpu);
+        if ( rc )
+            printk(XENLOG_ERR
+                   "Unable to allocate CPU sibling/core map  for CPU%u\n",
+                   cpu);
+
+        break;
+
     case CPU_DEAD:
         remove_cpu_sibling_map(cpu);
         break;
@@ -517,7 +562,7 @@ static int cpu_smpboot_callback(struct notifier_block *nfb,
         break;
     }
 
-    return NOTIFY_DONE;
+    return !rc ? NOTIFY_DONE : notifier_from_errno(rc);
 }
 
 static struct notifier_block cpu_smpboot_nfb = {

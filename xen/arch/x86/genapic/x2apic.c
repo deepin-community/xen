@@ -27,7 +27,6 @@
 #include <asm/msr.h>
 #include <asm/processor.h>
 #include <xen/smp.h>
-#include <asm/mach-default/mach_mpparse.h>
 
 static DEFINE_PER_CPU_READ_MOSTLY(u32, cpu_2_logical_apicid);
 static DEFINE_PER_CPU_READ_MOSTLY(cpumask_t *, cluster_cpus);
@@ -39,7 +38,7 @@ static inline u32 x2apic_cluster(unsigned int cpu)
     return per_cpu(cpu_2_logical_apicid, cpu) >> 16;
 }
 
-static void init_apic_ldr_x2apic_cluster(void)
+static void cf_check init_apic_ldr_x2apic_cluster(void)
 {
     unsigned int cpu, this_cpu = smp_processor_id();
 
@@ -54,7 +53,17 @@ static void init_apic_ldr_x2apic_cluster(void)
     per_cpu(cluster_cpus, this_cpu) = cluster_cpus_spare;
     for_each_online_cpu ( cpu )
     {
-        if (this_cpu == cpu || x2apic_cluster(this_cpu) != x2apic_cluster(cpu))
+        if ( this_cpu == cpu )
+            continue;
+        /*
+         * Guard in particular against the compiler suspecting out-of-bounds
+         * array accesses below when NR_CPUS=1 (oddly enough with gcc 10 it
+         * is the 1st of these alone which actually helps, not the 2nd, nor
+         * are both required together there).
+         */
+        BUG_ON(this_cpu >= NR_CPUS);
+        BUG_ON(cpu >= NR_CPUS);
+        if ( x2apic_cluster(this_cpu) != x2apic_cluster(cpu) )
             continue;
         per_cpu(cluster_cpus, this_cpu) = per_cpu(cluster_cpus, cpu);
         break;
@@ -65,16 +74,14 @@ static void init_apic_ldr_x2apic_cluster(void)
     cpumask_set_cpu(this_cpu, per_cpu(cluster_cpus, this_cpu));
 }
 
-static void __init clustered_apic_check_x2apic(void)
-{
-}
-
-static const cpumask_t *vector_allocation_cpumask_x2apic_cluster(int cpu)
+static const cpumask_t *cf_check vector_allocation_cpumask_x2apic_cluster(
+    int cpu)
 {
     return per_cpu(cluster_cpus, cpu);
 }
 
-static unsigned int cpu_mask_to_apicid_x2apic_cluster(const cpumask_t *cpumask)
+static unsigned int cf_check cpu_mask_to_apicid_x2apic_cluster(
+    const cpumask_t *cpumask)
 {
     unsigned int cpu = cpumask_any(cpumask);
     unsigned int dest = per_cpu(cpu_2_logical_apicid, cpu);
@@ -87,12 +94,13 @@ static unsigned int cpu_mask_to_apicid_x2apic_cluster(const cpumask_t *cpumask)
     return dest;
 }
 
-static void send_IPI_self_x2apic(uint8_t vector)
+static void cf_check send_IPI_self_x2apic(uint8_t vector)
 {
     apic_wrmsr(APIC_SELF_IPI, vector);
 }
 
-static void send_IPI_mask_x2apic_phys(const cpumask_t *cpumask, int vector)
+static void cf_check send_IPI_mask_x2apic_phys(
+    const cpumask_t *cpumask, int vector)
 {
     unsigned int cpu;
     unsigned long flags;
@@ -125,7 +133,8 @@ static void send_IPI_mask_x2apic_phys(const cpumask_t *cpumask, int vector)
     local_irq_restore(flags);
 }
 
-static void send_IPI_mask_x2apic_cluster(const cpumask_t *cpumask, int vector)
+static void cf_check send_IPI_mask_x2apic_cluster(
+    const cpumask_t *cpumask, int vector)
 {
     unsigned int cpu = smp_processor_id();
     cpumask_t *ipimask = per_cpu(scratch_mask, cpu);
@@ -165,7 +174,6 @@ static const struct genapic __initconstrel apic_x2apic_phys = {
     .int_delivery_mode = dest_Fixed,
     .int_dest_mode = 0 /* physical delivery */,
     .init_apic_ldr = init_apic_ldr_phys,
-    .clustered_apic_check = clustered_apic_check_x2apic,
     .vector_allocation_cpumask = vector_allocation_cpumask_phys,
     .cpu_mask_to_apicid = cpu_mask_to_apicid_phys,
     .send_IPI_mask = send_IPI_mask_x2apic_phys,
@@ -177,14 +185,43 @@ static const struct genapic __initconstrel apic_x2apic_cluster = {
     .int_delivery_mode = dest_LowestPrio,
     .int_dest_mode = 1 /* logical delivery */,
     .init_apic_ldr = init_apic_ldr_x2apic_cluster,
-    .clustered_apic_check = clustered_apic_check_x2apic,
     .vector_allocation_cpumask = vector_allocation_cpumask_x2apic_cluster,
     .cpu_mask_to_apicid = cpu_mask_to_apicid_x2apic_cluster,
     .send_IPI_mask = send_IPI_mask_x2apic_cluster,
     .send_IPI_self = send_IPI_self_x2apic
 };
 
-static int update_clusterinfo(
+/*
+ * Mixed x2APIC mode: use physical for external (device) interrupts, and
+ * cluster for inter processor interrupts.  Such mode has the benefits of not
+ * sharing the vector space with all CPUs on the cluster, while still allowing
+ * IPIs to be more efficiently delivered by not having to perform an ICR write
+ * for each target CPU.
+ */
+static const struct genapic __initconstrel apic_x2apic_mixed = {
+    APIC_INIT("x2apic_mixed", NULL),
+
+    /*
+     * The following fields are exclusively used by external interrupts and
+     * hence are set to use Physical destination mode handlers.
+     */
+    .int_delivery_mode = dest_Fixed,
+    .int_dest_mode = 0 /* physical delivery */,
+    .vector_allocation_cpumask = vector_allocation_cpumask_phys,
+    .cpu_mask_to_apicid = cpu_mask_to_apicid_phys,
+
+    /*
+     * The following fields are exclusively used by IPIs and hence are set to
+     * use Cluster Logical destination mode handlers.  Note that init_apic_ldr
+     * is not used by IPIs, but the per-CPU fields it initializes are only used
+     * by the IPI hooks.
+     */
+    .init_apic_ldr = init_apic_ldr_x2apic_cluster,
+    .send_IPI_mask = send_IPI_mask_x2apic_cluster,
+    .send_IPI_self = send_IPI_self_x2apic,
+};
+
+static int cf_check update_clusterinfo(
     struct notifier_block *nfb, unsigned long action, void *hcpu)
 {
     unsigned int cpu = (unsigned long)hcpu;
@@ -221,39 +258,58 @@ static struct notifier_block x2apic_cpu_nfb = {
    .notifier_call = update_clusterinfo
 };
 
-static s8 __initdata x2apic_phys = -1; /* By default we use logical cluster mode. */
+static int8_t __initdata x2apic_phys = -1;
 boolean_param("x2apic_phys", x2apic_phys);
+
+enum {
+   unset, physical, cluster, mixed
+} static __initdata x2apic_mode = unset;
+
+static int __init cf_check parse_x2apic_mode(const char *s)
+{
+    if ( !cmdline_strcmp(s, "physical") )
+        x2apic_mode = physical;
+    else if ( !cmdline_strcmp(s, "cluster") )
+        x2apic_mode = cluster;
+    else if ( !cmdline_strcmp(s, "mixed") )
+        x2apic_mode = mixed;
+    else
+        return -EINVAL;
+
+    return 0;
+}
+custom_param("x2apic-mode", parse_x2apic_mode);
 
 const struct genapic *__init apic_x2apic_probe(void)
 {
-    if ( x2apic_phys < 0 )
+    /* Honour the legacy cmdline setting if it's the only one provided. */
+    if ( x2apic_mode == unset && x2apic_phys >= 0 )
+        x2apic_mode = x2apic_phys ? physical : cluster;
+
+    if ( x2apic_mode == unset )
     {
-        /*
-         * Force physical mode if there's no interrupt remapping support: The
-         * ID in clustered mode requires a 32 bit destination field due to
-         * the usage of the high 16 bits to hold the cluster ID.
-         */
-        x2apic_phys = !iommu_intremap ||
-                      (acpi_gbl_FADT.flags & ACPI_FADT_APIC_PHYSICAL);
-    }
-    else if ( !x2apic_phys )
-        switch ( iommu_intremap )
+        if ( acpi_gbl_FADT.flags & ACPI_FADT_APIC_PHYSICAL )
         {
-        case iommu_intremap_off:
-        case iommu_intremap_restricted:
-            printk("WARNING: x2APIC cluster mode is not supported %s interrupt remapping -"
-                   " forcing phys mode\n",
-                   iommu_intremap == iommu_intremap_off ? "without"
-                                                        : "with restricted");
-            x2apic_phys = true;
-            break;
-
-        case iommu_intremap_full:
-            break;
+            printk(XENLOG_INFO "ACPI FADT forcing x2APIC physical mode\n");
+            x2apic_mode = physical;
         }
+        else
+            x2apic_mode = IS_ENABLED(CONFIG_X2APIC_MIXED) ? mixed
+                          : (IS_ENABLED(CONFIG_X2APIC_PHYSICAL) ? physical
+                                                                : cluster);
+    }
 
-    if ( x2apic_phys )
+    if ( x2apic_mode == physical )
         return &apic_x2apic_phys;
+
+    if ( x2apic_mode == cluster && iommu_intremap != iommu_intremap_full )
+    {
+        printk("WARNING: x2APIC cluster mode is not supported %s interrupt remapping -"
+               " forcing mixed mode\n",
+               iommu_intremap == iommu_intremap_off ? "without"
+                                                    : "with restricted");
+        x2apic_mode = mixed;
+    }
 
     if ( !this_cpu(cluster_cpus) )
     {
@@ -263,7 +319,7 @@ const struct genapic *__init apic_x2apic_probe(void)
         register_cpu_notifier(&x2apic_cpu_nfb);
     }
 
-    return &apic_x2apic_cluster;
+    return x2apic_mode == cluster ? &apic_x2apic_cluster : &apic_x2apic_mixed;
 }
 
 void __init check_x2apic_preenabled(void)

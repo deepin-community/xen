@@ -1,15 +1,15 @@
 /*
  * xen/drivers/passthrough/arm/ipmmu-vmsa.c
  *
- * Driver for the Renesas IPMMU-VMSA found in R-Car Gen3 SoCs.
+ * Driver for the Renesas IPMMU-VMSA found in R-Car Gen3/Gen4 SoCs.
  *
  * The IPMMU-VMSA is VMSA-compatible I/O Memory Management Unit (IOMMU)
  * which provides address translation and access protection functionalities
  * to processing units and interconnect networks.
  *
  * Please note, current driver is supposed to work only with newest
- * R-Car Gen3 SoCs revisions which IPMMU hardware supports stage 2 translation
- * table format and is able to use CPU's P2M table as is.
+ * R-Car Gen3/Gen4 SoCs revisions which IPMMU hardware supports stage 2
+ * translation table format and is able to use CPU's P2M table as is.
  *
  * Based on Linux's IPMMU-VMSA driver from Renesas BSP:
  *    drivers/iommu/ipmmu-vmsa.c
@@ -20,9 +20,9 @@
  * and Xen's SMMU driver:
  *    xen/drivers/passthrough/arm/smmu.c
  *
- * Copyright (C) 2014-2019 Renesas Electronics Corporation
+ * Copyright (C) 2014-2021 Renesas Electronics Corporation
  *
- * Copyright (C) 2016-2019 EPAM Systems Inc.
+ * Copyright (C) 2016-2021 EPAM Systems Inc.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms and conditions of the GNU General Public
@@ -68,12 +68,13 @@
     dev_print(dev, XENLOG_ERR, fmt, ## __VA_ARGS__)
 
 /*
- * R-Car Gen3 SoCs make use of up to 8 IPMMU contexts (sets of page table) and
- * these can be managed independently. Each context is mapped to one Xen domain.
+ * R-Car Gen3/Gen4 SoCs make use of up to 16 IPMMU contexts (sets of page table)
+ * and these can be managed independently. Each context is mapped to one Xen
+ * domain.
  */
-#define IPMMU_CTX_MAX     8
-/* R-Car Gen3 SoCs make use of up to 48 micro-TLBs per IPMMU device. */
-#define IPMMU_UTLB_MAX    48
+#define IPMMU_CTX_MAX     16U
+/* R-Car Gen3/Gen4 SoCs make use of up to 64 micro-TLBs per IPMMU device. */
+#define IPMMU_UTLB_MAX    64U
 
 /* IPMMU context supports IPA size up to 40 bit. */
 #define IPMMU_MAX_P2M_IPA_BITS    40
@@ -106,17 +107,28 @@ struct ipmmu_vmsa_xen_device {
     struct ipmmu_vmsa_device *mmu;
 };
 
+struct ipmmu_features {
+    unsigned int number_of_contexts;
+    unsigned int num_utlbs;
+    unsigned int ctx_offset_base;
+    unsigned int ctx_offset_stride;
+    unsigned int utlb_offset_base;
+    unsigned int control_offset_base;
+    unsigned int imuctr_ttsel_mask;
+};
+
 /* Root/Cache IPMMU device's information */
 struct ipmmu_vmsa_device {
     struct device *dev;
     void __iomem *base;
     struct ipmmu_vmsa_device *root;
     struct list_head list;
-    unsigned int num_utlbs;
     unsigned int num_ctx;
     spinlock_t lock;    /* Protects ctx and domains[] */
     DECLARE_BITMAP(ctx, IPMMU_CTX_MAX);
     struct ipmmu_vmsa_domain *domains[IPMMU_CTX_MAX];
+    unsigned int utlb_refcount[IPMMU_UTLB_MAX];
+    const struct ipmmu_features *features;
 };
 
 /*
@@ -162,19 +174,13 @@ static DEFINE_SPINLOCK(ipmmu_devices_lock);
 #define TLB_LOOP_TIMEOUT    100 /* 100us */
 
 /* Registers Definition */
-#define IM_CTX_SIZE    0x40
-
 #define IMCTR                0x0000
 /*
- * These fields are implemented in IPMMU-MM only. So, can be set for
+ * This field is implemented in IPMMU-MM only. So, can be set for
  * Root IPMMU only.
  */
 #define IMCTR_VA64           (1 << 29)
-#define IMCTR_TRE            (1 << 17)
-#define IMCTR_AFE            (1 << 16)
-#define IMCTR_RTSEL_MASK     (3 << 4)
-#define IMCTR_RTSEL_SHIFT    4
-#define IMCTR_TREN           (1 << 3)
+
 /*
  * These fields are common for all IPMMU devices. So, can be set for
  * Cache IPMMUs as well.
@@ -184,42 +190,9 @@ static DEFINE_SPINLOCK(ipmmu_devices_lock);
 #define IMCTR_MMUEN          (1 << 0)
 #define IMCTR_COMMON_MASK    (7 << 0)
 
-#define IMCAAR               0x0004
-
 #define IMTTBCR                        0x0008
-#define IMTTBCR_EAE                    (1 << 31)
+#define IMTTBCR_EAE                    (1U << 31)
 #define IMTTBCR_PMB                    (1 << 30)
-#define IMTTBCR_SH1_NON_SHAREABLE      (0 << 28)
-#define IMTTBCR_SH1_OUTER_SHAREABLE    (2 << 28)
-#define IMTTBCR_SH1_INNER_SHAREABLE    (3 << 28)
-#define IMTTBCR_SH1_MASK               (3 << 28)
-#define IMTTBCR_ORGN1_NC               (0 << 26)
-#define IMTTBCR_ORGN1_WB_WA            (1 << 26)
-#define IMTTBCR_ORGN1_WT               (2 << 26)
-#define IMTTBCR_ORGN1_WB               (3 << 26)
-#define IMTTBCR_ORGN1_MASK             (3 << 26)
-#define IMTTBCR_IRGN1_NC               (0 << 24)
-#define IMTTBCR_IRGN1_WB_WA            (1 << 24)
-#define IMTTBCR_IRGN1_WT               (2 << 24)
-#define IMTTBCR_IRGN1_WB               (3 << 24)
-#define IMTTBCR_IRGN1_MASK             (3 << 24)
-#define IMTTBCR_TSZ1_MASK              (0x1f << 16)
-#define IMTTBCR_TSZ1_SHIFT             16
-#define IMTTBCR_SH0_NON_SHAREABLE      (0 << 12)
-#define IMTTBCR_SH0_OUTER_SHAREABLE    (2 << 12)
-#define IMTTBCR_SH0_INNER_SHAREABLE    (3 << 12)
-#define IMTTBCR_SH0_MASK               (3 << 12)
-#define IMTTBCR_ORGN0_NC               (0 << 10)
-#define IMTTBCR_ORGN0_WB_WA            (1 << 10)
-#define IMTTBCR_ORGN0_WT               (2 << 10)
-#define IMTTBCR_ORGN0_WB               (3 << 10)
-#define IMTTBCR_ORGN0_MASK             (3 << 10)
-#define IMTTBCR_IRGN0_NC               (0 << 8)
-#define IMTTBCR_IRGN0_WB_WA            (1 << 8)
-#define IMTTBCR_IRGN0_WT               (2 << 8)
-#define IMTTBCR_IRGN0_WB               (3 << 8)
-#define IMTTBCR_IRGN0_MASK             (3 << 8)
-#define IMTTBCR_SL0_LVL_2              (0 << 6)
 #define IMTTBCR_SL0_LVL_1              (1 << 6)
 #define IMTTBCR_TSZ0_MASK              (0x1f << 0)
 #define IMTTBCR_TSZ0_SHIFT             0
@@ -228,18 +201,8 @@ static DEFINE_SPINLOCK(ipmmu_devices_lock);
 #define IMTTLBR0_TTBR_MASK    (0xfffff << 12)
 #define IMTTUBR0              0x0014
 #define IMTTUBR0_TTBR_MASK    (0xff << 0)
-#define IMTTLBR1              0x0018
-#define IMTTLBR1_TTBR_MASK    (0xfffff << 12)
-#define IMTTUBR1              0x001c
-#define IMTTUBR1_TTBR_MASK    (0xff << 0)
 
 #define IMSTR                          0x0020
-#define IMSTR_ERRLVL_MASK              (3 << 12)
-#define IMSTR_ERRLVL_SHIFT             12
-#define IMSTR_ERRCODE_TLB_FORMAT       (1 << 8)
-#define IMSTR_ERRCODE_ACCESS_PERM      (4 << 8)
-#define IMSTR_ERRCODE_SECURE_ACCESS    (5 << 8)
-#define IMSTR_ERRCODE_MASK             (7 << 8)
 #define IMSTR_MHIT                     (1 << 4)
 #define IMSTR_ABORT                    (1 << 2)
 #define IMSTR_PF                       (1 << 1)
@@ -251,12 +214,7 @@ static DEFINE_SPINLOCK(ipmmu_devices_lock);
 #define IMUCTR(n)              ((n) < 32 ? IMUCTR0(n) : IMUCTR32(n))
 #define IMUCTR0(n)             (0x0300 + ((n) * 16))
 #define IMUCTR32(n)            (0x0600 + (((n) - 32) * 16))
-#define IMUCTR_FIXADDEN        (1 << 31)
-#define IMUCTR_FIXADD_MASK     (0xff << 16)
-#define IMUCTR_FIXADD_SHIFT    16
 #define IMUCTR_TTSEL_MMU(n)    ((n) << 4)
-#define IMUCTR_TTSEL_PMB       (8 << 4)
-#define IMUCTR_TTSEL_MASK      (15 << 4)
 #define IMUCTR_TTSEL_SHIFT     4
 #define IMUCTR_FLUSH           (1 << 1)
 #define IMUCTR_MMUEN           (1 << 0)
@@ -264,10 +222,9 @@ static DEFINE_SPINLOCK(ipmmu_devices_lock);
 #define IMUASID(n)             ((n) < 32 ? IMUASID0(n) : IMUASID32(n))
 #define IMUASID0(n)            (0x0308 + ((n) * 16))
 #define IMUASID32(n)           (0x0608 + (((n) - 32) * 16))
-#define IMUASID_ASID8_MASK     (0xff << 8)
-#define IMUASID_ASID8_SHIFT    8
-#define IMUASID_ASID0_MASK     (0xff << 0)
-#define IMUASID_ASID0_SHIFT    0
+
+#define IMSCTLR             0x0500
+#define IMSCTLR_USE_SECGRP  (1 << 28)
 
 #define IMSAUXCTLR          0x0504
 #define IMSAUXCTLR_S2PTE    (1 << 3)
@@ -362,18 +319,40 @@ static void ipmmu_write(struct ipmmu_vmsa_device *mmu, uint32_t offset,
     writel(data, mmu->base + offset);
 }
 
+static unsigned int ipmmu_ctx_reg(struct ipmmu_vmsa_device *mmu,
+                                  unsigned int context_id, uint32_t reg)
+{
+    unsigned int base = mmu->features->ctx_offset_base;
+
+    if ( context_id > 7 )
+        base += 0x800 - 8 * 0x40;
+
+    return base + context_id * mmu->features->ctx_offset_stride + reg;
+}
+
+static uint32_t ipmmu_ctx_read(struct ipmmu_vmsa_device *mmu,
+                               unsigned int context_id, uint32_t reg)
+{
+    return ipmmu_read(mmu, ipmmu_ctx_reg(mmu, context_id, reg));
+}
+
+static void ipmmu_ctx_write(struct ipmmu_vmsa_device *mmu,
+                            unsigned int context_id, uint32_t reg,
+                            uint32_t data)
+{
+    ipmmu_write(mmu, ipmmu_ctx_reg(mmu, context_id, reg), data);
+}
+
 static uint32_t ipmmu_ctx_read_root(struct ipmmu_vmsa_domain *domain,
                                     uint32_t reg)
 {
-    return ipmmu_read(domain->mmu->root,
-                      domain->context_id * IM_CTX_SIZE + reg);
+    return ipmmu_ctx_read(domain->mmu->root, domain->context_id, reg);
 }
 
 static void ipmmu_ctx_write_root(struct ipmmu_vmsa_domain *domain,
                                  uint32_t reg, uint32_t data)
 {
-    ipmmu_write(domain->mmu->root,
-                domain->context_id * IM_CTX_SIZE + reg, data);
+    ipmmu_ctx_write(domain->mmu->root, domain->context_id, reg, data);
 }
 
 static void ipmmu_ctx_write_cache(struct ipmmu_vmsa_domain *domain,
@@ -384,8 +363,8 @@ static void ipmmu_ctx_write_cache(struct ipmmu_vmsa_domain *domain,
 
     /* Mask fields which are implemented in IPMMU-MM only. */
     if ( !ipmmu_is_root(domain->mmu) )
-        ipmmu_write(domain->mmu, domain->context_id * IM_CTX_SIZE + reg,
-                    data & IMCTR_COMMON_MASK);
+        ipmmu_ctx_write(domain->mmu, domain->context_id, reg,
+                        data & IMCTR_COMMON_MASK);
 }
 
 /*
@@ -402,6 +381,29 @@ static void ipmmu_ctx_write_all(struct ipmmu_vmsa_domain *domain,
         ipmmu_ctx_write_cache(cache_domain, reg, data);
 
     ipmmu_ctx_write_root(domain, reg, data);
+}
+
+static uint32_t ipmmu_utlb_reg(struct ipmmu_vmsa_device *mmu, uint32_t reg)
+{
+    return mmu->features->utlb_offset_base + reg;
+}
+
+static void ipmmu_imuasid_write(struct ipmmu_vmsa_device *mmu,
+                                unsigned int utlb, uint32_t data)
+{
+    ipmmu_write(mmu, ipmmu_utlb_reg(mmu, IMUASID(utlb)), data);
+}
+
+static void ipmmu_imuctr_write(struct ipmmu_vmsa_device *mmu,
+                               unsigned int utlb, uint32_t data)
+{
+    ipmmu_write(mmu, ipmmu_utlb_reg(mmu, IMUCTR(utlb)), data);
+}
+
+static uint32_t ipmmu_imuctr_read(struct ipmmu_vmsa_device *mmu,
+                                  unsigned int utlb)
+{
+    return ipmmu_read(mmu, ipmmu_utlb_reg(mmu, IMUCTR(utlb)));
 }
 
 /* TLB and micro-TLB Management */
@@ -451,12 +453,13 @@ static int ipmmu_utlb_enable(struct ipmmu_vmsa_domain *domain,
      * context_id for already enabled micro-TLB and prevent different context
      * bank from being set.
      */
-    imuctr = ipmmu_read(mmu, IMUCTR(utlb));
+    imuctr = ipmmu_imuctr_read(mmu, utlb);
     if ( imuctr & IMUCTR_MMUEN )
     {
         unsigned int context_id;
 
-        context_id = (imuctr & IMUCTR_TTSEL_MASK) >> IMUCTR_TTSEL_SHIFT;
+        context_id = (imuctr & mmu->features->imuctr_ttsel_mask) >>
+            IMUCTR_TTSEL_SHIFT;
         if ( domain->context_id != context_id )
         {
             dev_err(mmu->dev, "Micro-TLB %u already assigned to IPMMU context %u\n",
@@ -466,12 +469,17 @@ static int ipmmu_utlb_enable(struct ipmmu_vmsa_domain *domain,
     }
 
     /*
-     * TODO: Reference-count the micro-TLB as several bus masters can be
-     * connected to the same micro-TLB.
+     * Reference-count the micro-TLBs as several bus masters can be connected
+     * to the same micro-TLB. The platform devices get assigned/deassigned
+     * together during domain creation/destruction. The PCI devices which use
+     * the same micro-TLB must also be hot-(un)plugged together.
      */
-    ipmmu_write(mmu, IMUASID(utlb), 0);
-    ipmmu_write(mmu, IMUCTR(utlb), imuctr |
-                IMUCTR_TTSEL_MMU(domain->context_id) | IMUCTR_MMUEN);
+    if ( mmu->utlb_refcount[utlb]++ == 0 )
+    {
+        ipmmu_imuasid_write(mmu, utlb, 0);
+        ipmmu_imuctr_write(mmu, utlb, imuctr |
+                           IMUCTR_TTSEL_MMU(domain->context_id) | IMUCTR_MMUEN);
+    }
 
     return 0;
 }
@@ -482,7 +490,10 @@ static void ipmmu_utlb_disable(struct ipmmu_vmsa_domain *domain,
 {
     struct ipmmu_vmsa_device *mmu = domain->mmu;
 
-    ipmmu_write(mmu, IMUCTR(utlb), 0);
+    ASSERT(mmu->utlb_refcount[utlb] > 0);
+
+    if ( --mmu->utlb_refcount[utlb] == 0 )
+        ipmmu_imuctr_write(mmu, utlb, 0);
 }
 
 /* Domain/Context Management */
@@ -742,20 +753,41 @@ static int ipmmu_init_platform_device(struct device *dev,
     return 0;
 }
 
+static const struct ipmmu_features ipmmu_features_rcar_gen3 = {
+    .number_of_contexts = 8,
+    .num_utlbs = 48,
+    .ctx_offset_base = 0,
+    .ctx_offset_stride = 0x40,
+    .utlb_offset_base = 0,
+    .control_offset_base = 0,
+    .imuctr_ttsel_mask = (15 << 4),
+};
+
+static const struct ipmmu_features ipmmu_features_rcar_gen4 = {
+    .number_of_contexts = 16,
+    .num_utlbs = 64,
+    .ctx_offset_base = 0x10000,
+    .ctx_offset_stride = 0x1040,
+    .utlb_offset_base = 0x3000,
+    .control_offset_base = 0x1000,
+    .imuctr_ttsel_mask = (31 << 4),
+};
+
 static void ipmmu_device_reset(struct ipmmu_vmsa_device *mmu)
 {
     unsigned int i;
 
     /* Disable all contexts. */
     for ( i = 0; i < mmu->num_ctx; ++i )
-        ipmmu_write(mmu, i * IM_CTX_SIZE + IMCTR, 0);
+        ipmmu_ctx_write(mmu, i, IMCTR, 0);
 }
 
-/* R-Car Gen3 SoCs product and cut information. */
+/* R-Car Gen3/Gen4 SoCs product and cut information. */
 #define RCAR_PRODUCT_MASK    0x00007F00
 #define RCAR_PRODUCT_H3      0x00004F00
 #define RCAR_PRODUCT_M3W     0x00005200
 #define RCAR_PRODUCT_M3N     0x00005500
+#define RCAR_PRODUCT_S4      0x00005A00
 #define RCAR_CUT_MASK        0x000000FF
 #define RCAR_CUT_VER30       0x00000020
 
@@ -803,6 +835,10 @@ static __init bool ipmmu_stage2_supported(void)
         stage2_supported = true;
         break;
 
+    case RCAR_PRODUCT_S4:
+        stage2_supported = true;
+        break;
+
     default:
         printk(XENLOG_ERR "ipmmu: Unsupported SoC version\n");
         break;
@@ -813,6 +849,31 @@ static __init bool ipmmu_stage2_supported(void)
     return stage2_supported;
 }
 
+static const struct dt_device_match ipmmu_dt_match[] __initconst =
+{
+    {
+        .compatible = "renesas,ipmmu-r8a7795",
+        .data = &ipmmu_features_rcar_gen3,
+    },
+    {
+        .compatible = "renesas,ipmmu-r8a77965",
+        .data = &ipmmu_features_rcar_gen3,
+    },
+    {
+        .compatible = "renesas,ipmmu-r8a7796",
+        .data = &ipmmu_features_rcar_gen3,
+    },
+    {
+        .compatible = "renesas,ipmmu-r8a77961",
+        .data = &ipmmu_features_rcar_gen3,
+    },
+    {
+        .compatible = "renesas,ipmmu-r8a779f0",
+        .data = &ipmmu_features_rcar_gen4,
+    },
+    { /* sentinel */ },
+};
+
 /*
  * This function relies on the fact that Root IPMMU device is being probed
  * the first. If not the case, it denies further Cache IPMMU device probes
@@ -821,8 +882,10 @@ static __init bool ipmmu_stage2_supported(void)
  */
 static int ipmmu_probe(struct dt_device_node *node)
 {
+    const struct dt_device_match *match;
     struct ipmmu_vmsa_device *mmu;
     uint64_t addr, size;
+    uint32_t reg;
     int irq, ret;
 
     mmu = xzalloc(struct ipmmu_vmsa_device);
@@ -832,9 +895,12 @@ static int ipmmu_probe(struct dt_device_node *node)
         return -ENOMEM;
     }
 
+    match = dt_match_node(ipmmu_dt_match, node);
+    ASSERT(match);
+    mmu->features = match->data;
+
     mmu->dev = &node->dev;
-    mmu->num_utlbs = IPMMU_UTLB_MAX;
-    mmu->num_ctx = IPMMU_CTX_MAX;
+    mmu->num_ctx = min(IPMMU_CTX_MAX, mmu->features->number_of_contexts);
     spin_lock_init(&mmu->lock);
     bitmap_zero(mmu->ctx, IPMMU_CTX_MAX);
 
@@ -905,12 +971,16 @@ static int ipmmu_probe(struct dt_device_node *node)
          * Use stage 2 translation table format when stage 2 translation
          * enabled.
          */
-        ipmmu_write(mmu, IMSAUXCTLR,
-                    ipmmu_read(mmu, IMSAUXCTLR) | IMSAUXCTLR_S2PTE);
+        reg = IMSAUXCTLR + mmu->features->control_offset_base;
+        ipmmu_write(mmu, reg, ipmmu_read(mmu, reg) | IMSAUXCTLR_S2PTE);
 
         dev_info(&node->dev, "IPMMU context 0 is reserved\n");
         set_bit(0, mmu->ctx);
     }
+
+    /* Do not use security group function. */
+    reg = IMSCTLR + mmu->features->control_offset_base;
+    ipmmu_write(mmu, reg, ipmmu_read(mmu, reg) & ~IMSCTLR_USE_SECGRP);
 
     spin_lock(&ipmmu_devices_lock);
     list_add(&mmu->list, &ipmmu_devices);
@@ -930,28 +1000,24 @@ out:
 }
 
 /* Xen IOMMU ops */
-static int __must_check ipmmu_iotlb_flush_all(struct domain *d)
+static int __must_check ipmmu_iotlb_flush(struct domain *d, dfn_t dfn,
+                                          unsigned long page_count,
+                                          unsigned int flush_flags)
 {
     struct ipmmu_vmsa_xen_domain *xen_domain = dom_iommu(d)->arch.priv;
 
+    ASSERT(flush_flags);
+
     if ( !xen_domain || !xen_domain->root_domain )
         return 0;
+
+    /* The hardware doesn't support selective TLB flush. */
 
     spin_lock(&xen_domain->lock);
     ipmmu_tlb_invalidate(xen_domain->root_domain);
     spin_unlock(&xen_domain->lock);
 
     return 0;
-}
-
-static int __must_check ipmmu_iotlb_flush(struct domain *d, dfn_t dfn,
-                                          unsigned int page_count,
-                                          unsigned int flush_flags)
-{
-    ASSERT(flush_flags);
-
-    /* The hardware doesn't support selective TLB flush. */
-    return ipmmu_iotlb_flush_all(d);
 }
 
 static struct ipmmu_vmsa_domain *ipmmu_get_cache_domain(struct domain *d,
@@ -1168,7 +1234,7 @@ static int ipmmu_reassign_device(struct domain *s, struct domain *t,
     int ret = 0;
 
     /* Don't allow remapping on other domain than hwdom */
-    if ( t && t != hardware_domain )
+    if ( t && !is_hardware_domain(t) )
         return -EPERM;
 
     if ( t == s )
@@ -1259,19 +1325,6 @@ static int ipmmu_iommu_domain_init(struct domain *d)
     return 0;
 }
 
-static void __hwdom_init ipmmu_iommu_hwdom_init(struct domain *d)
-{
-    /* Set to false options not supported on ARM. */
-    if ( iommu_hwdom_inclusive )
-        printk(XENLOG_WARNING "ipmmu: map-inclusive dom0-iommu option is not supported on ARM\n");
-    iommu_hwdom_inclusive = false;
-    if ( iommu_hwdom_reserved == 1 )
-        printk(XENLOG_WARNING "ipmmu: map-reserved dom0-iommu option is not supported on ARM\n");
-    iommu_hwdom_reserved = 0;
-
-    arch_iommu_hwdom_init(d);
-}
-
 static void ipmmu_iommu_domain_teardown(struct domain *d)
 {
     struct ipmmu_vmsa_xen_domain *xen_domain = dom_iommu(d)->arch.priv;
@@ -1298,25 +1351,17 @@ static void ipmmu_iommu_domain_teardown(struct domain *d)
 
 static const struct iommu_ops ipmmu_iommu_ops =
 {
+    .page_sizes      = PAGE_SIZE_4K,
     .init            = ipmmu_iommu_domain_init,
-    .hwdom_init      = ipmmu_iommu_hwdom_init,
+    .hwdom_init      = arch_iommu_hwdom_init,
     .teardown        = ipmmu_iommu_domain_teardown,
     .iotlb_flush     = ipmmu_iotlb_flush,
-    .iotlb_flush_all = ipmmu_iotlb_flush_all,
     .assign_device   = ipmmu_assign_device,
     .reassign_device = ipmmu_reassign_device,
     .map_page        = arm_iommu_map_page,
     .unmap_page      = arm_iommu_unmap_page,
     .dt_xlate        = ipmmu_dt_xlate,
     .add_device      = ipmmu_add_device,
-};
-
-static const struct dt_device_match ipmmu_dt_match[] __initconst =
-{
-    DT_MATCH_COMPATIBLE("renesas,ipmmu-r8a7795"),
-    DT_MATCH_COMPATIBLE("renesas,ipmmu-r8a77965"),
-    DT_MATCH_COMPATIBLE("renesas,ipmmu-r8a7796"),
-    { /* sentinel */ },
 };
 
 static __init int ipmmu_init(struct dt_device_node *node, const void *data)

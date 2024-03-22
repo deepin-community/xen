@@ -37,6 +37,7 @@
 #define prefetch(x) __builtin_prefetch(x)
 #define ASSERT(x) assert(x)
 #define __must_check __attribute__((__warn_unused_result__))
+#define cf_check
 
 #include "list.h"
 
@@ -91,7 +92,7 @@ typedef union {
 #define xmalloc(type) ((type *)malloc(sizeof(type)))
 #define xfree(p) free(p)
 
-#define pci_get_pdev_by_domain(...) &test_pdev
+#define pci_get_pdev(...) (&test_pdev)
 #define pci_get_ro_map(...) NULL
 
 #define test_bit(...) false

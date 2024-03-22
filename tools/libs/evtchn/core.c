@@ -13,27 +13,29 @@
  * License along with this library; If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <errno.h>
 #include <unistd.h>
 #include <stdlib.h>
 
 #include "private.h"
 
-static int all_restrict_cb(Xentoolcore__Active_Handle *ah, domid_t domid) {
+static int all_restrict_cb(Xentoolcore__Active_Handle *ah, domid_t domid)
+{
     xenevtchn_handle *xce = CONTAINER_OF(ah, *xce, tc_ah);
 
-    if (xce->fd < 0)
+    if ( xce->fd < 0 )
         /* just in case */
         return 0;
 
     return xenevtchn_restrict(xce, domid);
 }
 
-xenevtchn_handle *xenevtchn_open(xentoollog_logger *logger, unsigned open_flags)
+static xenevtchn_handle *xenevtchn_alloc_handle(xentoollog_logger *logger)
 {
     xenevtchn_handle *xce = malloc(sizeof(*xce));
-    int rc;
 
-    if (!xce) return NULL;
+    if ( !xce )
+        return NULL;
 
     xce->fd = -1;
     xce->logger = logger;
@@ -42,24 +44,65 @@ xenevtchn_handle *xenevtchn_open(xentoollog_logger *logger, unsigned open_flags)
     xce->tc_ah.restrict_callback = all_restrict_cb;
     xentoolcore__register_active_handle(&xce->tc_ah);
 
-    if (!xce->logger) {
-        xce->logger = xce->logger_tofree =
-            (xentoollog_logger*)
+    if ( !xce->logger )
+    {
+        xce->logger = xce->logger_tofree = (xentoollog_logger *)
             xtl_createlogger_stdiostream(stderr, XTL_PROGRESS, 0);
-        if (!xce->logger) goto err;
+        if ( !xce->logger )
+            goto err;
     }
-
-    rc = osdep_evtchn_open(xce);
-    if ( rc  < 0 ) goto err;
 
     return xce;
 
-err:
-    xentoolcore__deregister_active_handle(&xce->tc_ah);
-    osdep_evtchn_close(xce);
-    xtl_logger_destroy(xce->logger_tofree);
-    free(xce);
+ err:
+    xenevtchn_close(xce);
     return NULL;
+}
+
+xenevtchn_handle *xenevtchn_open(xentoollog_logger *logger, unsigned int flags)
+{
+    xenevtchn_handle *xce;
+    int rc;
+
+    if ( flags & ~XENEVTCHN_NO_CLOEXEC )
+    {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    xce = xenevtchn_alloc_handle(logger);
+    if ( !xce )
+        return NULL;
+
+    rc = osdep_evtchn_open(xce, flags);
+    if ( rc < 0 )
+        goto err;
+
+    return xce;
+
+ err:
+    xenevtchn_close(xce);
+    return NULL;
+}
+
+xenevtchn_handle *xenevtchn_fdopen(struct xentoollog_logger *logger,
+                                   int fd, unsigned int flags)
+{
+    xenevtchn_handle *xce;
+
+    if ( flags )
+    {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    xce = xenevtchn_alloc_handle(logger);
+    if ( !xce )
+        return NULL;
+
+    xce->fd = fd;
+
+    return xce;
 }
 
 int xenevtchn_close(xenevtchn_handle *xce)
@@ -73,7 +116,13 @@ int xenevtchn_close(xenevtchn_handle *xce)
     rc = osdep_evtchn_close(xce);
     xtl_logger_destroy(xce->logger_tofree);
     free(xce);
+
     return rc;
+}
+
+int xenevtchn_fd(xenevtchn_handle *xce)
+{
+    return xce->fd;
 }
 
 int xenevtchn_restrict(xenevtchn_handle *xce, domid_t domid)

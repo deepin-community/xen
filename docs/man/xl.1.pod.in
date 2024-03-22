@@ -50,7 +50,7 @@ setup the bridge.
 
 If you specify the amount of memory dom0 has, passing B<dom0_mem> to
 Xen, it is highly recommended to disable B<autoballoon>. Edit
-B</etc/xen/xl.conf> and set it to 0.
+B<@XEN_CONFIG_DIR@/xl.conf> and set it to 0.
 
 =item run xl as B<root>
 
@@ -85,6 +85,10 @@ though it is unsafe.
 Always use carriage-return-based overwriting for displaying progress
 messages without scrolling the screen.  Without -t, this is done only
 if stderr is a tty.
+
+=item B<-T>
+
+Include timestamps and pid of the xl process in output.
 
 =back
 
@@ -170,13 +174,6 @@ single set of quotes, separated by semicolons.  (See below for an example.)
 B<EXAMPLES>
 
 =over 4
-
-=item I<with config file>
-
-  xl create DebianLenny
-
-This creates a domain with the file /etc/xen/DebianLenny, and returns as
-soon as it is run.
 
 =item I<with extra parameters>
 
@@ -445,15 +442,14 @@ allocate.
 The default unit is kiB.  Add 't' for TiB, 'g' for GiB, 'm' for
 MiB, 'k' for kiB, and 'b' for bytes (e.g., `2048m` for 2048 MiB).
 
-NB that users normally shouldn't need this command; B<xl mem-set> will
-set this as appropriate automatically.
-
 I<mem> can't be set lower than the current memory target for
 I<domain-id>.  It is allowed to be higher than the configured maximum
 memory size of the domain (B<maxmem> parameter in the domain's
-configuration). Note however that the initial B<maxmem> value is still
-used as an upper limit for B<xl mem-set>.  Also note that calling B<xl
-mem-set> will reset this value.
+configuration).
+
+Setting the maximum memory size above the configured maximum memory size
+will require special guest support (memory hotplug) in order to be usable
+by the guest.
 
 The domain will not receive any signal regarding the changed memory
 limit.
@@ -578,7 +574,7 @@ See the corresponding option of the I<create> subcommand.
 =item B<-N> I<netbufscript>
 
 Use <netbufscript> to setup network buffering instead of the
-default script (/etc/xen/scripts/remus-netbuf-setup).
+default script (@XEN_SCRIPT_DIR@/remus-netbuf-setup).
 
 =item B<-F>
 
@@ -1351,7 +1347,7 @@ All the specified CPUs that can be added to the cpupool will be added
 to it. If some CPU can't (e.g., because they're already part of another
 cpupool), an error is reported about each one of them.
 
-=item B<cpupool-cpu-remove> I<cpus|node:nodes>
+=item B<cpupool-cpu-remove> I<cpu-pool> I<cpus|node:nodes>
 
 Removes one or more CPUs or NUMA nodes from I<cpu-pool>. CPUs and NUMA
 nodes can be specified as single CPU/node IDs or as ranges, using the
@@ -1389,7 +1385,7 @@ Note that only PV block devices are supported by block-attach.
 Requests to attach emulated devices (eg, vdev=hdc) will result in only
 the PV view being available to the guest.
 
-=item B<block-detach> I<domain-id> I<devid> [I<OPTIONS>]
+=item B<block-detach> [I<OPTIONS>] I<domain-id> I<devid>
 
 Detach a domain's virtual block device. I<devid> may be the symbolic
 name or the numeric device id given to the device by domain 0.  You
@@ -1406,7 +1402,7 @@ B<OPTIONS>
 =item B<--force>
 
 If this parameter is specified the device will be forcefully detached, which
-may cause IO errors in the domain.
+may cause IO errors in the domain and possibly a guest crash
 
 =back
 
@@ -1578,7 +1574,7 @@ List vsnd devices for a domain.
 Creates a new keyboard device in the domain specified by I<domain-id>.
 I<vkb-device> describes the device to attach, using the same format as the
 B<VKB_SPEC_STRING> string in the domain config file. See L<xl.cfg(5)>
-for more informations.
+for more information.
 
 =item B<vkb-detach> I<domain-id> I<devid>
 
@@ -1595,16 +1591,24 @@ List virtual network interfaces for a domain.
 
 =over 4
 
-=item B<pci-assignable-list>
+=item B<pci-assignable-list> [I<-n>]
 
-List all the assignable PCI devices.
+List all the B<BDF> of assignable PCI devices. See
+L<xl-pci-configuration(5)> for more information. If the -n option is
+specified then any name supplied when the device was made assignable
+will also be displayed.
+
 These are devices in the system which are configured to be
 available for passthrough and are bound to a suitable PCI
 backend driver in domain 0 rather than a real driver.
 
-=item B<pci-assignable-add> I<BDF>
+=item B<pci-assignable-add> [I<-n NAME>] I<BDF>
 
-Make the device at PCI Bus/Device/Function BDF assignable to guests.
+Make the device at B<BDF> assignable to guests. See
+L<xl-pci-configuration(5)> for more information. If the -n option is
+supplied then the assignable device entry will the named with the
+given B<NAME>.
+
 This will bind the device to the pciback driver and assign it to the
 "quarantine domain".  If it is already bound to a driver, it will
 first be unbound, and the original driver stored so that it can be
@@ -1618,10 +1622,13 @@ not to do this on a device critical to domain 0's operation, such as
 storage controllers, network interfaces, or GPUs that are currently
 being used.
 
-=item B<pci-assignable-remove> [I<-r>] I<BDF>
+=item B<pci-assignable-remove> [I<-r>] I<BDF>|I<NAME>
 
-Make the device at PCI Bus/Device/Function BDF not assignable to
-guests.  This will at least unbind the device from pciback, and
+Make a device non-assignable to guests. The device may be identified
+either by its B<BDF> or the B<NAME> supplied when the device was made
+assignable. See L<xl-pci-configuration(5)> for more information.
+
+This will at least unbind the device from pciback, and
 re-assign it from the "quarantine domain" back to domain 0.  If the -r
 option is specified, it will also attempt to re-bind the device to its
 original driver, making it usable by Domain 0 again.  If the device is
@@ -1637,15 +1644,15 @@ As always, this should only be done if you trust the guest, or are
 confident that the particular device you're re-assigning to dom0 will
 cancel all in-flight DMA on FLR.
 
-=item B<pci-attach> I<domain-id> I<BDF>
+=item B<pci-attach> I<domain-id> I<PCI_SPEC_STRING>
 
-Hot-plug a new pass-through pci device to the specified domain.
-B<BDF> is the PCI Bus/Device/Function of the physical device to pass-through.
+Hot-plug a new pass-through pci device to the specified domain. See
+L<xl-pci-configuration(5)> for more information.
 
-=item B<pci-detach> [I<OPTIONS>] I<domain-id> I<BDF>
+=item B<pci-detach> [I<OPTIONS>] I<domain-id> I<PCI_SPEC_STRING>
 
-Hot-unplug a previously assigned pci device from a domain. B<BDF> is the PCI
-Bus/Device/Function of the physical device to be removed from the guest domain.
+Hot-unplug a pci device that was previously passed through to a domain. See
+L<xl-pci-configuration(5)> for more information.
 
 B<OPTIONS>
 
@@ -1660,7 +1667,7 @@ even without guest domain's collaboration.
 
 =item B<pci-list> I<domain-id>
 
-List pass-through pci devices for a domain.
+List the B<BDF> of pci devices passed through to a domain.
 
 =back
 
@@ -1947,6 +1954,47 @@ ignored:
 =over 4
 
 =item B<xl migrate --live>
+
+=back
+
+=head1 ENVIRONMENT VARIABLES
+
+The following environment variables shall affect the execution of xl:
+
+=over 4
+
+=item LIBXL_BOOTLOADER_RESTRICT
+
+Attempt to restrict the bootloader after startup, to limit the
+consequences of security vulnerabilities due to parsing guest
+owned image files.
+
+See docs/features/qemu-deprivilege.pandoc for more information
+on how to setup the unprivileged users.
+
+Note that running the bootloader in restricted mode also implies using
+non-interactive mode, and the disk image must be readable by the
+restricted user.
+
+Having this variable set is equivalent to enabling the option, even if the
+value is 0.
+
+=item LIBXL_BOOTLOADER_USER
+
+When using bootloader_restrict, run the bootloader as this user.  If
+not set the default QEMU restrict users will be used.
+
+NOTE: Each domain MUST have a SEPARATE username.
+
+See docs/features/qemu-deprivilege.pandoc for more information.
+
+=item LIBXL_BOOTLOADER_TIMEOUT
+
+Timeout in seconds for bootloader execution when running in restricted mode.
+Otherwise the build time default in LIBXL_BOOTLOADER_TIMEOUT will be used.
+
+If defined the value must be an unsigned integer between 0 and INT_MAX,
+otherwise behavior is undefined.  Setting to 0 disables the timeout.
 
 =back
 

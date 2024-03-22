@@ -43,6 +43,17 @@ bytes are forbidden; clients specifying relative paths should keep
 them to within 2048 bytes.  (See XENSTORE_*_PATH_MAX in xs_wire.h.)
 
 
+Each node has one or multiple permission entries.  Permissions are
+granted by domain-id, the first permission entry of each node specifies
+the owner of the node.  Permissions of a node can be changed by the
+owner of the node, the owner can only be modified by the control
+domain (usually domain id 0).  The owner always has the right to read
+and write the node, while other permissions can be setup to allow
+read and/or write access.  When a domain is being removed from Xenstore
+nodes owned by that domain will be removed together with all of those
+nodes' children.
+
+
 Communication with xenstore is via either sockets, or event channel
 and shared memory, as specified in io/xs_wire.h: each message in
 either direction is a header formatted as a struct xsd_sockmsg
@@ -176,7 +187,7 @@ SET_PERMS		<path>|<perm-as-string>|+?
 
 ---------- Watches ----------
 
-WATCH			<wpath>|<token>|?
+WATCH			<wpath>|<token>|[<depth>|]?
 	Adds a watch.
 
 	When a <path> is modified (including path creation, removal,
@@ -187,7 +198,11 @@ WATCH			<wpath>|<token>|?
 	matching watch results in a WATCH_EVENT message (see below).
 
 	The event's path matches the watch's <wpath> if it is an child
-	of <wpath>.
+	of <wpath>. This match can be limited by specifying <depth> (a
+	decimal value of 0 or larger): it denotes the directory levels
+	below <wpath> to consider for a match ("0" would not match for
+	a child of <wpath>, "1" would match only for a direct child,
+	etc.).
 
 	<wpath> can be a <path> to watch or @<wspecial>.  In the
 	latter case <wspecial> may have any syntax but it matches
@@ -198,7 +213,13 @@ WATCH			<wpath>|<token>|?
 				shutdown, and also on RELEASE
 				and domain destruction
 	<wspecial> events are sent to privileged callers or explicitly
-	via SET_PERMS enabled domains only.
+	via SET_PERMS enabled domains only. The semantics for a
+	specification of <depth> differ for generating <wspecial>
+	events: specifying "1" will report the related domid by using
+	@<wspecial>/<domid> for the reported path. Other <depth>
+	values are not supported.
+	For @releaseDomain it is possible to watch only for a specific
+	domain by specifying @releaseDomain/<domid> for the path.
 
 	When a watch is first set up it is triggered once straight
 	away, with <path> equal to <wpath>.  Watches may be triggered
@@ -294,6 +315,22 @@ IS_DOMAIN_INTRODUCED	<domid>|		T| or F|
 	ie, if INTRODUCE for the domain has not yet been followed by
 	domain destruction or explicit RELEASE.
 
+RESUME			<domid>|
+
+	Arranges that @releaseDomain events will once more be
+	generated when the domain becomes shut down.  This might have
+	to be used if a domain were to be shut down (generating one
+	@releaseDomain) and then subsequently restarted, since the
+	state-sensitive algorithm in xenstored will not otherwise send
+	further watch event notifications if the domain were to be
+	shut down again.
+
+	This command will be issued in place such as resume because
+	Xen will "shutdown" the domain on suspend.
+
+	xenstored prevents the use of RESUME other than by dom0.
+
+
 SET_TARGET		<domid>|<tdomid>|
 	Notifies xenstored that domain <domid> is targeting domain
 	<tdomid>. This grants domain <domid> full access to paths
@@ -303,6 +340,40 @@ SET_TARGET		<domid>|<tdomid>|
 	paths related to <tdomid>.
 
 	xenstored prevents the use of SET_TARGET other than by dom0.
+
+GET_FEATURE		[<domid>|]		<value>|
+SET_FEATURE		<domid>|<value>|
+	Returns or sets the contents of the "feature" field copied to
+	offset 2064 of the Xenstore ring page of the domain specified by
+	<domid>. <value> is a decimal number being a logical or of the
+	feature bits as defined in docs/misc/xenstore-ring.txt. Trying
+	to set a bit for a feature not being supported by the running
+	Xenstore will be denied. Providing no <domid> with the
+	GET_FEATURE command will return the features which are supported
+	by Xenstore.
+
+	SET_FEATURE for a domain will be rejected after the INTRODUCE
+	command for this domain has been sent to xenstored.
+
+	xenstored prevents the use of GET_FEATURE and SET_FEATURE other
+	than by dom0.
+
+GET_QUOTA		[[<domid>|]<quota>|]	<value>|
+SET_QUOTA		[<domid>|]<quota>|<value>|
+	Returns or sets a quota value for the domain being specified by
+	<domid>. Omitting <domid> will return or set the global quota
+	values, which are the default values for new domains. <quota> is
+	 one of "nodes", "watches", "transactions", "node-size",
+	"permissions", or any other implementation defined value. For
+	GET_QUOTA it is possible to omit the <quota> parameter together
+	with the <domid> parameter, which will return a single string of
+	all supported <quota> values separated by blanks. <value> is a
+	decimal number specifying the quota value, with "0" having the
+	special meaning of quota checks being disabled. The initial quota
+	settings for a domain are the global ones of Xenstore.
+
+	xenstored prevents the use of GET_QUOTA and SET_QUOTA other
+	than by dom0.
 
 ---------- Miscellaneous ----------
 
@@ -317,6 +388,27 @@ CONTROL			<command>|[<parameters>|]
 	Current commands are:
 	check
 		checks xenstored innards
+	live-update|<params>|+
+		perform a live-update of the Xenstore daemon, only to
+		be used via xenstore-control command.
+		<params> are implementation specific and are used for
+		different steps of the live-update processing. Currently
+		supported <params> are:
+		-f <file>  specify new daemon binary
+		-b <size>  specify size of new stubdom binary
+		-d <chunk-size> <binary-chunk>  transfer chunk of new
+			stubdom binary
+		-c <pars>  specify new command line to use
+		-s [-t <sec>] [-F]  start live update process (-t specifies
+			timeout in seconds to wait for active transactions
+			to finish, default is 60 seconds; -F will force
+			live update to happen even with running transactions
+			after timeout elapsed)
+		-a  abort live update handling
+		All sub-options will return "OK" in case of success or an
+		error string in case of failure. -s can return "BUSY" in case
+		of an active transaction, a retry of -s can be done in that
+		case.
 	log|on
 		turn xenstore logging on
 	log|off
@@ -329,6 +421,17 @@ CONTROL			<command>|[<parameters>|]
 	print|<string>
 		print <string> to syslog (xenstore runs as daemon) or
 		to console (xenstore runs as stubdom)
+	quota|[set <name> <val>|<domid>]
+		without parameters: print the current quota settings
+		with "set <name> <val>": set the quota <name> to new value
+		<val> (The admin should make sure all the domain usage is
+		below the quota. If it is not, then Xenstored may continue to
+		handle requests from the domain as long as the resource
+		violating the new quota setting isn't increased further)
+		with "<domid>": print quota related accounting data for
+		the domain <domid>
+	quota-soft|[set <name> <val>]
+		like the "quota" command, but for soft-quota.
 	help			<supported-commands>
 		return list of supported commands for CONTROL
 

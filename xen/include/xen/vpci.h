@@ -19,6 +19,8 @@ typedef int vpci_register_init_t(struct pci_dev *dev);
 #define VPCI_PRIORITY_MIDDLE    "5"
 #define VPCI_PRIORITY_LOW       "9"
 
+#define VPCI_ECAM_BDF(addr)     (((addr) & 0x0ffff000) >> 12)
+
 #define REGISTER_VPCI_INIT(x, p)                \
   static vpci_register_init_t *const x##_entry  \
                __used_section(".data.vpci." p) = x
@@ -44,10 +46,10 @@ void vpci_write(pci_sbdf_t sbdf, unsigned int reg, unsigned int size,
                 uint32_t data);
 
 /* Passthrough handlers. */
-uint32_t vpci_hw_read16(const struct pci_dev *pdev, unsigned int reg,
-                        void *data);
-uint32_t vpci_hw_read32(const struct pci_dev *pdev, unsigned int reg,
-                        void *data);
+uint32_t cf_check vpci_hw_read16(
+    const struct pci_dev *pdev, unsigned int reg, void *data);
+uint32_t cf_check vpci_hw_read32(
+    const struct pci_dev *pdev, unsigned int reg, void *data);
 
 /*
  * Check for pending vPCI operations on this vcpu. Returns true if the vcpu
@@ -78,8 +80,6 @@ struct vpci {
             bool prefetchable : 1;
             /* Store whether the BAR is mapped into guest p2m. */
             bool enabled      : 1;
-#define PCI_HEADER_NORMAL_NR_BARS        6
-#define PCI_HEADER_BRIDGE_NR_BARS        2
         } bars[PCI_HEADER_NORMAL_NR_BARS + 1];
         /* At most 6 BARS + 1 expansion ROM BAR. */
 
@@ -88,6 +88,12 @@ struct vpci {
          * is mapped into guest p2m) if there's a ROM BAR on the device.
          */
         bool rom_enabled      : 1;
+        /*
+         * Cache whether memory decoding is enabled from our PoV.
+         * Some devices have a sticky memory decoding so that can't be relied
+         * upon to know whether BARs are mapped into the guest p2m.
+         */
+        bool bars_mapped      : 1;
         /* FIXME: currently there's no support for SR-IOV. */
     } header;
 
@@ -127,6 +133,12 @@ struct vpci {
         bool enabled         : 1;
         /* Masked? */
         bool masked          : 1;
+        /* Partial table map. */
+#define VPCI_MSIX_TBL_HEAD 0
+#define VPCI_MSIX_TBL_TAIL 1
+#define VPCI_MSIX_PBA_HEAD 2
+#define VPCI_MSIX_PBA_TAIL 3
+        void __iomem *table[4];
         /* Entries. */
         struct vpci_msix_entry {
             uint64_t addr;
@@ -160,8 +172,7 @@ int __must_check vpci_msi_arch_enable(struct vpci_msi *msi,
                                       const struct pci_dev *pdev,
                                       unsigned int vectors);
 void vpci_msi_arch_disable(struct vpci_msi *msi, const struct pci_dev *pdev);
-int __must_check vpci_msi_arch_update(struct vpci_msi *msi,
-                                      const struct pci_dev *pdev);
+void vpci_msi_arch_update(struct vpci_msi *msi, const struct pci_dev *pdev);
 void vpci_msi_arch_init(struct vpci_msi *msi);
 void vpci_msi_arch_print(const struct vpci_msi *msi);
 
@@ -209,6 +220,16 @@ static inline unsigned int vmsix_entry_nr(const struct vpci_msix *msix,
 {
     return entry - msix->entries;
 }
+
+bool vpci_access_allowed(unsigned int reg, unsigned int len);
+
+/* ECAM mmio read/write helpers */
+bool vpci_ecam_write(pci_sbdf_t sbdf, unsigned int reg, unsigned int len,
+                     unsigned long data);
+
+bool vpci_ecam_read(pci_sbdf_t sbdf, unsigned int reg, unsigned int len,
+                    unsigned long *data);
+
 #endif /* __XEN__ */
 
 #else /* !CONFIG_HAS_VPCI */
@@ -218,6 +239,8 @@ static inline int vpci_add_handlers(struct pci_dev *pdev)
 {
     return 0;
 }
+
+static inline void vpci_remove_device(struct pci_dev *pdev) { }
 
 static inline void vpci_dump_msi(void) { }
 
@@ -234,7 +257,7 @@ static inline void vpci_write(pci_sbdf_t sbdf, unsigned int reg,
     ASSERT_UNREACHABLE();
 }
 
-static inline bool vpci_process_pending(struct vcpu *v)
+static inline bool __must_check vpci_process_pending(struct vcpu *v)
 {
     ASSERT_UNREACHABLE();
     return false;

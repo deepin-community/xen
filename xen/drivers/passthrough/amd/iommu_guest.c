@@ -50,12 +50,12 @@ static uint16_t guest_bdf(struct domain *d, uint16_t machine_bdf)
 
 static inline struct guest_iommu *domain_iommu(struct domain *d)
 {
-    return dom_iommu(d)->arch.g_iommu;
+    return dom_iommu(d)->arch.amd.g_iommu;
 }
 
 static inline struct guest_iommu *vcpu_iommu(struct vcpu *v)
 {
-    return dom_iommu(v->domain)->arch.g_iommu;
+    return dom_iommu(v->domain)->arch.amd.g_iommu;
 }
 
 static void guest_iommu_enable(struct guest_iommu *iommu)
@@ -68,10 +68,39 @@ static void guest_iommu_disable(struct guest_iommu *iommu)
     iommu->enabled = 0;
 }
 
-static uint64_t get_guest_cr3_from_dte(struct amd_iommu_dte *dte)
+/*
+ * The Guest CR3 Table is a table written by the guest kernel, pointing at
+ * gCR3 values for PASID transactions to use.  The Device Table Entry points
+ * at a system physical address.
+ *
+ * However, these helpers deliberately use untyped parameters without
+ * reference to gfn/mfn because they are used both for programming the real
+ * IOMMU, and interpreting a guests programming of its vIOMMU.
+ */
+static uint64_t dte_get_gcr3_table(const struct amd_iommu_dte *dte)
 {
-    return ((dte->gcr3_trp_51_31 << 31) | (dte->gcr3_trp_30_15 << 15) |
-            (dte->gcr3_trp_14_12 << 12)) >> PAGE_SHIFT;
+    return (((uint64_t)dte->gcr3_trp_51_31 << 31) |
+            (dte->gcr3_trp_30_15 << 15) |
+            (dte->gcr3_trp_14_12 << 12));
+}
+
+static void dte_set_gcr3_table(struct amd_iommu_dte *dte, uint16_t dom_id,
+                               uint64_t addr, bool gv, uint8_t glx)
+{
+#define GCR3_MASK(hi, lo) (((1ul << ((hi) + 1)) - 1) & ~((1ul << (lo)) - 1))
+
+    /* I bit must be set when gcr3 is enabled */
+    dte->i = true;
+
+    dte->gcr3_trp_14_12 = MASK_EXTR(addr, GCR3_MASK(14, 12));
+    dte->gcr3_trp_30_15 = MASK_EXTR(addr, GCR3_MASK(30, 15));
+    dte->gcr3_trp_51_31 = MASK_EXTR(addr, GCR3_MASK(51, 31));
+
+    dte->domain_id = dom_id;
+    dte->glx = glx;
+    dte->gv = gv;
+
+#undef GCR3_MASK
 }
 
 static unsigned int host_domid(struct domain *d, uint64_t g_domid)
@@ -356,7 +385,7 @@ static int do_completion_wait(struct domain *d, cmd_entry_t *cmd)
 
 static int do_invalidate_dte(struct domain *d, cmd_entry_t *cmd)
 {
-    uint16_t gbdf, mbdf, req_id, gdom_id, hdom_id;
+    uint16_t gbdf, mbdf, req_id, gdom_id, hdom_id, prev_domid;
     struct amd_iommu_dte *gdte, *mdte, *dte_base;
     struct amd_iommu *iommu = NULL;
     struct guest_iommu *g_iommu;
@@ -388,7 +417,7 @@ static int do_invalidate_dte(struct domain *d, cmd_entry_t *cmd)
     gdte = &dte_base[gbdf % (PAGE_SIZE / sizeof(struct amd_iommu_dte))];
 
     gdom_id = gdte->domain_id;
-    gcr3_gfn = get_guest_cr3_from_dte(gdte);
+    gcr3_gfn = dte_get_gcr3_table(gdte) >> PAGE_SHIFT;
     glx = gdte->glx;
     gv = gdte->gv;
 
@@ -416,17 +445,19 @@ static int do_invalidate_dte(struct domain *d, cmd_entry_t *cmd)
     req_id = get_dma_requestor_id(iommu->seg, mbdf);
     dte_base = iommu->dev_table.buffer;
     mdte = &dte_base[req_id];
+    prev_domid = mdte->domain_id;
 
     spin_lock_irqsave(&iommu->lock, flags);
-    iommu_dte_set_guest_cr3(mdte, hdom_id, gcr3_mfn, gv, glx);
+    dte_set_gcr3_table(mdte, hdom_id, gcr3_mfn << PAGE_SHIFT, gv, glx);
 
-    amd_iommu_flush_device(iommu, req_id);
     spin_unlock_irqrestore(&iommu->lock, flags);
+
+    amd_iommu_flush_device(iommu, req_id, prev_domid);
 
     return 0;
 }
 
-static void guest_iommu_process_command(void *data)
+static void cf_check guest_iommu_process_command(void *data)
 {
     unsigned long opcode, tail, head, cmd_mfn;
     cmd_entry_t *cmd;
@@ -615,8 +646,8 @@ static uint64_t iommu_mmio_read64(struct guest_iommu *iommu,
     return val;
 }
 
-static int guest_iommu_mmio_read(struct vcpu *v, unsigned long addr,
-                                 unsigned int len, unsigned long *pval)
+static int cf_check guest_iommu_mmio_read(
+    struct vcpu *v, unsigned long addr, unsigned int len, unsigned long *pval)
 {
     struct guest_iommu *iommu = vcpu_iommu(v);
     unsigned long offset;
@@ -705,8 +736,8 @@ static void guest_iommu_mmio_write64(struct guest_iommu *iommu,
     }
 }
 
-static int guest_iommu_mmio_write(struct vcpu *v, unsigned long addr,
-                                  unsigned int len, unsigned long val)
+static int cf_check guest_iommu_mmio_write(
+    struct vcpu *v, unsigned long addr, unsigned int len, unsigned long val)
 {
     struct guest_iommu *iommu = vcpu_iommu(v);
     unsigned long offset;
@@ -789,7 +820,7 @@ static void guest_iommu_reg_init(struct guest_iommu *iommu)
     iommu->reg_ext_feature = ef;
 }
 
-static int guest_iommu_mmio_range(struct vcpu *v, unsigned long addr)
+static int cf_check guest_iommu_mmio_range(struct vcpu *v, unsigned long addr)
 {
     struct guest_iommu *iommu = vcpu_iommu(v);
 
@@ -823,7 +854,7 @@ int guest_iommu_init(struct domain* d)
     guest_iommu_reg_init(iommu);
     iommu->mmio_base = ~0ULL;
     iommu->domain = d;
-    hd->arch.g_iommu = iommu;
+    hd->arch.amd.g_iommu = iommu;
 
     tasklet_init(&iommu->cmd_buffer_tasklet, guest_iommu_process_command, d);
 
@@ -845,5 +876,5 @@ void guest_iommu_destroy(struct domain *d)
     tasklet_kill(&iommu->cmd_buffer_tasklet);
     xfree(iommu);
 
-    dom_iommu(d)->arch.g_iommu = NULL;
+    dom_iommu(d)->arch.amd.g_iommu = NULL;
 }

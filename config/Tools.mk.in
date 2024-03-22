@@ -1,5 +1,6 @@
 -include $(XEN_ROOT)/config/Paths.mk
 
+CONFIG_WERROR       := @werror@
 CONFIG_RUMP         := @CONFIG_RUMP@
 ifeq ($(CONFIG_RUMP),y)
 XEN_OS              := NetBSDRump
@@ -12,14 +13,13 @@ PYTHON              := @PYTHON@
 PYTHON_PATH         := @PYTHONPATH@
 PY_NOOPT_CFLAGS     := @PY_NOOPT_CFLAGS@
 PERL                := @PERL@
-BASH                := @BASH@
-XGETTTEXT           := @XGETTEXT@
 AS86                := @AS86@
 LD86                := @LD86@
 BCC                 := @BCC@
 IASL                := @IASL@
 AWK                 := @AWK@
 FETCHER             := @FETCHER@
+ABI_DUMPER          := @ABI_DUMPER@
 
 # Extra folder for libs/includes
 PREPEND_INCLUDES    := @PREPEND_INCLUDES@
@@ -30,8 +30,6 @@ APPEND_LIB          := @APPEND_LIB@
 PTHREAD_CFLAGS      := @PTHREAD_CFLAGS@
 PTHREAD_LDFLAGS     := @PTHREAD_LDFLAGS@
 PTHREAD_LIBS        := @PTHREAD_LIBS@
-
-PTYFUNCS_LIBS       := @PTYFUNCS_LIBS@
 
 LIBNL3_LIBS         := @LIBNL3_LIBS@
 LIBNL3_CFLAGS       := @LIBNL3_CFLAGS@
@@ -67,7 +65,8 @@ CONFIG_9PFS         := @ninepfs@
 LINUX_BACKEND_MODULES := @LINUX_BACKEND_MODULES@
 
 #System options
-ZLIB                := @zlib@
+ZLIB_CFLAGS         := @ZLIB_CFLAGS@
+ZLIB_LIBS           := @ZLIB_LIBS@
 CONFIG_LIBICONV     := @libiconv@
 EXTFS_LIBS          := @EXTFS_LIBS@
 CURSES_LIBS         := @CURSES_LIBS@

@@ -29,22 +29,33 @@ struct transaction;
 
 extern uint64_t generation;
 
-int do_transaction_start(struct connection *conn, struct buffered_data *node);
-int do_transaction_end(struct connection *conn, struct buffered_data *in);
+int do_transaction_start(const void *ctx, struct connection *conn,
+			 struct buffered_data *node);
+int do_transaction_end(const void *ctx, struct connection *conn,
+		       struct buffered_data *in);
 
 struct transaction *transaction_lookup(struct connection *conn, uint32_t id);
+
+/* Set flag for created node. */
+void ta_node_created(struct transaction *trans);
 
 /* inc/dec entry number local to trans while changing a node */
 void transaction_entry_inc(struct transaction *trans, unsigned int domid);
 void transaction_entry_dec(struct transaction *trans, unsigned int domid);
 
 /* This node was accessed. */
-int access_node(struct connection *conn, struct node *node,
-                enum node_access_type type, TDB_DATA *key);
+int __must_check access_node(struct connection *conn, struct node *node,
+                             enum node_access_type type, TDB_DATA *key);
+
+/* Queue watches for a modified node. */
+void queue_watches(struct connection *conn, const char *name, bool watch_exact);
 
 /* Prepend the transaction to name if appropriate. */
-int transaction_prepend(struct connection *conn, const char *name,
-                        TDB_DATA *key);
+void transaction_prepend(struct connection *conn, const char *name,
+                         TDB_DATA *key);
+
+/* Mark the transaction as failed. This will prevent it to be committed. */
+void fail_transaction(struct transaction *trans);
 
 void conn_delete_all_transactions(struct connection *conn);
 int check_transactions(struct hashtable *hash);

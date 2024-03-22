@@ -3,28 +3,49 @@
 # Cleaning up
 # ==========================================================================
 
+src := $(obj)
+
+# shortcuts
+srcdir := $(srctree)/$(src)
+
 clean::
 
-include $(BASEDIR)/scripts/Kbuild.include
+include $(srctree)/scripts/Kbuild.include
 
-include Makefile
+include $(src)/Makefile
 
 # Figure out what we need to clean from the various variables
 # ==========================================================================
 subdir-all := $(subdir-y) $(subdir-n) $(subdir-) \
-              $(filter %/, $(obj-y) $(obj-n) $(obj-))
+              $(patsubst %/,%, $(filter %/, $(obj-y) $(obj-n) $(obj-)))
 
-DEPS_RM = $(DEPS) $(DEPS_INCLUDE)
+subdir-all := $(addprefix $(obj)/,$(subdir-all))
+
+__clean-files := \
+    $(clean-files) $(hostprogs-y) $(hostprogs-) \
+    $(extra-y) $(extra-) $(targets) \
+    $(hostprogs-always-y) $(hostprogs-always-)
+
+# clean-files is given relative to the current directory, unless it
+# starts with $(objtree)/ (which means "./", so do not add "./" unless
+# you want to delete a file from the toplevel object directory).
+
+__clean-files := $(wildcard \
+		   $(addprefix $(obj)/, $(filter-out /% $(objtree)/%, $(__clean-files))) \
+		   $(filter /% $(objtree)/%, $(__clean-files)))
+
 .PHONY: clean
-clean:: $(addprefix _clean_, $(subdir-all))
-	rm -f *.o .*.o.tmp *~ core $(DEPS_RM)
+clean:: $(subdir-all)
+ifneq ($(strip $(__clean-files)),)
+	rm -rf $(__clean-files)
+endif
+	@:
 
 # Descending
 # ---------------------------------------------------------------------------
 
-_clean_%/: FORCE
-	$(MAKE) $(clean) $*
+PHONY += $(subdir-all)
+$(subdir-all):
+	$(Q)$(MAKE) $(clean)=$@
 
-# Force execution of pattern rules (for which PHONY cannot be directly used).
-.PHONY: FORCE
-FORCE:
+.PHONY: $(PHONY)

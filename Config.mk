@@ -19,13 +19,17 @@ or       = $(if $(strip $(1)),$(1),$(if $(strip $(2)),$(2),$(if $(strip $(3)),$(
 
 -include $(XEN_ROOT)/.config
 
-XEN_COMPILE_ARCH    ?= $(shell uname -m | sed -e s/i.86/x86_32/ \
+ifeq ($(origin XEN_COMPILE_ARCH), undefined)
+XEN_COMPILE_ARCH    := $(shell uname -m | sed -e s/i.86/x86_32/ \
                          -e s/i86pc/x86_32/ -e s/amd64/x86_64/ \
                          -e s/armv7.*/arm32/ -e s/armv8.*/arm64/ \
                          -e s/aarch64/arm64/)
+endif
 
 XEN_TARGET_ARCH     ?= $(XEN_COMPILE_ARCH)
-XEN_OS              ?= $(shell uname -s)
+ifeq ($(origin XEN_OS), undefined)
+XEN_OS              := $(shell uname -s)
+endif
 
 CONFIG_$(XEN_OS) := y
 
@@ -63,7 +67,7 @@ DEPS_INCLUDE = $(addsuffix .d2, $(basename $(wildcard $(DEPS))))
 DEPS_RM = $(DEPS) $(DEPS_INCLUDE)
 
 %.d2: %.d
-	sed "s! $$PWD/! !" $^ >$@.tmp && mv -f $@.tmp $@
+	sed "s!\(^\| \)$$PWD/! !" $^ >$@.tmp && mv -f $@.tmp $@
 
 include $(XEN_ROOT)/config/$(XEN_OS).mk
 include $(XEN_ROOT)/config/$(XEN_TARGET_ARCH).mk
@@ -91,7 +95,7 @@ PYTHON_PREFIX_ARG ?= --prefix="$(prefix)"
 #
 # Usage: cflags-y += $(call cc-option,$(CC),-march=winchip-c6,-march=i586)
 cc-option = $(shell if test -z "`echo 'void*p=1;' | \
-              $(1) $(2) -S -o /dev/null -x c - 2>&1 | grep -- $(2) -`"; \
+              $(1) $(2) -c -o /dev/null -x c - 2>&1 | grep -- $(2:-Wa$(comma)%=%) -`"; \
               then echo "$(2)"; else echo "$(3)"; fi ;)
 
 # cc-option-add: Add an option to compilation flags, but only if supported.
@@ -137,12 +141,6 @@ export XEN_HAS_BUILD_ID=y
 build_id_linker := --build-id=sha1
 endif
 
-ifndef XEN_HAS_CHECKPOLICY
-    CHECKPOLICY ?= checkpolicy
-    XEN_HAS_CHECKPOLICY := $(shell $(CHECKPOLICY) -h 2>&1 | grep -q xen && echo y || echo n)
-    export XEN_HAS_CHECKPOLICY
-endif
-
 define buildmakevars2shellvars
     export PREFIX="$(prefix)";                                            \
     export XEN_SCRIPT_DIR="$(XEN_SCRIPT_DIR)";                            \
@@ -173,23 +171,12 @@ define buildmakevars2file-closure
 	$(call move-if-changed,$(1).tmp,$(1))
 endef
 
-buildmakevars2header = $(eval $(call buildmakevars2header-closure,$(1)))
-define buildmakevars2header-closure
-    $(1): .phony
-	rm -f $(1).tmp; \
-	$(foreach var, $(BUILD_MAKE_VARS), \
-	          echo "#define $(var) \"$($(var))\"" >>$(1).tmp;) \
-	$(call move-if-changed,$(1).tmp,$(1))
-endef
-
 CFLAGS += -fno-strict-aliasing
 
 CFLAGS += -std=gnu99
 
 CFLAGS += -Wall -Wstrict-prototypes
 
-$(call cc-option-add,HOSTCFLAGS,HOSTCC,-Wdeclaration-after-statement)
-$(call cc-option-add,CFLAGS,CC,-Wdeclaration-after-statement)
 $(call cc-option-add,CFLAGS,CC,-Wno-unused-but-set-variable)
 $(call cc-option-add,CFLAGS,CC,-Wno-unused-local-typedefs)
 
@@ -203,9 +190,8 @@ endif
 APPEND_LDFLAGS += $(foreach i, $(APPEND_LIB), -L$(i))
 APPEND_CFLAGS += $(foreach i, $(APPEND_INCLUDES), -I$(i))
 
-EMBEDDED_EXTRA_CFLAGS := -nopie -fno-stack-protector -fno-stack-protector-all
+EMBEDDED_EXTRA_CFLAGS := -fno-pie -fno-stack-protector -fno-stack-protector-all
 EMBEDDED_EXTRA_CFLAGS += -fno-exceptions -fno-asynchronous-unwind-tables
-EMBEDDED_EXTRA_CFLAGS += -fcf-protection=none
 
 XEN_EXTFILES_URL ?= http://xenbits.xen.org/xen-extfiles
 # All the files at that location were downloaded from elsewhere on
@@ -244,16 +230,16 @@ QEMU_TRADITIONAL_URL ?= git://xenbits.xen.org/qemu-xen-traditional.git
 SEABIOS_UPSTREAM_URL ?= git://xenbits.xen.org/seabios.git
 MINIOS_UPSTREAM_URL ?= git://xenbits.xen.org/mini-os.git
 endif
-OVMF_UPSTREAM_REVISION ?= 20d2e5a125e34fc8501026613a71549b2a1a3e54
-QEMU_UPSTREAM_REVISION ?= qemu-xen-4.14.3
-MINIOS_UPSTREAM_REVISION ?= xen-RELEASE-4.14.3
+OVMF_UPSTREAM_REVISION ?= 7b4a99be8a39c12d3a7fc4b8db9f0eab4ac688d5
+QEMU_UPSTREAM_REVISION ?= qemu-xen-4.17.3
+MINIOS_UPSTREAM_REVISION ?= xen-RELEASE-4.17.3
 
-SEABIOS_UPSTREAM_REVISION ?= rel-1.13.0
+SEABIOS_UPSTREAM_REVISION ?= rel-1.16.0
 
 ETHERBOOT_NICS ?= rtl8139 8086100e
 
 
-QEMU_TRADITIONAL_REVISION ?= xen-4.14.3
+QEMU_TRADITIONAL_REVISION ?= xen-4.17.3
 
 # Specify which qemu-dm to use. This may be `ioemu' to use the old
 # Mercurial in-tree version, or a local directory, or a git URL.

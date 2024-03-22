@@ -41,7 +41,6 @@
 
 #include <xenstore.h>
 #include "xenctrl.h"
-#include "_paths.h"
 
 #define ESCAPE_CHARACTER 0x1d
 
@@ -103,7 +102,7 @@ static int get_pty_fd(struct xs_handle *xs, char *path, int seconds)
 	struct timeval tv;
 	fd_set watch_fdset;
 	int xs_fd = xs_fileno(xs), pty_fd = -1;
-	int start, now;
+	time_t start, now;
 	unsigned int len = 0;
 	char *pty_path, **watch_paths;
 
@@ -325,7 +324,7 @@ int main(int argc, char **argv)
 {
 	struct termios attr;
 	int domid;
-	char *sopt = "hn:";
+	const char *sopt = "hn:";
 	int ch;
 	unsigned int num = 0;
 	int opt_ind=0;
@@ -345,7 +344,7 @@ int main(int argc, char **argv)
 	char *end;
 	console_type type = CONSOLE_INVAL;
 	bool interactive = 0;
-	char *console_names = "serial, pv, vuart";
+	const char *console_names = "serial, pv, vuart";
 
 	while((ch = getopt_long(argc, argv, sopt, lopt, &opt_ind)) != -1) {
 		switch(ch) {
@@ -398,7 +397,7 @@ int main(int argc, char **argv)
 		exit(EINVAL);
 	}
 
-	xs = xs_daemon_open();
+	xs = xs_open(0);
 	if (xs == NULL) {
 		err(errno, "Could not contact XenStore");
 	}

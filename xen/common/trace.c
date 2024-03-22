@@ -79,7 +79,7 @@ static u32 tb_event_mask = TRC_ALL;
  * i.e., sizeof(_type) * ans >= _x. */
 #define fit_to_type(_type, _x) (((_x)+sizeof(_type)-1) / sizeof(_type))
 
-static int cpu_callback(
+static int cf_check cpu_callback(
     struct notifier_block *nfb, unsigned long action, void *hcpu)
 {
     unsigned int cpu = (unsigned long)hcpu;
@@ -663,7 +663,7 @@ static inline void insert_lost_records(struct t_buf *buf)
  * Notification is performed in qtasklet to avoid deadlocks with contexts
  * which __trace_var() may be called from (e.g., scheduler critical regions).
  */
-static void trace_notify_dom0(void *unused)
+static void cf_check trace_notify_dom0(void *unused)
 {
     send_global_virq(VIRQ_TBUF);
 }
@@ -822,7 +822,7 @@ void __trace_hypercall(uint32_t event, unsigned long op,
 {
     struct {
         uint32_t op;
-        uint32_t args[6];
+        uint32_t args[5];
     } d;
     uint32_t *a = d.args;
 
@@ -834,7 +834,7 @@ void __trace_hypercall(uint32_t event, unsigned long op,
 
 #define APPEND_ARG32(i)                         \
     do {                                        \
-        unsigned i_ = (i);                      \
+        unsigned int i_ = (i);                  \
         *a++ = args[(i_)];                      \
         d.op |= TRC_PV_HYPERCALL_V2_ARG_32(i_); \
     } while( 0 )

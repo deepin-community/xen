@@ -13,9 +13,9 @@
  *    it under the terms of the GNU General Public License version 2,
  *      as published by the Free Software Foundation.
  */
- 
+
 /* Ported to Xen 3.0, George Coker, <gscoker@alpha.ncsc.mil> */
- 
+
 #include <xen/lib.h>
 #include <xen/xmalloc.h>
 #include <xen/types.h>
@@ -113,7 +113,8 @@ struct avc_dump_buf {
     u32 free;
 };
 
-static void avc_printk(struct avc_dump_buf *buf, const char *fmt, ...)
+static void __attribute__ ((format (printf, 2, 3)))
+    avc_printk(struct avc_dump_buf *buf, const char *fmt, ...)
 {
     int i;
     va_list args;
@@ -267,7 +268,7 @@ int avc_get_hash_stats(struct xen_flask_hash_stats *arg)
     }
 
     rcu_read_unlock(&avc_rcu_lock);
-    
+
     arg->entries = atomic_read(&avc_cache.active_nodes);
     arg->buckets_used = slots_used;
     arg->buckets_total = AVC_CACHE_SLOTS;
@@ -276,7 +277,7 @@ int avc_get_hash_stats(struct xen_flask_hash_stats *arg)
     return 0;
 }
 
-static void avc_node_free(struct rcu_head *rhead)
+static void cf_check avc_node_free(struct rcu_head *rhead)
 {
     struct avc_node *node = container_of(rhead, struct avc_node, rhead);
     xfree(node);
@@ -336,7 +337,7 @@ static inline int avc_reclaim_node(void)
         }
         rcu_read_unlock(&avc_rcu_lock);
         spin_unlock_irqrestore(lock, flags);
-    }    
+    }
  out:
     return ecx;
 }
@@ -565,15 +566,14 @@ void avc_audit(u32 ssid, u32 tsid, u16 tclass, u32 requested,
 
     if ( a && (a->sdom || a->tdom) )
     {
-        if ( a->sdom && a->tdom && a->sdom != a->tdom )
-            avc_printk(&buf, "domid=%d target=%d ", a->sdom->domain_id, a->tdom->domain_id);
-        else if ( a->sdom )
-            avc_printk(&buf, "domid=%d ", a->sdom->domain_id);
-        else
-            avc_printk(&buf, "target=%d ", a->tdom->domain_id);
+        if ( a->sdom )
+            avc_printk(&buf, "source=%pd ", a->sdom);
+        if ( a->tdom && a->tdom != a->sdom )
+            avc_printk(&buf, "target=%pd ", a->tdom);
     }
     else if ( cdom )
-        avc_printk(&buf, "domid=%d ", cdom->domain_id);
+        avc_printk(&buf, "current=%pd ", cdom);
+
     switch ( a ? a->type : 0 ) {
     case AVC_AUDIT_DATA_DEV:
         avc_printk(&buf, "device=%#lx ", a->device);
@@ -622,7 +622,7 @@ static int avc_update_node(u32 perms, u32 ssid, u32 tsid, u16 tclass,
     struct hlist_head *head;
     struct hlist_node *next;
     spinlock_t *lock;
-    
+
     node = avc_alloc_node();
     if ( !node )
     {
@@ -630,7 +630,7 @@ static int avc_update_node(u32 perms, u32 ssid, u32 tsid, u16 tclass,
         goto out;
     }
 
-    hvalue = avc_hash(ssid, tsid, tclass);    
+    hvalue = avc_hash(ssid, tsid, tclass);
 
     head = &avc_cache.slots[hvalue];
     lock = &avc_cache.slots_lock[hvalue];
@@ -695,7 +695,7 @@ int avc_ss_reset(u32 seqno)
         rcu_read_unlock(&avc_rcu_lock);
         spin_unlock_irqrestore(lock, flag);
     }
-    
+
     avc_latest_notif_update(seqno, 0);
     return rc;
 }

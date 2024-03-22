@@ -23,6 +23,13 @@ endif
 
 -include $(XEN_ROOT)/config/Stubdom.mk
 
+include $(XEN_ROOT)/tools/libs/uselibs.mk
+
+define LIB_deps
+ LIBDEPS_$(1) = $$(foreach use,$$(USELIBS_$(1)),libxen$$(use))
+endef
+$(foreach lib,$(LIBS_LIBS),$(eval $(call LIB_deps,$(lib))))
+
 GNU_TARGET_ARCH:=$(XEN_TARGET_ARCH)
 ifeq ($(XEN_TARGET_ARCH),x86_32)
 GNU_TARGET_ARCH:=i686
@@ -98,7 +105,7 @@ cross-newlib: $(NEWLIB_STAMPFILE)
 $(NEWLIB_STAMPFILE): mk-headers-$(XEN_TARGET_ARCH) newlib-$(NEWLIB_VERSION)
 	mkdir -p newlib-$(XEN_TARGET_ARCH)
 	( cd newlib-$(XEN_TARGET_ARCH) && \
-	  CC_FOR_TARGET="$(CC) $(TARGET_CPPFLAGS) $(TARGET_CFLAGS) $(NEWLIB_CFLAGS)" AR_FOR_TARGET=$(AR) LD_FOR_TARGET=$(LD) RANLIB_FOR_TARGET=$(RANLIB) ../newlib-$(NEWLIB_VERSION)/configure --prefix=$(CROSS_PREFIX) --verbose --target=$(GNU_TARGET_ARCH)-xen-elf --enable-newlib-io-long-long --disable-multilib && \
+	  CC_FOR_TARGET="$(CC) $(TARGET_CPPFLAGS) $(TARGET_CFLAGS) $(NEWLIB_CFLAGS)" AR_FOR_TARGET=$(AR) LD_FOR_TARGET=$(LD) RANLIB_FOR_TARGET=$(RANLIB) ../newlib-$(NEWLIB_VERSION)/configure --prefix=$(CROSS_PREFIX) --verbose --target=$(GNU_TARGET_ARCH)-xen-elf --enable-newlib-io-long-long --enable-newlib-io-c99-formats --disable-multilib && \
 	  $(MAKE) DESTDIR= && \
 	  $(MAKE) DESTDIR= install )
 
@@ -232,8 +239,11 @@ tpm_emulator-$(XEN_TARGET_ARCH): tpm_emulator-$(TPMEMU_VERSION).tar.gz
 	patch -d $@ -p1 < vtpm-implicit-fallthrough.patch
 	patch -d $@ -p1 < vtpm_TPM_ChangeAuthAsymFinish.patch
 	patch -d $@ -p1 < vtpm_extern.patch
+	patch -d $@ -p1 < vtpm-microsecond-duration.patch
+	patch -d $@ -p1 < vtpm-command-duration.patch
+	patch -d $@ -p1 < vtpm-tpm_bn_t-addr.patch
 	mkdir $@/build
-	cd $@/build; CC=${CC} $(CMAKE) .. -DCMAKE_C_FLAGS:STRING="-std=c99 -DTPM_NO_EXTERN $(TARGET_CPPFLAGS) $(TARGET_CFLAGS) -Wno-declaration-after-statement"
+	cd $@/build; CC=${CC} $(CMAKE) .. -DCMAKE_C_FLAGS:STRING="-std=c99 -DTPM_NO_EXTERN $(TARGET_CPPFLAGS) $(TARGET_CFLAGS)"
 	touch $@
 
 TPMEMU_STAMPFILE=$(CROSS_ROOT)/$(GNU_TARGET_ARCH)-xen-elf/lib/libtpm.a
@@ -320,45 +330,52 @@ ioemu/linkfarm.stamp:
 	touch ioemu/linkfarm.stamp
 endif
 
+#######
+# libraries under tools/libs
+#######
+
+STUB_LIBS := toolcore toollog evtchn gnttab call foreignmemory devicemodel ctrl guest
+
+LIBDEP_guest := cross-zlib
+
+#######
+# common handling
+#######
+
 define do_links
   mkdir -p $(dir $@)include
   cd $(dir $@); \
   ln -sf $(dir $<)include/*.h include/; \
-  ln -sf $(dir $<)*.[ch] .; \
-  ln -sf $(dir $<)*.pc.in .; \
-  ln -sf $(dir $<)Makefile .
+  find $(dir $<) -maxdepth 1 -type f -name '*.[ch]' -exec ln -sf {} . \; ; \
+  ln -sf $(dir $<)Makefile.common .
   touch $@
 endef
 
-libs-$(XEN_TARGET_ARCH)/toolcore/stamp: $(XEN_ROOT)/tools/libs/toolcore/Makefile
+define BUILD_lib
+ .PHONY: libxen$(1) clean-libxen$(1)
+ libxen$(1): libs-$$(XEN_TARGET_ARCH)/$(1)/libxen$(1).a
+ libs-$$(XEN_TARGET_ARCH)/$(1)/libxen$(1).a: $$(LIBDEPS_$(1)) $$(LIBDEP_$(1))
+ libs-$$(XEN_TARGET_ARCH)/$(1)/libxen$(1).a: mk-headers-$$(XEN_TARGET_ARCH) $$(NEWLIB_STAMPFILE) .phony
+	CPPFLAGS="$$(TARGET_CPPFLAGS)" CFLAGS="$$(TARGET_CFLAGS)" $$(MAKE) CONFIG_LIBXC_MINIOS=y -f $(CURDIR)/xenlibs.mk -C $$(@D) $$(@F)
+
+ clean-libxen$(1):
+	if [ -e libs-$$(XEN_TARGET_ARCH)/$(1)/Makefile.common ]; then \
+	    $$(MAKE) -f $(CURDIR)/xenlibs.mk -C libs-$$(XEN_TARGET_ARCH)/$(1) clean; \
+	fi
+
+ libs-$$(XEN_TARGET_ARCH)/$(1)/stamp: $$(XEN_ROOT)/tools/libs/$(1)/Makefile.common
+	$$(do_links)
+endef
+
+$(foreach lib,$(STUB_LIBS),$(eval $(call BUILD_lib,$(lib))))
+
+xenstore/stamp: $(XEN_ROOT)/tools/xenstore/Makefile.common
 	$(do_links)
 
-libs-$(XEN_TARGET_ARCH)/toollog/stamp: $(XEN_ROOT)/tools/libs/toollog/Makefile
+xenstorepvh/stamp: $(XEN_ROOT)/tools/xenstore/Makefile.common
 	$(do_links)
 
-libs-$(XEN_TARGET_ARCH)/evtchn/stamp: $(XEN_ROOT)/tools/libs/evtchn/Makefile
-	$(do_links)
-
-libs-$(XEN_TARGET_ARCH)/gnttab/stamp: $(XEN_ROOT)/tools/libs/gnttab/Makefile
-	$(do_links)
-
-libs-$(XEN_TARGET_ARCH)/call/stamp: $(XEN_ROOT)/tools/libs/call/Makefile
-	$(do_links)
-
-libs-$(XEN_TARGET_ARCH)/foreignmemory/stamp: $(XEN_ROOT)/tools/libs/foreignmemory/Makefile
-	$(do_links)
-
-libs-$(XEN_TARGET_ARCH)/devicemodel/stamp: $(XEN_ROOT)/tools/libs/devicemodel/Makefile
-	$(do_links)
-
-libxc-$(XEN_TARGET_ARCH)/stamp: $(XEN_ROOT)/tools/libxc/Makefile
-	$(do_links)
-
-xenstore/stamp: $(XEN_ROOT)/tools/xenstore/Makefile
-	$(do_links)
-
-LINK_LIBS_DIRS := toolcore toollog evtchn gnttab call foreignmemory devicemodel
-LINK_DIRS := libxc-$(XEN_TARGET_ARCH) xenstore $(foreach dir,$(LINK_LIBS_DIRS),libs-$(XEN_TARGET_ARCH)/$(dir))
+LINK_DIRS := xenstore xenstorepvh $(foreach dir,$(STUB_LIBS),libs-$(XEN_TARGET_ARCH)/$(dir))
 LINK_STAMPS := $(foreach dir,$(LINK_DIRS),$(dir)/stamp)
 
 mk-headers-$(XEN_TARGET_ARCH): $(IOEMU_LINKFARM_TARGET) $(LINK_STAMPS)
@@ -382,80 +399,6 @@ $(TARGETS_MINIOS): mini-os-%:
 	done
 
 #######
-# libxentoolcore
-#######
-
-.PHONY: libxentoolcore
-libxentoolcore: libs-$(XEN_TARGET_ARCH)/toolcore/libxentoolcore.a
-libs-$(XEN_TARGET_ARCH)/toolcore/libxentoolcore.a: mk-headers-$(XEN_TARGET_ARCH) $(NEWLIB_STAMPFILE)
-	CPPFLAGS="$(TARGET_CPPFLAGS)" CFLAGS="$(TARGET_CFLAGS)" $(MAKE) DESTDIR= -C libs-$(XEN_TARGET_ARCH)/toolcore
-
-#######
-# libxentoollog
-#######
-
-.PHONY: libxentoollog
-libxentoollog: libs-$(XEN_TARGET_ARCH)/toollog/libxentoollog.a
-libs-$(XEN_TARGET_ARCH)/toollog/libxentoollog.a: mk-headers-$(XEN_TARGET_ARCH) $(NEWLIB_STAMPFILE)
-	CPPFLAGS="$(TARGET_CPPFLAGS)" CFLAGS="$(TARGET_CFLAGS)" $(MAKE) DESTDIR= -C libs-$(XEN_TARGET_ARCH)/toollog
-
-#######
-# libxenevtchn
-#######
-
-.PHONY: libxenevtchn
-libxenevtchn: libs-$(XEN_TARGET_ARCH)/evtchn/libxenevtchn.a
-libs-$(XEN_TARGET_ARCH)/evtchn/libxenevtchn.a: mk-headers-$(XEN_TARGET_ARCH) $(NEWLIB_STAMPFILE)
-	CPPFLAGS="$(TARGET_CPPFLAGS)" CFLAGS="$(TARGET_CFLAGS)" $(MAKE) DESTDIR= -C libs-$(XEN_TARGET_ARCH)/evtchn
-
-#######
-# libxengnttab
-#######
-
-.PHONY: libxengnttab
-libxengnttab: libs-$(XEN_TARGET_ARCH)/gnttab/libxengnttab.a
-libs-$(XEN_TARGET_ARCH)/gnttab/libxengnttab.a: mk-headers-$(XEN_TARGET_ARCH) $(NEWLIB_STAMPFILE)
-	CPPFLAGS="$(TARGET_CPPFLAGS)" CFLAGS="$(TARGET_CFLAGS)" $(MAKE) DESTDIR= -C libs-$(XEN_TARGET_ARCH)/gnttab
-
-#######
-# libxencall
-#######
-
-.PHONY: libxencall
-libxencall: libs-$(XEN_TARGET_ARCH)/call/libxencall.a
-libs-$(XEN_TARGET_ARCH)/call/libxencall.a: mk-headers-$(XEN_TARGET_ARCH) $(NEWLIB_STAMPFILE)
-	CPPFLAGS="$(TARGET_CPPFLAGS)" CFLAGS="$(TARGET_CFLAGS)" $(MAKE) DESTDIR= -C libs-$(XEN_TARGET_ARCH)/call
-
-#######
-# libxenforeignmemory
-#######
-
-.PHONY: libxenforeignmemory
-libxenforeignmemory: libs-$(XEN_TARGET_ARCH)/foreignmemory/libxenforeignmemory.a
-libs-$(XEN_TARGET_ARCH)/foreignmemory/libxenforeignmemory.a: mk-headers-$(XEN_TARGET_ARCH) $(NEWLIB_STAMPFILE)
-	CPPFLAGS="$(TARGET_CPPFLAGS)" CFLAGS="$(TARGET_CFLAGS)" $(MAKE) DESTDIR= -C libs-$(XEN_TARGET_ARCH)/foreignmemory
-
-#######
-# libxendevicemodel
-#######
-
-.PHONY: libxendevicemodel
-libxendevicemodel: libs-$(XEN_TARGET_ARCH)/devicemodel/libxendevicemodel.a
-libs-$(XEN_TARGET_ARCH)/devicemodel/libxendevicemodel.a: mk-headers-$(XEN_TARGET_ARCH) $(NEWLIB_STAMPFILE)
-	CPPFLAGS="$(TARGET_CPPFLAGS)" CFLAGS="$(TARGET_CFLAGS)" $(MAKE) DESTDIR= -C libs-$(XEN_TARGET_ARCH)/devicemodel
-
-#######
-# libxc
-#######
-
-.PHONY: libxc
-libxc: libxc-$(XEN_TARGET_ARCH)/libxenctrl.a libxc-$(XEN_TARGET_ARCH)/libxenguest.a
-libxc-$(XEN_TARGET_ARCH)/libxenctrl.a: mk-headers-$(XEN_TARGET_ARCH) libxentoolcore libxentoollog libxenevtchn libxengnttab libxencall libxenforeignmemory libxendevicemodel cross-zlib
-	CPPFLAGS="$(TARGET_CPPFLAGS)" CFLAGS="$(TARGET_CFLAGS)" $(MAKE) DESTDIR= CONFIG_LIBXC_MINIOS=y -C libxc-$(XEN_TARGET_ARCH)
-
- libxc-$(XEN_TARGET_ARCH)/libxenguest.a: libxc-$(XEN_TARGET_ARCH)/libxenctrl.a
-
-#######
 # ioemu
 #######
 
@@ -463,7 +406,7 @@ ioemu-minios-config.mk: $(CURDIR)/ioemu-minios.cfg
 	MINIOS_CONFIG="$<" CONFIG_FILE="$(CURDIR)/$@" $(MAKE) DESTDIR= -C $(MINI_OS) config
 
 .PHONY: ioemu
-ioemu: cross-zlib cross-libpci libxc ioemu-minios-config.mk
+ioemu: cross-zlib cross-libpci libxenguest ioemu-minios-config.mk
 	[ -f ioemu/config-host.mak ] || \
 	  ( $(buildmakevars2shellvars); \
 	    cd ioemu ; \
@@ -549,7 +492,18 @@ xenstore-minios-config.mk: $(CURDIR)/xenstore-minios.cfg
 
 .PHONY: xenstore
 xenstore: $(CROSS_ROOT) xenstore-minios-config.mk
-	CPPFLAGS="$(TARGET_CPPFLAGS) $(shell cat xenstore-minios-config.mk)" CFLAGS="$(TARGET_CFLAGS)" $(MAKE) DESTDIR= -C $@ xenstored.a CONFIG_STUBDOM=y
+	CPPFLAGS="$(TARGET_CPPFLAGS) $(shell cat xenstore-minios-config.mk)" CFLAGS="$(TARGET_CFLAGS)" $(MAKE) -f $(CURDIR)/xenlibs.mk -C $@ xenstored.a CONFIG_STUBDOM=y
+
+#############
+# xenstorepvh
+#############
+
+xenstorepvh-minios-config.mk: $(CURDIR)/xenstorepvh-minios.cfg
+	MINIOS_CONFIG="$<" CONFIG_FILE="$(CURDIR)/$@" $(MAKE) DESTDIR= -C $(MINI_OS) config
+
+.PHONY: xenstorepvh
+xenstorepvh: $(CROSS_ROOT) xenstorepvh-minios-config.mk
+	CPPFLAGS="$(TARGET_CPPFLAGS) $(shell cat xenstorepvh-minios-config.mk)" CFLAGS="$(TARGET_CFLAGS)" $(MAKE) -f $(CURDIR)/xenlibs.mk -C $@ xenstored.a CONFIG_STUBDOM=y
 
 ########
 # minios
@@ -557,15 +511,15 @@ xenstore: $(CROSS_ROOT) xenstore-minios-config.mk
 
 .PHONY: ioemu-stubdom
 ioemu-stubdom: APP_OBJS=$(CURDIR)/ioemu/i386-stubdom/qemu.a $(CURDIR)/ioemu/i386-stubdom/libqemu.a $(CURDIR)/ioemu/libqemu_common.a
-ioemu-stubdom: mini-os-$(XEN_TARGET_ARCH)-ioemu lwip-$(XEN_TARGET_ARCH) libxc ioemu
+ioemu-stubdom: mini-os-$(XEN_TARGET_ARCH)-ioemu lwip-$(XEN_TARGET_ARCH) libxenguest ioemu
 	DEF_CPPFLAGS="$(TARGET_CPPFLAGS)" DEF_CFLAGS="$(TARGET_CFLAGS)" DEF_LDFLAGS="$(TARGET_LDFLAGS)" MINIOS_CONFIG="$(CURDIR)/ioemu-minios.cfg" $(MAKE) DESTDIR= -C $(MINI_OS) OBJ_DIR=$(CURDIR)/$< LWIPDIR=$(CURDIR)/lwip-$(XEN_TARGET_ARCH) APP_OBJS="$(APP_OBJS)"
 
 .PHONY: caml-stubdom
-caml-stubdom: mini-os-$(XEN_TARGET_ARCH)-caml lwip-$(XEN_TARGET_ARCH) libxc cross-ocaml caml
+caml-stubdom: mini-os-$(XEN_TARGET_ARCH)-caml lwip-$(XEN_TARGET_ARCH) libxenguest cross-ocaml caml
 	DEF_CPPFLAGS="$(TARGET_CPPFLAGS)" DEF_CFLAGS="$(TARGET_CFLAGS)" DEF_LDFLAGS="$(TARGET_LDFLAGS)" MINIOS_CONFIG="$(CURDIR)/caml/minios.cfg" $(MAKE) DESTDIR= -C $(MINI_OS) OBJ_DIR=$(CURDIR)/$< LWIPDIR=$(CURDIR)/lwip-$(XEN_TARGET_ARCH) APP_OBJS="$(CURDIR)/caml/main-caml.o $(CURDIR)/caml/caml.o $(CAMLLIB)/libasmrun.a"
 
 .PHONY: c-stubdom
-c-stubdom: mini-os-$(XEN_TARGET_ARCH)-c lwip-$(XEN_TARGET_ARCH) libxc c
+c-stubdom: mini-os-$(XEN_TARGET_ARCH)-c lwip-$(XEN_TARGET_ARCH) libxenguest c
 	DEF_CPPFLAGS="$(TARGET_CPPFLAGS)" DEF_CFLAGS="$(TARGET_CFLAGS)" DEF_LDFLAGS="$(TARGET_LDFLAGS)" MINIOS_CONFIG="$(CURDIR)/c/minios.cfg" $(MAKE) DESTDIR= -C $(MINI_OS) OBJ_DIR=$(CURDIR)/$< LWIPDIR=$(CURDIR)/lwip-$(XEN_TARGET_ARCH) APP_OBJS=$(CURDIR)/c/main.a
 
 .PHONY: vtpm-stubdom
@@ -577,12 +531,23 @@ vtpmmgr-stubdom: mini-os-$(XEN_TARGET_ARCH)-vtpmmgr vtpmmgr
 	DEF_CPPFLAGS="$(TARGET_CPPFLAGS)" DEF_CFLAGS="$(TARGET_CFLAGS)" DEF_LDFLAGS="$(TARGET_LDFLAGS)" MINIOS_CONFIG="$(CURDIR)/vtpmmgr/minios.cfg" $(MAKE) -C $(MINI_OS) OBJ_DIR=$(CURDIR)/$< APP_OBJS="$(CURDIR)/vtpmmgr/vtpmmgr.a" APP_LDLIBS="-lm -lpolarssl"
 
 .PHONY: pv-grub
-pv-grub: mini-os-$(XEN_TARGET_ARCH)-grub libxc grub
+pv-grub: mini-os-$(XEN_TARGET_ARCH)-grub libxenguest grub
 	DEF_CPPFLAGS="$(TARGET_CPPFLAGS)" DEF_CFLAGS="$(TARGET_CFLAGS)" DEF_LDFLAGS="$(TARGET_LDFLAGS)" MINIOS_CONFIG="$(CURDIR)/grub/minios.cfg" $(MAKE) DESTDIR= -C $(MINI_OS) OBJ_DIR=$(CURDIR)/$< APP_OBJS=$(CURDIR)/grub-$(XEN_TARGET_ARCH)/main.a
 
+.PHONY: pv-grub-if-enabled
+ifneq ($(filter grub,$(STUBDOM_TARGETS)),)
+pv-grub-if-enabled: pv-grub
+else
+pv-grub-if-enabled:
+endif
+
 .PHONY: xenstore-stubdom
-xenstore-stubdom: mini-os-$(XEN_TARGET_ARCH)-xenstore libxc xenstore
+xenstore-stubdom: mini-os-$(XEN_TARGET_ARCH)-xenstore libxenguest xenstore
 	DEF_CPPFLAGS="$(TARGET_CPPFLAGS)" DEF_CFLAGS="$(TARGET_CFLAGS)" DEF_LDFLAGS="$(TARGET_LDFLAGS)" MINIOS_CONFIG="$(CURDIR)/xenstore-minios.cfg" $(MAKE) DESTDIR= -C $(MINI_OS) OBJ_DIR=$(CURDIR)/$< APP_OBJS=$(CURDIR)/xenstore/xenstored.a
+
+.PHONY: xenstorepvh-stubdom
+xenstorepvh-stubdom: mini-os-$(XEN_TARGET_ARCH)-xenstorepvh libxenguest xenstorepvh
+	DEF_CPPFLAGS="$(TARGET_CPPFLAGS)" DEF_CFLAGS="$(TARGET_CFLAGS)" DEF_LDFLAGS="$(TARGET_LDFLAGS)" MINIOS_CONFIG="$(CURDIR)/xenstorepvh-minios.cfg" $(MAKE) DESTDIR= -C $(MINI_OS) OBJ_DIR=$(CURDIR)/$< APP_OBJS=$(CURDIR)/xenstorepvh/xenstored.a
 
 #########
 # install
@@ -605,6 +570,12 @@ install-grub: pv-grub
 	$(INSTALL_DIR) "$(DESTDIR)$(XENFIRMWAREDIR)"
 	$(INSTALL_DATA) mini-os-$(XEN_TARGET_ARCH)-grub/mini-os.gz "$(DESTDIR)$(XENFIRMWAREDIR)/pv-grub-$(XEN_TARGET_ARCH).gz"
 
+ifneq ($(filter grub,$(STUBDOM_TARGETS)),)
+install-grub-if-enabled: install-grub
+else
+install-grub-if-enabled:
+endif
+
 install-c: c-stubdom
 
 install-caml: caml-stubdom
@@ -612,6 +583,10 @@ install-caml: caml-stubdom
 install-xenstore: xenstore-stubdom
 	$(INSTALL_DIR) "$(DESTDIR)$(XENFIRMWAREDIR)"
 	$(INSTALL_DATA) mini-os-$(XEN_TARGET_ARCH)-xenstore/mini-os.gz "$(DESTDIR)$(XENFIRMWAREDIR)/xenstore-stubdom.gz"
+
+install-xenstorepvh: xenstorepvh-stubdom
+	$(INSTALL_DIR) "$(DESTDIR)$(XENFIRMWAREDIR)"
+	$(INSTALL_DATA) mini-os-$(XEN_TARGET_ARCH)-xenstorepvh/mini-os.gz "$(DESTDIR)$(XENFIRMWAREDIR)/xenstorepvh-stubdom.gz"
 
 install-vtpm: vtpm-stubdom
 	$(INSTALL_DIR) "$(DESTDIR)$(XENFIRMWAREDIR)"
@@ -646,6 +621,9 @@ uninstall-grub:
 uninstall-xenstore:
 	rm -f $(DESTDIR)$(XENFIRMWAREDIR)/xenstore-stubdom.gz
 
+uninstall-xenstorepvh:
+	rm -f $(DESTDIR)$(XENFIRMWAREDIR)/xenstorepvh-stubdom.gz
+
 uninstall-vtpm:
 	rm -f $(DESTDIR)$(XENFIRMWAREDIR)/vtpm-stubdom.gz
 
@@ -658,12 +636,14 @@ uninstall-vtpmmgr:
 
 # Only clean the libxc/ioemu/mini-os part
 .PHONY: clean
+clean: $(foreach lib,$(STUB_LIBS),clean-libxen$(lib))
 clean:
 	rm -fr mini-os-$(XEN_TARGET_ARCH)-ioemu
 	rm -fr mini-os-$(XEN_TARGET_ARCH)-c
 	rm -fr mini-os-$(XEN_TARGET_ARCH)-caml
 	rm -fr mini-os-$(XEN_TARGET_ARCH)-grub
 	rm -fr mini-os-$(XEN_TARGET_ARCH)-xenstore
+	rm -fr mini-os-$(XEN_TARGET_ARCH)-xenstorepvh
 	rm -fr mini-os-$(XEN_TARGET_ARCH)-vtpm
 	rm -fr mini-os-$(XEN_TARGET_ARCH)-vtpmmgr
 	$(MAKE) DESTDIR= -C caml clean
@@ -674,16 +654,9 @@ clean:
 	rm -f $(STUBDOMPATH)
 	rm -f *-minios-config.mk
 	rm -fr pkg-config
-	[ ! -e libs-$(XEN_TARGET_ARCH)/toolcore/Makefile ] || $(MAKE) DESTDIR= -C libs-$(XEN_TARGET_ARCH)/toolcore clean
-	[ ! -e libs-$(XEN_TARGET_ARCH)/toollog/Makefile ] || $(MAKE) DESTDIR= -C libs-$(XEN_TARGET_ARCH)/toollog clean
-	[ ! -e libs-$(XEN_TARGET_ARCH)/evtchn/Makefile ] || $(MAKE) DESTDIR= -C libs-$(XEN_TARGET_ARCH)/evtchn clean
-	[ ! -e libs-$(XEN_TARGET_ARCH)/gnttab/Makefile ] || $(MAKE) DESTDIR= -C libs-$(XEN_TARGET_ARCH)/gnttab clean
-	[ ! -e libs-$(XEN_TARGET_ARCH)/call/Makefile ] || $(MAKE) DESTDIR= -C libs-$(XEN_TARGET_ARCH)/call clean
-	[ ! -e libs-$(XEN_TARGET_ARCH)/foreignmemory/Makefile ] || $(MAKE) DESTDIR= -C libs-$(XEN_TARGET_ARCH)/foreignmemory clean
-	[ ! -e libs-$(XEN_TARGET_ARCH)/devicemodel/Makefile ] || $(MAKE) DESTDIR= -C libs-$(XEN_TARGET_ARCH)/devicemodel clean
-	[ ! -e libxc-$(XEN_TARGET_ARCH)/Makefile ] || $(MAKE) DESTDIR= -C libxc-$(XEN_TARGET_ARCH) clean
 	-[ ! -d ioemu ] || $(MAKE) DESTDIR= -C ioemu clean
-	-[ ! -d xenstore ] || $(MAKE) DESTDIR= -C xenstore clean
+	-[ ! -d xenstore ] || $(MAKE) -f $(CURDIR)/xenlibs.mk -C xenstore clean
+	-[ ! -d xenstorepvh ] || $(MAKE) -f $(CURDIR)/xenlibs.mk -C xenstorepvh clean
 
 # clean the cross-compilation result
 .PHONY: crossclean
@@ -692,7 +665,7 @@ crossclean: clean
 	rm -fr newlib-$(XEN_TARGET_ARCH)
 	rm -fr zlib-$(XEN_TARGET_ARCH) pciutils-$(XEN_TARGET_ARCH)
 	rm -fr libs-$(XEN_TARGET_ARCH)
-	rm -fr libxc-$(XEN_TARGET_ARCH) ioemu xenstore
+	rm -fr ioemu xenstore xenstorepvh
 	rm -fr gmp-$(XEN_TARGET_ARCH)
 	rm -fr polarssl-$(XEN_TARGET_ARCH)
 	rm -fr openssl-$(XEN_TARGET_ARCH)

@@ -4,9 +4,9 @@ Hypercall ABI
 =============
 
 Hypercalls are system calls to Xen.  Two modes of guest operation are
-supported, and up to 6 individual parameters are supported.
+supported, and up to 5 individual parameters are supported.
 
-Hypercalls may only be issued by kernel-level software [1]_.
+Hypercalls may only be issued by kernel-level software [#kern]_.
 
 Registers
 ---------
@@ -18,22 +18,22 @@ The registers used for hypercalls depends on the operating mode of the guest.
 
    * - ABI
      - Hypercall Index
-     - Parameters (1 - 6)
+     - Parameters (1 - 5) [#params]_
      - Result
 
    * - 64bit
      - RAX
-     - RDI RSI RDX R10 R8 R9
+     - RDI RSI RDX R10 R8
      - RAX
 
    * - 32bit
      - EAX
-     - EBX ECX EDX ESI EDI EBP
+     - EBX ECX EDX ESI EDI
      - EAX
 
 32 and 64bit PV guests have an ABI fixed by their guest type.  The ABI for an
 HVM guest depends on whether the vCPU is operating in a 64bit segment or not
-[2]_.
+[#mode]_.
 
 
 Parameters
@@ -87,7 +87,7 @@ written by Xen, is mapped with executable permissions so it may be used.
 Multiple hypercall pages may be created by the guest, if it wishes.
 
 The stubs are arranged by hypercall index, and start on 32-byte boundaries.
-To invoke a specific hypercall, ``call`` the relevant stub [3]_:
+To invoke a specific hypercall, ``call`` the relevant stub [#iret]_:
 
 .. code-block:: none
 
@@ -116,14 +116,21 @@ means.
 
 .. rubric:: Footnotes
 
-.. [1] For HVM guests, ``HVMOP_guest_request_vm_event`` may be configured to
-       be usable from userspace, but this behaviour is not default.
+.. [#kern] For HVM guests, ``HVMOP_guest_request_vm_event`` may be configured
+   to be usable from userspace, but this behaviour is not default.
 
-.. [2] While it is possible to use compatibility mode segments in a 64bit
-       kernel, hypercalls issues from such a mode will be interpreted with the
-       32bit ABI.  Such a setup is not expected in production scenarios.
+.. [#params] Xen's ABI used to declare support for 6 hypercall arguments,
+   using ``r9`` and ``ebp``.  However, such an ABI clobbers the frame pointer
+   in the 32bit code and does not interact nicely with guest-side debugging.
+   ``V4V``, the predecessor to ``HYPERCALL_argo_op`` was a 6-argument
+   hypercall, but the ABI was intentionally altered when Argo was upstreamed
+   (Xen 4.13) to be the 5-argument hypercall it now is.
 
-.. [3] ``HYPERCALL_iret`` is special.  It is only implemented for PV guests
-       and takes all its parameters on the stack.  This stub should be
-       ``jmp``'d to, rather than ``call``'d.  HVM guests have this stub
-       implemented as ``ud2a`` to prevent accidental use.
+.. [#mode] While it is possible to use compatibility mode segments in a 64bit
+   kernel, hypercalls issues from such a mode will be interpreted with the
+   32bit ABI.  Such a setup is not expected in production scenarios.
+
+.. [#iret] ``HYPERCALL_iret`` is special.  It is only implemented for PV
+   guests and takes all its parameters on the stack.  This stub should be
+   ``jmp``'d to, rather than ``call``'d.  HVM guests have this stub
+   implemented as ``ud2a`` to prevent accidental use.

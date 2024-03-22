@@ -3,6 +3,8 @@
 #include <xen/delay.h>
 #include <xen/param.h>
 #include <xen/smp.h>
+
+#include <asm/cpu-policy.h>
 #include <asm/current.h>
 #include <asm/debugreg.h>
 #include <asm/processor.h>
@@ -13,6 +15,7 @@
 #include <asm/apic.h>
 #include <asm/random.h>
 #include <asm/setup.h>
+#include <asm/shstk.h>
 #include <mach_apic.h>
 #include <public/sysctl.h> /* for XEN_INVALID_{SOCKET,CORE}_ID */
 
@@ -69,7 +72,7 @@ void __init setup_clear_cpu_cap(unsigned int cap)
 		       __builtin_return_address(0), cap);
 
 	__clear_bit(cap, boot_cpu_data.x86_capability);
-	dfs = x86_cpuid_lookup_deep_deps(cap);
+	dfs = x86_cpu_policy_lookup_deep_deps(cap);
 
 	if (!dfs)
 		return;
@@ -104,7 +107,7 @@ bool __init is_forced_cpu_cap(unsigned int cap)
 	return test_bit(cap, forced_caps);
 }
 
-static void default_init(struct cpuinfo_x86 * c)
+static void cf_check default_init(struct cpuinfo_x86 * c)
 {
 	/* Not much we can do here... */
 	/* Check if at least it has cpuid */
@@ -127,14 +130,17 @@ bool __init probe_cpuid_faulting(void)
 
 	/*
 	 * Don't bother looking for CPUID faulting if we aren't virtualised on
-	 * AMD or Hygon hardware - it won't be present.
+	 * AMD or Hygon hardware - it won't be present.  Likewise for Fam0F
+	 * Intel hardware.
 	 */
-	if ((boot_cpu_data.x86_vendor & (X86_VENDOR_AMD | X86_VENDOR_HYGON)) &&
+	if (((boot_cpu_data.x86_vendor & (X86_VENDOR_AMD | X86_VENDOR_HYGON)) ||
+	     ((boot_cpu_data.x86_vendor == X86_VENDOR_INTEL) &&
+	      boot_cpu_data.x86 == 0xf)) &&
 	    !cpu_has_hypervisor)
 		return false;
 
 	if ((rc = rdmsr_safe(MSR_INTEL_PLATFORM_INFO, val)) == 0)
-		raw_msr_policy.platform_info.cpuid_faulting =
+		raw_cpu_policy.platform_info.cpuid_faulting =
 			val & MSR_PLATFORM_INFO_CPUID_FAULTING;
 
 	if (rc ||
@@ -205,6 +211,28 @@ void ctxt_switch_levelling(const struct vcpu *next)
 		alternative_vcall(ctxt_switch_masking, next);
 }
 
+static void setup_doitm(void)
+{
+    uint64_t msr;
+
+    if ( !cpu_has_doitm )
+        return;
+
+    /*
+     * We don't currently enumerate DOITM to guests.  As a conseqeuence, guest
+     * kernels will believe they're safe even when they are not.
+     *
+     * For now, set it unilaterally.  This prevents otherwise-correct crypto
+     * code from becoming vulnerable to timing sidechannels.
+     */
+
+    rdmsrl(MSR_UARCH_MISC_CTRL, msr);
+    msr |= UARCH_CTRL_DOITM;
+    if ( !opt_dit )
+        msr &= ~UARCH_CTRL_DOITM;
+    wrmsrl(MSR_UARCH_MISC_CTRL, msr);
+}
+
 bool_t opt_cpu_info;
 boolean_param("cpuinfo", opt_cpu_info);
 
@@ -240,28 +268,41 @@ int get_model_name(struct cpuinfo_x86 *c)
 
 void display_cacheinfo(struct cpuinfo_x86 *c)
 {
-	unsigned int dummy, ecx, edx, l2size;
+	unsigned int dummy, ecx, edx, size;
 
 	if (c->extended_cpuid_level >= 0x80000005) {
 		cpuid(0x80000005, &dummy, &dummy, &ecx, &edx);
-		if (opt_cpu_info)
-			printk("CPU: L1 I cache %dK (%d bytes/line),"
-			              " D cache %dK (%d bytes/line)\n",
-			       edx>>24, edx&0xFF, ecx>>24, ecx&0xFF);
-		c->x86_cache_size=(ecx>>24)+(edx>>24);	
+		if ((edx | ecx) >> 24) {
+			if (opt_cpu_info)
+				printk("CPU: L1 I cache %uK (%u bytes/line),"
+				              " D cache %uK (%u bytes/line)\n",
+				       edx >> 24, edx & 0xFF, ecx >> 24, ecx & 0xFF);
+			c->x86_cache_size = (ecx >> 24) + (edx >> 24);
+		}
 	}
 
 	if (c->extended_cpuid_level < 0x80000006)	/* Some chips just has a large L1. */
 		return;
 
-	ecx = cpuid_ecx(0x80000006);
-	l2size = ecx >> 16;
-	
-	c->x86_cache_size = l2size;
+	cpuid(0x80000006, &dummy, &dummy, &ecx, &edx);
 
-	if (opt_cpu_info)
-		printk("CPU: L2 Cache: %dK (%d bytes/line)\n",
-		       l2size, ecx & 0xFF);
+	size = ecx >> 16;
+	if (size) {
+		c->x86_cache_size = size;
+
+		if (opt_cpu_info)
+			printk("CPU: L2 Cache: %uK (%u bytes/line)\n",
+			       size, ecx & 0xFF);
+	}
+
+	size = edx >> 18;
+	if (size) {
+		c->x86_cache_size = size * 512;
+
+		if (opt_cpu_info)
+			printk("CPU: L3 Cache: %uM (%u bytes/line)\n",
+			       (size + (size & 1)) >> 1, edx & 0xFF);
+	}
 }
 
 static inline u32 _phys_pkg_id(u32 cpuid_apic, int index_msb)
@@ -316,13 +357,13 @@ void __init early_cpu_init(void)
 	cpuid(0x00000001, &eax, &ebx, &ecx, &edx);
 	c->x86 = get_cpu_family(eax, &c->x86_model, &c->x86_mask);
 
-	edx &= ~cleared_caps[cpufeat_word(X86_FEATURE_FPU)];
-	ecx &= ~cleared_caps[cpufeat_word(X86_FEATURE_SSE3)];
+	edx &= ~cleared_caps[FEATURESET_1d];
+	ecx &= ~cleared_caps[FEATURESET_1c];
 	if (edx & cpufeat_mask(X86_FEATURE_CLFLUSH))
 		c->x86_cache_alignment = ((ebx >> 8) & 0xff) * 8;
 	/* Leaf 0x1 capabilities filled in early for Xen. */
-	c->x86_capability[cpufeat_word(X86_FEATURE_FPU)] = edx;
-	c->x86_capability[cpufeat_word(X86_FEATURE_SSE3)] = ecx;
+	c->x86_capability[FEATURESET_1d] = edx;
+	c->x86_capability[FEATURESET_1c] = ecx;
 
 	printk(XENLOG_INFO
 	       "CPU Vendor: %s, Family %u (%#x), Model %u (%#x), Stepping %u (raw %08x)\n",
@@ -330,22 +371,36 @@ void __init early_cpu_init(void)
 	       c->x86_model, c->x86_model, c->x86_mask, eax);
 
 	if (c->cpuid_level >= 7) {
-		cpuid_count(7, 0, &eax, &ebx, &ecx, &edx);
-		c->x86_capability[cpufeat_word(X86_FEATURE_CET_SS)] = ecx;
+		uint32_t max_subleaf;
+
+		cpuid_count(7, 0, &max_subleaf, &ebx,
+			    &c->x86_capability[FEATURESET_7c0],
+			    &c->x86_capability[FEATURESET_7d0]);
+
+		if (max_subleaf >= 1)
+			cpuid_count(7, 1, &eax, &ebx, &ecx,
+				    &c->x86_capability[FEATURESET_7d1]);
 	}
 
 	eax = cpuid_eax(0x80000000);
 	if ((eax >> 16) == 0x8000 && eax >= 0x80000008) {
+		ebx = eax >= 0x8000001f ? cpuid_ebx(0x8000001f) : 0;
 		eax = cpuid_eax(0x80000008);
+
 		paddr_bits = eax & 0xff;
 		if (paddr_bits > PADDR_BITS)
 			paddr_bits = PADDR_BITS;
+
 		vaddr_bits = (eax >> 8) & 0xff;
 		if (vaddr_bits > VADDR_BITS)
 			vaddr_bits = VADDR_BITS;
+
 		hap_paddr_bits = ((eax >> 16) & 0xff) ?: paddr_bits;
 		if (hap_paddr_bits > PADDR_BITS)
 			hap_paddr_bits = PADDR_BITS;
+
+		/* Account for SME's physical address space reduction. */
+		paddr_bits -= (ebx >> 6) & 0x3f;
 	}
 
 	if (!(c->x86_vendor & (X86_VENDOR_AMD | X86_VENDOR_HYGON)))
@@ -359,7 +414,7 @@ static void generic_identify(struct cpuinfo_x86 *c)
 	u32 eax, ebx, ecx, edx, tmp;
 
 	/* Get vendor name */
-	cpuid(0x00000000, &c->cpuid_level, &ebx, &ecx, &edx);
+	cpuid(0, &c->cpuid_level, &ebx, &ecx, &edx);
 	*(u32 *)&c->x86_vendor_id[0] = ebx;
 	*(u32 *)&c->x86_vendor_id[8] = ecx;
 	*(u32 *)&c->x86_vendor_id[4] = edx;
@@ -374,7 +429,7 @@ static void generic_identify(struct cpuinfo_x86 *c)
 	/* Note that the vendor-specific code below might override */
 
 	/* Model and family information. */
-	cpuid(0x00000001, &eax, &ebx, &ecx, &edx);
+	cpuid(1, &eax, &ebx, &ecx, &edx);
 	c->x86 = get_cpu_family(eax, &c->x86_model, &c->x86_mask);
 	c->apicid = phys_pkg_id((ebx >> 24) & 0xFF, 0);
 	c->phys_proc_id = c->apicid;
@@ -384,51 +439,65 @@ static void generic_identify(struct cpuinfo_x86 *c)
 
 	/* c_early_init() may have adjusted cpuid levels/features.  Reread. */
 	c->cpuid_level = cpuid_eax(0);
-	cpuid(0x00000001, &eax, &ebx, &ecx, &edx);
-	c->x86_capability[cpufeat_word(X86_FEATURE_FPU)] = edx;
-	c->x86_capability[cpufeat_word(X86_FEATURE_SSE3)] = ecx;
+	cpuid(1, &eax, &ebx,
+	      &c->x86_capability[FEATURESET_1c],
+	      &c->x86_capability[FEATURESET_1d]);
 
 	if ( cpu_has(c, X86_FEATURE_CLFLUSH) )
 		c->x86_clflush_size = ((ebx >> 8) & 0xff) * 8;
 
 	if ( (c->cpuid_level >= CPUID_PM_LEAF) &&
 	     (cpuid_ecx(CPUID_PM_LEAF) & CPUID6_ECX_APERFMPERF_CAPABILITY) )
-		set_bit(X86_FEATURE_APERFMPERF, c->x86_capability);
+		__set_bit(X86_FEATURE_APERFMPERF, c->x86_capability);
+
+	eax = cpuid_eax(0x80000000);
+	if ((eax >> 16) == 0x8000)
+		c->extended_cpuid_level = eax;
 
 	/* AMD-defined flags: level 0x80000001 */
-	c->extended_cpuid_level = cpuid_eax(0x80000000);
-	if ((c->extended_cpuid_level >> 16) != 0x8000)
-		c->extended_cpuid_level = 0;
-	if (c->extended_cpuid_level > 0x80000000)
+	if (c->extended_cpuid_level >= 0x80000001)
 		cpuid(0x80000001, &tmp, &tmp,
-		      &c->x86_capability[cpufeat_word(X86_FEATURE_LAHF_LM)],
-		      &c->x86_capability[cpufeat_word(X86_FEATURE_SYSCALL)]);
+		      &c->x86_capability[FEATURESET_e1c],
+		      &c->x86_capability[FEATURESET_e1d]);
 
 	if (c->extended_cpuid_level >= 0x80000004)
 		get_model_name(c); /* Default name */
 	if (c->extended_cpuid_level >= 0x80000007)
-		c->x86_capability[cpufeat_word(X86_FEATURE_ITSC)]
-			= cpuid_edx(0x80000007);
+		c->x86_capability[FEATURESET_e7d] = cpuid_edx(0x80000007);
 	if (c->extended_cpuid_level >= 0x80000008)
-		c->x86_capability[cpufeat_word(X86_FEATURE_CLZERO)]
-			= cpuid_ebx(0x80000008);
+		c->x86_capability[FEATURESET_e8b] = cpuid_ebx(0x80000008);
+	if (c->extended_cpuid_level >= 0x80000021)
+		c->x86_capability[FEATURESET_e21a] = cpuid_eax(0x80000021);
 
 	/* Intel-defined flags: level 0x00000007 */
-	if ( c->cpuid_level >= 0x00000007 ) {
-		cpuid_count(0x00000007, 0, &eax,
-			    &c->x86_capability[cpufeat_word(X86_FEATURE_FSGSBASE)],
-			    &c->x86_capability[cpufeat_word(X86_FEATURE_PKU)],
-			    &c->x86_capability[cpufeat_word(X86_FEATURE_AVX512_4VNNIW)]);
-		if (eax > 0)
-			cpuid_count(0x00000007, 1,
-				    &c->x86_capability[cpufeat_word(X86_FEATURE_AVX512_BF16)],
-				    &tmp, &tmp, &tmp);
+	if (c->cpuid_level >= 7) {
+		uint32_t max_subleaf;
+
+		cpuid_count(7, 0, &max_subleaf,
+			    &c->x86_capability[FEATURESET_7b0],
+			    &c->x86_capability[FEATURESET_7c0],
+			    &c->x86_capability[FEATURESET_7d0]);
+		if (max_subleaf >= 1)
+			cpuid_count(7, 1,
+				    &c->x86_capability[FEATURESET_7a1],
+				    &c->x86_capability[FEATURESET_7b1],
+				    &c->x86_capability[FEATURESET_7c1],
+				    &c->x86_capability[FEATURESET_7d1]);
+		if (max_subleaf >= 2)
+			cpuid_count(7, 2,
+				    &tmp, &tmp, &tmp,
+				    &c->x86_capability[FEATURESET_7d2]);
 	}
 
 	if (c->cpuid_level >= 0xd)
 		cpuid_count(0xd, 1,
-			    &c->x86_capability[cpufeat_word(X86_FEATURE_XSAVEOPT)],
+			    &c->x86_capability[FEATURESET_Da1],
 			    &tmp, &tmp, &tmp);
+
+	if (test_bit(X86_FEATURE_ARCH_CAPS, c->x86_capability))
+		rdmsr(MSR_ARCH_CAPABILITIES,
+		      c->x86_capability[FEATURESET_m10Al],
+		      c->x86_capability[FEATURESET_m10Ah]);
 }
 
 /*
@@ -549,6 +618,8 @@ void identify_cpu(struct cpuinfo_x86 *c)
 
 		mtrr_bp_init();
 	}
+
+	setup_doitm();
 }
 
 /* leaf 0xb SMT level */
@@ -795,14 +866,30 @@ void load_system_tables(void)
 	 */
 	if (cpu_has_xen_shstk) {
 		volatile uint64_t *ist_ssp = tss_page->ist_ssp;
+		unsigned long
+			mce_ssp = stack_top + (IST_MCE * IST_SHSTK_SIZE) - 8,
+			nmi_ssp = stack_top + (IST_NMI * IST_SHSTK_SIZE) - 8,
+			db_ssp  = stack_top + (IST_DB  * IST_SHSTK_SIZE) - 8,
+			df_ssp  = stack_top + (IST_DF  * IST_SHSTK_SIZE) - 8;
 
 		ist_ssp[0] = 0x8600111111111111ul;
-		ist_ssp[IST_MCE] = stack_top + (IST_MCE * IST_SHSTK_SIZE) - 8;
-		ist_ssp[IST_NMI] = stack_top + (IST_NMI * IST_SHSTK_SIZE) - 8;
-		ist_ssp[IST_DB]	 = stack_top + (IST_DB	* IST_SHSTK_SIZE) - 8;
-		ist_ssp[IST_DF]	 = stack_top + (IST_DF	* IST_SHSTK_SIZE) - 8;
+		ist_ssp[IST_MCE] = mce_ssp;
+		ist_ssp[IST_NMI] = nmi_ssp;
+		ist_ssp[IST_DB]	 = db_ssp;
+		ist_ssp[IST_DF]	 = df_ssp;
 		for ( i = IST_DF + 1; i < ARRAY_SIZE(tss_page->ist_ssp); ++i )
 			ist_ssp[i] = 0x8600111111111111ul;
+
+		if (IS_ENABLED(CONFIG_XEN_SHSTK) && rdssp() != SSP_NO_SHSTK) {
+			/*
+			 * Rewrite supervisor tokens when shadow stacks are
+			 * active.  This resets any busy bits left across S3.
+			 */
+			wrss(mce_ssp, _p(mce_ssp));
+			wrss(nmi_ssp, _p(nmi_ssp));
+			wrss(db_ssp,  _p(db_ssp));
+			wrss(df_ssp,  _p(df_ssp));
+		}
 
 		wrmsrl(MSR_INTERRUPT_SSP_TABLE, (unsigned long)ist_ssp);
 	}
@@ -832,6 +919,29 @@ void load_system_tables(void)
 	BUILD_BUG_ON((sizeof(struct cpu_info) -
 		      offsetof(struct cpu_info, guest_cpu_user_regs.es)) & 0xf);
 	BUG_ON(system_state != SYS_STATE_early_boot && (stack_bottom & 0xf));
+}
+
+static void skinit_enable_intr(void)
+{
+	uint64_t val;
+
+	/*
+	 * If the platform is performing a Secure Launch via SKINIT
+	 * INIT_REDIRECTION flag will be active.
+	 */
+	if ( !cpu_has_skinit || rdmsr_safe(MSR_K8_VM_CR, val) ||
+	     !(val & VM_CR_INIT_REDIRECTION) )
+		return;
+
+	ap_boot_method = AP_BOOT_SKINIT;
+
+	/*
+	 * We don't yet handle #SX.  Disable INIT_REDIRECTION first, before
+	 * enabling GIF, so a pending INIT resets us, rather than causing a
+	 * panic due to an unknown exception.
+	 */
+	wrmsrl(MSR_K8_VM_CR, val & ~VM_CR_INIT_REDIRECTION);
+	asm volatile ( "stgi" ::: "memory" );
 }
 
 /*
@@ -864,6 +974,15 @@ void cpu_init(void)
 	write_debugreg(3, 0);
 	write_debugreg(6, X86_DR6_DEFAULT);
 	write_debugreg(7, X86_DR7_DEFAULT);
+
+	/*
+	 * If the platform is performing a Secure Launch via SKINIT, GIF is
+	 * clear to prevent external interrupts interfering with Secure
+	 * Startup.  Re-enable all interrupts now that we are suitably set up.
+	 *
+	 * Refer to AMD APM Vol2 15.27 "Secure Startup with SKINIT".
+	 */
+	skinit_enable_intr();
 
 	/* Enable NMIs.  Our loader (e.g. Tboot) may have left them disabled. */
 	enable_nmis();

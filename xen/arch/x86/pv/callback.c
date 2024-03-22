@@ -19,12 +19,11 @@
 #include <xen/event.h>
 #include <xen/hypercall.h>
 #include <xen/guest_access.h>
-#include <compat/callback.h>
-#include <compat/nmi.h>
 
 #include <asm/shared.h>
 
 #include <public/callback.h>
+#include <public/nmi.h>
 
 static int register_guest_nmi_callback(unsigned long address)
 {
@@ -179,9 +178,9 @@ long do_callback_op(int cmd, XEN_GUEST_HANDLE_PARAM(const_void) arg)
     return ret;
 }
 
-long do_set_callbacks(unsigned long event_address,
-                      unsigned long failsafe_address,
-                      unsigned long syscall_address)
+long do_set_callbacks(
+    unsigned long event_address, unsigned long failsafe_address,
+    unsigned long syscall_address)
 {
     struct callback_register event = {
         .type = CALLBACKTYPE_event,
@@ -203,9 +202,14 @@ long do_set_callbacks(unsigned long event_address,
     return 0;
 }
 
-static long compat_register_guest_callback(struct compat_callback_register *reg)
+#ifdef CONFIG_PV32
+
+#include <compat/callback.h>
+#include <compat/nmi.h>
+
+static int compat_register_guest_callback(struct compat_callback_register *reg)
 {
-    long ret = 0;
+    int ret = 0;
     struct vcpu *curr = current;
 
     fixup_guest_code_selector(curr->domain, reg->address.cs);
@@ -252,10 +256,10 @@ static long compat_register_guest_callback(struct compat_callback_register *reg)
     return ret;
 }
 
-static long compat_unregister_guest_callback(
+static int compat_unregister_guest_callback(
     struct compat_callback_unregister *unreg)
 {
-    long ret;
+    int ret;
 
     switch ( unreg->type )
     {
@@ -279,9 +283,9 @@ static long compat_unregister_guest_callback(
     return ret;
 }
 
-long compat_callback_op(int cmd, XEN_GUEST_HANDLE(void) arg)
+int compat_callback_op(int cmd, XEN_GUEST_HANDLE(const_void) arg)
 {
-    long ret;
+    int ret;
 
     switch ( cmd )
     {
@@ -317,10 +321,9 @@ long compat_callback_op(int cmd, XEN_GUEST_HANDLE(void) arg)
     return ret;
 }
 
-long compat_set_callbacks(unsigned long event_selector,
-                          unsigned long event_address,
-                          unsigned long failsafe_selector,
-                          unsigned long failsafe_address)
+int compat_set_callbacks(
+    unsigned long event_selector, unsigned long event_address,
+    unsigned long failsafe_selector, unsigned long failsafe_address)
 {
     struct compat_callback_register event = {
         .type = CALLBACKTYPE_event,
@@ -342,6 +345,8 @@ long compat_set_callbacks(unsigned long event_selector,
 
     return 0;
 }
+
+#endif /* CONFIG_PV32 */
 
 long do_set_trap_table(XEN_GUEST_HANDLE_PARAM(const_trap_info_t) traps)
 {
@@ -388,6 +393,7 @@ long do_set_trap_table(XEN_GUEST_HANDLE_PARAM(const_trap_info_t) traps)
     return rc;
 }
 
+#ifdef CONFIG_PV32
 int compat_set_trap_table(XEN_GUEST_HANDLE(trap_info_compat_t) traps)
 {
     struct vcpu *curr = current;
@@ -429,6 +435,7 @@ int compat_set_trap_table(XEN_GUEST_HANDLE(trap_info_compat_t) traps)
 
     return rc;
 }
+#endif
 
 long do_nmi_op(unsigned int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
 {
@@ -455,6 +462,7 @@ long do_nmi_op(unsigned int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
     return rc;
 }
 
+#ifdef CONFIG_PV32
 int compat_nmi_op(unsigned int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
 {
     struct compat_nmi_callback cb;
@@ -479,6 +487,7 @@ int compat_nmi_op(unsigned int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
 
     return rc;
 }
+#endif
 
 /*
  * Local variables:

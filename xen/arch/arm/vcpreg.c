@@ -47,15 +47,33 @@
  *
  */
 
+#ifdef CONFIG_ARM_64
+#define WRITE_SYSREG_SZ(sz, val, sysreg) WRITE_SYSREG((uint##sz##_t)val, sysreg)
+#else
+/*
+ * WRITE_SYSREG{32/64} on arm32 is defined as variadic macro which imposes
+ * on the below macro to be defined like that as well.
+ */
+#define WRITE_SYSREG_SZ(sz, val, sysreg...)  WRITE_SYSREG##sz(val, sysreg)
+#endif
+
+/*
+ * type32_t is defined as register_t due to the vreg_emulate_cp32 and
+ * vreg_emulate_sysreg taking function pointer with register_t type used for
+ * passing register's value.
+ */
+typedef register_t type32_t;
+typedef uint64_t type64_t;
+
 /* The name is passed from the upper macro to workaround macro expansion. */
 #define TVM_REG(sz, func, reg...)                                           \
-static bool func(struct cpu_user_regs *regs, uint##sz##_t *r, bool read)    \
+static bool func(struct cpu_user_regs *regs, type##sz##_t *r, bool read)    \
 {                                                                           \
     struct vcpu *v = current;                                               \
     bool cache_enabled = vcpu_has_cache_enabled(v);                         \
                                                                             \
     GUEST_BUG_ON(read);                                                     \
-    WRITE_SYSREG##sz(*r, reg);                                              \
+    WRITE_SYSREG_SZ(sz, *r, reg);                                           \
                                                                             \
     p2m_toggle_cache(v, cache_enabled);                                     \
                                                                             \
@@ -73,7 +91,7 @@ static bool func(struct cpu_user_regs *regs, uint##sz##_t *r, bool read)    \
 
 #else /* CONFIG_ARM_64 */
 #define TVM_REG32_COMBINED(lowreg, hireg, xreg)                             \
-static bool vreg_emulate_##xreg(struct cpu_user_regs *regs, uint32_t *r,    \
+static bool vreg_emulate_##xreg(struct cpu_user_regs *regs, register_t *r,  \
                                 bool read, bool hi)                         \
 {                                                                           \
     struct vcpu *v = current;                                               \
@@ -98,13 +116,13 @@ static bool vreg_emulate_##xreg(struct cpu_user_regs *regs, uint32_t *r,    \
     return true;                                                            \
 }                                                                           \
                                                                             \
-static bool vreg_emulate_##lowreg(struct cpu_user_regs *regs, uint32_t *r,  \
+static bool vreg_emulate_##lowreg(struct cpu_user_regs *regs, register_t *r,\
                                   bool read)                                \
 {                                                                           \
     return vreg_emulate_##xreg(regs, r, read, false);                       \
 }                                                                           \
                                                                             \
-static bool vreg_emulate_##hireg(struct cpu_user_regs *regs, uint32_t *r,   \
+static bool vreg_emulate_##hireg(struct cpu_user_regs *regs, register_t *r, \
                                  bool read)                                 \
 {                                                                           \
     return vreg_emulate_##xreg(regs, r, read, true);                        \
@@ -155,6 +173,24 @@ TVM_REG32(CONTEXTIDR, CONTEXTIDR_EL1)
         break;                                                      \
     }
 
+/* Macro to generate easily case for ID co-processor emulation */
+#define GENERATE_TID3_INFO(reg, field, offset)                      \
+    case HSR_CPREG32(reg):                                          \
+    {                                                               \
+        return handle_ro_read_val(regs, regidx, cp32.read, hsr, 1,  \
+                                  guest_cpuinfo.field.bits[offset]);\
+    }
+
+/* helper to define cases for all registers for one CRm value */
+#define HSR_CPREG32_TID3_CASES(REG)     case HSR_CPREG32(p15,0,c0,REG,0): \
+                                        case HSR_CPREG32(p15,0,c0,REG,1): \
+                                        case HSR_CPREG32(p15,0,c0,REG,2): \
+                                        case HSR_CPREG32(p15,0,c0,REG,3): \
+                                        case HSR_CPREG32(p15,0,c0,REG,4): \
+                                        case HSR_CPREG32(p15,0,c0,REG,5): \
+                                        case HSR_CPREG32(p15,0,c0,REG,6): \
+                                        case HSR_CPREG32(p15,0,c0,REG,7)
+
 void do_cp15_32(struct cpu_user_regs *regs, const union hsr hsr)
 {
     const struct hsr_cp32 cp32 = hsr.cp32;
@@ -188,7 +224,7 @@ void do_cp15_32(struct cpu_user_regs *regs, const union hsr hsr)
      * ARMv8 (DDI 0487A.d): G6.2.1
      */
     case HSR_CPREG32(ACTLR):
-        if ( psr_mode_is_user(regs) )
+        if ( regs_mode_is_user(regs) )
             return inject_undef_exception(regs, hsr);
         if ( cp32.read )
             set_user_reg(regs, regidx, v->arch.actlr);
@@ -204,7 +240,7 @@ void do_cp15_32(struct cpu_user_regs *regs, const union hsr hsr)
     case HSR_CPREG32(DCCSW):
     case HSR_CPREG32(DCCISW):
         if ( !cp32.read )
-            p2m_set_way_flush(current);
+            p2m_set_way_flush(current, regs, hsr);
         break;
 
     /*
@@ -260,7 +296,7 @@ void do_cp15_32(struct cpu_user_regs *regs, const union hsr hsr)
      */
     case HSR_CPREG32(PMUSERENR):
         /* RO at EL0. RAZ/WI at EL1 */
-        if ( psr_mode_is_user(regs) )
+        if ( regs_mode_is_user(regs) )
             return handle_ro_raz(regs, regidx, cp32.read, hsr, 0);
         else
             return handle_raz_wi(regs, regidx, cp32.read, hsr, 1);
@@ -285,6 +321,53 @@ void do_cp15_32(struct cpu_user_regs *regs, const union hsr hsr)
          * emulate that register as 0 above.
          */
         return handle_raz_wi(regs, regidx, cp32.read, hsr, 1);
+
+    /*
+     * HCR_EL2.TID3
+     *
+     * This is trapping most Identification registers used by a guest
+     * to identify the processor features
+     */
+    GENERATE_TID3_INFO(ID_PFR0, pfr32, 0)
+    GENERATE_TID3_INFO(ID_PFR1, pfr32, 1)
+    GENERATE_TID3_INFO(ID_PFR2, pfr32, 2)
+    GENERATE_TID3_INFO(ID_DFR0, dbg32, 0)
+    GENERATE_TID3_INFO(ID_DFR1, dbg32, 1)
+    GENERATE_TID3_INFO(ID_AFR0, aux32, 0)
+    GENERATE_TID3_INFO(ID_MMFR0, mm32, 0)
+    GENERATE_TID3_INFO(ID_MMFR1, mm32, 1)
+    GENERATE_TID3_INFO(ID_MMFR2, mm32, 2)
+    GENERATE_TID3_INFO(ID_MMFR3, mm32, 3)
+    GENERATE_TID3_INFO(ID_MMFR4, mm32, 4)
+    GENERATE_TID3_INFO(ID_MMFR5, mm32, 5)
+    GENERATE_TID3_INFO(ID_ISAR0, isa32, 0)
+    GENERATE_TID3_INFO(ID_ISAR1, isa32, 1)
+    GENERATE_TID3_INFO(ID_ISAR2, isa32, 2)
+    GENERATE_TID3_INFO(ID_ISAR3, isa32, 3)
+    GENERATE_TID3_INFO(ID_ISAR4, isa32, 4)
+    GENERATE_TID3_INFO(ID_ISAR5, isa32, 5)
+    GENERATE_TID3_INFO(ID_ISAR6, isa32, 6)
+    /* MVFR registers are in cp10 not cp15 */
+
+    /*
+     * Those cases are catching all Reserved registers trapped by TID3 which
+     * currently have no assignment.
+     * HCR.TID3 is trapping all registers in the group 3:
+     * coproc == p15, opc1 == 0, CRn == c0, CRm == {c2-c7}, opc2 == {0-7}.
+     * Those registers are defined as being RO in the Arm Architecture
+     * Reference manual Armv8 (Chapter D12.3.2 of issue F.c) so handle them
+     * as Read-only read as zero.
+     */
+    case HSR_CPREG32(p15,0,c0,c3,0):
+    case HSR_CPREG32(p15,0,c0,c3,1):
+    case HSR_CPREG32(p15,0,c0,c3,2):
+    case HSR_CPREG32(p15,0,c0,c3,3):
+    case HSR_CPREG32(p15,0,c0,c3,7):
+    HSR_CPREG32_TID3_CASES(c4):
+    HSR_CPREG32_TID3_CASES(c5):
+    HSR_CPREG32_TID3_CASES(c6):
+    HSR_CPREG32_TID3_CASES(c7):
+        return handle_ro_raz(regs, regidx, cp32.read, hsr, 1);
 
     /*
      * HCR_EL2.TIDCP
@@ -320,7 +403,7 @@ void do_cp15_32(struct cpu_user_regs *regs, const union hsr hsr)
                  "%s p15, %d, r%d, cr%d, cr%d, %d @ 0x%"PRIregister"\n",
                  cp32.read ? "mrc" : "mcr",
                  cp32.op1, cp32.reg, cp32.crn, cp32.crm, cp32.op2, regs->pc);
-        gdprintk(XENLOG_ERR, "unhandled 32-bit CP15 access %#x\n",
+        gdprintk(XENLOG_ERR, "unhandled 32-bit CP15 access %#"PRIregister"\n",
                  hsr.bits & HSR_CP32_REGS_MASK);
         inject_undef_exception(regs, hsr);
         return;
@@ -389,7 +472,8 @@ void do_cp15_64(struct cpu_user_regs *regs, const union hsr hsr)
                      "%s p15, %d, r%d, r%d, cr%d @ 0x%"PRIregister"\n",
                      cp64.read ? "mrrc" : "mcrr",
                      cp64.op1, cp64.reg1, cp64.reg2, cp64.crm, regs->pc);
-            gdprintk(XENLOG_ERR, "unhandled 64-bit CP15 access %#x\n",
+            gdprintk(XENLOG_ERR,
+                     "unhandled 64-bit CP15 access %#"PRIregister"\n",
                      hsr.bits & HSR_CP64_REGS_MASK);
             inject_undef_exception(regs, hsr);
             return;
@@ -520,7 +604,7 @@ void do_cp14_32(struct cpu_user_regs *regs, const union hsr hsr)
                  "%s p14, %d, r%d, cr%d, cr%d, %d @ 0x%"PRIregister"\n",
                   cp32.read ? "mrc" : "mcr",
                   cp32.op1, cp32.reg, cp32.crn, cp32.crm, cp32.op2, regs->pc);
-        gdprintk(XENLOG_ERR, "unhandled 32-bit cp14 access %#x\n",
+        gdprintk(XENLOG_ERR, "unhandled 32-bit cp14 access %#"PRIregister"\n",
                  hsr.bits & HSR_CP32_REGS_MASK);
         inject_undef_exception(regs, hsr);
         return;
@@ -562,7 +646,7 @@ void do_cp14_64(struct cpu_user_regs *regs, const union hsr hsr)
              "%s p14, %d, r%d, r%d, cr%d @ 0x%"PRIregister"\n",
              cp64.read ? "mrrc" : "mcrr",
              cp64.op1, cp64.reg1, cp64.reg2, cp64.crm, regs->pc);
-    gdprintk(XENLOG_ERR, "unhandled 64-bit CP14 access %#x\n",
+    gdprintk(XENLOG_ERR, "unhandled 64-bit CP14 access %#"PRIregister"\n",
              hsr.bits & HSR_CP64_REGS_MASK);
     inject_undef_exception(regs, hsr);
 }
@@ -593,10 +677,47 @@ void do_cp14_dbg(struct cpu_user_regs *regs, const union hsr hsr)
              "%s p14, %d, r%d, r%d, cr%d @ 0x%"PRIregister"\n",
              cp64.read ? "mrrc" : "mcrr",
              cp64.op1, cp64.reg1, cp64.reg2, cp64.crm, regs->pc);
-    gdprintk(XENLOG_ERR, "unhandled 64-bit CP14 DBG access %#x\n",
+    gdprintk(XENLOG_ERR, "unhandled 64-bit CP14 DBG access %#"PRIregister"\n",
              hsr.bits & HSR_CP64_REGS_MASK);
 
     inject_undef_exception(regs, hsr);
+}
+
+void do_cp10(struct cpu_user_regs *regs, const union hsr hsr)
+{
+    const struct hsr_cp32 cp32 = hsr.cp32;
+    int regidx = cp32.reg;
+
+    if ( !check_conditional_instr(regs, hsr) )
+    {
+        advance_pc(regs, hsr);
+        return;
+    }
+
+    switch ( hsr.bits & HSR_CP32_REGS_MASK )
+    {
+    /*
+     * HCR.TID3 is trapping access to MVFR register used to identify the
+     * VFP/Simd using VMRS/VMSR instructions.
+     * Exception encoding is using MRC/MCR standard with the reg field in Crn
+     * as are declared MVFR0 and MVFR1 in cpregs.h
+     */
+    GENERATE_TID3_INFO(MVFR0, mvfr, 0)
+    GENERATE_TID3_INFO(MVFR1, mvfr, 1)
+    GENERATE_TID3_INFO(MVFR2, mvfr, 2)
+
+    default:
+        gdprintk(XENLOG_ERR,
+                 "%s p10, %d, r%d, cr%d, cr%d, %d @ 0x%"PRIregister"\n",
+                 cp32.read ? "mrc" : "mcr",
+                 cp32.op1, cp32.reg, cp32.crn, cp32.crm, cp32.op2, regs->pc);
+        gdprintk(XENLOG_ERR, "unhandled 32-bit CP10 access %#"PRIregister"\n",
+                 hsr.bits & HSR_CP32_REGS_MASK);
+        inject_undef_exception(regs, hsr);
+        return;
+    }
+
+    advance_pc(regs, hsr);
 }
 
 void do_cp(struct cpu_user_regs *regs, const union hsr hsr)

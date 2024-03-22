@@ -19,6 +19,7 @@
 
 #include <xen/sched.h>
 #include <xen/vpci.h>
+#include <xen/vmap.h>
 
 /* Internal struct to store the emulated PCI registers. */
 struct vpci_register {
@@ -37,6 +38,9 @@ extern vpci_register_init_t *const __end_vpci_array[];
 
 void vpci_remove_device(struct pci_dev *pdev)
 {
+    if ( !has_vpci(pdev->domain) || !pdev->vpci )
+        return;
+
     spin_lock(&pdev->vpci->lock);
     while ( !list_empty(&pdev->vpci->handlers) )
     {
@@ -48,19 +52,31 @@ void vpci_remove_device(struct pci_dev *pdev)
         xfree(r);
     }
     spin_unlock(&pdev->vpci->lock);
+    if ( pdev->vpci->msix )
+    {
+        unsigned int i;
+
+        list_del(&pdev->vpci->msix->next);
+        for ( i = 0; i < ARRAY_SIZE(pdev->vpci->msix->table); i++ )
+            if ( pdev->vpci->msix->table[i] )
+                iounmap(pdev->vpci->msix->table[i]);
+    }
     xfree(pdev->vpci->msix);
     xfree(pdev->vpci->msi);
     xfree(pdev->vpci);
     pdev->vpci = NULL;
 }
 
-int __hwdom_init vpci_add_handlers(struct pci_dev *pdev)
+int vpci_add_handlers(struct pci_dev *pdev)
 {
     unsigned int i;
     int rc = 0;
 
     if ( !has_vpci(pdev->domain) )
         return 0;
+
+    /* We should not get here twice for the same device. */
+    ASSERT(!pdev->vpci);
 
     pdev->vpci = xzalloc(struct vpci);
     if ( !pdev->vpci )
@@ -100,25 +116,25 @@ static int vpci_register_cmp(const struct vpci_register *r1,
 }
 
 /* Dummy hooks, writes are ignored, reads return 1's */
-static uint32_t vpci_ignored_read(const struct pci_dev *pdev, unsigned int reg,
-                                  void *data)
+static uint32_t cf_check vpci_ignored_read(
+    const struct pci_dev *pdev, unsigned int reg, void *data)
 {
     return ~(uint32_t)0;
 }
 
-static void vpci_ignored_write(const struct pci_dev *pdev, unsigned int reg,
-                               uint32_t val, void *data)
+static void cf_check vpci_ignored_write(
+    const struct pci_dev *pdev, unsigned int reg, uint32_t val, void *data)
 {
 }
 
-uint32_t vpci_hw_read16(const struct pci_dev *pdev, unsigned int reg,
-                        void *data)
+uint32_t cf_check vpci_hw_read16(
+    const struct pci_dev *pdev, unsigned int reg, void *data)
 {
     return pci_conf_read16(pdev->sbdf, reg);
 }
 
-uint32_t vpci_hw_read32(const struct pci_dev *pdev, unsigned int reg,
-                        void *data)
+uint32_t cf_check vpci_hw_read32(
+    const struct pci_dev *pdev, unsigned int reg, void *data)
 {
     return pci_conf_read32(pdev->sbdf, reg);
 }
@@ -317,8 +333,8 @@ uint32_t vpci_read(pci_sbdf_t sbdf, unsigned int reg, unsigned int size)
     }
 
     /* Find the PCI dev matching the address. */
-    pdev = pci_get_pdev_by_domain(d, sbdf.seg, sbdf.bus, sbdf.devfn);
-    if ( !pdev )
+    pdev = pci_get_pdev(d, sbdf);
+    if ( !pdev || !pdev->vpci )
         return vpci_read_hw(sbdf, reg, size);
 
     spin_lock(&pdev->vpci->lock);
@@ -364,6 +380,7 @@ uint32_t vpci_read(pci_sbdf_t sbdf, unsigned int reg, unsigned int size)
             break;
         ASSERT(data_offset < size);
     }
+    spin_unlock(&pdev->vpci->lock);
 
     if ( data_offset < size )
     {
@@ -373,7 +390,6 @@ uint32_t vpci_read(pci_sbdf_t sbdf, unsigned int reg, unsigned int size)
 
         data = merge_result(data, tmp_data, size - data_offset, data_offset);
     }
-    spin_unlock(&pdev->vpci->lock);
 
     return data & (0xffffffff >> (32 - 8 * size));
 }
@@ -427,8 +443,8 @@ void vpci_write(pci_sbdf_t sbdf, unsigned int reg, unsigned int size,
      * Find the PCI dev matching the address.
      * Passthrough everything that's not trapped.
      */
-    pdev = pci_get_pdev_by_domain(d, sbdf.seg, sbdf.bus, sbdf.devfn);
-    if ( !pdev )
+    pdev = pci_get_pdev(d, sbdf);
+    if ( !pdev || !pdev->vpci )
     {
         vpci_write_hw(sbdf, reg, size, data);
         return;
@@ -469,13 +485,76 @@ void vpci_write(pci_sbdf_t sbdf, unsigned int reg, unsigned int size,
             break;
         ASSERT(data_offset < size);
     }
+    spin_unlock(&pdev->vpci->lock);
 
     if ( data_offset < size )
         /* Tailing gap, write the remaining. */
         vpci_write_hw(sbdf, reg + data_offset, size - data_offset,
                       data >> (data_offset * 8));
+}
 
-    spin_unlock(&pdev->vpci->lock);
+/* Helper function to check an access size and alignment on vpci space. */
+bool vpci_access_allowed(unsigned int reg, unsigned int len)
+{
+    /* Check access size. */
+    if ( len != 1 && len != 2 && len != 4 && len != 8 )
+        return false;
+
+#ifndef CONFIG_64BIT
+    /* Prevent 64bit accesses on 32bit */
+    if ( len == 8 )
+        return false;
+#endif
+
+    /* Check that access is size aligned. */
+    if ( (reg & (len - 1)) )
+        return false;
+
+    return true;
+}
+
+bool vpci_ecam_write(pci_sbdf_t sbdf, unsigned int reg, unsigned int len,
+                         unsigned long data)
+{
+    if ( !vpci_access_allowed(reg, len) ||
+         (reg + len) > PCI_CFG_SPACE_EXP_SIZE )
+        return false;
+
+    vpci_write(sbdf, reg, min(4u, len), data);
+#ifdef CONFIG_64BIT
+    if ( len == 8 )
+        vpci_write(sbdf, reg + 4, 4, data >> 32);
+#endif
+
+    return true;
+}
+
+bool vpci_ecam_read(pci_sbdf_t sbdf, unsigned int reg, unsigned int len,
+                        unsigned long *data)
+{
+    if ( !vpci_access_allowed(reg, len) ||
+         (reg + len) > PCI_CFG_SPACE_EXP_SIZE )
+        return false;
+
+    /*
+     * According to the PCIe 3.1A specification:
+     *  - Configuration Reads and Writes must usually be DWORD or smaller
+     *    in size.
+     *  - Because Root Complex implementations are not required to support
+     *    accesses to a RCRB that cross DW boundaries [...] software
+     *    should take care not to cause the generation of such accesses
+     *    when accessing a RCRB unless the Root Complex will support the
+     *    access.
+     *  Xen however supports 8byte accesses by splitting them into two
+     *  4byte accesses.
+     */
+    *data = vpci_read(sbdf, reg, min(4u, len));
+#ifdef CONFIG_64BIT
+    if ( len == 8 )
+        *data |= (uint64_t)vpci_read(sbdf, reg + 4, 4) << 32;
+#endif
+
+    return true;
 }
 
 /*

@@ -40,7 +40,7 @@ static enum core_parking_controller {
     PERFORMANCE_FIRST
 } core_parking_controller __initdata = POWER_FIRST;
 
-static int __init setup_core_parking_option(const char *str)
+static int __init cf_check setup_core_parking_option(const char *str)
 {
     if ( !strcmp(str, "power") )
         core_parking_controller = POWER_FIRST;
@@ -53,7 +53,7 @@ static int __init setup_core_parking_option(const char *str)
 }
 custom_param("core_parking", setup_core_parking_option);
 
-static unsigned int core_parking_performance(unsigned int event)
+static unsigned int cf_check core_parking_performance(unsigned int event)
 {
     unsigned int cpu = -1;
 
@@ -111,7 +111,7 @@ static unsigned int core_parking_performance(unsigned int event)
     return cpu;
 }
 
-static unsigned int core_parking_power(unsigned int event)
+static unsigned int cf_check core_parking_power(unsigned int event)
 {
     unsigned int cpu = -1;
 
@@ -169,7 +169,7 @@ static unsigned int core_parking_power(unsigned int event)
     return cpu;
 }
 
-long core_parking_helper(void *data)
+long cf_check core_parking_helper(void *data)
 {
     uint32_t idle_nums = (unsigned long)data;
     unsigned int cpu;
@@ -258,7 +258,7 @@ static int __init register_core_parking_policy(const struct cp_policy *policy)
     return 0;
 }
 
-static int __init core_parking_init(void)
+static int __init cf_check core_parking_init(void)
 {
     int ret = 0;
 

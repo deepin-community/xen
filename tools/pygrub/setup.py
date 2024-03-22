@@ -3,7 +3,7 @@ from distutils.ccompiler import new_compiler
 import os
 import sys
 
-extra_compile_args  = [ "-fno-strict-aliasing", "-Werror" ]
+extra_compile_args  = [ "-fno-strict-aliasing" ]
 
 XEN_ROOT = "../.."
 
@@ -17,7 +17,7 @@ xenfsimage = Extension("xenfsimage",
 pkgs = [ 'grub' ]
 
 setup(name='pygrub',
-      version='0.6',
+      version='0.7',
       description='Boot loader that looks a lot like grub for Xen',
       author='Jeremy Katz',
       author_email='katzj@redhat.com',

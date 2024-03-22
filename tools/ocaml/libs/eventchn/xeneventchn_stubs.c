@@ -22,7 +22,6 @@
 #include <stdint.h>
 #include <sys/ioctl.h>
 #include <xen/xen.h>
-#include <xen/sys/evtchn.h>
 #include <xenevtchn.h>
 
 #define CAML_NAME_SPACE
@@ -34,32 +33,78 @@
 #include <caml/fail.h>
 #include <caml/signals.h>
 
-#define _H(__h) ((xenevtchn_handle *)(__h))
-
-CAMLprim value stub_eventchn_init(void)
+static inline xenevtchn_handle *xce_of_val(value v)
 {
-	CAMLparam0();
+	return *(xenevtchn_handle **)Data_custom_val(v);
+}
+
+static void stub_evtchn_finalize(value v)
+{
+	xenevtchn_close(xce_of_val(v));
+}
+
+static struct custom_operations xenevtchn_ops = {
+	.identifier  = "xenevtchn",
+	.finalize    = stub_evtchn_finalize,
+	.compare     = custom_compare_default,     /* Can't compare     */
+	.hash        = custom_hash_default,        /* Can't hash        */
+	.serialize   = custom_serialize_default,   /* Can't serialize   */
+	.deserialize = custom_deserialize_default, /* Can't deserialize */
+	.compare_ext = custom_compare_ext_default, /* Can't compare     */
+};
+
+CAMLprim value stub_eventchn_init(value cloexec)
+{
+	CAMLparam1(cloexec);
 	CAMLlocal1(result);
 	xenevtchn_handle *xce;
+	unsigned int flags = 0;
+
+	if ( !Bool_val(cloexec) )
+		flags |= XENEVTCHN_NO_CLOEXEC;
+
+	result = caml_alloc_custom(&xenevtchn_ops, sizeof(xce), 0, 1);
 
 	caml_enter_blocking_section();
-	xce = xenevtchn_open(NULL, 0);
+	xce = xenevtchn_open(NULL, flags);
 	caml_leave_blocking_section();
 
 	if (xce == NULL)
 		caml_failwith("open failed");
 
-	result = (value)xce;
+	*(xenevtchn_handle **)Data_custom_val(result) = xce;
+
 	CAMLreturn(result);
 }
 
-CAMLprim value stub_eventchn_fd(value xce)
+CAMLprim value stub_eventchn_fdopen(value fdval)
 {
-	CAMLparam1(xce);
+	CAMLparam1(fdval);
 	CAMLlocal1(result);
+	xenevtchn_handle *xce;
+
+	result = caml_alloc_custom(&xenevtchn_ops, sizeof(xce), 0, 1);
+
+	caml_enter_blocking_section();
+	xce = xenevtchn_fdopen(NULL, Int_val(fdval), 0);
+	caml_leave_blocking_section();
+
+	if (xce == NULL)
+		caml_failwith("evtchn fdopen failed");
+
+	*(xenevtchn_handle **)Data_custom_val(result) = xce;
+
+	CAMLreturn(result);
+}
+
+CAMLprim value stub_eventchn_fd(value xce_val)
+{
+	CAMLparam1(xce_val);
+	CAMLlocal1(result);
+	xenevtchn_handle *xce = xce_of_val(xce_val);
 	int fd;
 
-	fd = xenevtchn_fd(_H(xce));
+	fd = xenevtchn_fd(xce);
 	if (fd == -1)
 		caml_failwith("evtchn fd failed");
 
@@ -68,13 +113,14 @@ CAMLprim value stub_eventchn_fd(value xce)
 	CAMLreturn(result);
 }
 
-CAMLprim value stub_eventchn_notify(value xce, value port)
+CAMLprim value stub_eventchn_notify(value xce_val, value port)
 {
-	CAMLparam2(xce, port);
+	CAMLparam2(xce_val, port);
+	xenevtchn_handle *xce = xce_of_val(xce_val);
 	int rc;
 
 	caml_enter_blocking_section();
-	rc = xenevtchn_notify(_H(xce), Int_val(port));
+	rc = xenevtchn_notify(xce, Int_val(port));
 	caml_leave_blocking_section();
 
 	if (rc == -1)
@@ -83,15 +129,16 @@ CAMLprim value stub_eventchn_notify(value xce, value port)
 	CAMLreturn(Val_unit);
 }
 
-CAMLprim value stub_eventchn_bind_interdomain(value xce, value domid,
+CAMLprim value stub_eventchn_bind_interdomain(value xce_val, value domid,
                                               value remote_port)
 {
-	CAMLparam3(xce, domid, remote_port);
+	CAMLparam3(xce_val, domid, remote_port);
 	CAMLlocal1(port);
+	xenevtchn_handle *xce = xce_of_val(xce_val);
 	xenevtchn_port_or_error_t rc;
 
 	caml_enter_blocking_section();
-	rc = xenevtchn_bind_interdomain(_H(xce), Int_val(domid), Int_val(remote_port));
+	rc = xenevtchn_bind_interdomain(xce, Int_val(domid), Int_val(remote_port));
 	caml_leave_blocking_section();
 
 	if (rc == -1)
@@ -101,14 +148,15 @@ CAMLprim value stub_eventchn_bind_interdomain(value xce, value domid,
 	CAMLreturn(port);
 }
 
-CAMLprim value stub_eventchn_bind_virq(value xce, value virq_type)
+CAMLprim value stub_eventchn_bind_virq(value xce_val, value virq_type)
 {
-	CAMLparam2(xce, virq_type);
+	CAMLparam2(xce_val, virq_type);
 	CAMLlocal1(port);
+	xenevtchn_handle *xce = xce_of_val(xce_val);
 	xenevtchn_port_or_error_t rc;
 
 	caml_enter_blocking_section();
-	rc = xenevtchn_bind_virq(_H(xce), Int_val(virq_type));
+	rc = xenevtchn_bind_virq(xce, Int_val(virq_type));
 	caml_leave_blocking_section();
 
 	if (rc == -1)
@@ -118,13 +166,14 @@ CAMLprim value stub_eventchn_bind_virq(value xce, value virq_type)
 	CAMLreturn(port);
 }
 
-CAMLprim value stub_eventchn_unbind(value xce, value port)
+CAMLprim value stub_eventchn_unbind(value xce_val, value port)
 {
-	CAMLparam2(xce, port);
+	CAMLparam2(xce_val, port);
+	xenevtchn_handle *xce = xce_of_val(xce_val);
 	int rc;
 
 	caml_enter_blocking_section();
-	rc = xenevtchn_unbind(_H(xce), Int_val(port));
+	rc = xenevtchn_unbind(xce, Int_val(port));
 	caml_leave_blocking_section();
 
 	if (rc == -1)
@@ -133,14 +182,15 @@ CAMLprim value stub_eventchn_unbind(value xce, value port)
 	CAMLreturn(Val_unit);
 }
 
-CAMLprim value stub_eventchn_pending(value xce)
+CAMLprim value stub_eventchn_pending(value xce_val)
 {
-	CAMLparam1(xce);
+	CAMLparam1(xce_val);
 	CAMLlocal1(result);
+	xenevtchn_handle *xce = xce_of_val(xce_val);
 	xenevtchn_port_or_error_t port;
 
 	caml_enter_blocking_section();
-	port = xenevtchn_pending(_H(xce));
+	port = xenevtchn_pending(xce);
 	caml_leave_blocking_section();
 
 	if (port == -1)
@@ -150,16 +200,17 @@ CAMLprim value stub_eventchn_pending(value xce)
 	CAMLreturn(result);
 }
 
-CAMLprim value stub_eventchn_unmask(value xce, value _port)
+CAMLprim value stub_eventchn_unmask(value xce_val, value _port)
 {
-	CAMLparam2(xce, _port);
+	CAMLparam2(xce_val, _port);
+	xenevtchn_handle *xce = xce_of_val(xce_val);
 	evtchn_port_t port;
 	int rc;
 
 	port = Int_val(_port);
 
 	caml_enter_blocking_section();
-	rc = xenevtchn_unmask(_H(xce), port);
+	rc = xenevtchn_unmask(xce, port);
 	caml_leave_blocking_section();
 
 	if (rc)

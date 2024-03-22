@@ -20,9 +20,22 @@ variables:
   # disable shallow cloning of git repository. This is needed for git-debrebase
   GIT_DEPTH: 0
 
+  RELEASE: 'unstable'
+
   # xen currently does not enable hardening when building the hypervisor so
   # disable blhc.
   SALSA_CI_DISABLE_BLHC: 1
 
   SALSA_CI_REPROTEST_ENABLE_DIFFOSCOPE: 1
 
+  # We do not provide packages for i386
+  SALSA_CI_DISABLE_BUILD_PACKAGE_I386: 1
+
+  # cross building xen currently fails for the following reason:
+  #  The following packages have unmet dependencies:
+  #  ocaml:arm64 : Depends: gcc:arm64 but it is not installable
+  #                Depends: binutils:arm64 but it is not installable
+  #
+  # It can be tried again when there are better chances of it building
+  # successfully.
+  SALSA_CI_DISABLE_CROSSBUILD_ARM64: 1

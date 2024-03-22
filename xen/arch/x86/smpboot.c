@@ -42,6 +42,7 @@
 #include <asm/microcode.h>
 #include <asm/msr.h>
 #include <asm/mtrr.h>
+#include <asm/setup.h>
 #include <asm/spec_ctrl.h>
 #include <asm/time.h>
 #include <asm/tboot.h>
@@ -49,6 +50,7 @@
 #include <mach_apic.h>
 
 unsigned long __read_mostly trampoline_phys;
+enum ap_boot_method __read_mostly ap_boot_method = AP_BOOT_NORMAL;
 
 /* representing HT siblings of each logical CPU */
 DEFINE_PER_CPU_READ_MOSTLY(cpumask_var_t, cpu_sibling_mask);
@@ -321,6 +323,8 @@ static void set_cpu_sibling_map(unsigned int cpu)
 
 void start_secondary(void *unused)
 {
+    struct cpu_info *info = get_cpu_info();
+
     /*
      * Dont put anything before smp_callin(), SMP booting is so fragile that we
      * want to limit the things done here to the most necessary things.
@@ -376,10 +380,12 @@ void start_secondary(void *unused)
      * settings.  Note: These MSRs may only become available after loading
      * microcode.
      */
-    if ( boot_cpu_has(X86_FEATURE_IBRSB) )
+    if ( boot_cpu_has(X86_FEATURE_IBRSB) || boot_cpu_has(X86_FEATURE_IBRS) )
+    {
         wrmsrl(MSR_SPEC_CTRL, default_xen_spec_ctrl);
-    if ( boot_cpu_has(X86_FEATURE_SRBDS_CTRL) )
-        wrmsrl(MSR_MCU_OPT_CTRL, default_xen_mcu_opt_ctrl);
+        info->last_spec_ctrl = default_xen_spec_ctrl;
+    }
+    update_mcu_opt_ctrl();
 
     tsx_init(); /* Needs microcode.  May change HLE/RTM feature bits. */
 
@@ -418,12 +424,27 @@ void start_secondary(void *unused)
     startup_cpu_idle_loop();
 }
 
-extern void *stack_start;
-
 static int wakeup_secondary_cpu(int phys_apicid, unsigned long start_eip)
 {
     unsigned long send_status = 0, accept_status = 0;
     int maxlvt, timeout, i;
+
+    /*
+     * Normal AP startup uses an INIT-SIPI-SIPI sequence.
+     *
+     * When using SKINIT for Secure Startup, the INIT IPI must be skipped, so
+     * that SIPI is the first interrupt the AP sees.
+     *
+     * Refer to AMD APM Vol2 15.27 "Secure Startup with SKINIT".
+     */
+    bool send_INIT = ap_boot_method != AP_BOOT_SKINIT;
+
+    /*
+     * Some versions of tboot might be able to handle the entire wake sequence
+     * on our behalf.
+     */
+    if ( tboot_in_measured_env() && !tboot_wake_ap(phys_apicid, start_eip) )
+        return 0;
 
     /*
      * Be paranoid about clearing APIC errors.
@@ -431,49 +452,52 @@ static int wakeup_secondary_cpu(int phys_apicid, unsigned long start_eip)
     apic_write(APIC_ESR, 0);
     apic_read(APIC_ESR);
 
-    Dprintk("Asserting INIT.\n");
-
-    /*
-     * Turn INIT on target chip via IPI
-     */
-    apic_icr_write(APIC_INT_LEVELTRIG | APIC_INT_ASSERT | APIC_DM_INIT,
-                   phys_apicid);
-
-    if ( !x2apic_enabled )
+    if ( send_INIT )
     {
-        Dprintk("Waiting for send to finish...\n");
-        timeout = 0;
-        do {
-            Dprintk("+");
-            udelay(100);
-            send_status = apic_read(APIC_ICR) & APIC_ICR_BUSY;
-        } while ( send_status && (timeout++ < 1000) );
+        Dprintk("Asserting INIT.\n");
 
-        mdelay(10);
-
-        Dprintk("Deasserting INIT.\n");
-
-        apic_icr_write(APIC_INT_LEVELTRIG | APIC_DM_INIT, phys_apicid);
-
-        Dprintk("Waiting for send to finish...\n");
-        timeout = 0;
-        do {
-            Dprintk("+");
-            udelay(100);
-            send_status = apic_read(APIC_ICR) & APIC_ICR_BUSY;
-        } while ( send_status && (timeout++ < 1000) );
-    }
-    else if ( tboot_in_measured_env() )
-    {
         /*
-         * With tboot AP is actually spinning in a mini-guest before
-         * receiving INIT. Upon receiving INIT ipi, AP need time to VMExit,
-         * update VMCS to tracking SIPIs and VMResume.
-         *
-         * While AP is in root mode handling the INIT the CPU will drop
-         * any SIPIs
+         * Turn INIT on target chip via IPI
          */
-        udelay(10);
+        apic_icr_write(APIC_INT_LEVELTRIG | APIC_INT_ASSERT | APIC_DM_INIT,
+                       phys_apicid);
+
+        if ( !x2apic_enabled )
+        {
+            Dprintk("Waiting for send to finish...\n");
+            timeout = 0;
+            do {
+                Dprintk("+");
+                udelay(100);
+                send_status = apic_read(APIC_ICR) & APIC_ICR_BUSY;
+            } while ( send_status && (timeout++ < 1000) );
+
+            mdelay(10);
+
+            Dprintk("Deasserting INIT.\n");
+
+            apic_icr_write(APIC_INT_LEVELTRIG | APIC_DM_INIT, phys_apicid);
+
+            Dprintk("Waiting for send to finish...\n");
+            timeout = 0;
+            do {
+                Dprintk("+");
+                udelay(100);
+                send_status = apic_read(APIC_ICR) & APIC_ICR_BUSY;
+            } while ( send_status && (timeout++ < 1000) );
+        }
+        else if ( tboot_in_measured_env() )
+        {
+            /*
+             * With tboot AP is actually spinning in a mini-guest before
+             * receiving INIT. Upon receiving INIT ipi, AP need time to VMExit,
+             * update VMCS to tracking SIPIs and VMResume.
+             *
+             * While AP is in root mode handling the INIT the CPU will drop
+             * any SIPIs
+             */
+            udelay(10);
+        }
     }
 
     maxlvt = get_maxlvt();
@@ -570,8 +594,7 @@ static int do_boot_cpu(int apicid, int cpu)
     set_cpu_state(CPU_STATE_INIT);
 
     /* Starting actual IPI sequence... */
-    if ( !tboot_in_measured_env() || tboot_wake_ap(apicid, start_eip) )
-        boot_error = wakeup_secondary_cpu(apicid, start_eip);
+    boot_error = wakeup_secondary_cpu(apicid, start_eip);
 
     if ( !boot_error )
     {
@@ -674,8 +697,9 @@ static int clone_mapping(const void *ptr, root_pgentry_t *rpt)
     unsigned long linear = (unsigned long)ptr, pfn;
     unsigned int flags;
     l3_pgentry_t *pl3e;
-    l2_pgentry_t *pl2e;
-    l1_pgentry_t *pl1e;
+    l2_pgentry_t *pl2e = NULL;
+    l1_pgentry_t *pl1e = NULL;
+    int rc = 0;
 
     /*
      * Sanity check 'linear'.  We only allow cloning from the Xen virtual
@@ -689,7 +713,7 @@ static int clone_mapping(const void *ptr, root_pgentry_t *rpt)
          (linear >= XEN_VIRT_END && linear < DIRECTMAP_VIRT_START) )
         return -EINVAL;
 
-    pl3e = l4e_to_l3e(idle_pg_table[root_table_offset(linear)]) +
+    pl3e = map_l3t_from_l4e(idle_pg_table[root_table_offset(linear)]) +
         l3_table_offset(linear);
 
     flags = l3e_get_flags(*pl3e);
@@ -702,7 +726,7 @@ static int clone_mapping(const void *ptr, root_pgentry_t *rpt)
     }
     else
     {
-        pl2e = l3e_to_l2e(*pl3e) + l2_table_offset(linear);
+        pl2e = map_l2t_from_l3e(*pl3e) + l2_table_offset(linear);
         flags = l2e_get_flags(*pl2e);
         ASSERT(flags & _PAGE_PRESENT);
         if ( flags & _PAGE_PSE )
@@ -713,56 +737,66 @@ static int clone_mapping(const void *ptr, root_pgentry_t *rpt)
         }
         else
         {
-            pl1e = l2e_to_l1e(*pl2e) + l1_table_offset(linear);
+            pl1e = map_l1t_from_l2e(*pl2e) + l1_table_offset(linear);
             flags = l1e_get_flags(*pl1e);
             if ( !(flags & _PAGE_PRESENT) )
-                return 0;
+                goto out;
             pfn = l1e_get_pfn(*pl1e);
         }
     }
 
+    UNMAP_DOMAIN_PAGE(pl1e);
+    UNMAP_DOMAIN_PAGE(pl2e);
+    unmap_domain_page(pl3e);
+
     if ( !(root_get_flags(rpt[root_table_offset(linear)]) & _PAGE_PRESENT) )
     {
-        pl3e = alloc_xen_pagetable();
+        mfn_t l3mfn;
+
+        pl3e = alloc_mapped_pagetable(&l3mfn);
+        rc = -ENOMEM;
         if ( !pl3e )
-            return -ENOMEM;
-        clear_page(pl3e);
+            goto out;
         l4e_write(&rpt[root_table_offset(linear)],
-                  l4e_from_paddr(__pa(pl3e), __PAGE_HYPERVISOR));
+                  l4e_from_mfn(l3mfn, __PAGE_HYPERVISOR));
     }
     else
-        pl3e = l4e_to_l3e(rpt[root_table_offset(linear)]);
+        pl3e = map_l3t_from_l4e(rpt[root_table_offset(linear)]);
 
     pl3e += l3_table_offset(linear);
 
     if ( !(l3e_get_flags(*pl3e) & _PAGE_PRESENT) )
     {
-        pl2e = alloc_xen_pagetable();
+        mfn_t l2mfn;
+
+        pl2e = alloc_mapped_pagetable(&l2mfn);
+        rc = -ENOMEM;
         if ( !pl2e )
-            return -ENOMEM;
-        clear_page(pl2e);
-        l3e_write(pl3e, l3e_from_paddr(__pa(pl2e), __PAGE_HYPERVISOR));
+            goto out;
+        l3e_write(pl3e, l3e_from_mfn(l2mfn, __PAGE_HYPERVISOR));
     }
     else
     {
         ASSERT(!(l3e_get_flags(*pl3e) & _PAGE_PSE));
-        pl2e = l3e_to_l2e(*pl3e);
+        pl2e = map_l2t_from_l3e(*pl3e);
     }
 
     pl2e += l2_table_offset(linear);
 
     if ( !(l2e_get_flags(*pl2e) & _PAGE_PRESENT) )
     {
-        pl1e = alloc_xen_pagetable();
+        mfn_t l1mfn;
+
+        pl1e = alloc_mapped_pagetable(&l1mfn);
+        rc = -ENOMEM;
         if ( !pl1e )
-            return -ENOMEM;
-        clear_page(pl1e);
-        l2e_write(pl2e, l2e_from_paddr(__pa(pl1e), __PAGE_HYPERVISOR));
+            goto out;
+        l2e_write(pl2e, l2e_from_mfn(l1mfn, __PAGE_HYPERVISOR));
     }
     else
     {
         ASSERT(!(l2e_get_flags(*pl2e) & _PAGE_PSE));
-        pl1e = l2e_to_l1e(*pl2e);
+        pl1e = map_l1t_from_l2e(*pl2e);
     }
 
     pl1e += l1_table_offset(linear);
@@ -776,7 +810,12 @@ static int clone_mapping(const void *ptr, root_pgentry_t *rpt)
     else
         l1e_write(pl1e, l1e_from_pfn(pfn, flags));
 
-    return 0;
+    rc = 0;
+ out:
+    unmap_domain_page(pl1e);
+    unmap_domain_page(pl2e);
+    unmap_domain_page(pl3e);
+    return rc;
 }
 
 DEFINE_PER_CPU(root_pgentry_t *, root_pgt);
@@ -785,7 +824,7 @@ static root_pgentry_t common_pgt;
 
 extern const char _stextentry[], _etextentry[];
 
-static int setup_cpu_root_pgt(unsigned int cpu)
+int setup_cpu_root_pgt(unsigned int cpu)
 {
     root_pgentry_t *rpt;
     unsigned int off;
@@ -794,7 +833,7 @@ static int setup_cpu_root_pgt(unsigned int cpu)
     if ( !opt_xpti_hwdom && !opt_xpti_domu )
         return 0;
 
-    rpt = alloc_xen_pagetable();
+    rpt = alloc_xenheap_page();
     if ( !rpt )
         return -ENOMEM;
 
@@ -886,18 +925,18 @@ static void cleanup_cpu_root_pgt(unsigned int cpu)
                     continue;
 
                 ASSERT(!(l2e_get_flags(l2t[i2]) & _PAGE_PSE));
-                free_xen_pagetable_new(l2e_get_mfn(l2t[i2]));
+                free_xen_pagetable(l2e_get_mfn(l2t[i2]));
             }
 
             unmap_domain_page(l2t);
-            free_xen_pagetable_new(l2mfn);
+            free_xen_pagetable(l2mfn);
         }
 
         unmap_domain_page(l3t);
-        free_xen_pagetable_new(l3mfn);
+        free_xen_pagetable(l3mfn);
     }
 
-    free_xen_pagetable(rpt);
+    free_xenheap_page(rpt);
 
     /* Also zap the stub mapping for this CPU. */
     if ( stub_linear )
@@ -984,6 +1023,23 @@ static void cpu_smpboot_free(unsigned int cpu, bool remove)
     }
 }
 
+void *cpu_alloc_stack(unsigned int cpu)
+{
+    nodeid_t node = cpu_to_node(cpu);
+    unsigned int memflags = 0;
+    void *stack;
+
+    if ( node != NUMA_NO_NODE )
+        memflags = MEMF_node(node);
+
+    stack = alloc_xenheap_pages(STACK_ORDER, memflags);
+
+    if ( stack )
+        memguard_guard_stack(stack);
+
+    return stack;
+}
+
 static int cpu_smpboot_alloc(unsigned int cpu)
 {
     struct cpu_info *info;
@@ -996,14 +1052,9 @@ static int cpu_smpboot_alloc(unsigned int cpu)
     if ( node != NUMA_NO_NODE )
         memflags = MEMF_node(node);
 
-    if ( stack_base[cpu] == NULL )
-    {
-        stack_base[cpu] = alloc_xenheap_pages(STACK_ORDER, memflags);
-        if ( !stack_base[cpu] )
+    if ( stack_base[cpu] == NULL &&
+         (stack_base[cpu] = cpu_alloc_stack(cpu)) == NULL )
             goto out;
-
-        memguard_guard_stack(stack_base[cpu]);
-    }
 
     info = get_cpu_info_from_stack((unsigned long)stack_base[cpu]);
     info->processor_id = cpu;
@@ -1073,7 +1124,7 @@ static int cpu_smpboot_alloc(unsigned int cpu)
     return rc;
 }
 
-static int cpu_smpboot_callback(
+static int cf_check cpu_smpboot_callback(
     struct notifier_block *nfb, unsigned long action, void *hcpu)
 {
     unsigned int cpu = (unsigned long)hcpu;
@@ -1102,8 +1153,6 @@ static struct notifier_block cpu_smpboot_nfb = {
 
 void __init smp_prepare_cpus(void)
 {
-    int rc;
-
     register_cpu_notifier(&cpu_smpboot_nfb);
 
     mtrr_aps_sync_begin();
@@ -1116,23 +1165,6 @@ void __init smp_prepare_cpus(void)
     x86_cpu_to_apicid[0] = boot_cpu_physical_apicid;
 
     stack_base[0] = (void *)((unsigned long)stack_start & ~(STACK_SIZE - 1));
-
-    rc = setup_cpu_root_pgt(0);
-    if ( rc )
-        panic("Error %d setting up PV root page table\n", rc);
-    if ( per_cpu(root_pgt, 0) )
-    {
-        get_cpu_info()->pv_cr3 = 0;
-
-#ifdef CONFIG_PV
-        /*
-         * All entry points which may need to switch page tables have to start
-         * with interrupts off. Re-write what pv_trap_init() has put there.
-         */
-        _set_gate(idt_table + LEGACY_SYSCALL_VECTOR, SYS_DESC_irq_gate, 3,
-                  &int80_direct_trap);
-#endif
-    }
 
     set_nr_sockets();
 
@@ -1186,6 +1218,11 @@ void __init smp_prepare_cpus(void)
     verify_local_APIC();
 
     connect_bsp_APIC();
+
+    if ( !skip_ioapic_setup && nr_ioapics )
+        /* Sanitize the IO-APIC pins before enabling the lapic LVTERR/ESR. */
+        enable_IO_APIC();
+
     setup_local_APIC(true);
 
     if ( !skip_ioapic_setup && nr_ioapics )

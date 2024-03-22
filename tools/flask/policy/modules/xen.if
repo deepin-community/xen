@@ -49,7 +49,8 @@ define(`create_domain_common', `
 	allow $1 $2:domain { create max_vcpus setdomainmaxmem setaddrsize
 			getdomaininfo hypercall setvcpucontext getscheduler
 			getvcpuinfo getaddrsize getaffinity setaffinity
-			settime setdomainhandle getvcpucontext set_misc_info };
+			settime setdomainhandle getvcpucontext set_misc_info
+			getpagingmempool setpagingmempool };
 	allow $1 $2:domain2 { set_cpu_policy settsc setscheduler setclaim
 			set_vnumainfo get_vnumainfo cacheflush
 			psr_cmt_op psr_alloc soft_reset
@@ -59,7 +60,14 @@ define(`create_domain_common', `
 	allow $1 $2:mmu { map_read map_write adjust memorymap physmap pinpage mmuext_op updatemp };
 	allow $1 $2:grant setup;
 	allow $1 $2:hvm { getparam hvmctl sethvmc
-			setparam nested altp2mhvm altp2mhvm_op dm };
+			setparam altp2mhvm altp2mhvm_op dm };
+')
+
+# xen_build_domain(target)
+#   Allow a domain to be created at boot by the hypervisor
+define(`xen_build_domain', `
+	allow xenboot_t $1:domain create;
+	allow xenboot_t $1_channel:event create;
 ')
 
 # create_domain(priv, target)
@@ -85,7 +93,7 @@ define(`manage_domain', `
 	allow $1 $2:domain { getdomaininfo getvcpuinfo getaffinity
 			getaddrsize pause unpause trigger shutdown destroy
 			setaffinity setdomainmaxmem getscheduler resume
-			setpodtarget getpodtarget };
+			setpodtarget getpodtarget getpagingmempool setpagingmempool };
     allow $1 $2:domain2 set_vnumainfo;
 ')
 

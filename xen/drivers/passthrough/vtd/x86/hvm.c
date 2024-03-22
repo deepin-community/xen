@@ -21,8 +21,8 @@
 #include <xen/irq.h>
 #include <xen/sched.h>
 
-static int _hvm_dpci_isairq_eoi(struct domain *d,
-                                struct hvm_pirq_dpci *pirq_dpci, void *arg)
+static int cf_check _hvm_dpci_isairq_eoi(
+    struct domain *d, struct hvm_pirq_dpci *pirq_dpci, void *arg)
 {
     struct hvm_irq *hvm_irq = hvm_domain_irq(d);
     unsigned int isairq = (long)arg;
@@ -36,10 +36,7 @@ static int _hvm_dpci_isairq_eoi(struct domain *d,
         {
             hvm_pci_intx_deassert(d, digl->device, digl->intx);
             if ( --pirq_dpci->pending == 0 )
-            {
-                stop_timer(&pirq_dpci->timer);
                 pirq_guest_eoi(dpci_pirq(pirq_dpci));
-            }
         }
     }
 
@@ -54,7 +51,7 @@ void hvm_dpci_isairq_eoi(struct domain *d, unsigned int isairq)
     if ( !is_iommu_enabled(d) )
         return;
 
-    spin_lock(&d->event_lock);
+    write_lock(&d->event_lock);
 
     dpci = domain_get_irq_dpci(d);
 
@@ -63,5 +60,5 @@ void hvm_dpci_isairq_eoi(struct domain *d, unsigned int isairq)
         /* Multiple mirq may be mapped to one isa irq */
         pt_pirq_iterate(d, _hvm_dpci_isairq_eoi, (void *)(long)isairq);
     }
-    spin_unlock(&d->event_lock);
+    write_unlock(&d->event_lock);
 }

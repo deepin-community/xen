@@ -29,6 +29,7 @@
 #include <asm/hvm/support.h>
 #include <asm/hvm/svm/svm.h>
 #include <asm/hvm/svm/svmdebug.h>
+#include <asm/spec_ctrl.h>
 
 struct vmcb_struct *alloc_vmcb(void)
 {
@@ -70,7 +71,8 @@ static int construct_vmcb(struct vcpu *v)
         GENERAL2_INTERCEPT_STGI        | GENERAL2_INTERCEPT_CLGI        |
         GENERAL2_INTERCEPT_SKINIT      | GENERAL2_INTERCEPT_MWAIT       |
         GENERAL2_INTERCEPT_WBINVD      | GENERAL2_INTERCEPT_MONITOR     |
-        GENERAL2_INTERCEPT_XSETBV      | GENERAL2_INTERCEPT_ICEBP;
+        GENERAL2_INTERCEPT_XSETBV      | GENERAL2_INTERCEPT_ICEBP       |
+        GENERAL2_INTERCEPT_RDPRU;
 
     /* Intercept all debug-register writes. */
     vmcb->_dr_intercepts = ~0u;
@@ -175,6 +177,14 @@ static int construct_vmcb(struct vcpu *v)
             vmcb->_pause_filter_thresh = SVM_PAUSETHRESH_INIT;
     }
 
+    /*
+     * When default_xen_spec_ctrl simply SPEC_CTRL_STIBP, default this behind
+     * the back of the VM too.  Our SMT topology isn't accurate, the overhead
+     * is neglegable, and doing this saves a WRMSR on the vmentry path.
+     */
+    if ( default_xen_spec_ctrl == SPEC_CTRL_STIBP )
+        v->arch.msrs->spec_ctrl.raw = SPEC_CTRL_STIBP;
+
     return 0;
 }
 
@@ -225,7 +235,7 @@ void svm_destroy_vmcb(struct vcpu *v)
     svm->vmcb = NULL;
 }
 
-static void vmcb_dump(unsigned char ch)
+static void cf_check vmcb_dump(unsigned char ch)
 {
     struct domain *d;
     struct vcpu *v;
@@ -241,6 +251,11 @@ static void vmcb_dump(unsigned char ch)
         printk("\n>>> Domain %d <<<\n", d->domain_id);
         for_each_vcpu ( d, v )
         {
+            if ( !v->is_initialised )
+            {
+                printk("\tVCPU %u: not initialized\n", v->vcpu_id);
+                continue;
+            }
             printk("\tVCPU %d\n", v->vcpu_id);
             svm_vmcb_dump("key_handler", v->arch.hvm.svm.vmcb);
         }
@@ -271,6 +286,7 @@ static void __init __maybe_unused build_assertions(void)
     BUILD_BUG_ON(offsetof(typeof(vmcb), rsp)                  != 0x5d8);
     BUILD_BUG_ON(offsetof(typeof(vmcb), rax)                  != 0x5f8);
     BUILD_BUG_ON(offsetof(typeof(vmcb), _g_pat)               != 0x668);
+    BUILD_BUG_ON(offsetof(typeof(vmcb), spec_ctrl)            != 0x6e0);
 
     /* Check struct segment_register against the VMCB segment layout. */
     BUILD_BUG_ON(sizeof(vmcb.es)       != 16);

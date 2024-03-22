@@ -263,14 +263,15 @@ int arch_monitor_domctl_event(struct domain *d,
         if ( unlikely(old_status == requested_status) )
             return -EEXIST;
 
-        if ( !hvm_funcs.set_descriptor_access_exiting )
+        if ( !hvm_has_set_descriptor_access_exiting() )
             return -EOPNOTSUPP;
 
         domain_pause(d);
         ad->monitor.descriptor_access_enabled = requested_status;
 
         for_each_vcpu ( d, v )
-            hvm_funcs.set_descriptor_access_exiting(v, requested_status);
+            alternative_vcall(hvm_funcs.set_descriptor_access_exiting, v,
+                              requested_status);
 
         domain_unpause(d);
         break;
@@ -327,6 +328,20 @@ int arch_monitor_domctl_event(struct domain *d,
 
         domain_pause(d);
         ad->monitor.emul_unimplemented_enabled = requested_status;
+        domain_unpause(d);
+        break;
+    }
+
+    case XEN_DOMCTL_MONITOR_EVENT_VMEXIT:
+    {
+        bool old_status = ad->monitor.vmexit_enabled;
+
+        if ( unlikely(old_status == requested_status) )
+            return -EEXIST;
+
+        domain_pause(d);
+        ad->monitor.vmexit_enabled = requested_status;
+        ad->monitor.vmexit_sync = mop->u.vmexit.sync;
         domain_unpause(d);
         break;
     }

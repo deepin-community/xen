@@ -14,9 +14,11 @@
 #include <xen/vm_event.h>
 #include <xen/virtual_region.h>
 
+#include <asm/endbr.h>
 #include <asm/fixmap.h>
 #include <asm/nmi.h>
 #include <asm/livepatch.h>
+#include <asm/setup.h>
 
 static bool has_active_waitqueue(const struct vm_event_domain *ved)
 {
@@ -26,7 +28,7 @@ static bool has_active_waitqueue(const struct vm_event_domain *ved)
 }
 
 /*
- * x86's implementation of waitqueue violates the livepatching safey principle
+ * x86's implementation of waitqueue violates the livepatching safety principle
  * of having unwound every CPUs stack before modifying live content.
  *
  * Search through every domain and check that no vCPUs have an active
@@ -59,46 +61,32 @@ int arch_livepatch_safety_check(void)
 
 int noinline arch_livepatch_quiesce(void)
 {
-    /* If Shadow Stacks are in use, disable CR4.CET so we can modify CR0.WP. */
-    if ( cpu_has_xen_shstk )
-        write_cr4(read_cr4() & ~X86_CR4_CET);
-
-    /* Disable WP to allow changes to read-only pages. */
-    write_cr0(read_cr0() & ~X86_CR0_WP);
+    /*
+     * Relax perms on .text to be RWX, so we can modify them.
+     *
+     * This relaxes perms globally, but all other CPUs are waiting on us.
+     */
+    relax_virtual_region_perms();
+    flush_local(FLUSH_TLB_GLOBAL);
 
     return 0;
 }
 
 void noinline arch_livepatch_revive(void)
 {
-    /* Reinstate WP. */
-    write_cr0(read_cr0() | X86_CR0_WP);
-
-    /* Clobber dirty bits and reinstate CET, if applicable. */
-    if ( IS_ENABLED(CONFIG_XEN_SHSTK) && cpu_has_xen_shstk )
-    {
-        unsigned long tmp;
-
-        reset_virtual_region_perms();
-
-        write_cr4(read_cr4() | X86_CR4_CET);
-
-        /*
-         * Fix up the return address on the shadow stack, which currently
-         * points at arch_livepatch_quiesce()'s caller.
-         *
-         * Note: this is somewhat fragile, and depends on both
-         * arch_livepatch_{quiesce,revive}() being called from the same
-         * function, which is currently the case.
-         *
-         * Any error will result in Xen dying with #CP, and its too late to
-         * recover in any way.
-         */
-        asm volatile ("rdsspq %[ssp];"
-                      "wrssq %[addr], (%[ssp]);"
-                      : [ssp] "=&r" (tmp)
-                      : [addr] "r" (__builtin_return_address(0)));
-    }
+    /*
+     * Reinstate perms on .text to be RX.  This also cleans out the dirty
+     * bits, which matters when CET Shstk is active.
+     *
+     * The other CPUs waiting for us could in principle have re-walked while
+     * we were patching and cached the reduced perms in their TLB.  Therefore,
+     * we need to do a global TLB flush.
+     *
+     * However, we can't use Xen's normal global TLB flush infrastructure, so
+     * delay the TLB flush to arch_livepatch_post_action(), which is called on
+     * all CPUs (including us) on the way out of patching.
+     */
+    tighten_virtual_region_perms();
 }
 
 int arch_livepatch_verify_func(const struct livepatch_func *func)
@@ -107,14 +95,26 @@ int arch_livepatch_verify_func(const struct livepatch_func *func)
     if ( !func->new_addr )
     {
         /* Only do up to maximum amount we can put in the ->opaque. */
-        if ( func->new_size > sizeof(func->opaque) )
+        if ( func->new_size > LIVEPATCH_OPAQUE_SIZE )
             return -EOPNOTSUPP;
 
         if ( func->old_size < func->new_size )
             return -EINVAL;
     }
-    else if ( func->old_size < ARCH_PATCH_INSN_SIZE )
-        return -EINVAL;
+    else
+    {
+        /*
+         * Space needed now depends on whether the target function
+         * start{s,ed} with an ENDBR64 instruction.
+         */
+        uint8_t needed = ARCH_PATCH_INSN_SIZE;
+
+        if ( is_endbr64(func->old_addr) || is_endbr64_poison(func->old_addr) )
+            needed += ENDBR64_LEN;
+
+        if ( func->old_size < needed )
+            return -EINVAL;
+    }
 
     return 0;
 }
@@ -123,18 +123,33 @@ int arch_livepatch_verify_func(const struct livepatch_func *func)
  * "noinline" to cause control flow change and thus invalidate I$ and
  * cause refetch after modification.
  */
-void noinline arch_livepatch_apply(struct livepatch_func *func)
+void noinline arch_livepatch_apply(const struct livepatch_func *func,
+                                   struct livepatch_fstate *state)
 {
     uint8_t *old_ptr;
-    uint8_t insn[sizeof(func->opaque)];
+    uint8_t insn[sizeof(state->insn_buffer)];
     unsigned int len;
 
+    state->patch_offset = 0;
     old_ptr = func->old_addr;
-    len = livepatch_insn_len(func);
+
+    /*
+     * CET hotpatching support: We may have functions starting with an ENDBR64
+     * instruction that MUST remain the first instruction of the function,
+     * hence we need to move any hotpatch trampoline further into the function.
+     * For that we need to keep track of the patching offset used for any
+     * loaded hotpatch (to avoid racing against other fixups adding/removing
+     * ENDBR64 or similar instructions).
+     */
+    if ( is_endbr64(old_ptr) || is_endbr64_poison(func->old_addr) )
+        state->patch_offset += ENDBR64_LEN;
+
+    /* This call must be done with ->patch_offset already set. */
+    len = livepatch_insn_len(func, state);
     if ( !len )
         return;
 
-    memcpy(func->opaque, old_ptr, len);
+    memcpy(state->insn_buffer, old_ptr + state->patch_offset, len);
     if ( func->new_addr )
     {
         int32_t val;
@@ -142,23 +157,26 @@ void noinline arch_livepatch_apply(struct livepatch_func *func)
         BUILD_BUG_ON(ARCH_PATCH_INSN_SIZE != (1 + sizeof(val)));
 
         insn[0] = 0xe9; /* Relative jump. */
-        val = func->new_addr - func->old_addr - ARCH_PATCH_INSN_SIZE;
+        val = func->new_addr - (func->old_addr + state->patch_offset +
+                                ARCH_PATCH_INSN_SIZE);
 
         memcpy(&insn[1], &val, sizeof(val));
     }
     else
         add_nops(insn, len);
 
-    memcpy(old_ptr, insn, len);
+    memcpy(old_ptr + state->patch_offset, insn, len);
 }
 
 /*
  * "noinline" to cause control flow change and thus invalidate I$ and
  * cause refetch after modification.
  */
-void noinline arch_livepatch_revert(const struct livepatch_func *func)
+void noinline arch_livepatch_revert(const struct livepatch_func *func,
+                                    struct livepatch_fstate *state)
 {
-    memcpy(func->old_addr, func->opaque, livepatch_insn_len(func));
+    memcpy(func->old_addr + state->patch_offset, state->insn_buffer,
+           livepatch_insn_len(func, state));
 }
 
 /*
@@ -167,6 +185,8 @@ void noinline arch_livepatch_revert(const struct livepatch_func *func)
  */
 void noinline arch_livepatch_post_action(void)
 {
+    /* See arch_livepatch_revive() */
+    flush_local(FLUSH_TLB_GLOBAL);
 }
 
 static nmi_callback_t *saved_nmi_callback;
@@ -174,7 +194,7 @@ static nmi_callback_t *saved_nmi_callback;
  * Note that because of this NOP code the do_nmi is not safely patchable.
  * Also if we do receive 'real' NMIs we have lost them.
  */
-static int mask_nmi_callback(const struct cpu_user_regs *regs, int cpu)
+static int cf_check mask_nmi_callback(const struct cpu_user_regs *regs, int cpu)
 {
     /* TODO: Handle missing NMI/MCE.*/
     return 1;
@@ -261,6 +281,13 @@ int arch_livepatch_perform_rela(struct livepatch_elf *elf,
                    elf->name, symndx);
             return -EINVAL;
         }
+        else if ( elf->sym[symndx].ignored )
+        {
+            printk(XENLOG_ERR LIVEPATCH
+                   "%s: Relocation against ignored symbol %s cannot be resolved\n",
+                   elf->name, elf->sym[symndx].name);
+            return -EINVAL;
+        }
 
         val = r->r_addend + elf->sym[symndx].sym->st_value;
 
@@ -343,7 +370,7 @@ void __init arch_livepatch_init(void)
 {
     void *start, *end;
 
-    start = (void *)xen_virt_end;
+    start = (void *)__2M_rwdata_end;
     end = (void *)(XEN_VIRT_END - FIXADDR_X_SIZE - NR_CPUS * PAGE_SIZE);
 
     BUG_ON(end <= start);

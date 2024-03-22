@@ -23,20 +23,21 @@
 #ifndef __XEN_GRANT_TABLE_H__
 #define __XEN_GRANT_TABLE_H__
 
-#include <xen/mm.h>
+#include <xen/mm-frame.h>
 #include <xen/rwlock.h>
 #include <public/grant_table.h>
-#include <asm/page.h>
 #include <asm/grant_table.h>
 
-#ifdef CONFIG_GRANT_TABLE
 struct grant_table;
 
+#ifdef CONFIG_GRANT_TABLE
+
+extern unsigned int opt_gnttab_max_version;
 extern unsigned int opt_max_grant_frames;
 
 /* Create/destroy per-domain grant table context. */
 int grant_table_init(struct domain *d, int max_grant_frames,
-                     int max_maptrack_frames);
+                     int max_maptrack_frames, unsigned int options);
 void grant_table_destroy(
     struct domain *d);
 void grant_table_init_vcpu(struct vcpu *v);
@@ -54,19 +55,26 @@ int mem_sharing_gref_to_gfn(struct grant_table *gt, grant_ref_t ref,
 
 int gnttab_map_frame(struct domain *d, unsigned long idx, gfn_t gfn,
                      mfn_t *mfn);
-int gnttab_get_shared_frame(struct domain *d, unsigned long idx,
-                            mfn_t *mfn);
-int gnttab_get_status_frame(struct domain *d, unsigned long idx,
-                            mfn_t *mfn);
+
+unsigned int gnttab_resource_max_frames(const struct domain *d, unsigned int id);
+
+int gnttab_acquire_resource(
+    struct domain *d, unsigned int id, unsigned int frame,
+    unsigned int nr_frames, xen_pfn_t mfn_list[]);
 
 #else
 
+#define opt_gnttab_max_version 0
 #define opt_max_grant_frames 0
 
 static inline int grant_table_init(struct domain *d,
                                    int max_grant_frames,
-                                   int max_maptrack_frames)
+                                   int max_maptrack_frames,
+                                   unsigned int options)
 {
+    if ( options )
+        return -EINVAL;
+
     return 0;
 }
 
@@ -91,14 +99,15 @@ static inline int gnttab_map_frame(struct domain *d, unsigned long idx,
     return -EINVAL;
 }
 
-static inline int gnttab_get_shared_frame(struct domain *d, unsigned long idx,
-                                          mfn_t *mfn)
+static inline unsigned int gnttab_resource_max_frames(
+    const struct domain *d, unsigned int id)
 {
-    return -EINVAL;
+    return 0;
 }
 
-static inline int gnttab_get_status_frame(struct domain *d, unsigned long idx,
-                                          mfn_t *mfn)
+static inline int gnttab_acquire_resource(
+    struct domain *d, unsigned int id, unsigned int frame,
+    unsigned int nr_frames, xen_pfn_t mfn_list[])
 {
     return -EINVAL;
 }

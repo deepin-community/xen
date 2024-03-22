@@ -1,19 +1,18 @@
-CFLAGS-y += -fshort-wchar
+include $(srctree)/common/efi/efi-common.mk
 
 quiet_cmd_objcopy_o_ihex = OBJCOPY $@
 cmd_objcopy_o_ihex = $(OBJCOPY) -I ihex -O binary $< $@
 
-%.o: %.ihex FORCE
+$(obj)/%.o: $(src)/%.ihex FORCE
 	$(call if_changed,objcopy_o_ihex)
 
-boot.init.o: buildid.o
-
-EFIOBJ := boot.init.o compat.o runtime.o
+$(obj)/boot.init.o: $(obj)/buildid.o
 
 $(call cc-option-add,cflags-stack-boundary,CC,-mpreferred-stack-boundary=4)
-$(EFIOBJ): CFLAGS-stack-boundary := $(cflags-stack-boundary)
+$(addprefix $(obj)/,$(EFIOBJ-y)): CFLAGS_stack_boundary := $(cflags-stack-boundary)
 
-obj-y := stub.o
-obj-$(XEN_BUILD_EFI) := $(EFIOBJ) relocs-dummy.o
-extra-$(XEN_BUILD_EFI) += buildid.o
+obj-y := common-stub.o stub.o
+obj-$(XEN_BUILD_EFI) := $(filter-out %.init.o,$(EFIOBJ-y))
+obj-bin-$(XEN_BUILD_EFI) := $(filter %.init.o,$(EFIOBJ-y))
+extra-$(XEN_BUILD_EFI) += buildid.o relocs-dummy.o
 nocov-$(XEN_BUILD_EFI) += stub.o

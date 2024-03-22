@@ -27,11 +27,13 @@ RUN apt-get update && \
         pkg-config \
         flex \
         bison \
+        # gettext for Xen < 4.13
         gettext \
         acpica-tools \
         bin86 \
         bcc \
         liblzma-dev \
+        # libc6-dev-i386 for Xen < 4.15
         libc6-dev-i386 \
         libnl-3-dev \
         ocaml-nox \
@@ -45,18 +47,8 @@ RUN apt-get update && \
         nasm \
         gnupg \
         apt-transport-https \
-        && \
-        apt-get autoremove -y && \
-        apt-get clean && \
-        rm -rf /var/lib/apt/lists* /tmp/* /var/tmp/*
-
-RUN wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add -
-COPY stretch-llvm-8.list /etc/apt/sources.list.d/
-
-RUN apt-get update && \
-    apt-get --quiet --yes install \
-        clang-8 \
-        lld-8 \
+        # for test phase, qemu-smoke-* jobs
+        qemu-system-x86 \
         && \
         apt-get autoremove -y && \
         apt-get clean && \

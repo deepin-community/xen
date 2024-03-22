@@ -38,13 +38,14 @@
 #include <xen/serial.h>
 #include <xen/irq.h>
 #include <xen/watchdog.h>
-#include <asm/debugger.h>
 #include <xen/init.h>
 #include <xen/param.h>
 #include <xen/smp.h>
 #include <xen/console.h>
 #include <xen/errno.h>
 #include <xen/delay.h>
+#include <xen/gdbstub.h>
+
 #include <asm/byteorder.h>
 
 /* Printk isn't particularly safe just after we've trapped to the
@@ -69,7 +70,7 @@ static void gdb_smp_resume(void);
 static char __initdata opt_gdb[30];
 string_param("gdb", opt_gdb);
 
-static void gdbstub_console_puts(const char *str, size_t nr);
+static void cf_check gdbstub_console_puts(const char *str, size_t nr);
 
 /* value <-> char (de)serialzers */
 static char
@@ -546,8 +547,7 @@ __gdb_ctx = {
 };
 static struct gdb_context *gdb_ctx = &__gdb_ctx;
 
-static void
-gdbstub_console_puts(const char *str, size_t nr)
+static void cf_check gdbstub_console_puts(const char *str, size_t nr)
 {
     const char *p;
 
@@ -640,7 +640,7 @@ __trap_to_gdb(struct cpu_user_regs *regs, unsigned long cookie)
     return rc;
 }
 
-static int __init initialise_gdb(void)
+static int __init cf_check initialise_gdb(void)
 {
     if ( *opt_gdb == '\0' )
         return 0;
@@ -660,7 +660,7 @@ static int __init initialise_gdb(void)
 }
 presmp_initcall(initialise_gdb);
 
-static void gdb_pause_this_cpu(void *unused)
+static void cf_check gdb_pause_this_cpu(void *unused)
 {
     unsigned long flags;
 

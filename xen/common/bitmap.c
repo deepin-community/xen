@@ -9,6 +9,9 @@
 #include <xen/errno.h>
 #include <xen/bitmap.h>
 #include <xen/bitops.h>
+#include <xen/cpumask.h>
+#include <xen/guest_access.h>
+#include <xen/lib.h>
 #include <asm/byteorder.h>
 
 /*
@@ -336,7 +339,8 @@ EXPORT_SYMBOL(bitmap_allocate_region);
 
 #ifdef __BIG_ENDIAN
 
-void bitmap_long_to_byte(uint8_t *bp, const unsigned long *lp, int nbits)
+static void bitmap_long_to_byte(uint8_t *bp, const unsigned long *lp,
+				unsigned int nbits)
 {
 	unsigned long l;
 	int i, j, b;
@@ -352,7 +356,8 @@ void bitmap_long_to_byte(uint8_t *bp, const unsigned long *lp, int nbits)
 	clamp_last_byte(bp, nbits);
 }
 
-void bitmap_byte_to_long(unsigned long *lp, const uint8_t *bp, int nbits)
+static void bitmap_byte_to_long(unsigned long *lp, const uint8_t *bp,
+				unsigned int nbits)
 {
 	unsigned long l;
 	int i, j, b;
@@ -369,18 +374,107 @@ void bitmap_byte_to_long(unsigned long *lp, const uint8_t *bp, int nbits)
 
 #elif defined(__LITTLE_ENDIAN)
 
-void bitmap_long_to_byte(uint8_t *bp, const unsigned long *lp, int nbits)
+static void bitmap_long_to_byte(uint8_t *bp, const unsigned long *lp,
+				unsigned int nbits)
 {
-	memcpy(bp, lp, (nbits+7)/8);
+	memcpy(bp, lp, DIV_ROUND_UP(nbits, BITS_PER_BYTE));
 	clamp_last_byte(bp, nbits);
 }
 
-void bitmap_byte_to_long(unsigned long *lp, const uint8_t *bp, int nbits)
+static void bitmap_byte_to_long(unsigned long *lp, const uint8_t *bp,
+				unsigned int nbits)
 {
 	/* We may need to pad the final longword with zeroes. */
 	if (nbits & (BITS_PER_LONG-1))
 		lp[BITS_TO_LONGS(nbits)-1] = 0;
-	memcpy(lp, bp, (nbits+7)/8);
+	memcpy(lp, bp, DIV_ROUND_UP(nbits, BITS_PER_BYTE));
 }
 
 #endif
+
+int bitmap_to_xenctl_bitmap(struct xenctl_bitmap *xenctl_bitmap,
+                            const unsigned long *bitmap, unsigned int nbits)
+{
+    unsigned int guest_bytes, copy_bytes, i;
+    uint8_t zero = 0;
+    int err = 0;
+    unsigned int xen_bytes = DIV_ROUND_UP(nbits, BITS_PER_BYTE);
+    uint8_t *bytemap = xmalloc_array(uint8_t, xen_bytes);
+
+    if ( !bytemap )
+        return -ENOMEM;
+
+    guest_bytes = DIV_ROUND_UP(xenctl_bitmap->nr_bits, BITS_PER_BYTE);
+    copy_bytes  = min(guest_bytes, xen_bytes);
+
+    bitmap_long_to_byte(bytemap, bitmap, nbits);
+
+    if ( copy_bytes &&
+         copy_to_guest(xenctl_bitmap->bitmap, bytemap, copy_bytes) )
+        err = -EFAULT;
+
+    xfree(bytemap);
+
+    for ( i = copy_bytes; !err && i < guest_bytes; i++ )
+        if ( copy_to_guest_offset(xenctl_bitmap->bitmap, i, &zero, 1) )
+            err = -EFAULT;
+
+    return err;
+}
+
+int xenctl_bitmap_to_bitmap(unsigned long *bitmap,
+                            const struct xenctl_bitmap *xenctl_bitmap,
+                            unsigned int nbits)
+{
+    unsigned int guest_bytes, copy_bytes;
+    int err = 0;
+    unsigned int xen_bytes = DIV_ROUND_UP(nbits, BITS_PER_BYTE);
+    uint8_t *bytemap = xzalloc_array(uint8_t, xen_bytes);
+
+    if ( !bytemap )
+        return -ENOMEM;
+
+    guest_bytes = DIV_ROUND_UP(xenctl_bitmap->nr_bits, BITS_PER_BYTE);
+    copy_bytes  = min(guest_bytes, xen_bytes);
+
+    if ( copy_bytes )
+    {
+        if ( copy_from_guest(bytemap, xenctl_bitmap->bitmap, copy_bytes) )
+            err = -EFAULT;
+        if ( (xenctl_bitmap->nr_bits & 7) && (guest_bytes == copy_bytes) )
+            bytemap[guest_bytes - 1] &= ~(0xff << (xenctl_bitmap->nr_bits & 7));
+    }
+
+    if ( !err )
+        bitmap_byte_to_long(bitmap, bytemap, nbits);
+
+    xfree(bytemap);
+
+    return err;
+}
+
+int cpumask_to_xenctl_bitmap(struct xenctl_bitmap *xenctl_cpumap,
+                             const cpumask_t *cpumask)
+{
+    return bitmap_to_xenctl_bitmap(xenctl_cpumap, cpumask_bits(cpumask),
+                                   nr_cpu_ids);
+}
+
+int xenctl_bitmap_to_cpumask(cpumask_var_t *cpumask,
+                             const struct xenctl_bitmap *xenctl_cpumap)
+{
+    int err = 0;
+
+    if ( alloc_cpumask_var(cpumask) )
+    {
+        err = xenctl_bitmap_to_bitmap(cpumask_bits(*cpumask), xenctl_cpumap,
+                                      nr_cpu_ids);
+        /* In case of error, cleanup is up to us, as the caller won't care! */
+        if ( err )
+            free_cpumask_var(*cpumask);
+    }
+    else
+        err = -ENOMEM;
+
+    return err;
+}

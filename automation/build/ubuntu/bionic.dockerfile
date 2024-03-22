@@ -27,11 +27,13 @@ RUN apt-get update && \
         pkg-config \
         flex \
         bison \
+        # gettext for Xen < 4.13
         gettext \
         acpica-tools \
         bin86 \
         bcc \
         liblzma-dev \
+        # libc6-dev-i386 for Xen < 4.15
         libc6-dev-i386 \
         libnl-3-dev \
         ocaml-nox \
@@ -43,6 +45,8 @@ RUN apt-get update && \
         wget \
         git \
         nasm \
+        # QEMU
+        ninja-build \
         && \
         apt-get autoremove -y && \
         apt-get clean && \

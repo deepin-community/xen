@@ -551,9 +551,9 @@ static const struct test avx512_4vnniw_512[] = {
 };
 
 static const struct test avx512_bf16_all[] = {
-    INSN(vcvtne2ps2bf16, f2, 0f38, 72, vl, d, vl),
-    INSN(vcvtneps2bf16,  f3, 0f38, 72, vl, d, vl),
-    INSN(vdpbf16ps,      f3, 0f38, 52, vl, d, vl),
+    INSN(cvtne2ps2bf16, f2, 0f38, 72, vl, d, vl),
+    INSN(cvtneps2bf16,  f3, 0f38, 72, vl, d, vl),
+    INSN(dpbf16ps,      f3, 0f38, 52, vl, d, vl),
 };
 
 static const struct test avx512_bitalg_all[] = {
@@ -591,6 +591,10 @@ static const struct test avx512_vnni_all[] = {
     INSN(pdpbusds, 66, 0f38, 51, vl, d, vl),
     INSN(pdpwssd,  66, 0f38, 52, vl, d, vl),
     INSN(pdpwssds, 66, 0f38, 53, vl, d, vl),
+};
+
+static const struct test avx512_vp2intersect_all[] = {
+    INSN(p2intersect, f2, 0f38, 68, vl, dq, vl)
 };
 
 static const struct test avx512_vpopcntdq_all[] = {
@@ -996,6 +1000,7 @@ void evex_disp8_test(void *instr, struct x86_emulate_ctxt *ctxt,
     RUN(avx512_vbmi, all);
     RUN(avx512_vbmi2, all);
     RUN(avx512_vnni, all);
+    RUN(avx512_vp2intersect, all);
     RUN(avx512_vpopcntdq, all);
 
     if ( cpu_has_avx512f )

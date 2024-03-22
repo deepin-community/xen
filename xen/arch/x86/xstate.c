@@ -55,11 +55,18 @@ static inline bool xsetbv(u32 index, u64 xfeatures)
     return lo != 0;
 }
 
-bool set_xcr0(u64 xfeatures)
+bool set_xcr0(u64 val)
 {
-    if ( !xsetbv(XCR_XFEATURE_ENABLED_MASK, xfeatures) )
-        return false;
-    this_cpu(xcr0) = xfeatures;
+    uint64_t *this_xcr0 = &this_cpu(xcr0);
+
+    if ( *this_xcr0 != val )
+    {
+        if ( !xsetbv(XCR_XFEATURE_ENABLED_MASK, val) )
+            return false;
+
+        *this_xcr0 = val;
+    }
+
     return true;
 }
 
@@ -547,19 +554,18 @@ void xstate_free_save_area(struct vcpu *v)
     v->arch.xsave_area = NULL;
 }
 
-static unsigned int _xstate_ctxt_size(u64 xcr0)
+static unsigned int hw_uncompressed_size(uint64_t xcr0)
 {
     u64 act_xcr0 = get_xcr0();
-    u32 eax, ebx = 0, ecx, edx;
+    unsigned int size;
     bool ok = set_xcr0(xcr0);
 
     ASSERT(ok);
-    cpuid_count(XSTATE_CPUID, 0, &eax, &ebx, &ecx, &edx);
-    ASSERT(ebx <= ecx);
+    size = cpuid_count_ebx(XSTATE_CPUID, 0);
     ok = set_xcr0(act_xcr0);
     ASSERT(ok);
 
-    return ebx;
+    return size;
 }
 
 /* Fastpath for common xstate size requests, avoiding reloads of xcr0. */
@@ -571,7 +577,35 @@ unsigned int xstate_ctxt_size(u64 xcr0)
     if ( xcr0 == 0 )
         return 0;
 
-    return _xstate_ctxt_size(xcr0);
+    return hw_uncompressed_size(xcr0);
+}
+
+static bool valid_xcr0(uint64_t xcr0)
+{
+    /* FP must be unconditionally set. */
+    if ( !(xcr0 & X86_XCR0_FP) )
+        return false;
+
+    /* YMM depends on SSE. */
+    if ( (xcr0 & X86_XCR0_YMM) && !(xcr0 & X86_XCR0_SSE) )
+        return false;
+
+    if ( xcr0 & (X86_XCR0_OPMASK | X86_XCR0_ZMM | X86_XCR0_HI_ZMM) )
+    {
+        /* OPMASK, ZMM, and HI_ZMM require YMM. */
+        if ( !(xcr0 & X86_XCR0_YMM) )
+            return false;
+
+        /* OPMASK, ZMM, and HI_ZMM must be the same. */
+        if ( ~xcr0 & (X86_XCR0_OPMASK | X86_XCR0_ZMM | X86_XCR0_HI_ZMM) )
+            return false;
+    }
+
+    /* BNDREGS and BNDCSR must be the same. */
+    if ( !(xcr0 & X86_XCR0_BNDREGS) != !(xcr0 & X86_XCR0_BNDCSR) )
+        return false;
+
+    return true;
 }
 
 /* Collect the information of processor's extended state */
@@ -608,11 +642,17 @@ void xstate_init(struct cpuinfo_x86 *c)
         return;
     }
 
-    cpuid_count(XSTATE_CPUID, 0, &eax, &ebx, &ecx, &edx);
+    /*
+     * Zap the cached values to make set_xcr0() and set_msr_xss() really
+     * write it.
+     */
+    this_cpu(xcr0) = 0;
+    this_cpu(xss) = ~0;
 
-    BUG_ON((eax & XSTATE_FP_SSE) != XSTATE_FP_SSE);
-    BUG_ON((eax & X86_XCR0_YMM) && !(eax & X86_XCR0_SSE));
+    cpuid_count(XSTATE_CPUID, 0, &eax, &ebx, &ecx, &edx);
     feature_mask = (((u64)edx << 32) | eax) & XCNTXT_MASK;
+    BUG_ON(!valid_xcr0(feature_mask));
+    BUG_ON(!(feature_mask & X86_XCR0_SSE));
 
     /*
      * Set CR4_OSXSAVE and run "cpuid" to get xsave_cntxt_size.
@@ -628,49 +668,24 @@ void xstate_init(struct cpuinfo_x86 *c)
          * xsave_cntxt_size is the max size required by enabled features.
          * We know FP/SSE and YMM about eax, and nothing about edx at present.
          */
-        xsave_cntxt_size = _xstate_ctxt_size(feature_mask);
+        xsave_cntxt_size = hw_uncompressed_size(feature_mask);
         printk("xstate: size: %#x and states: %#"PRIx64"\n",
                xsave_cntxt_size, xfeature_mask);
     }
     else
     {
         BUG_ON(xfeature_mask != feature_mask);
-        BUG_ON(xsave_cntxt_size != _xstate_ctxt_size(feature_mask));
+        BUG_ON(xsave_cntxt_size != hw_uncompressed_size(feature_mask));
     }
 
     if ( setup_xstate_features(bsp) && bsp )
         BUG();
 }
 
-static bool valid_xcr0(u64 xcr0)
-{
-    /* FP must be unconditionally set. */
-    if ( !(xcr0 & X86_XCR0_FP) )
-        return false;
-
-    /* YMM depends on SSE. */
-    if ( (xcr0 & X86_XCR0_YMM) && !(xcr0 & X86_XCR0_SSE) )
-        return false;
-
-    if ( xcr0 & (X86_XCR0_OPMASK | X86_XCR0_ZMM | X86_XCR0_HI_ZMM) )
-    {
-        /* OPMASK, ZMM, and HI_ZMM require YMM. */
-        if ( !(xcr0 & X86_XCR0_YMM) )
-            return false;
-
-        /* OPMASK, ZMM, and HI_ZMM must be the same. */
-        if ( ~xcr0 & (X86_XCR0_OPMASK | X86_XCR0_ZMM | X86_XCR0_HI_ZMM) )
-            return false;
-    }
-
-    /* BNDREGS and BNDCSR must be the same. */
-    return !(xcr0 & X86_XCR0_BNDREGS) == !(xcr0 & X86_XCR0_BNDCSR);
-}
-
 int validate_xstate(const struct domain *d, uint64_t xcr0, uint64_t xcr0_accum,
                     const struct xsave_hdr *hdr)
 {
-    uint64_t xcr0_max = cpuid_policy_xcr0_max(d->arch.cpuid);
+    uint64_t xcr0_max = cpu_policy_xcr0_max(d->arch.cpuid);
     unsigned int i;
 
     if ( (hdr->xstate_bv & ~xcr0_accum) ||
@@ -694,7 +709,7 @@ int validate_xstate(const struct domain *d, uint64_t xcr0, uint64_t xcr0_accum,
 int handle_xsetbv(u32 index, u64 new_bv)
 {
     struct vcpu *curr = current;
-    uint64_t xcr0_max = cpuid_policy_xcr0_max(curr->domain->arch.cpuid);
+    uint64_t xcr0_max = cpu_policy_xcr0_max(curr->domain->arch.cpuid);
     u64 mask;
 
     if ( index != XCR_XFEATURE_ENABLED_MASK )

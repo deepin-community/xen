@@ -19,12 +19,10 @@
 
         .file "svm/entry.S"
 
+#include <xen/lib.h>
+
 #include <asm/asm_defns.h>
 #include <asm/page.h>
-
-#define VMRUN  .byte 0x0F,0x01,0xD8
-#define STGI   .byte 0x0F,0x01,0xDC
-#define CLGI   .byte 0x0F,0x01,0xDD
 
 ENTRY(svm_asm_do_resume)
         GET_CURRENT(bx)
@@ -59,11 +57,24 @@ __UNLIKELY_END(nsvm_hap)
         mov  %rsp, %rdi
         call svm_vmenter_helper
 
-        mov VCPU_arch_msrs(%rbx), %rax
-        mov VCPUMSR_spec_ctrl_raw(%rax), %eax
+        clgi
 
         /* WARNING! `ret`, `call *`, `jmp *` not safe beyond this point. */
-        SPEC_CTRL_EXIT_TO_HVM   /* Req: a=spec_ctrl %rsp=regs/cpuinfo, Clob: cd */
+        /* SPEC_CTRL_EXIT_TO_SVM       Req: b=curr %rsp=regs/cpuinfo, Clob: acd */
+        .macro svm_vmentry_spec_ctrl
+            mov    VCPU_arch_msrs(%rbx), %rax
+            movzbl CPUINFO_last_spec_ctrl(%rsp), %edx
+            mov    VCPUMSR_spec_ctrl_raw(%rax), %eax
+            cmp    %edx, %eax
+            je     1f /* Skip write if value is correct. */
+            mov    $MSR_SPEC_CTRL, %ecx
+            xor    %edx, %edx
+            wrmsr
+            mov    %al, CPUINFO_last_spec_ctrl(%rsp)
+1:          /* No Spectre v1 concerns.  Execution will hit VMRUN imminently. */
+        .endm
+        ALTERNATIVE "", svm_vmentry_spec_ctrl, X86_FEATURE_SC_MSR_HVM
+        ALTERNATIVE "", DO_SPEC_CTRL_DIV, X86_FEATURE_SC_DIV
 
         pop  %r15
         pop  %r14
@@ -82,18 +93,47 @@ __UNLIKELY_END(nsvm_hap)
         pop  %rsi
         pop  %rdi
 
-        CLGI
         sti
-        VMRUN
+        vmrun
 
         SAVE_ALL
 
         GET_CURRENT(bx)
 
-        SPEC_CTRL_ENTRY_FROM_HVM    /* Req: b=curr %rsp=regs/cpuinfo, Clob: acd */
+        /* SPEC_CTRL_ENTRY_FROM_SVM    Req: %rsp=regs/cpuinfo, %rdx=0 Clob: acd */
+
+        .macro svm_vmexit_cond_ibpb
+            testb  $SCF_entry_ibpb, CPUINFO_xen_spec_ctrl(%rsp)
+            jz     .L_skip_ibpb
+
+            mov    $MSR_PRED_CMD, %ecx
+            mov    $PRED_CMD_IBPB, %eax
+            wrmsr
+.L_skip_ibpb:
+	.endm
+        ALTERNATIVE "", svm_vmexit_cond_ibpb, X86_FEATURE_IBPB_ENTRY_HVM
+
+        ALTERNATIVE "", DO_OVERWRITE_RSB, X86_FEATURE_SC_RSB_HVM
+
+        .macro svm_vmexit_spec_ctrl
+            movzbl CPUINFO_xen_spec_ctrl(%rsp), %eax
+            movzbl CPUINFO_last_spec_ctrl(%rsp), %edx
+            cmp    %edx, %eax
+            je     1f /* Skip write if value is correct. */
+            mov    $MSR_SPEC_CTRL, %ecx
+            xor    %edx, %edx
+            wrmsr
+            mov    %al, CPUINFO_last_spec_ctrl(%rsp)
+1:
+        .endm
+        ALTERNATIVE "", svm_vmexit_spec_ctrl, X86_FEATURE_SC_MSR_HVM
         /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
 
-        STGI
+        /*
+         * STGI is executed unconditionally, and is sufficiently serialising
+         * to safely resolve any Spectre-v1 concerns in the above logic.
+         */
+        stgi
 GLOBAL(svm_stgi_label)
         mov  %rsp,%rdi
         call svm_vmexit_handler

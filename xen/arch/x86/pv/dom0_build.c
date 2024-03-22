@@ -21,6 +21,7 @@
 #include <asm/page.h>
 #include <asm/pv/mm.h>
 #include <asm/setup.h>
+#include <asm/shadow.h>
 
 /* Allow ring-3 access in long mode as guest cannot use ring 1 ... */
 #define BASE_PROT (_PAGE_PRESENT|_PAGE_RW|_PAGE_ACCESSED|_PAGE_USER)
@@ -31,10 +32,10 @@
 #define L3_PROT (BASE_PROT|_PAGE_DIRTY)
 #define L4_PROT (BASE_PROT|_PAGE_DIRTY)
 
-void __init dom0_update_physmap(struct domain *d, unsigned long pfn,
+void __init dom0_update_physmap(bool compat, unsigned long pfn,
                                 unsigned long mfn, unsigned long vphysmap_s)
 {
-    if ( !is_pv_32bit_domain(d) )
+    if ( !compat )
         ((unsigned long *)vphysmap_s)[pfn] = mfn;
     else
         ((unsigned int *)vphysmap_s)[pfn] = mfn;
@@ -45,7 +46,8 @@ void __init dom0_update_physmap(struct domain *d, unsigned long pfn,
 static __init void mark_pv_pt_pages_rdonly(struct domain *d,
                                            l4_pgentry_t *l4start,
                                            unsigned long vpt_start,
-                                           unsigned long nr_pt_pages)
+                                           unsigned long nr_pt_pages,
+                                           unsigned int *flush_flags)
 {
     unsigned long count;
     struct page_info *page;
@@ -58,6 +60,25 @@ static __init void mark_pv_pt_pages_rdonly(struct domain *d,
     {
         l1e_remove_flags(*pl1e, _PAGE_RW);
         page = mfn_to_page(l1e_get_mfn(*pl1e));
+
+        /*
+         * Verify that
+         * - all pages have a valid L1...Ln page table type (including the PAE
+         *   sub-flavor of L2) and
+         * - no other bits are set, in particular the type refcount is still
+         *   zero.
+         */
+        ASSERT((page->u.inuse.type_info & PGT_type_mask) >= PGT_l1_page_table);
+        ASSERT((page->u.inuse.type_info & PGT_type_mask) <= PGT_root_page_table);
+        ASSERT(!(page->u.inuse.type_info & ~(PGT_type_mask | PGT_pae_xen_l2)));
+
+        /*
+         * Page table pages need to be removed from the IOMMU again in case
+         * iommu_memory_setup() ended up mapping them.
+         */
+        if ( need_iommu_pt_sync(d) &&
+             iommu_unmap(d, _dfn(mfn_x(page_to_mfn(page))), 1, 0, flush_flags) )
+            BUG();
 
         /* Read-only mapping + PGC_allocated + page-table page. */
         page->count_info         = PGC_allocated | 3;
@@ -95,11 +116,56 @@ static __init void mark_pv_pt_pages_rdonly(struct domain *d,
     unmap_domain_page(pl3e);
 }
 
+static void __init iommu_memory_setup(struct domain *d, const char *what,
+                                      struct page_info *page, unsigned long nr,
+                                      unsigned int *flush_flags)
+{
+    long rc;
+    mfn_t mfn = page_to_mfn(page);
+
+    if ( !need_iommu_pt_sync(d) )
+        return;
+
+    while ( (rc = iommu_map(d, _dfn(mfn_x(mfn)), mfn, nr,
+                            IOMMUF_readable | IOMMUF_writable | IOMMUF_preempt,
+                            flush_flags)) > 0 )
+    {
+        mfn = mfn_add(mfn, rc);
+        nr -= rc;
+        /* See comment below. */
+        for ( ; rc--; ++page )
+        {
+            ASSERT(!page->u.inuse.type_info);
+            page->u.inuse.type_info = PGT_writable_page | PGT_validated;
+        }
+        process_pending_softirqs();
+    }
+    if ( rc )
+    {
+        printk(XENLOG_ERR
+               "pre-mapping %s MFN [%lx,%lx) into IOMMU failed: %ld\n",
+               what, mfn_x(mfn), mfn_x(mfn) + nr, rc);
+        return;
+    }
+
+    /*
+     * For successfully established IOMMU mappings the type of the page(s)
+     * needs to match (for _get_page_type() to unmap upon type change). Set
+     * the page(s) to writable with no type ref.
+     */
+    for ( ; nr--; ++page )
+    {
+        ASSERT(!page->u.inuse.type_info);
+        page->u.inuse.type_info = PGT_writable_page | PGT_validated;
+    }
+}
+
 static __init void setup_pv_physmap(struct domain *d, unsigned long pgtbl_pfn,
                                     unsigned long v_start, unsigned long v_end,
                                     unsigned long vphysmap_start,
                                     unsigned long vphysmap_end,
-                                    unsigned long nr_pages)
+                                    unsigned long nr_pages,
+                                    unsigned int *flush_flags)
 {
     struct page_info *page = NULL;
     l4_pgentry_t *pl4e, *l4start = map_domain_page(_mfn(pgtbl_pfn));
@@ -165,6 +231,10 @@ static __init void setup_pv_physmap(struct domain *d, unsigned long pgtbl_pfn,
                                              L3_PAGETABLE_SHIFT - PAGE_SHIFT,
                                              MEMF_no_scrub)) != NULL )
             {
+                iommu_memory_setup(d, "P2M 1G", page,
+                                   SUPERPAGE_PAGES * SUPERPAGE_PAGES,
+                                   flush_flags);
+
                 *pl3e = l3e_from_page(page, L1_PROT|_PAGE_DIRTY|_PAGE_PSE);
                 vphysmap_start += 1UL << L3_PAGETABLE_SHIFT;
                 continue;
@@ -191,6 +261,9 @@ static __init void setup_pv_physmap(struct domain *d, unsigned long pgtbl_pfn,
                                              L2_PAGETABLE_SHIFT - PAGE_SHIFT,
                                              MEMF_no_scrub)) != NULL )
             {
+                iommu_memory_setup(d, "P2M 2M", page, SUPERPAGE_PAGES,
+                                   flush_flags);
+
                 *pl2e = l2e_from_page(page, L1_PROT|_PAGE_DIRTY|_PAGE_PSE);
                 vphysmap_start += 1UL << L2_PAGETABLE_SHIFT;
                 continue;
@@ -288,7 +361,8 @@ int __init dom0_construct_pv(struct domain *d,
                              module_t *initrd,
                              char *cmdline)
 {
-    int i, rc, compatible, order, machine;
+    int i, rc, order, machine;
+    bool compatible, compat;
     struct cpu_user_regs *regs;
     unsigned long pfn, mfn;
     unsigned long nr_pages;
@@ -298,9 +372,9 @@ int __init dom0_construct_pv(struct domain *d,
     unsigned long initrd_pfn = -1, initrd_mfn = 0;
     unsigned long count;
     struct page_info *page = NULL;
+    unsigned int flush_flags = 0;
     start_info_t *si;
     struct vcpu *v = d->vcpu[0];
-    unsigned long long value;
     void *image_base = bootstrap_map(image);
     unsigned long image_len = image->mod_end;
     void *image_start = image_base + image_headroom;
@@ -353,31 +427,48 @@ int __init dom0_construct_pv(struct domain *d,
         elf_set_verbose(&elf);
 
     elf_parse_binary(&elf);
-    if ( (rc = elf_xen_parse(&elf, &parms)) != 0 )
+    if ( (rc = elf_xen_parse(&elf, &parms, false)) != 0 )
         goto out;
 
     /* compatibility check */
-    compatible = 0;
+    printk(" Xen  kernel: 64-bit, lsb%s\n",
+           IS_ENABLED(CONFIG_PV32) ? ", compat32" : "");
+    compatible = false;
     machine = elf_uval(&elf, elf.ehdr, e_machine);
-    printk(" Xen  kernel: 64-bit, lsb, compat32\n");
-    if ( elf_32bit(&elf) && parms.pae == XEN_PAE_BIMODAL )
-        parms.pae = XEN_PAE_EXTCR3;
-    if ( elf_32bit(&elf) && parms.pae && machine == EM_386 )
-    {
-        if ( unlikely(rc = switch_compat(d)) )
-        {
-            printk("Dom0 failed to switch to compat: %d\n", rc);
-            return rc;
-        }
 
-        compatible = 1;
+    if ( elf_32bit(&elf) )
+    {
+#ifdef CONFIG_PV32
+        if ( parms.pae == XEN_PAE_BIMODAL )
+            parms.pae = XEN_PAE_EXTCR3;
+        if ( parms.pae && machine == EM_386 )
+        {
+            if ( unlikely(rc = switch_compat(d)) )
+            {
+                printk("Dom0 failed to switch to compat: %d\n", rc);
+                return rc;
+            }
+
+            compatible = true;
+        }
+#else
+        printk("Found 32-bit PV kernel, but CONFIG_PV32 missing\n");
+        return -EOPNOTSUPP;
+#endif
     }
-    if (elf_64bit(&elf) && machine == EM_X86_64)
-        compatible = 1;
-    printk(" Dom0 kernel: %s%s, %s, paddr %#" PRIx64 " -> %#" PRIx64 "\n",
-           elf_64bit(&elf) ? "64-bit" : "32-bit",
-           parms.pae       ? ", PAE"  : "",
-           elf_msb(&elf)   ? "msb"    : "lsb",
+
+    compat = is_pv_32bit_domain(d);
+
+    if ( elf_64bit(&elf) && machine == EM_X86_64 )
+        compatible = true;
+
+    if ( elf_msb(&elf) )
+        compatible = false;
+
+    printk(" Dom0 kernel: %s-bit%s, %s, paddr %#" PRIx64 " -> %#" PRIx64 "\n",
+           elf_64bit(&elf) ? "64" : elf_32bit(&elf) ? "32" : "??",
+           parms.pae       ? ", PAE" : "",
+           elf_msb(&elf)   ? "msb"   : "lsb",
            elf.pstart, elf.pend);
     if ( elf.bsd_symtab_pstart )
         printk(" Dom0 symbol map %#" PRIx64 " -> %#" PRIx64 "\n",
@@ -386,8 +477,7 @@ int __init dom0_construct_pv(struct domain *d,
     if ( !compatible )
     {
         printk("Mismatch between Xen and DOM0 kernel\n");
-        rc = -EINVAL;
-        goto out;
+        return -EINVAL;
     }
 
     if ( parms.elf_notes[XEN_ELFNOTE_SUPPORTED_FEATURES].type != XEN_ENT_NONE )
@@ -395,8 +485,7 @@ int __init dom0_construct_pv(struct domain *d,
         if ( !pv_shim && !test_bit(XENFEAT_dom0, parms.f_supported) )
         {
             printk("Kernel does not support Dom0 operation\n");
-            rc = -EINVAL;
-            goto out;
+            return -EINVAL;
         }
     }
 
@@ -405,23 +494,30 @@ int __init dom0_construct_pv(struct domain *d,
     if ( parms.pae == XEN_PAE_EXTCR3 )
             set_bit(VMASST_TYPE_pae_extended_cr3, &d->vm_assist);
 
-    if ( !pv_shim && (parms.virt_hv_start_low != UNSET_ADDR) &&
-         elf_32bit(&elf) )
+#ifdef CONFIG_PV32
+    if ( elf_32bit(&elf) )
     {
-        unsigned long mask = (1UL << L2_PAGETABLE_SHIFT) - 1;
-        value = (parms.virt_hv_start_low + mask) & ~mask;
-        BUG_ON(!is_pv_32bit_domain(d));
-        if ( value > __HYPERVISOR_COMPAT_VIRT_START )
-            panic("Domain 0 expects too high a hypervisor start address\n");
-        HYPERVISOR_COMPAT_VIRT_START(d) =
-            max_t(unsigned int, m2p_compat_vstart, value);
-    }
+        if ( !pv_shim && (parms.virt_hv_start_low != UNSET_ADDR) )
+        {
+            unsigned long value = ROUNDUP(parms.virt_hv_start_low,
+                                          1UL << L2_PAGETABLE_SHIFT);
 
-    if ( (parms.p2m_base != UNSET_ADDR) && elf_32bit(&elf) )
-    {
-        printk(XENLOG_WARNING "P2M table base ignored\n");
-        parms.p2m_base = UNSET_ADDR;
+            if ( value > __HYPERVISOR_COMPAT_VIRT_START )
+            {
+                printk("Dom0 expects too high a hypervisor start address\n");
+                return -ERANGE;
+            }
+            HYPERVISOR_COMPAT_VIRT_START(d) =
+                max_t(unsigned int, m2p_compat_vstart, value);
+        }
+
+        if ( parms.p2m_base != UNSET_ADDR )
+        {
+            printk(XENLOG_WARNING "P2M table base ignored\n");
+            parms.p2m_base = UNSET_ADDR;
+        }
     }
+#endif
 
     /*
      * Why do we need this? The number of page-table frames depends on the
@@ -444,9 +540,9 @@ int __init dom0_construct_pv(struct domain *d,
         vinitrd_end    = vinitrd_start + initrd_len;
         vphysmap_start = round_pgup(vinitrd_end);
     }
-    vphysmap_end     = vphysmap_start + (nr_pages * (!is_pv_32bit_domain(d) ?
-                                                     sizeof(unsigned long) :
-                                                     sizeof(unsigned int)));
+
+    vphysmap_end = vphysmap_start +
+        (nr_pages * (compat ? sizeof(unsigned int) : sizeof(unsigned long)));
     if ( parms.p2m_base != UNSET_ADDR )
         vphysmap_end = vphysmap_start;
     vstartinfo_start = round_pgup(vphysmap_end);
@@ -477,9 +573,9 @@ int __init dom0_construct_pv(struct domain *d,
 #define NR(_l,_h,_s) \
     (((((_h) + ((1UL<<(_s))-1)) & ~((1UL<<(_s))-1)) - \
        ((_l) & ~((1UL<<(_s))-1))) >> (_s))
-        if ( (!is_pv_32bit_domain(d) + /* # L4 */
+        if ( (!compat + /* # L4 */
               NR(v_start, v_end, L4_PAGETABLE_SHIFT) + /* # L3 */
-              (!is_pv_32bit_domain(d) ?
+              (!compat ?
                NR(v_start, v_end, L3_PAGETABLE_SHIFT) : /* # L2 */
                4) + /* # compat L2 */
               NR(v_start, v_end, L2_PAGETABLE_SHIFT))  /* # L1 */
@@ -535,10 +631,13 @@ int __init dom0_construct_pv(struct domain *d,
         else
         {
             while ( count-- )
-                if ( assign_pages(d, mfn_to_page(_mfn(mfn++)), 0, 0) )
+                if ( assign_pages(mfn_to_page(_mfn(mfn++)), 1, d, 0) )
                     BUG();
         }
         initrd->mod_end = 0;
+
+        iommu_memory_setup(d, "initrd", mfn_to_page(_mfn(initrd_mfn)),
+                           PFN_UP(initrd_len), &flush_flags);
     }
 
     printk("PHYSICAL MEMORY ARRANGEMENT:\n"
@@ -553,52 +652,52 @@ int __init dom0_construct_pv(struct domain *d,
         printk("\n Init. ramdisk: %"PRIpaddr"->%"PRIpaddr,
                mpt_alloc, mpt_alloc + initrd_len);
     }
-    printk("\nVIRTUAL MEMORY ARRANGEMENT:\n"
-           " Loaded kernel: %p->%p\n"
-           " Init. ramdisk: %p->%p\n"
-           " Phys-Mach map: %p->%p\n"
-           " Start info:    %p->%p\n"
-           " Xenstore ring: %p->%p\n"
-           " Console ring:  %p->%p\n"
-           " Page tables:   %p->%p\n"
-           " Boot stack:    %p->%p\n"
-           " TOTAL:         %p->%p\n",
-           _p(vkern_start), _p(vkern_end),
-           _p(vinitrd_start), _p(vinitrd_end),
-           _p(vphysmap_start), _p(vphysmap_end),
-           _p(vstartinfo_start), _p(vstartinfo_end),
-           _p(vxenstore_start), _p(vxenstore_end),
-           _p(vconsole_start), _p(vconsole_end),
-           _p(vpt_start), _p(vpt_end),
-           _p(vstack_start), _p(vstack_end),
-           _p(v_start), _p(v_end));
+
+    printk("\nVIRTUAL MEMORY ARRANGEMENT:\n");
+    printk(" Loaded kernel: %p->%p\n", _p(vkern_start), _p(vkern_end));
+    if ( vinitrd_end > vinitrd_start )
+        printk(" Init. ramdisk: %p->%p\n", _p(vinitrd_start), _p(vinitrd_end));
+    printk(" Phys-Mach map: %p->%p\n", _p(vphysmap_start), _p(vphysmap_end));
+    printk(" Start info:    %p->%p\n", _p(vstartinfo_start), _p(vstartinfo_end));
+    if ( pv_shim )
+    {
+        printk(" Xenstore ring: %p->%p\n", _p(vxenstore_start), _p(vxenstore_end));
+        printk(" Console ring:  %p->%p\n", _p(vconsole_start), _p(vconsole_end));
+    }
+    printk(" Page tables:   %p->%p\n", _p(vpt_start), _p(vpt_end));
+    printk(" Boot stack:    %p->%p\n", _p(vstack_start), _p(vstack_end));
+    printk(" TOTAL:         %p->%p\n", _p(v_start), _p(v_end));
     printk(" ENTRY ADDRESS: %p\n", _p(parms.virt_entry));
 
     process_pending_softirqs();
+
+    /*
+     * Map the full range here and then punch holes for page tables
+     * alongside marking them as such in mark_pv_pt_pages_rdonly().
+     */
+    iommu_memory_setup(d, "init-alloc", mfn_to_page(_mfn(alloc_spfn)),
+                       alloc_epfn - alloc_spfn, &flush_flags);
 
     mpt_alloc = (vpt_start - v_start) + pfn_to_paddr(alloc_spfn);
     if ( vinitrd_start )
         mpt_alloc -= PAGE_ALIGN(initrd_len);
 
     /* Overlap with Xen protected area? */
-    if ( !is_pv_32bit_domain(d) ?
-         ((v_start < HYPERVISOR_VIRT_END) &&
-          (v_end > HYPERVISOR_VIRT_START)) :
-         (v_end > HYPERVISOR_COMPAT_VIRT_START(d)) )
+    if ( compat
+         ? v_end > HYPERVISOR_COMPAT_VIRT_START(d)
+         : (v_start < HYPERVISOR_VIRT_END) && (v_end > HYPERVISOR_VIRT_START) )
     {
         printk("DOM0 image overlaps with Xen private area.\n");
-        rc = -EINVAL;
-        goto out;
+        return -EINVAL;
     }
 
-    if ( is_pv_32bit_domain(d) )
+    if ( compat )
     {
         v->arch.pv.failsafe_callback_cs = FLAT_COMPAT_KERNEL_CS;
         v->arch.pv.event_callback_cs    = FLAT_COMPAT_KERNEL_CS;
     }
 
-    /* WARNING: The new domain must have its 'processor' field filled in! */
-    if ( !is_pv_32bit_domain(d) )
+    if ( !compat )
     {
         maddr_to_page(mpt_alloc)->u.inuse.type_info = PGT_l4_page_table;
         l4start = l4tab = __va(mpt_alloc); mpt_alloc += PAGE_SIZE;
@@ -659,17 +758,17 @@ int __init dom0_construct_pv(struct domain *d,
             mfn = pfn++;
         else
             mfn = initrd_mfn++;
-        *l1tab = l1e_from_pfn(mfn, (!is_pv_32bit_domain(d) ?
-                                    L1_PROT : COMPAT_L1_PROT));
+        *l1tab = l1e_from_pfn(mfn, compat ? COMPAT_L1_PROT : L1_PROT);
         l1tab++;
 
         page = mfn_to_page(_mfn(mfn));
-        if ( !page->u.inuse.type_info &&
+        if ( (!page->u.inuse.type_info ||
+              page->u.inuse.type_info == (PGT_writable_page | PGT_validated)) &&
              !get_page_and_type(page, d, PGT_writable_page) )
             BUG();
     }
 
-    if ( is_pv_32bit_domain(d) )
+    if ( compat )
     {
         l2_pgentry_t *l2t;
 
@@ -693,7 +792,7 @@ int __init dom0_construct_pv(struct domain *d,
     }
 
     /* Pages that are part of page tables must be read only. */
-    mark_pv_pt_pages_rdonly(d, l4start, vpt_start, nr_pt_pages);
+    mark_pv_pt_pages_rdonly(d, l4start, vpt_start, nr_pt_pages, &flush_flags);
 
     /* Mask all upcalls... */
     for ( i = 0; i < XEN_LEGACY_MAX_VCPUS; i++ )
@@ -735,8 +834,7 @@ int __init dom0_construct_pv(struct domain *d,
             mapcache_override_current(NULL);
             switch_cr3_cr4(current->arch.cr3, read_cr4());
             printk("Invalid HYPERCALL_PAGE field in ELF notes.\n");
-            rc = -EINVAL;
-            goto out;
+            return -EINVAL;
         }
         init_hypercall_page(d, _p(parms.virt_hypercall));
     }
@@ -769,7 +867,7 @@ int __init dom0_construct_pv(struct domain *d,
     {
         pfn = pagetable_get_pfn(v->arch.guest_table);
         setup_pv_physmap(d, pfn, v_start, v_end, vphysmap_start, vphysmap_end,
-                         nr_pages);
+                         nr_pages, &flush_flags);
     }
 
     /* Write the phys->machine and machine->phys table entries. */
@@ -788,7 +886,7 @@ int __init dom0_construct_pv(struct domain *d,
         if ( pfn > REVERSE_START && (vinitrd_start || pfn < initrd_pfn) )
             mfn = alloc_epfn - (pfn - REVERSE_START);
 #endif
-        dom0_update_physmap(d, pfn, mfn, vphysmap_start);
+        dom0_update_physmap(compat, pfn, mfn, vphysmap_start);
         if ( !(pfn & 0xfffff) )
             process_pending_softirqs();
     }
@@ -797,15 +895,16 @@ int __init dom0_construct_pv(struct domain *d,
     page_list_for_each ( page, &d->page_list )
     {
         mfn = mfn_x(page_to_mfn(page));
-        BUG_ON(SHARED_M2P(get_gpfn_from_mfn(mfn)));
         if ( get_gpfn_from_mfn(mfn) >= count )
         {
-            BUG_ON(is_pv_32bit_domain(d));
-            if ( !page->u.inuse.type_info &&
+            BUG_ON(compat);
+            if ( (!page->u.inuse.type_info ||
+                  page->u.inuse.type_info == (PGT_writable_page |
+                                              PGT_validated)) &&
                  !get_page_and_type(page, d, PGT_writable_page) )
                 BUG();
 
-            dom0_update_physmap(d, pfn, mfn, vphysmap_start);
+            dom0_update_physmap(compat, pfn, mfn, vphysmap_start);
             ++pfn;
             if ( !(pfn & 0xfffff) )
                 process_pending_softirqs();
@@ -817,21 +916,29 @@ int __init dom0_construct_pv(struct domain *d,
 #endif
     while ( pfn < nr_pages )
     {
-        if ( (page = alloc_chunk(d, nr_pages - domain_tot_pages(d))) == NULL )
+        count = domain_tot_pages(d);
+        if ( (page = alloc_chunk(d, nr_pages - count)) == NULL )
             panic("Not enough RAM for DOM0 reservation\n");
+
+        iommu_memory_setup(d, "chunk", page, domain_tot_pages(d) - count,
+                           &flush_flags);
         while ( pfn < domain_tot_pages(d) )
         {
             mfn = mfn_x(page_to_mfn(page));
 #ifndef NDEBUG
 #define pfn (nr_pages - 1 - (pfn - (alloc_epfn - alloc_spfn)))
 #endif
-            dom0_update_physmap(d, pfn, mfn, vphysmap_start);
+            dom0_update_physmap(compat, pfn, mfn, vphysmap_start);
 #undef pfn
             page++; pfn++;
             if ( !(pfn & 0xfffff) )
                 process_pending_softirqs();
         }
     }
+
+    /* Use while() to avoid compiler warning. */
+    while ( iommu_iotlb_flush_all(d, flush_flags) )
+        break;
 
     if ( initrd_len != 0 )
     {
@@ -859,9 +966,11 @@ int __init dom0_construct_pv(struct domain *d,
         pv_shim_setup_dom(d, l4start, v_start, vxenstore_start, vconsole_start,
                           vphysmap_start, si);
 
-    if ( is_pv_32bit_domain(d) )
+#ifdef CONFIG_COMPAT
+    if ( compat )
         xlat_start_info(si, pv_shim ? XLAT_start_info_console_domU
                                     : XLAT_start_info_console_dom0);
+#endif
 
     /* Return to idle domain's page tables. */
     mapcache_override_current(NULL);
@@ -879,11 +988,9 @@ int __init dom0_construct_pv(struct domain *d,
      */
     regs = &v->arch.user_regs;
     regs->ds = regs->es = regs->fs = regs->gs =
-        !is_pv_32bit_domain(d) ? FLAT_KERNEL_DS : FLAT_COMPAT_KERNEL_DS;
-    regs->ss = (!is_pv_32bit_domain(d) ?
-                FLAT_KERNEL_SS : FLAT_COMPAT_KERNEL_SS);
-    regs->cs = (!is_pv_32bit_domain(d) ?
-                FLAT_KERNEL_CS : FLAT_COMPAT_KERNEL_CS);
+               (compat ? FLAT_COMPAT_KERNEL_DS : FLAT_KERNEL_DS);
+    regs->ss = (compat ? FLAT_COMPAT_KERNEL_SS : FLAT_KERNEL_SS);
+    regs->cs = (compat ? FLAT_COMPAT_KERNEL_CS : FLAT_KERNEL_CS);
     regs->rip = parms.virt_entry;
     regs->rsp = vstack_end;
     regs->rsi = vstartinfo_start;
@@ -905,8 +1012,22 @@ int __init dom0_construct_pv(struct domain *d,
     if ( d->domain_id == hardware_domid )
         iommu_hwdom_init(d);
 
-    /* Activate shadow mode, if requested.  Reuse the pv_l1tf tasklet. */
 #ifdef CONFIG_SHADOW_PAGING
+    /* Fill the shadow pool if necessary. */
+    if ( opt_dom0_shadow || opt_pv_l1tf_hwdom )
+    {
+        bool preempted;
+
+        nr_pt_pages = dom0_paging_pages(d, nr_pages);
+
+        do {
+            preempted = false;
+            shadow_set_allocation(d, nr_pt_pages, &preempted);
+            process_pending_softirqs();
+        } while ( preempted );
+    }
+
+    /* Activate shadow mode, if requested.  Reuse the pv_l1tf tasklet. */
     if ( opt_dom0_shadow )
     {
         printk("Switching dom0 to using shadow paging\n");

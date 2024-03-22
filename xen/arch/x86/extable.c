@@ -23,7 +23,7 @@ static inline unsigned long ex_cont(const struct exception_table_entry *x)
 	return EX_FIELD(x, cont);
 }
 
-static int init_or_livepatch cmp_ex(const void *a, const void *b)
+static int init_or_livepatch cf_check cmp_ex(const void *a, const void *b)
 {
 	const struct exception_table_entry *l = a, *r = b;
 	unsigned long lip = ex_addr(l);
@@ -37,8 +37,7 @@ static int init_or_livepatch cmp_ex(const void *a, const void *b)
 	return 0;
 }
 
-#ifndef swap_ex
-static void init_or_livepatch swap_ex(void *a, void *b, int size)
+static void init_or_livepatch cf_check swap_ex(void *a, void *b, size_t size)
 {
 	struct exception_table_entry *l = a, *r = b, tmp;
 	long delta = b - a;
@@ -49,7 +48,6 @@ static void init_or_livepatch swap_ex(void *a, void *b, int size)
 	r->addr = tmp.addr - delta;
 	r->cont = tmp.cont - delta;
 }
-#endif
 
 void init_or_livepatch sort_exception_table(struct exception_table_entry *start,
                                  const struct exception_table_entry *stop)
@@ -66,9 +64,10 @@ void __init sort_exception_tables(void)
 
 static unsigned long
 search_one_extable(const struct exception_table_entry *first,
-                   const struct exception_table_entry *last,
+                   const struct exception_table_entry *end,
                    unsigned long value)
 {
+    const struct exception_table_entry *last = end - 1;
     const struct exception_table_entry *mid;
     long diff;
 
@@ -93,7 +92,7 @@ search_exception_table(const struct cpu_user_regs *regs)
     unsigned long stub = this_cpu(stubs.addr);
 
     if ( region && region->ex )
-        return search_one_extable(region->ex, region->ex_end - 1, regs->rip);
+        return search_one_extable(region->ex, region->ex_end, regs->rip);
 
     if ( regs->rip >= stub + STUB_BUF_SIZE / 2 &&
          regs->rip < stub + STUB_BUF_SIZE &&
@@ -104,7 +103,7 @@ search_exception_table(const struct cpu_user_regs *regs)
 
         region = find_text_region(retptr);
         retptr = region && region->ex
-                 ? search_one_extable(region->ex, region->ex_end - 1, retptr)
+                 ? search_one_extable(region->ex, region->ex_end, retptr)
                  : 0;
         if ( retptr )
         {
@@ -126,23 +125,27 @@ search_exception_table(const struct cpu_user_regs *regs)
 }
 
 #ifndef NDEBUG
-static int __init stub_selftest(void)
+#include <asm/traps.h>
+
+static int __init cf_check stub_selftest(void)
 {
     static const struct {
-        uint8_t opc[4];
+        uint8_t opc[8];
         uint64_t rax;
         union stub_exception_token res;
     } tests[] __initconst = {
-        { .opc = { 0x0f, 0xb9, 0xc3, 0xc3 }, /* ud1 */
+#define endbr64 0xf3, 0x0f, 0x1e, 0xfa
+        { .opc = { endbr64, 0x0f, 0xb9, 0xc3, 0xc3 }, /* ud1 */
           .res.fields.trapnr = TRAP_invalid_op },
-        { .opc = { 0x90, 0x02, 0x00, 0xc3 }, /* nop; add (%rax),%al */
+        { .opc = { endbr64, 0x90, 0x02, 0x00, 0xc3 }, /* nop; add (%rax),%al */
           .rax = 0x0123456789abcdef,
           .res.fields.trapnr = TRAP_gp_fault },
-        { .opc = { 0x02, 0x04, 0x04, 0xc3 }, /* add (%rsp,%rax),%al */
+        { .opc = { endbr64, 0x02, 0x04, 0x04, 0xc3 }, /* add (%rsp,%rax),%al */
           .rax = 0xfedcba9876543210,
           .res.fields.trapnr = TRAP_stack_error },
-        { .opc = { 0xcc, 0xc3, 0xc3, 0xc3 }, /* int3 */
+        { .opc = { endbr64, 0xcc, 0xc3, 0xc3, 0xc3 }, /* int3 */
           .res.fields.trapnr = TRAP_int3 },
+#undef endbr64
     };
     unsigned long addr = this_cpu(stubs.addr) + STUB_BUF_SIZE / 2;
     unsigned int i;
@@ -174,10 +177,10 @@ static int __init stub_selftest(void)
         if ( res.raw != tests[i].res.raw )
         {
             printk("Selftest %u failed: Opc %*ph "
-                   "expected %u[%04x], got %u[%04x]\n",
+                   "expected %s[%04x], got %s[%04x]\n",
                    i, (int)ARRAY_SIZE(tests[i].opc), tests[i].opc,
-                   tests[i].res.fields.trapnr, tests[i].res.fields.ec,
-                   res.fields.trapnr, res.fields.ec);
+                   vector_name(tests[i].res.fields.trapnr), tests[i].res.fields.ec,
+                   vector_name(res.fields.trapnr), res.fields.ec);
 
             fail = true;
         }
@@ -196,7 +199,7 @@ search_pre_exception_table(struct cpu_user_regs *regs)
 {
     unsigned long addr = regs->rip;
     unsigned long fixup = search_one_extable(
-        __start___pre_ex_table, __stop___pre_ex_table-1, addr);
+        __start___pre_ex_table, __stop___pre_ex_table, addr);
     if ( fixup )
     {
         dprintk(XENLOG_INFO, "Pre-exception: %p -> %p\n", _p(addr), _p(fixup));

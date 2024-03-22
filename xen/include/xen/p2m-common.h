@@ -1,7 +1,11 @@
 #ifndef _XEN_P2M_COMMON_H
 #define _XEN_P2M_COMMON_H
 
-#include <xen/mm.h>
+#include <xen/mm-frame.h>
+
+/* Set foreign entry in the p2m table */
+int set_foreign_p2m_entry(struct domain *d, const struct domain *fd,
+                          unsigned long gfn, mfn_t mfn);
 
 /* Remove a page from a domain's p2m table */
 int __must_check

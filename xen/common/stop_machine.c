@@ -141,7 +141,7 @@ int stop_machine_run(int (*fn)(void *), void *data, unsigned int cpu)
     return ret;
 }
 
-static void stopmachine_action(void *data)
+static void cf_check stopmachine_action(void *data)
 {
     unsigned int cpu = (unsigned long)data;
     enum stopmachine_state state = STOPMACHINE_START;
@@ -182,7 +182,7 @@ static void stopmachine_action(void *data)
     local_irq_enable();
 }
 
-static int cpu_callback(
+static int cf_check cpu_callback(
     struct notifier_block *nfb, unsigned long action, void *hcpu)
 {
     unsigned int cpu = (unsigned long)hcpu;
@@ -198,7 +198,7 @@ static struct notifier_block cpu_nfb = {
     .notifier_call = cpu_callback
 };
 
-static int __init cpu_stopmachine_init(void)
+static int __init cf_check cpu_stopmachine_init(void)
 {
     unsigned int cpu;
     for_each_online_cpu ( cpu )

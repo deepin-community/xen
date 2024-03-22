@@ -7,7 +7,7 @@
 # and /etc/subgid.
 #
 docker_cmd=${DOCKER_CMD:-"docker"}
-[ "$DOCKER_CMD" = "podman" ] && userns_podman="--userns=keep-id"
+[ "$DOCKER_CMD" = "podman" ] && userns_podman="--userns=keep-id" selinux=",z"
 
 einfo() {
     echo "$*" >&2
@@ -24,13 +24,16 @@ die() {
 #
 BASE="registry.gitlab.com/xen-project/xen"
 case "_${CONTAINER}" in
+    _alpine) CONTAINER="${BASE}/alpine:3.12" ;;
     _archlinux|_arch) CONTAINER="${BASE}/archlinux:current" ;;
-    _centos6) CONTAINER="${BASE}/centos:6" ;;
+    _riscv64) CONTAINER="${BASE}/archlinux:riscv64" ;;
     _centos7) CONTAINER="${BASE}/centos:7" ;;
     _centos72) CONTAINER="${BASE}/centos:7.2" ;;
     _fedora) CONTAINER="${BASE}/fedora:29";;
+    _focal) CONTAINER="${BASE}/ubuntu:focal" ;;
     _jessie) CONTAINER="${BASE}/debian:jessie" ;;
     _stretch|_) CONTAINER="${BASE}/debian:stretch" ;;
+    _buster-gcc-ibt) CONTAINER="${BASE}/debian:buster-gcc-ibt" ;;
     _unstable|_) CONTAINER="${BASE}/debian:unstable" ;;
     _trusty) CONTAINER="${BASE}/ubuntu:trusty" ;;
     _xenial) CONTAINER="${BASE}/ubuntu:xenial" ;;
@@ -45,10 +48,10 @@ case "_${CONTAINER_UID0}" in
 esac
 
 # Save the commands for future use
-cmd=$@
+cmd=("$@")
 
 # If no command was specified, just drop us into a shell if we're interactive
-[ $# -eq 0 ] && tty -s && cmd="/bin/bash"
+[ $# -eq 0 ] && tty -s && cmd=("/bin/bash")
 
 # Are we in an interactive terminal?
 tty -s && termint=t
@@ -95,11 +98,10 @@ einfo "*** Launching container ..."
 exec ${docker_cmd} run \
     ${userarg} \
     ${SSH_AUTH_SOCK:+-e SSH_AUTH_SOCK="/tmp/ssh-agent/${SSH_AUTH_NAME}"} \
-    -v "${CONTAINER_PATH}":/build:rw \
+    -v "${CONTAINER_PATH}":/build:rw${selinux} \
     -v "${HOME}/.ssh":/root/.ssh:ro \
-    ${SSH_AUTH_DIR:+-v "${SSH_AUTH_DIR}":/tmp/ssh-agent} \
-    ${XEN_CONFIG_EXPERT:+-e XEN_CONFIG_EXPERT=${XEN_CONFIG_EXPERT}} \
+    ${SSH_AUTH_DIR:+-v "${SSH_AUTH_DIR}":/tmp/ssh-agent${selinux}} \
     ${CONTAINER_ARGS} \
     -${termint}i --rm -- \
     ${CONTAINER} \
-    ${cmd}
+    "${cmd[@]}"

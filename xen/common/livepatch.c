@@ -40,7 +40,7 @@ static LIST_HEAD(payload_list);
 
 /*
  * Patches which have been applied. Need RCU in case we crash (and then
- * traps code would iterate via applied_list) when adding entries onthe list.
+ * traps code would iterate via applied_list) when adding entries on the list.
  */
 static DEFINE_RCU_READ_LOCK(rcu_applied_lock);
 static LIST_HEAD(applied_list);
@@ -157,10 +157,9 @@ unsigned long livepatch_symbols_lookup_by_name(const char *symname)
     return 0;
 }
 
-static const char *livepatch_symbols_lookup(unsigned long addr,
-                                            unsigned long *symbolsize,
-                                            unsigned long *offset,
-                                            char *namebuf)
+static const char *cf_check livepatch_symbols_lookup(
+    unsigned long addr, unsigned long *symbolsize, unsigned long *offset,
+    char *namebuf)
 {
     const struct payload *data;
     unsigned int i, best;
@@ -261,6 +260,9 @@ static void free_payload_data(struct payload *payload)
     vfree((void *)payload->text_addr);
 
     payload->pages = 0;
+
+    /* fstate gets allocated strictly after move_payload. */
+    XFREE(payload->fstate);
 }
 
 /*
@@ -301,9 +303,6 @@ static int move_payload(struct payload *payload, struct livepatch_elf *elf)
          * and .shstrtab. For the non-relocate we allocate and copy these
          * via other means - and the .rel we can ignore as we only use it
          * once during loading.
-         *
-         * Also ignore sections with zero size. Those can be for example:
-         * data, or .bss.
          */
         if ( livepatch_elf_ignore_section(elf->sec[i].sec) )
             offset[i] = UINT_MAX;
@@ -327,8 +326,8 @@ static int move_payload(struct payload *payload, struct livepatch_elf *elf)
 
     /*
      * Total of all three regions - RX, RW, and RO. We have to have
-     * keep them in seperate pages so we PAGE_ALIGN the RX and RW to have
-     * them on seperate pages. The last one will by default fall on its
+     * keep them in separate pages so we PAGE_ALIGN the RX and RW to have
+     * them on separate pages. The last one will by default fall on its
      * own page.
      */
     size = PAGE_ALIGN(payload->text_size) + PAGE_ALIGN(payload->rw_size) +
@@ -362,8 +361,17 @@ static int move_payload(struct payload *payload, struct livepatch_elf *elf)
             else if ( elf->sec[i].sec->sh_flags & SHF_WRITE )
             {
                 buf = rw_buf;
-                rw_buf_sec = i;
-                rw_buf_cnt++;
+                if ( elf->sec[i].sec->sh_size )
+                {
+                    /*
+                     * Special handling of RW empty regions: do not account for
+                     * them in order to decide whether a patch can safely be
+                     * re-applied, but assign them a load address so symbol
+                     * resolution and relocations work.
+                     */
+                    rw_buf_sec = i;
+                    rw_buf_cnt++;
+                }
             }
             else
                 buf = ro_buf;
@@ -651,6 +659,7 @@ static int prepare_payload(struct payload *payload,
 {
     const struct livepatch_elf_sec *sec;
     unsigned int i;
+    struct livepatch_func *funcs;
     struct livepatch_func *f;
     struct virtual_region *region;
     const Elf_Note *n;
@@ -661,14 +670,19 @@ static int prepare_payload(struct payload *payload,
         if ( !section_ok(elf, sec, sizeof(*payload->funcs)) )
             return -EINVAL;
 
-        payload->funcs = sec->load_addr;
+        payload->funcs = funcs = sec->load_addr;
         payload->nfuncs = sec->sec->sh_size / sizeof(*payload->funcs);
+
+        payload->fstate = xzalloc_array(typeof(*payload->fstate),
+                                        payload->nfuncs);
+        if ( !payload->fstate )
+            return -ENOMEM;
 
         for ( i = 0; i < payload->nfuncs; i++ )
         {
             int rc;
 
-            f = &(payload->funcs[i]);
+            f = &(funcs[i]);
 
             if ( f->version != LIVEPATCH_PAYLOAD_VERSION )
             {
@@ -685,11 +699,11 @@ static int prepare_payload(struct payload *payload,
                 return -EINVAL;
             }
 
-            rc = arch_livepatch_verify_func(f);
+            rc = resolve_old_address(f, elf);
             if ( rc )
                 return rc;
 
-            rc = resolve_old_address(f, elf);
+            rc = arch_livepatch_verify_func(f);
             if ( rc )
                 return rc;
 
@@ -883,7 +897,7 @@ static bool_t is_payload_symbol(const struct livepatch_elf *elf,
         return 0;
 
     /*
-     * The payload is not a final image as we dynmically link against it.
+     * The payload is not a final image as we dynamically link against it.
      * As such the linker has left symbols we don't care about and which
      * binutils would have removed had it be a final image. Hence we:
      * - For SHF_ALLOC - ignore symbols referring to sections that are not
@@ -1300,7 +1314,7 @@ static int apply_payload(struct payload *data)
     ASSERT(!local_irq_is_enabled());
 
     for ( i = 0; i < data->nfuncs; i++ )
-        common_livepatch_apply(&data->funcs[i]);
+        common_livepatch_apply(&data->funcs[i], &data->fstate[i]);
 
     arch_livepatch_revive();
 
@@ -1336,7 +1350,7 @@ static int revert_payload(struct payload *data)
     }
 
     for ( i = 0; i < data->nfuncs; i++ )
-        common_livepatch_revert(&data->funcs[i]);
+        common_livepatch_revert(&data->funcs[i], &data->fstate[i]);
 
     /*
      * Since we are running with IRQs disabled and the hooks may call common
@@ -1377,9 +1391,10 @@ static inline bool was_action_consistent(const struct payload *data, livepatch_f
 
     for ( i = 0; i < data->nfuncs; i++ )
     {
-        struct livepatch_func *f = &(data->funcs[i]);
+        const struct livepatch_func *f = &(data->funcs[i]);
+        const struct livepatch_fstate *s = &(data->fstate[i]);
 
-        if ( f->applied != expected_state )
+        if ( s->applied != expected_state )
         {
             printk(XENLOG_ERR LIVEPATCH "%s: Payload has a function: '%s' with inconsistent applied state.\n",
                    data->name, f->name ?: "noname");
@@ -1392,8 +1407,8 @@ static inline bool was_action_consistent(const struct payload *data, livepatch_f
 }
 
 /*
- * This function is executed having all other CPUs with no deep stack (we may
- * have cpu_idle on it) and IRQs disabled.
+ * This function is executed having all other CPUs with no deep stack (when
+ * idle) and IRQs disabled.
  */
 static void livepatch_do_action(void)
 {
@@ -1524,7 +1539,7 @@ static bool_t is_work_scheduled(const struct payload *data)
 
 /*
  * Check if payload has any of the vetoing, non-atomic hooks assigned.
- * A vetoing, non-atmic hook may perform an operation that changes the
+ * A vetoing, non-atomic hook may perform an operation that changes the
  * hypervisor state and may not be guaranteed to succeed. Result of
  * such operation may be returned and may change the livepatch workflow.
  * Such hooks may require additional cleanup actions performed by other
@@ -1591,7 +1606,7 @@ static int schedule_work(struct payload *data, uint32_t cmd, uint32_t timeout)
     return 0;
 }
 
-static void tasklet_fn(void *unused)
+static void cf_check tasklet_fn(void *unused)
 {
     this_cpu(work_to_do) = 1;
 }
@@ -2068,7 +2083,7 @@ static const char *state2str(unsigned int state)
     return names[state];
 }
 
-static void livepatch_printall(unsigned char key)
+static void cf_check livepatch_printall(unsigned char key)
 {
     struct payload *data;
     const void *binary_id = NULL;
@@ -2096,7 +2111,8 @@ static void livepatch_printall(unsigned char key)
 
         for ( i = 0; i < data->nfuncs; i++ )
         {
-            struct livepatch_func *f = &(data->funcs[i]);
+            const struct livepatch_func *f = &(data->funcs[i]);
+
             printk("    %s patch %p(%u) with %p (%u)\n",
                    f->name, f->old_addr, f->old_size, f->new_addr, f->new_size);
 
@@ -2124,7 +2140,7 @@ static void livepatch_printall(unsigned char key)
     spin_unlock(&payload_lock);
 }
 
-static int cpu_callback(
+static int cf_check cpu_callback(
     struct notifier_block *nfb, unsigned long action, void *hcpu)
 {
     unsigned int cpu = (unsigned long)hcpu;
@@ -2139,7 +2155,7 @@ static struct notifier_block cpu_nfb = {
     .notifier_call = cpu_callback
 };
 
-static int __init livepatch_init(void)
+static int __init cf_check livepatch_init(void)
 {
     unsigned int cpu;
 

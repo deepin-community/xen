@@ -384,7 +384,7 @@ int rangeset_consume_ranges(struct rangeset *r,
     return rc;
 }
 
-static int merge(unsigned long s, unsigned long e, void *data)
+static int cf_check merge(unsigned long s, unsigned long e, void *data)
 {
     struct rangeset *r = data;
 
@@ -421,7 +421,7 @@ bool_t rangeset_is_empty(
 }
 
 struct rangeset *rangeset_new(
-    struct domain *d, char *name, unsigned int flags)
+    struct domain *d, const char *name, unsigned int flags)
 {
     struct rangeset *r;
 
@@ -436,14 +436,7 @@ struct rangeset *rangeset_new(
     BUG_ON(flags & ~RANGESETF_prettyprint_hex);
     r->flags = flags;
 
-    if ( name != NULL )
-    {
-        safe_strcpy(r->name, name);
-    }
-    else
-    {
-        snprintf(r->name, sizeof(r->name), "(no name)");
-    }
+    safe_strcpy(r->name, name ?: "(no name)");
 
     if ( (r->domain = d) != NULL )
     {

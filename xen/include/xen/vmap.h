@@ -1,8 +1,8 @@
 #if !defined(__XEN_VMAP_H__) && defined(VMAP_VIRT_START)
 #define __XEN_VMAP_H__
 
-#include <xen/mm.h>
-#include <asm/page.h>
+#include <xen/mm-frame.h>
+#include <xen/page-size.h>
 
 enum vmap_region {
     VMAP_DEFAULT,

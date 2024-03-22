@@ -9,6 +9,7 @@
 #include <xen/event.h>
 #include <xen/multicall.h>
 #include <xen/guest_access.h>
+#include <xen/hypercall.h>
 #include <xen/perfc.h>
 #include <xen/trace.h>
 #include <asm/current.h>
@@ -32,8 +33,7 @@ static void trace_multicall_call(multicall_entry_t *call)
     __trace_multicall_call(call);
 }
 
-ret_t
-do_multicall(
+ret_t do_multicall(
     XEN_GUEST_HANDLE_PARAM(multicall_entry_t) call_list, uint32_t nr_calls)
 {
     struct vcpu *curr = current;
@@ -113,7 +113,6 @@ do_multicall(
     if ( unlikely(disp == mc_preempt) && i < nr_calls )
         goto preempted;
 
-    perfc_incr(calls_to_multicall);
     perfc_add(calls_from_multicall, i);
     mcs->flags = 0;
     return rc;

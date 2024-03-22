@@ -18,7 +18,7 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #if defined(CONFIG_X86)
-#include <xen/arch-x86/xen.h>
+#include <xen/arch-x86/guest-acpi.h>
 #include <xen/hvm/hvm_info_table.h>
 #elif defined(CONFIG_ARM_64)
 #include <xen/arch-arm.h>
@@ -431,7 +431,7 @@ int main(int argc, char **argv)
                 stmt("Store", "0x89, \\_GPE.DPT2");
             }
             if ( slot & 1 )
-                stmt("ShiftRight", "0x4, \\_GPE.PH%02X, Local1", slot & ~1);
+                stmt("ShiftRight", "\\_GPE.PH%02X, 0x04, Local1", slot & ~1);
             else
                 stmt("And", "\\_GPE.PH%02X, 0x0f, Local1", slot & ~1);
             stmt("Return", "Local1"); /* IN status as the _STA */

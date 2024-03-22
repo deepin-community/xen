@@ -79,7 +79,7 @@ static int variable_period = 1;
  * Collects information of correctable errors and notifies
  * Dom0 via an event.
  */
-static void mce_amd_checkregs(void *info)
+static void cf_check mce_amd_checkregs(void *info)
 {
 	mctelem_cookie_t mctc;
 	struct mca_summary bs;
@@ -127,7 +127,7 @@ static void mce_amd_checkregs(void *info)
  * multiple correctable errors between two polls. In that case,
  * increase polling frequency higher than normal.
  */
-static void mce_amd_work_fn(void *data)
+static void cf_check mce_amd_work_fn(void *data)
 {
 	on_each_cpu(mce_amd_checkregs, data, 1);
 

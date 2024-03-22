@@ -51,13 +51,16 @@
 #include <asm/platform.h>
 #include <asm/procinfo.h>
 #include <asm/setup.h>
-#include <asm/tee/tee.h>
 #include <xsm/xsm.h>
 #include <asm/acpi.h>
 
 struct bootinfo __initdata bootinfo;
 
-struct cpuinfo_arm __read_mostly boot_cpu_data;
+/*
+ * Sanitized version of cpuinfo containing only features available on all
+ * cores (only on arm64 as there is no sanitization support on arm32).
+ */
+struct cpuinfo_arm __read_mostly system_cpuinfo;
 
 #ifdef CONFIG_ACPI
 bool __read_mostly acpi_disabled;
@@ -72,10 +75,24 @@ domid_t __read_mostly max_init_domid;
 
 static __used void init_done(void)
 {
+    int rc;
+
     /* Must be done past setting system_state. */
     unregister_init_virtual_region();
 
     free_init_memory();
+
+    /*
+     * We have finished booting. Mark the section .data.ro_after_init
+     * read-only.
+     */
+    rc = modify_xen_mappings((unsigned long)&__ro_after_init_start,
+                             (unsigned long)&__ro_after_init_end,
+                             PAGE_HYPERVISOR_RO);
+    if ( rc )
+        panic("Unable to mark the .data.ro_after_init section read-only (rc = %d)\n",
+              rc);
+
     startup_cpu_idle_loop();
 }
 
@@ -101,7 +118,7 @@ static const char * __initdata processor_implementers[] = {
 static void __init processor_id(void)
 {
     const char *implementer = "Unknown";
-    struct cpuinfo_arm *c = &boot_cpu_data;
+    struct cpuinfo_arm *c = &system_cpuinfo;
 
     identify_cpu(c);
     current_cpu_data = *c;
@@ -114,14 +131,14 @@ static void __init processor_id(void)
         printk("Huh, cpu architecture %x, expected 0xf (defined by cpuid)\n",
                c->midr.architecture);
 
-    printk("Processor: %08"PRIx32": \"%s\", variant: 0x%x, part 0x%03x, rev 0x%x\n",
-           c->midr.bits, implementer,
+    printk("Processor: %"PRIregister": \"%s\", variant: 0x%x, part 0x%03x,"
+           "rev 0x%x\n", c->midr.bits, implementer,
            c->midr.variant, c->midr.part_number, c->midr.revision);
 
 #if defined(CONFIG_ARM_64)
     printk("64-bit Execution:\n");
     printk("  Processor Features: %016"PRIx64" %016"PRIx64"\n",
-           boot_cpu_data.pfr64.bits[0], boot_cpu_data.pfr64.bits[1]);
+           system_cpuinfo.pfr64.bits[0], system_cpuinfo.pfr64.bits[1]);
     printk("    Exception Levels: EL3:%s EL2:%s EL1:%s EL0:%s\n",
            cpu_has_el3_32 ? "64+32" : cpu_has_el3_64 ? "64" : "No",
            cpu_has_el2_32 ? "64+32" : cpu_has_el2_64 ? "64" : "No",
@@ -132,14 +149,26 @@ static void __init processor_id(void)
            cpu_has_simd ? " AdvancedSIMD" : "",
            cpu_has_gicv3 ? " GICv3-SysReg" : "");
 
+    /* Warn user if we find unknown floating-point features */
+    if ( cpu_has_fp && (boot_cpu_feature64(fp) >= 2) )
+        printk(XENLOG_WARNING "WARNING: Unknown Floating-point ID:%d, "
+               "this may result in corruption on the platform\n",
+               boot_cpu_feature64(fp));
+
+    /* Warn user if we find unknown AdvancedSIMD features */
+    if ( cpu_has_simd && (boot_cpu_feature64(simd) >= 2) )
+        printk(XENLOG_WARNING "WARNING: Unknown AdvancedSIMD ID:%d, "
+               "this may result in corruption on the platform\n",
+               boot_cpu_feature64(simd));
+
     printk("  Debug Features: %016"PRIx64" %016"PRIx64"\n",
-           boot_cpu_data.dbg64.bits[0], boot_cpu_data.dbg64.bits[1]);
+           system_cpuinfo.dbg64.bits[0], system_cpuinfo.dbg64.bits[1]);
     printk("  Auxiliary Features: %016"PRIx64" %016"PRIx64"\n",
-           boot_cpu_data.aux64.bits[0], boot_cpu_data.aux64.bits[1]);
+           system_cpuinfo.aux64.bits[0], system_cpuinfo.aux64.bits[1]);
     printk("  Memory Model Features: %016"PRIx64" %016"PRIx64"\n",
-           boot_cpu_data.mm64.bits[0], boot_cpu_data.mm64.bits[1]);
+           system_cpuinfo.mm64.bits[0], system_cpuinfo.mm64.bits[1]);
     printk("  ISA Features:  %016"PRIx64" %016"PRIx64"\n",
-           boot_cpu_data.isa64.bits[0], boot_cpu_data.isa64.bits[1]);
+           system_cpuinfo.isa64.bits[0], system_cpuinfo.isa64.bits[1]);
 #endif
 
     /*
@@ -149,8 +178,8 @@ static void __init processor_id(void)
     if ( cpu_has_aarch32 )
     {
         printk("32-bit Execution:\n");
-        printk("  Processor Features: %08"PRIx32":%08"PRIx32"\n",
-               boot_cpu_data.pfr32.bits[0], boot_cpu_data.pfr32.bits[1]);
+        printk("  Processor Features: %"PRIregister":%"PRIregister"\n",
+               system_cpuinfo.pfr32.bits[0], system_cpuinfo.pfr32.bits[1]);
         printk("    Instruction Sets:%s%s%s%s%s%s\n",
                cpu_has_aarch32 ? " AArch32" : "",
                cpu_has_arm ? " A32" : "",
@@ -162,18 +191,19 @@ static void __init processor_id(void)
                cpu_has_gentimer ? " GenericTimer" : "",
                cpu_has_security ? " Security" : "");
 
-        printk("  Debug Features: %08"PRIx32"\n",
-               boot_cpu_data.dbg32.bits[0]);
-        printk("  Auxiliary Features: %08"PRIx32"\n",
-               boot_cpu_data.aux32.bits[0]);
-        printk("  Memory Model Features: "
-               "%08"PRIx32" %08"PRIx32" %08"PRIx32" %08"PRIx32"\n",
-               boot_cpu_data.mm32.bits[0], boot_cpu_data.mm32.bits[1],
-               boot_cpu_data.mm32.bits[2], boot_cpu_data.mm32.bits[3]);
-        printk(" ISA Features: %08x %08x %08x %08x %08x %08x\n",
-               boot_cpu_data.isa32.bits[0], boot_cpu_data.isa32.bits[1],
-               boot_cpu_data.isa32.bits[2], boot_cpu_data.isa32.bits[3],
-               boot_cpu_data.isa32.bits[4], boot_cpu_data.isa32.bits[5]);
+        printk("  Debug Features: %"PRIregister"\n",
+               system_cpuinfo.dbg32.bits[0]);
+        printk("  Auxiliary Features: %"PRIregister"\n",
+               system_cpuinfo.aux32.bits[0]);
+        printk("  Memory Model Features: %"PRIregister" %"PRIregister"\n"
+               "                         %"PRIregister" %"PRIregister"\n",
+               system_cpuinfo.mm32.bits[0], system_cpuinfo.mm32.bits[1],
+               system_cpuinfo.mm32.bits[2], system_cpuinfo.mm32.bits[3]);
+        printk("  ISA Features: %"PRIregister" %"PRIregister" %"PRIregister"\n"
+               "                %"PRIregister" %"PRIregister" %"PRIregister"\n",
+               system_cpuinfo.isa32.bits[0], system_cpuinfo.isa32.bits[1],
+               system_cpuinfo.isa32.bits[2], system_cpuinfo.isa32.bits[3],
+               system_cpuinfo.isa32.bits[4], system_cpuinfo.isa32.bits[5]);
     }
     else
     {
@@ -183,10 +213,19 @@ static void __init processor_id(void)
     processor_setup();
 }
 
-void __init dt_unreserved_regions(paddr_t s, paddr_t e,
-                                  void (*cb)(paddr_t, paddr_t), int first)
+static void __init dt_unreserved_regions(paddr_t s, paddr_t e,
+                                         void (*cb)(paddr_t, paddr_t),
+                                         unsigned int first)
 {
-    int i, nr = fdt_num_mem_rsv(device_tree_flattened);
+    unsigned int i, nr;
+    int rc;
+
+    rc = fdt_num_mem_rsv(device_tree_flattened);
+    if ( rc < 0 )
+        panic("Unable to retrieve the number of reserved regions (rc=%d)\n",
+              rc);
+
+    nr = rc;
 
     for ( i = first; i < nr ; i++ )
     {
@@ -230,6 +269,18 @@ void __init dt_unreserved_regions(paddr_t s, paddr_t e,
 
     cb(s, e);
 }
+
+void __init fw_unreserved_regions(paddr_t s, paddr_t e,
+                                  void (*cb)(paddr_t, paddr_t),
+                                  unsigned int first)
+{
+    if ( acpi_disabled )
+        dt_unreserved_regions(s, e, cb, first);
+    else
+        cb(s, e);
+}
+
+
 
 struct bootmodule __init *add_boot_module(bootmodule_kind kind,
                                           paddr_t start, paddr_t size,
@@ -392,7 +443,7 @@ void __init discard_initial_modules(void)
              !mfn_valid(maddr_to_mfn(e)) )
             continue;
 
-        dt_unreserved_regions(s, e, init_domheap_pages, 0);
+        fw_unreserved_regions(s, e, init_domheap_pages, 0);
     }
 
     mi->nr_mods = 0;
@@ -505,6 +556,44 @@ static paddr_t __init consider_modules(paddr_t s, paddr_t e,
     }
     return e;
 }
+
+/*
+ * Find a contiguous region that fits in the static heap region with
+ * required size and alignment, and return the end address of the region
+ * if found otherwise 0.
+ */
+static paddr_t __init fit_xenheap_in_static_heap(uint32_t size, paddr_t align)
+{
+    unsigned int i;
+    paddr_t end = 0, aligned_start, aligned_end;
+    paddr_t bank_start, bank_size, bank_end;
+
+    for ( i = 0 ; i < bootinfo.reserved_mem.nr_banks; i++ )
+    {
+        if ( bootinfo.reserved_mem.bank[i].type != MEMBANK_STATIC_HEAP )
+            continue;
+
+        bank_start = bootinfo.reserved_mem.bank[i].start;
+        bank_size = bootinfo.reserved_mem.bank[i].size;
+        bank_end = bank_start + bank_size;
+
+        if ( bank_size < size )
+            continue;
+
+        aligned_end = bank_end & ~(align - 1);
+        aligned_start = (aligned_end - size) & ~(align - 1);
+
+        if ( aligned_start > bank_start )
+            /*
+             * Allocate the xenheap as high as possible to keep low-memory
+             * available (assuming the admin supplied region below 4GB)
+             * for other use (e.g. domain memory allocation).
+             */
+            end = max(end, aligned_end);
+    }
+
+    return end;
+}
 #endif
 
 /*
@@ -585,21 +674,124 @@ static void __init init_pdx(void)
     }
 }
 
+/* Static memory initialization */
+static void __init init_staticmem_pages(void)
+{
+#ifdef CONFIG_STATIC_MEMORY
+    unsigned int bank;
+
+    for ( bank = 0 ; bank < bootinfo.reserved_mem.nr_banks; bank++ )
+    {
+        if ( bootinfo.reserved_mem.bank[bank].type == MEMBANK_STATIC_DOMAIN )
+        {
+            mfn_t bank_start = _mfn(PFN_UP(bootinfo.reserved_mem.bank[bank].start));
+            unsigned long bank_pages = PFN_DOWN(bootinfo.reserved_mem.bank[bank].size);
+            mfn_t bank_end = mfn_add(bank_start, bank_pages);
+
+            if ( mfn_x(bank_end) <= mfn_x(bank_start) )
+                return;
+
+            unprepare_staticmem_pages(mfn_to_page(bank_start),
+                                      bank_pages, false);
+        }
+    }
+#endif
+}
+
+/*
+ * Populate the boot allocator.
+ * If a static heap was not provided by the admin, all the RAM but the
+ * following regions will be added:
+ *  - Modules (e.g., Xen, Kernel)
+ *  - Reserved regions
+ *  - Xenheap (arm32 only)
+ * If a static heap was provided by the admin, populate the boot
+ * allocator with the corresponding regions only, but with Xenheap excluded
+ * on arm32.
+ */
+static void __init populate_boot_allocator(void)
+{
+    unsigned int i;
+    const struct meminfo *banks = &bootinfo.mem;
+    paddr_t s, e;
+
+    if ( bootinfo.static_heap )
+    {
+        for ( i = 0 ; i < bootinfo.reserved_mem.nr_banks; i++ )
+        {
+            if ( bootinfo.reserved_mem.bank[i].type != MEMBANK_STATIC_HEAP )
+                continue;
+
+            s = bootinfo.reserved_mem.bank[i].start;
+            e = s + bootinfo.reserved_mem.bank[i].size;
+#ifdef CONFIG_ARM_32
+            /* Avoid the xenheap, note that the xenheap cannot across a bank */
+            if ( s <= mfn_to_maddr(directmap_mfn_start) &&
+                 e >= mfn_to_maddr(directmap_mfn_end) )
+            {
+                init_boot_pages(s, mfn_to_maddr(directmap_mfn_start));
+                init_boot_pages(mfn_to_maddr(directmap_mfn_end), e);
+            }
+            else
+#endif
+                init_boot_pages(s, e);
+        }
+
+        return;
+    }
+
+    for ( i = 0; i < banks->nr_banks; i++ )
+    {
+        const struct membank *bank = &banks->bank[i];
+        paddr_t bank_end = bank->start + bank->size;
+
+        s = bank->start;
+        while ( s < bank_end )
+        {
+            paddr_t n = bank_end;
+
+            e = next_module(s, &n);
+
+            if ( e == ~(paddr_t)0 )
+                e = n = bank_end;
+
+            /*
+             * Module in a RAM bank other than the one which we are
+             * not dealing with here.
+             */
+            if ( e > bank_end )
+                e = bank_end;
+
+#ifdef CONFIG_ARM_32
+            /* Avoid the xenheap */
+            if ( s < mfn_to_maddr(directmap_mfn_end) &&
+                 mfn_to_maddr(directmap_mfn_start) < e )
+            {
+                e = mfn_to_maddr(directmap_mfn_start);
+                n = mfn_to_maddr(directmap_mfn_end);
+            }
+#endif
+
+            fw_unreserved_regions(s, e, init_boot_pages, 0);
+            s = n;
+        }
+    }
+}
+
 #ifdef CONFIG_ARM_32
 static void __init setup_mm(void)
 {
-    paddr_t ram_start, ram_end, ram_size;
-    paddr_t s, e;
-    unsigned long ram_pages;
+    paddr_t ram_start, ram_end, ram_size, e, bank_start, bank_end, bank_size;
+    paddr_t static_heap_end = 0, static_heap_size = 0;
     unsigned long heap_pages, xenheap_pages, domheap_pages;
-    int i;
+    unsigned int i;
     const uint32_t ctr = READ_CP32(CTR);
 
     if ( !bootinfo.mem.nr_banks )
         panic("No memory bank\n");
 
     /* We only supports instruction caches implementing the IVIPT extension. */
-    if ( ((ctr >> CTR_L1Ip_SHIFT) & CTR_L1Ip_MASK) == CTR_L1Ip_AIVIVT )
+    if ( ((ctr >> CTR_L1IP_SHIFT) & CTR_L1IP_MASK) == ICACHE_POLICY_AIVIVT )
         panic("AIVIVT instruction cache not supported\n");
 
     init_pdx();
@@ -610,30 +802,51 @@ static void __init setup_mm(void)
 
     for ( i = 1; i < bootinfo.mem.nr_banks; i++ )
     {
-        paddr_t bank_start = bootinfo.mem.bank[i].start;
-        paddr_t bank_size = bootinfo.mem.bank[i].size;
-        paddr_t bank_end = bank_start + bank_size;
+        bank_start = bootinfo.mem.bank[i].start;
+        bank_size = bootinfo.mem.bank[i].size;
+        bank_end = bank_start + bank_size;
 
         ram_size  = ram_size + bank_size;
         ram_start = min(ram_start,bank_start);
         ram_end   = max(ram_end,bank_end);
     }
 
-    total_pages = ram_pages = ram_size >> PAGE_SHIFT;
+    total_pages = ram_size >> PAGE_SHIFT;
+
+    if ( bootinfo.static_heap )
+    {
+        for ( i = 0 ; i < bootinfo.reserved_mem.nr_banks; i++ )
+        {
+            if ( bootinfo.reserved_mem.bank[i].type != MEMBANK_STATIC_HEAP )
+                continue;
+
+            bank_start = bootinfo.reserved_mem.bank[i].start;
+            bank_size = bootinfo.reserved_mem.bank[i].size;
+            bank_end = bank_start + bank_size;
+
+            static_heap_size += bank_size;
+            static_heap_end = max(static_heap_end, bank_end);
+        }
+
+        heap_pages = static_heap_size >> PAGE_SHIFT;
+    }
+    else
+        heap_pages = total_pages;
 
     /*
      * If the user has not requested otherwise via the command line
      * then locate the xenheap using these constraints:
      *
+     *  - must be contiguous
      *  - must be 32 MiB aligned
      *  - must not include Xen itself or the boot modules
-     *  - must be at most 1GB or 1/32 the total RAM in the system if less
+     *  - must be at most 1GB or 1/32 the total RAM in the system (or static
+          heap if enabled) if less
      *  - must be at least 32M
      *
      * We try to allocate the largest xenheap possible within these
      * constraints.
      */
-    heap_pages = ram_pages;
     if ( opt_xenheap_megabytes )
         xenheap_pages = opt_xenheap_megabytes << (20-PAGE_SHIFT);
     else
@@ -645,7 +858,9 @@ static void __init setup_mm(void)
 
     do
     {
-        e = consider_modules(ram_start, ram_end,
+        e = bootinfo.static_heap ?
+            fit_xenheap_in_static_heap(pfn_to_paddr(xenheap_pages), MB(32)) :
+            consider_modules(ram_start, ram_end,
                              pfn_to_paddr(xenheap_pages),
                              32<<20, 0);
         if ( e )
@@ -655,7 +870,7 @@ static void __init setup_mm(void)
     } while ( !opt_xenheap_megabytes && xenheap_pages > 32<<(20-PAGE_SHIFT) );
 
     if ( ! e )
-        panic("Not not enough space for xenheap\n");
+        panic("Not enough space for xenheap\n");
 
     domheap_pages = heap_pages - xenheap_pages;
 
@@ -664,109 +879,117 @@ static void __init setup_mm(void)
            opt_xenheap_megabytes ? ", from command-line" : "");
     printk("Dom heap: %lu pages\n", domheap_pages);
 
-    setup_xenheap_mappings((e >> PAGE_SHIFT) - xenheap_pages, xenheap_pages);
+    /*
+     * We need some memory to allocate the page-tables used for the
+     * directmap mappings. So populate the boot allocator first.
+     *
+     * This requires us to set directmap_mfn_{start, end} first so the
+     * direct-mapped Xenheap region can be avoided.
+     */
+    directmap_mfn_start = _mfn((e >> PAGE_SHIFT) - xenheap_pages);
+    directmap_mfn_end = mfn_add(directmap_mfn_start, xenheap_pages);
 
-    /* Add non-xenheap memory */
-    for ( i = 0; i < bootinfo.mem.nr_banks; i++ )
-    {
-        paddr_t bank_start = bootinfo.mem.bank[i].start;
-        paddr_t bank_end = bank_start + bootinfo.mem.bank[i].size;
+    populate_boot_allocator();
 
-        s = bank_start;
-        while ( s < bank_end )
-        {
-            paddr_t n = bank_end;
-
-            e = next_module(s, &n);
-
-            if ( e == ~(paddr_t)0 )
-            {
-                e = n = ram_end;
-            }
-
-            /*
-             * Module in a RAM bank other than the one which we are
-             * not dealing with here.
-             */
-            if ( e > bank_end )
-                e = bank_end;
-
-            /* Avoid the xenheap */
-            if ( s < mfn_to_maddr(mfn_add(xenheap_mfn_start, xenheap_pages))
-                 && mfn_to_maddr(xenheap_mfn_start) < e )
-            {
-                e = mfn_to_maddr(xenheap_mfn_start);
-                n = mfn_to_maddr(mfn_add(xenheap_mfn_start, xenheap_pages));
-            }
-
-            dt_unreserved_regions(s, e, init_boot_pages, 0);
-
-            s = n;
-        }
-    }
+    setup_directmap_mappings(mfn_x(directmap_mfn_start), xenheap_pages);
 
     /* Frame table covers all of RAM region, including holes */
     setup_frametable_mappings(ram_start, ram_end);
     max_page = PFN_DOWN(ram_end);
 
+    /*
+     * The allocators may need to use map_domain_page() (such as for
+     * scrubbing pages). So we need to prepare the domheap area first.
+     */
+    if ( !init_domheap_mappings(smp_processor_id()) )
+        panic("CPU%u: Unable to prepare the domheap page-tables\n",
+              smp_processor_id());
+
     /* Add xenheap memory that was not already added to the boot allocator. */
-    init_xenheap_pages(mfn_to_maddr(xenheap_mfn_start),
-                       mfn_to_maddr(xenheap_mfn_end));
+    init_xenheap_pages(mfn_to_maddr(directmap_mfn_start),
+                       mfn_to_maddr(directmap_mfn_end));
+
+    init_staticmem_pages();
 }
 #else /* CONFIG_ARM_64 */
 static void __init setup_mm(void)
 {
-    paddr_t ram_start = ~0;
+    const struct meminfo *banks = &bootinfo.mem;
+    paddr_t ram_start = INVALID_PADDR;
     paddr_t ram_end = 0;
     paddr_t ram_size = 0;
-    int bank;
+    unsigned int i;
 
     init_pdx();
 
+    /*
+     * We need some memory to allocate the page-tables used for the directmap
+     * mappings. But some regions may contain memory already allocated
+     * for other uses (e.g. modules, reserved-memory...).
+     *
+     * For simplicity, add all the free regions in the boot allocator.
+     */
+    populate_boot_allocator();
+
     total_pages = 0;
-    for ( bank = 0 ; bank < bootinfo.mem.nr_banks; bank++ )
+
+    for ( i = 0; i < banks->nr_banks; i++ )
     {
-        paddr_t bank_start = bootinfo.mem.bank[bank].start;
-        paddr_t bank_size = bootinfo.mem.bank[bank].size;
-        paddr_t bank_end = bank_start + bank_size;
-        paddr_t s, e;
+        const struct membank *bank = &banks->bank[i];
+        paddr_t bank_end = bank->start + bank->size;
 
-        ram_size = ram_size + bank_size;
-        ram_start = min(ram_start,bank_start);
-        ram_end = max(ram_end,bank_end);
+        ram_size = ram_size + bank->size;
+        ram_start = min(ram_start, bank->start);
+        ram_end = max(ram_end, bank_end);
 
-        setup_xenheap_mappings(bank_start>>PAGE_SHIFT, bank_size>>PAGE_SHIFT);
-
-        s = bank_start;
-        while ( s < bank_end )
-        {
-            paddr_t n = bank_end;
-
-            e = next_module(s, &n);
-
-            if ( e == ~(paddr_t)0 )
-            {
-                e = n = bank_end;
-            }
-
-            if ( e > bank_end )
-                e = bank_end;
-
-            dt_unreserved_regions(s, e, init_boot_pages, 0);
-            s = n;
-        }
+        setup_directmap_mappings(PFN_DOWN(bank->start),
+                                 PFN_DOWN(bank->size));
     }
 
     total_pages += ram_size >> PAGE_SHIFT;
 
-    xenheap_virt_end = XENHEAP_VIRT_START + ram_end - ram_start;
-    xenheap_mfn_start = maddr_to_mfn(ram_start);
-    xenheap_mfn_end = maddr_to_mfn(ram_end);
+    directmap_virt_end = XENHEAP_VIRT_START + ram_end - ram_start;
+    directmap_mfn_start = maddr_to_mfn(ram_start);
+    directmap_mfn_end = maddr_to_mfn(ram_end);
 
     setup_frametable_mappings(ram_start, ram_end);
     max_page = PFN_DOWN(ram_end);
+
+    init_staticmem_pages();
 }
 #endif
+
+static bool __init is_dom0less_mode(void)
+{
+    struct bootmodules *mods = &bootinfo.modules;
+    struct bootmodule *mod;
+    unsigned int i;
+    bool dom0found = false;
+    bool domUfound = false;
+
+    /* Look into the bootmodules */
+    for ( i = 0 ; i < mods->nr_mods ; i++ )
+    {
+        mod = &mods->module[i];
+        /* Find if dom0 and domU kernels are present */
+        if ( mod->kind == BOOTMOD_KERNEL )
+        {
+            if ( mod->domU == false )
+            {
+                dom0found = true;
+                break;
+            }
+            else
+                domUfound = true;
+        }
+    }
+
+    /*
+     * If there is no dom0 kernel but at least one domU, then we are in
+     * dom0less mode
+     */
+    return ( !dom0found && domUfound );
+}
 
 size_t __read_mostly dcache_line_bytes;
 
@@ -775,17 +998,10 @@ void __init start_xen(unsigned long boot_phys_offset,
                       unsigned long fdt_paddr)
 {
     size_t fdt_size;
-    int cpus, i;
     const char *cmdline;
     struct bootmodule *xen_bootmodule;
-    struct domain *dom0, *d;
-    struct xen_domctl_createdomain dom0_cfg = {
-        .flags = XEN_DOMCTL_CDF_hvm | XEN_DOMCTL_CDF_hap,
-        .max_evtchn_port = -1,
-        .max_grant_frames = gnttab_dom0_frames(),
-        .max_maptrack_frames = -1,
-    };
-    int rc;
+    struct domain *d;
+    int rc, i;
 
     dcache_line_bytes = read_dcache_line_bytes();
 
@@ -861,15 +1077,16 @@ void __init start_xen(unsigned long boot_phys_offset,
     processor_id();
 
     smp_init_cpus();
-    cpus = smp_get_max_cpus();
-    printk(XENLOG_INFO "SMP: Allowing %u CPUs\n", cpus);
-    nr_cpu_ids = cpus;
+    nr_cpu_ids = smp_get_max_cpus();
+    printk(XENLOG_INFO "SMP: Allowing %u CPUs\n", nr_cpu_ids);
 
     /*
      * Some errata relies on SMCCC version which is detected by psci_init()
      * (called from smp_init_cpus()).
      */
     check_local_cpu_errata();
+
+    check_local_cpu_features();
 
     init_xen_time();
 
@@ -907,7 +1124,7 @@ void __init start_xen(unsigned long boot_phys_offset,
 
     for_each_present_cpu ( i )
     {
-        if ( (num_online_cpus() < cpus) && !cpu_online(i) )
+        if ( (num_online_cpus() < nr_cpu_ids) && !cpu_online(i) )
         {
             int ret = cpu_up(i);
             if ( ret != 0 )
@@ -917,6 +1134,9 @@ void __init start_xen(unsigned long boot_phys_offset,
 
     printk("Brought up %ld CPUs\n", (long)num_online_cpus());
     /* TODO: smp_cpus_done(); */
+
+    /* This should be done in a vpmu driver but we do not have one yet. */
+    vpmu_is_available = cpu_has_pmu;
 
     /*
      * The IOMMU subsystem must be initialized before P2M as we need
@@ -937,31 +1157,19 @@ void __init start_xen(unsigned long boot_phys_offset,
      */
     apply_alternatives_all();
     enable_errata_workarounds();
+    enable_cpu_features();
 
     /* Create initial domain 0. */
-    /* The vGIC for DOM0 is exactly emulating the hardware GIC */
-    dom0_cfg.arch.gic_version = XEN_DOMCTL_CONFIG_GIC_NATIVE;
-    /*
-     * Xen vGIC supports a maximum of 992 interrupt lines.
-     * 32 are substracted to cover local IRQs.
-     */
-    dom0_cfg.arch.nr_spis = min(gic_number_lines(), (unsigned int) 992) - 32;
-    if ( gic_number_lines() > 992 )
-        printk(XENLOG_WARNING "Maximum number of vGIC IRQs exceeded.\n");
-    dom0_cfg.arch.tee_type = tee_get_type();
-    dom0_cfg.max_vcpus = dom0_max_vcpus();
+    if ( !is_dom0less_mode() )
+        create_dom0();
+    else
+        printk(XENLOG_INFO "Xen dom0less mode detected\n");
 
-    if ( iommu_enabled )
-        dom0_cfg.flags |= XEN_DOMCTL_CDF_iommu;
-
-    dom0 = domain_create(0, &dom0_cfg, true);
-    if ( IS_ERR(dom0) || (alloc_dom0_vcpu0(dom0) == NULL) )
-        panic("Error creating domain 0\n");
-
-    if ( construct_dom0(dom0) != 0)
-        panic("Could not set up DOM0 guest OS\n");
-
-    create_domUs();
+    if ( acpi_disabled )
+    {
+        create_domUs();
+        alloc_static_evtchn();
+    }
 
     /*
      * This needs to be called **before** heap_init_late() so modules
@@ -979,6 +1187,9 @@ void __init start_xen(unsigned long boot_phys_offset,
 
     /* Hide UART from DOM0 if we're using it */
     serial_endboot();
+
+    if ( (rc = xsm_set_system_active()) != 0 )
+        panic("xsm: unable to switch to SYSTEM_ACTIVE privilege: %d\n", rc);
 
     system_state = SYS_STATE_active;
 

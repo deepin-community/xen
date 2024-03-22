@@ -38,3 +38,9 @@ VERS_1.3 {
 	global:
 		xendevicemodel_modified_memory_bulk;
 } VERS_1.2;
+
+VERS_1.4 {
+	global:
+		xendevicemodel_set_irq_level;
+		xendevicemodel_nr_vcpus;
+} VERS_1.3;

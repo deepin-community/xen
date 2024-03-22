@@ -39,6 +39,7 @@
 #include <asm/event.h>
 #include <asm/hap.h>
 #include <asm/hvm/hvm.h>
+#include <asm/hvm/nestedhvm.h>
 #include <xsm/xsm.h>
 
 #include <public/hvm/params.h>
@@ -74,7 +75,7 @@ static DEFINE_SPINLOCK(shr_audit_lock);
 static DEFINE_RCU_READ_LOCK(shr_audit_read_lock);
 
 /* RCU delayed free of audit list entry */
-static void _free_pg_shared_info(struct rcu_head *head)
+static void cf_check _free_pg_shared_info(struct rcu_head *head)
 {
     xfree(container_of(head, struct page_sharing_info, rcu_head));
 }
@@ -431,6 +432,66 @@ static void mem_sharing_gfn_destroy(struct page_info *page, struct domain *d,
     xfree(gfn_info);
 }
 
+/* Deadlock-avoidance scheme when calling get_gfn on different gfn's */
+struct two_gfns {
+    struct domain *first_domain, *second_domain;
+    gfn_t          first_gfn,     second_gfn;
+};
+
+/*
+ * Returns mfn, type and access for potential caller consumption, but any
+ * of those can be NULL.
+ */
+static void get_two_gfns(struct domain *rd, gfn_t rgfn, p2m_type_t *rt,
+                         p2m_access_t *ra, mfn_t *rmfn,
+                         struct domain *ld, gfn_t lgfn, p2m_type_t *lt,
+                         p2m_access_t *la, mfn_t *lmfn,
+                         p2m_query_t q, struct two_gfns *rval, bool lock)
+{
+    mfn_t        *first_mfn, *second_mfn, scratch_mfn;
+    p2m_access_t *first_a, *second_a, scratch_a;
+    p2m_type_t   *first_t, *second_t, scratch_t;
+
+    /* Sort by domain, if same domain by gfn */
+
+#define assign_pointers(dest, source)                   \
+do {                                                    \
+    rval-> dest ## _domain = source ## d;               \
+    rval-> dest ## _gfn = source ## gfn;                \
+    dest ## _mfn = (source ## mfn) ?: &scratch_mfn;     \
+    dest ## _a   = (source ## a)   ?: &scratch_a;       \
+    dest ## _t   = (source ## t)   ?: &scratch_t;       \
+} while ( false )
+
+    if ( (rd->domain_id < ld->domain_id) ||
+         ((rd == ld) && (gfn_x(rgfn) <= gfn_x(lgfn))) )
+    {
+        assign_pointers(first, r);
+        assign_pointers(second, l);
+    }
+    else
+    {
+        assign_pointers(first, l);
+        assign_pointers(second, r);
+    }
+
+#undef assign_pointers
+
+    /* Now do the gets. */
+    *first_mfn  = p2m_get_gfn_type_access(p2m_get_hostp2m(rval->first_domain),
+                                          rval->first_gfn, first_t,
+                                          first_a, q, NULL, lock);
+    *second_mfn = p2m_get_gfn_type_access(p2m_get_hostp2m(rval->second_domain),
+                                          rval->second_gfn, second_t,
+                                          second_a, q, NULL, lock);
+}
+
+static void put_two_gfns(const struct two_gfns *arg)
+{
+    put_gfn(arg->second_domain, gfn_x(arg->second_gfn));
+    put_gfn(arg->first_domain,  gfn_x(arg->first_gfn));
+}
+
 static struct page_info *mem_sharing_lookup(unsigned long mfn)
 {
     struct page_info *page;
@@ -537,7 +598,7 @@ static int audit(void)
             p2m_type_t t;
             mfn_t o_mfn;
 
-            d = get_domain_by_id(g->domain);
+            d = rcu_lock_domain_by_id(g->domain);
             if ( d == NULL )
             {
                 gdprintk(XENLOG_ERR,
@@ -562,7 +623,7 @@ static int audit(void)
                          d, g->gfn, mfn_x(mfn), p2m_ram_shared, t);
                 errors++;
             }
-            put_domain(d);
+            rcu_unlock_domain(d);
             nr_gfns++;
         }
         /* The type count has an extra ref because we have locked the page */
@@ -875,8 +936,8 @@ static int nominate_page(struct domain *d, gfn_t gfn,
             if ( !ap2m )
                 continue;
 
-            amfn = __get_gfn_type_access(ap2m, gfn_x(gfn), &ap2mt, &ap2ma,
-                                         0, NULL, false);
+            amfn = p2m_get_gfn_type_access(ap2m, gfn, &ap2mt, &ap2ma,
+                                           0, NULL, false);
             if ( mfn_valid(amfn) && (!mfn_eq(amfn, mfn) || ap2ma != p2ma) )
             {
                 altp2m_list_unlock(d);
@@ -893,13 +954,11 @@ static int nominate_page(struct domain *d, gfn_t gfn,
         goto out;
 
     /*
-     * Now that the page is validated, we can lock it. There is no
-     * race because we're holding the p2m entry, so no one else
-     * could be nominating this gfn.
+     * Now that the page is validated, we can make it shared. There is no race
+     * because we're holding the p2m entry, so no one else could be nominating
+     * this gfn & and it is evidently not yet shared with any other VM, thus we
+     * don't need to take the mem_sharing_page_lock here.
      */
-    ret = -ENOENT;
-    if ( !mem_sharing_page_lock(page) )
-        goto out;
 
     /* Initialize the shared state */
     ret = -ENOMEM;
@@ -935,7 +994,6 @@ static int nominate_page(struct domain *d, gfn_t gfn,
 
     *phandle = page->sharing->handle;
     audit_add_list(page);
-    mem_sharing_page_unlock(page);
     ret = 0;
 
 out:
@@ -1043,10 +1101,10 @@ static int share_pages(struct domain *sd, gfn_t sgfn, shr_handle_t sh,
         rmap_del(gfn, cpage, 0);
         rmap_add(gfn, spage);
         put_count++;
-        d = get_domain_by_id(gfn->domain);
+        d = rcu_lock_domain_by_id(gfn->domain);
         BUG_ON(!d);
         BUG_ON(set_shared_p2m_entry(d, gfn->gfn, smfn));
-        put_domain(d);
+        rcu_unlock_domain(d);
     }
     ASSERT(list_empty(&cpage->sharing->gfns));
     BUG_ON(!put_count);
@@ -1155,6 +1213,7 @@ int add_to_physmap(struct domain *sd, unsigned long sgfn, shr_handle_t sh,
     }
     else
     {
+#ifdef CONFIG_MEM_PAGING
         /*
          * There is a chance we're plugging a hole where a paged out
          * page was.
@@ -1180,6 +1239,7 @@ int add_to_physmap(struct domain *sd, unsigned long sgfn, shr_handle_t sh,
                 put_page(cpage);
             }
         }
+#endif
     }
 
     atomic_inc(&nr_saved_mfns);
@@ -1214,7 +1274,8 @@ int __mem_sharing_unshare_page(struct domain *d,
     p2m_type_t p2mt;
     mfn_t mfn;
     struct page_info *page, *old_page;
-    int last_gfn;
+    bool last_gfn;
+    int rc = 0;
     gfn_info_t *gfn_info = NULL;
 
     mfn = get_gfn(d, gfn, &p2mt);
@@ -1224,6 +1285,15 @@ int __mem_sharing_unshare_page(struct domain *d,
     {
         put_gfn(d, gfn);
         return 0;
+    }
+
+    /* lock nested p2ms to avoid lock-order violation with sharing lock */
+    if ( unlikely(nestedhvm_enabled(d)) )
+    {
+        unsigned int i;
+
+        for ( i = 0; i < MAX_NESTEDP2M; i++ )
+            p2m_lock(d->arch.nested_p2m[i]);
     }
 
     page = __grab_shared_page(mfn);
@@ -1276,9 +1346,7 @@ int __mem_sharing_unshare_page(struct domain *d,
             put_page_alloc_ref(page);
 
         put_page_and_type(page);
-        put_gfn(d, gfn);
-
-        return 0;
+        goto out;
     }
 
     if ( last_gfn )
@@ -1295,12 +1363,12 @@ int __mem_sharing_unshare_page(struct domain *d,
         /* Undo dec of nr_saved_mfns, as the retry will decrease again. */
         atomic_inc(&nr_saved_mfns);
         mem_sharing_page_unlock(old_page);
-        put_gfn(d, gfn);
         /*
          * Caller is responsible for placing an event
          * in the ring.
          */
-        return -ENOMEM;
+        rc = -ENOMEM;
+        goto out;
     }
 
     copy_domain_page(page_to_mfn(page), page_to_mfn(old_page));
@@ -1327,8 +1395,18 @@ int __mem_sharing_unshare_page(struct domain *d,
      */
     paging_mark_dirty(d, page_to_mfn(page));
     /* We do not need to unlock a private page */
+
+ out:
+    if ( unlikely(nestedhvm_enabled(d)) )
+    {
+        unsigned int i;
+
+        for ( i = 0; i < MAX_NESTEDP2M; i++ )
+            p2m_unlock(d->arch.nested_p2m[i]);
+    }
+
     put_gfn(d, gfn);
-    return 0;
+    return rc;
 }
 
 int relinquish_shared_pages(struct domain *d)
@@ -1567,6 +1645,57 @@ static int bring_up_vcpus(struct domain *cd, struct domain *d)
     return 0;
 }
 
+static void copy_vcpu_nonreg_state(struct vcpu *d_vcpu, struct vcpu *cd_vcpu)
+{
+    struct hvm_vcpu_nonreg_state nrs = {};
+
+    hvm_get_nonreg_state(d_vcpu, &nrs);
+    hvm_set_nonreg_state(cd_vcpu, &nrs);
+}
+
+static int copy_vpmu(struct vcpu *d_vcpu, struct vcpu *cd_vcpu)
+{
+    struct vpmu_struct *d_vpmu = vcpu_vpmu(d_vcpu);
+    struct vpmu_struct *cd_vpmu = vcpu_vpmu(cd_vcpu);
+    int ret;
+
+    if ( !vpmu_are_all_set(d_vpmu, VPMU_INITIALIZED | VPMU_CONTEXT_ALLOCATED) )
+        return 0;
+    if ( (ret = vpmu_allocate_context(cd_vcpu)) )
+        return ret;
+
+    /*
+     * The VPMU subsystem only saves the context when the CPU does a context
+     * switch. Otherwise, the relevant MSRs are not saved on vmexit.
+     * We force a save here in case the parent CPU context is still loaded.
+     */
+    if ( vpmu_is_set(d_vpmu, VPMU_CONTEXT_LOADED) )
+    {
+        unsigned int pcpu = smp_processor_id();
+
+        if ( d_vpmu->last_pcpu != pcpu )
+        {
+            on_selected_cpus(cpumask_of(d_vpmu->last_pcpu),
+                             vpmu_save_force, d_vcpu, 1);
+            vpmu_reset(d_vpmu, VPMU_CONTEXT_LOADED);
+        }
+        else
+            vpmu_save(d_vcpu);
+    }
+
+    if ( vpmu_is_set(d_vpmu, VPMU_RUNNING) )
+        vpmu_set(cd_vpmu, VPMU_RUNNING);
+
+    /* Make sure context gets (re-)loaded when scheduled next */
+    vpmu_reset(cd_vpmu, VPMU_CONTEXT_LOADED);
+
+    memcpy(cd_vpmu->context, d_vpmu->context, d_vpmu->context_size);
+    memcpy(cd_vpmu->priv_context, d_vpmu->priv_context,
+           d_vpmu->priv_context_size);
+
+    return 0;
+}
+
 static int copy_vcpu_settings(struct domain *cd, const struct domain *d)
 {
     unsigned int i;
@@ -1575,7 +1704,7 @@ static int copy_vcpu_settings(struct domain *cd, const struct domain *d)
 
     for ( i = 0; i < cd->max_vcpus; i++ )
     {
-        const struct vcpu *d_vcpu = d->vcpu[i];
+        struct vcpu *d_vcpu = d->vcpu[i];
         struct vcpu *cd_vcpu = cd->vcpu[i];
         mfn_t vcpu_info_mfn;
 
@@ -1615,6 +1744,14 @@ static int copy_vcpu_settings(struct domain *cd, const struct domain *d)
 
             copy_domain_page(new_vcpu_info_mfn, vcpu_info_mfn);
         }
+
+        ret = copy_vpmu(d_vcpu, cd_vcpu);
+        if ( ret )
+            return ret;
+
+        hvm_vmtrace_reset(cd_vcpu);
+
+        copy_vcpu_nonreg_state(d_vcpu, cd_vcpu);
 
         /*
          * TODO: to support VMs with PV interfaces copy additional
@@ -1723,6 +1860,8 @@ static int copy_special_pages(struct domain *cd, struct domain *d)
                                 p2m_ram_rw, p2m->default_access, -1);
             if ( rc )
                 return rc;
+
+            set_gpfn_from_mfn(mfn_x(new_mfn), gfn_x(old_gfn));
         }
     }
 
@@ -1743,6 +1882,7 @@ static int copy_settings(struct domain *cd, struct domain *d)
         return rc;
 
     copy_tsc(cd, d);
+    p2m_get_hostp2m(cd)->max_mapped_pfn = p2m_get_hostp2m(d)->max_mapped_pfn;
 
     return rc;
 }
@@ -1764,6 +1904,8 @@ static int fork(struct domain *cd, struct domain *d)
 
         domain_pause(d);
         cd->max_pages = d->max_pages;
+        *cd->arch.cpu_policy = *d->arch.cpu_policy;
+        cd->vmtrace_size = d->vmtrace_size;
         cd->parent = d;
     }
 
@@ -1779,9 +1921,9 @@ static int fork(struct domain *cd, struct domain *d)
  done:
     if ( rc && rc != -ERESTART )
     {
+        cd->parent = NULL;
         domain_unpause(d);
         put_domain(d);
-        cd->parent = NULL;
     }
 
     return rc;
@@ -1797,13 +1939,20 @@ static int fork(struct domain *cd, struct domain *d)
  * footprints the hypercall continuation should be implemented (or if this
  * feature needs to be become "stable").
  */
-static int mem_sharing_fork_reset(struct domain *d, struct domain *pd)
+int mem_sharing_fork_reset(struct domain *d, bool reset_state,
+                           bool reset_memory)
 {
-    int rc;
+    int rc = 0;
+    struct domain *pd = d->parent;
     struct p2m_domain *p2m = p2m_get_hostp2m(d);
     struct page_info *page, *tmp;
 
+    ASSERT(reset_state || reset_memory);
+
     domain_pause(d);
+
+    if ( !reset_memory )
+        goto state;
 
     /* need recursive lock because we will free pages */
     spin_lock_recursive(&d->page_alloc_lock);
@@ -1837,7 +1986,9 @@ static int mem_sharing_fork_reset(struct domain *d, struct domain *pd)
     }
     spin_unlock_recursive(&d->page_alloc_lock);
 
-    rc = copy_settings(d, pd);
+ state:
+    if ( reset_state )
+        rc = copy_settings(d, pd);
 
     domain_unpause(d);
 
@@ -1867,7 +2018,7 @@ int mem_sharing_memop(XEN_GUEST_HANDLE_PARAM(xen_mem_sharing_op_t) arg)
 
     if ( !mem_sharing_enabled(d) &&
          (rc = mem_sharing_control(d, true, 0)) )
-        return rc;
+        goto out;
 
     switch ( mso.op )
     {
@@ -2144,23 +2295,21 @@ int mem_sharing_memop(XEN_GUEST_HANDLE_PARAM(xen_mem_sharing_op_t) arg)
 
     case XENMEM_sharing_op_fork_reset:
     {
-        struct domain *pd;
+        bool reset_state = mso.u.fork.flags & XENMEM_FORK_RESET_STATE;
+        bool reset_memory = mso.u.fork.flags & XENMEM_FORK_RESET_MEMORY;
 
         rc = -EINVAL;
-        if ( mso.u.fork.pad || mso.u.fork.flags )
+        if ( mso.u.fork.pad || (!reset_state && !reset_memory) )
+            goto out;
+        if ( mso.u.fork.flags &
+             ~(XENMEM_FORK_RESET_STATE | XENMEM_FORK_RESET_MEMORY) )
             goto out;
 
         rc = -ENOSYS;
         if ( !d->parent )
             goto out;
 
-        rc = rcu_lock_live_remote_domain_by_id(d->parent->domain_id, &pd);
-        if ( rc )
-            goto out;
-
-        rc = mem_sharing_fork_reset(d, pd);
-
-        rcu_unlock_domain(pd);
+        rc = mem_sharing_fork_reset(d, reset_state, reset_memory);
         break;
     }
 

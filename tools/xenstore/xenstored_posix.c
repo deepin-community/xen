@@ -85,13 +85,24 @@ void finish_daemonize(void)
 	dup2(devnull, STDOUT_FILENO);
 	dup2(devnull, STDERR_FILENO);
 	close(devnull);
-	xprintf = trace;
 }
 
 void init_pipe(int reopen_log_pipe[2])
 {
+	int flags;
+	unsigned int i;
+
 	if (pipe(reopen_log_pipe)) {
 		barf_perror("pipe");
+	}
+
+	for (i = 0; i < 2; i++) {
+		flags = fcntl(reopen_log_pipe[i], F_GETFD);
+		if (flags < 0)
+			barf_perror("pipe get flags");
+		flags |= FD_CLOEXEC;
+		if (fcntl(reopen_log_pipe[i],  F_SETFD, flags) < 0)
+			barf_perror("pipe set flags");
 	}
 }
 
@@ -100,7 +111,6 @@ void unmap_xenbus(void *interface)
 	munmap(interface, getpagesize());
 }
 
-#ifndef __sun__
 evtchn_port_t xenbus_evtchn(void)
 {
 	int fd;
@@ -147,8 +157,3 @@ void *xenbus_map(void)
 
 	return addr;
 }
-
-void xenbus_notify_running(void)
-{
-}
-#endif /* !__sun__ */

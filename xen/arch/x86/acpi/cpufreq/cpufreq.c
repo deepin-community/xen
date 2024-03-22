@@ -129,7 +129,7 @@ struct drv_cmd {
     u32 val;
 };
 
-static void do_drv_read(void *drvcmd)
+static void cf_check do_drv_read(void *drvcmd)
 {
     struct drv_cmd *cmd;
 
@@ -148,7 +148,7 @@ static void do_drv_read(void *drvcmd)
     }
 }
 
-static void do_drv_write(void *drvcmd)
+static void cf_check do_drv_write(void *drvcmd)
 {
     struct drv_cmd *cmd;
     uint64_t msr_content;
@@ -244,7 +244,7 @@ struct perf_pair {
 static DEFINE_PER_CPU(struct perf_pair, gov_perf_pair);
 static DEFINE_PER_CPU(struct perf_pair, usr_perf_pair);
 
-static void read_measured_perf_ctrs(void *_readin)
+static void cf_check read_measured_perf_ctrs(void *_readin)
 {
     struct perf_pair *readin = _readin;
 
@@ -275,7 +275,7 @@ unsigned int get_measured_perf(unsigned int cpu, unsigned int flag)
         return 0;
 
     policy = per_cpu(cpufreq_cpu_policy, cpu);
-    if (!policy || !policy->aperf_mperf)
+    if ( !policy || !cpu_has_aperfmperf )
         return 0;
 
     switch (flag)
@@ -320,7 +320,7 @@ unsigned int get_measured_perf(unsigned int cpu, unsigned int flag)
     return policy->cpuinfo.max_freq * perf_percent / 100;
 }
 
-static unsigned int get_cur_freq_on_cpu(unsigned int cpu)
+static unsigned int cf_check get_cur_freq_on_cpu(unsigned int cpu)
 {
     struct cpufreq_policy *policy;
     struct acpi_cpufreq_data *data;
@@ -340,16 +340,10 @@ static unsigned int get_cur_freq_on_cpu(unsigned int cpu)
     return extract_freq(get_cur_val(cpumask_of(cpu)), data);
 }
 
-static void feature_detect(void *info)
+static void cf_check feature_detect(void *info)
 {
     struct cpufreq_policy *policy = info;
     unsigned int eax;
-
-    if ( cpu_has_aperfmperf )
-    {
-        policy->aperf_mperf = 1;
-        cpufreq_driver.getavg = get_measured_perf;
-    }
 
     eax = cpuid_eax(6);
     if (eax & 0x2) {
@@ -375,8 +369,9 @@ static unsigned int check_freqs(const cpumask_t *mask, unsigned int freq,
     return 0;
 }
 
-static int acpi_cpufreq_target(struct cpufreq_policy *policy,
-                               unsigned int target_freq, unsigned int relation)
+static int cf_check acpi_cpufreq_target(
+    struct cpufreq_policy *policy,
+    unsigned int target_freq, unsigned int relation)
 {
     struct acpi_cpufreq_data *data = cpufreq_drv_data[policy->cpu];
     struct processor_performance *perf;
@@ -455,7 +450,7 @@ static int acpi_cpufreq_target(struct cpufreq_policy *policy,
     return result;
 }
 
-static int acpi_cpufreq_verify(struct cpufreq_policy *policy)
+static int cf_check acpi_cpufreq_verify(struct cpufreq_policy *policy)
 {
     struct acpi_cpufreq_data *data;
     struct processor_performance *perf;
@@ -500,8 +495,7 @@ acpi_cpufreq_guess_freq(struct acpi_cpufreq_data *data, unsigned int cpu)
     }
 }
 
-static int 
-acpi_cpufreq_cpu_init(struct cpufreq_policy *policy)
+static int cf_check acpi_cpufreq_cpu_init(struct cpufreq_policy *policy)
 {
     unsigned int i;
     unsigned int valid_states = 0;
@@ -615,7 +609,7 @@ err_unreg:
     return result;
 }
 
-static int acpi_cpufreq_cpu_exit(struct cpufreq_policy *policy)
+static int cf_check acpi_cpufreq_cpu_exit(struct cpufreq_policy *policy)
 {
     struct acpi_cpufreq_data *data = cpufreq_drv_data[policy->cpu];
 
@@ -636,17 +630,24 @@ static const struct cpufreq_driver __initconstrel acpi_cpufreq_driver = {
     .exit   = acpi_cpufreq_cpu_exit,
 };
 
-static int __init cpufreq_driver_init(void)
+static int __init cf_check cpufreq_driver_init(void)
 {
     int ret = 0;
 
-    if ((cpufreq_controller == FREQCTL_xen) &&
-        (boot_cpu_data.x86_vendor == X86_VENDOR_INTEL))
-        ret = cpufreq_register_driver(&acpi_cpufreq_driver);
-    else if ((cpufreq_controller == FREQCTL_xen) &&
-        (boot_cpu_data.x86_vendor &
-         (X86_VENDOR_AMD | X86_VENDOR_HYGON)))
-        ret = powernow_register_driver();
+    if ( cpufreq_controller == FREQCTL_xen )
+    {
+        switch ( boot_cpu_data.x86_vendor )
+        {
+        case X86_VENDOR_INTEL:
+            ret = cpufreq_register_driver(&acpi_cpufreq_driver);
+            break;
+
+        case X86_VENDOR_AMD:
+        case X86_VENDOR_HYGON:
+            ret = powernow_register_driver();
+            break;
+        }
+    }
 
     return ret;
 }

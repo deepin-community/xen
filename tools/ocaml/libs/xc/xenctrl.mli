@@ -42,8 +42,12 @@ type x86_arch_emulation_flags =
   | X86_EMU_USE_PIRQ
   | X86_EMU_VPCI
 
+type x86_arch_misc_flags =
+  | X86_MSR_RELAXED
+
 type xen_x86_arch_domainconfig = {
   emulation_flags: x86_arch_emulation_flags list;
+  misc_flags: x86_arch_misc_flags list;
 }
 
 type arch_domainconfig =
@@ -57,6 +61,8 @@ type domain_create_flag =
   | CDF_OOS_OFF
   | CDF_XS_DOMAIN
   | CDF_IOMMU
+  | CDF_NESTED_VIRT
+  | CDF_VPMU
 
 type domain_create_iommu_opts =
   | IOMMU_NO_SHAREPT
@@ -70,6 +76,8 @@ type domctl_create_config = {
   max_evtchn_port: int;
   max_grant_frames: int;
   max_maptrack_frames: int;
+  max_grant_version: int;
+  cpupool_id: int32;
   arch: arch_domainconfig;
 }
 
@@ -100,6 +108,18 @@ type physinfo_cap_flag =
   | CAP_HAP
   | CAP_Shadow
   | CAP_IOMMU_HAP_PT_SHARE
+  | CAP_Vmtrace
+  | CAP_Vpmu
+  | CAP_Gnttab_v1
+  | CAP_Gnttab_v2
+
+type arm_physinfo_cap_flag
+
+type x86_physinfo_cap_flag
+
+type arch_physinfo_cap_flags =
+  | ARM of arm_physinfo_cap_flag list
+  | X86 of x86_physinfo_cap_flag list
 
 type physinfo = {
   threads_per_core : int;
@@ -112,6 +132,7 @@ type physinfo = {
   scrub_pages      : nativeint;
   capabilities     : physinfo_cap_flag list;
   max_nr_cpus      : int; (** compile-time max possible number of nr_cpus *)
+  arch_capabilities : arch_physinfo_cap_flags;
 }
 type version = { major : int; minor : int; extra : string; }
 type compile_info = {
@@ -132,16 +153,18 @@ external interface_close : handle -> unit = "stub_xc_interface_close"
  * interface_open and interface_close or with_intf although mixing both
  * is possible *)
 val with_intf : (handle -> 'a) -> 'a
+
 (** [get_handle] returns the global handle used by [with_intf] *)
 val get_handle: unit -> handle option
+
 (** [close handle] closes the handle maintained by [with_intf]. This
  * should only be closed before process exit. It must not be called from
  * a function called directly or indirectly by with_intf as this
  * would invalidate the handle that with_intf passes to its argument. *)
 val close_handle: unit -> unit
 
-external domain_create : handle -> domctl_create_config -> domid
-  = "stub_xc_domain_create"
+val domain_create: handle -> ?domid:int -> domctl_create_config -> domid
+
 external domain_sethandle : handle -> domid -> string -> unit = "stub_xc_domain_sethandle"
 external domain_max_vcpus : handle -> domid -> int -> unit
   = "stub_xc_domain_max_vcpus"
@@ -212,7 +235,13 @@ external version_changeset : handle -> string = "stub_xc_version_changeset"
 external version_capabilities : handle -> string
   = "stub_xc_version_capabilities"
 
-type featureset_index = Featureset_raw | Featureset_host | Featureset_pv | Featureset_hvm
+type featureset_index =
+  | Featureset_raw
+  | Featureset_host
+  | Featureset_pv
+  | Featureset_hvm
+  | Featureset_pv_max
+  | Featureset_hvm_max
 external get_cpu_featureset : handle -> featureset_index -> int64 array = "stub_xc_get_cpu_featureset"
 
 external pages_to_kib : int64 -> int64 = "stub_pages_to_kib"

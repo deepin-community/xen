@@ -580,6 +580,11 @@ to have. This value controls how many pages of foreign domains can be accessed
 via the grant mechanism by this domain. The default value is settable via
 L<xl.conf(5)>.
 
+=item B<max_grant_version=NUMBER>
+
+Specify the maximum grant table version the domain is allowed to use. The
+default value is settable via L<xl.conf(5)>.
+
 =item B<nomigrate=BOOLEAN>
 
 Disable migration of this domain.  This enables certain other features
@@ -678,6 +683,32 @@ be re-instated.
 The existence of the suspend event channel path can cause problems with
 certain PV drivers running in the guest (e.g. old Red Hat PV drivers for
 Windows).
+
+If this option is not specified then it will default to B<false>.
+
+=item B<vmtrace_buf_kb=KBYTES>
+
+Specifies the size of vmtrace buffer that would be allocated for each
+vCPU belonging to this domain.  Disabled (i.e.  B<vmtrace_buf_kb=0>) by
+default.
+
+B<NOTE>: Acceptable values are platform specific.  For Intel Processor
+Trace, this value must be a power of 2 between 4k and 16M.
+
+=item B<vpmu=BOOLEAN>
+
+Currently ARM only.
+
+Specifies whether to enable the access to PMU registers by disabling
+the PMU traps.
+
+The PMU registers are not virtualized and the physical registers are directly
+accessible when this parameter is enabled. There is no interrupt support and
+Xen will not save/restore the register values on context switches.
+
+vPMU, by design and purpose, exposes system level performance
+information to the guest. Only to be used by sufficiently privileged
+domains. This feature is currently in experimental state.
 
 If this option is not specified then it will default to B<false>.
 
@@ -1101,73 +1132,7 @@ option is valid only when the B<controller> option is specified.
 =item B<pci=[ "PCI_SPEC_STRING", "PCI_SPEC_STRING", ...]>
 
 Specifies the host PCI devices to passthrough to this guest.
-Each B<PCI_SPEC_STRING> has the form of
-B<[DDDD:]BB:DD.F[@VSLOT],KEY=VALUE,KEY=VALUE,...> where:
-
-=over 4
-
-=item B<[DDDD:]BB:DD.F>
-
-Identifies the PCI device from the host perspective in the domain
-(B<DDDD>), Bus (B<BB>), Device (B<DD>) and Function (B<F>) syntax. This is
-the same scheme as used in the output of B<lspci(1)> for the device in
-question.
-
-Note: by default B<lspci(1)> will omit the domain (B<DDDD>) if it
-is zero and it is optional here also. You may specify the function
-(B<F>) as B<*> to indicate all functions.
-
-=item B<@VSLOT>
-
-Specifies the virtual slot where the guest will see this
-device. This is equivalent to the B<DD> which the guest sees. In a
-guest B<DDDD> and B<BB> are C<0000:00>.
-
-=item B<permissive=BOOLEAN>
-
-By default pciback only allows PV guests to write "known safe" values
-into PCI configuration space, likewise QEMU (both qemu-xen and
-qemu-xen-traditional) imposes the same constraint on HVM guests.
-However, many devices require writes to other areas of the configuration space
-in order to operate properly.  This option tells the backend (pciback or QEMU)
-to allow all writes to the PCI configuration space of this device by this
-domain.
-
-B<This option should be enabled with caution:> it gives the guest much
-more control over the device, which may have security or stability
-implications.  It is recommended to only enable this option for
-trusted VMs under administrator's control.
-
-=item B<msitranslate=BOOLEAN>
-
-Specifies that MSI-INTx translation should be turned on for the PCI
-device. When enabled, MSI-INTx translation will always enable MSI on
-the PCI device regardless of whether the guest uses INTx or MSI. Some
-device drivers, such as NVIDIA's, detect an inconsistency and do not
-function when this option is enabled. Therefore the default is false (0).
-
-=item B<seize=BOOLEAN>
-
-Tells B<xl> to automatically attempt to re-assign a device to
-pciback if it is not already assigned.
-
-B<WARNING:> If you set this option, B<xl> will gladly re-assign a critical
-system device, such as a network or a disk controller being used by
-dom0 without confirmation.  Please use with care.
-
-=item B<power_mgmt=BOOLEAN>
-
-B<(HVM only)> Specifies that the VM should be able to program the
-D0-D3hot power management states for the PCI device. The default is false (0).
-
-=item B<rdm_policy=STRING>
-
-B<(HVM/x86 only)> This is the same as the policy setting inside the B<rdm>
-option but just specific to a given device. The default is "relaxed".
-
-Note: this would override global B<rdm> option.
-
-=back
+See L<xl-pci-configuration(5)> for more details.
 
 =item B<pci_permissive=BOOLEAN>
 
@@ -2009,24 +1974,16 @@ proccount procpkg stepping
 
 =back
 
-List of keys taking a character:
+List of keys taking a character can be found in the public header file
+L<arch-x86/cpufeatureset.h|https://xenbits.xen.org/docs/unstable/hypercall/x86_64/include,public,arch-x86,cpufeatureset.h.html>
 
-=over 4
+The feature names described in C<cpufeatureset.h> should be specified in all
+lowercase letters, and with underscores converted to hyphens.  For example in
+order to reference feature C<LAHF_LM> the string C<lahf-lm> should be used.
 
-3dnow 3dnowext 3dnowprefetch abm acpi adx aes altmovcr8 apic arat avx avx2
-avx512-4fmaps avx512-4vnniw avx512bw avx512cd avx512dq avx512er avx512f
-avx512ifma avx512pf avx512vbmi avx512vl bmi1 bmi2 clflushopt clfsh clwb cmov
-cmplegacy cmpxchg16 cmpxchg8 cmt cntxid dca de ds dscpl dtes64 erms est extapic
-f16c ffxsr fma fma4 fpu fsgsbase fxsr hle htt hypervisor ia64 ibs invpcid
-invtsc lahfsahf lm lwp mca mce misalignsse mmx mmxext monitor movbe mpx msr
-mtrr nodeid nx ospke osvw osxsave pae page1gb pat pbe pcid pclmulqdq pdcm
-perfctr_core perfctr_nb pge pku popcnt pse pse36 psn rdrand rdseed rdtscp rtm
-sha skinit smap smep smx ss sse sse2 sse3 sse4.1 sse4.2 sse4_1 sse4_2 sse4a
-ssse3 svm svm_decode svm_lbrv svm_npt svm_nrips svm_pausefilt svm_tscrate
-svm_vmcbclean syscall sysenter tbm tm tm2 topoext tsc tsc-deadline tsc_adjust
-umip vme vmx wdt x2apic xop xsave xtpr
-
-=back
+Note that C<clflush> is described as an option that takes a value, and that
+takes precedence over the C<clflush> flag in C<cpufeatureset.h>.  The feature
+flag must be referenced as C<clfsh>.
 
 =back
 
@@ -2318,11 +2275,31 @@ This set incorporates use of a hypercall for interprocessor interrupts.
 This enlightenment may improve performance of Windows guests with multiple
 virtual CPUs.
 
+=item B<ex_processor_masks>
+
+This set enables new hypercall variants taking a variably-sized sparse
+B<Virtual Processor Set> as an argument, rather than a simple 64-bit
+mask. Hence this enlightenment must be specified for guests with more
+than 64 vCPUs if B<hcall_remote_tlb_flush> and/or B<hcall_ipi> are also
+specified.
+
+=item B<no_vp_limit>
+
+This group when set indicates to a guest that the hypervisor does not
+explicitly have any limits on the number of Virtual processors a guest
+is allowed to bring up. It is strongly recommended to keep this enabled
+for guests with more than 64 vCPUs.
+
+=item B<cpu_hotplug>
+
+This set enables dynamic changes to Virtual processor states in Windows
+guests effectively allowing vCPU hotplug.
+
 =item B<defaults>
 
 This is a special value that enables the default set of groups, which
 is currently the B<base>, B<freq>, B<time_ref_count>, B<apic_assist>,
-B<crash_ctl> and B<stimer> groups.
+B<crash_ctl>, B<stimer>, B<no_vp_limit> and B<cpu_hotplug> groups.
 
 =item B<all>
 
@@ -2385,7 +2362,7 @@ If B<videoram> is set less than 128MB, an error will be triggered.
 
 =item B<stdvga=BOOLEAN>
 
-Speficies a standard VGA card with VBE (VESA BIOS Extensions) as the
+Specifies a standard VGA card with VBE (VESA BIOS Extensions) as the
 emulated graphics device. If your guest supports VBE 2.0 or
 later (e.g. Windows XP onwards) then you should enable this.
 stdvga supports more video ram and bigger resolutions than Cirrus.
@@ -2555,9 +2532,9 @@ The form serial=DEVICE is also accepted for backwards compatibility.
 
 =item B<soundhw="DEVICE">
 
-Select the virtual sound card to expose to the guest. The valid
-devices are defined by the device model configuration, please see the
-B<qemu(1)> manpage for details. The default is not to export any sound
+Select the virtual sound card to expose to the guest. The valid devices are
+B<hda>, B<ac97>, B<es1370>, B<adlib>, B<cs4231a>, B<gus>, B<sb16> if there are
+available with the device model QEMU. The default is not to export any sound
 device.
 
 =item B<vkb_device=BOOLEAN>
@@ -2725,6 +2702,11 @@ are not using hardware assisted paging (i.e. you are using shadow
 mode) and your guest workload consists of a very large number of
 similar processes then increasing this value may improve performance.
 
+On Arm, this field is used to determine the size of the guest P2M pages
+pool, and the default value is the same as x86 HAP mode, plus 512KB to
+cover the extended regions. Users should adjust this value if bigger
+P2M pool size is needed.
+
 =back
 
 =head2 Device-Model Options
@@ -2778,6 +2760,10 @@ B<device_model_version> which you have specified.
 In case of B<qemu-xen-traditional> it is expected to be MiniOS-based stubdomain
 image, in case of B<qemu-xen> it is expected to be Linux-based stubdomain
 kernel.
+
+=item B<stubdomain_cmdline="STRING">
+
+Set the device-model stubdomain kernel command line to B<STRING>.
 
 =item B<stubdomain_ramdisk="PATH">
 
@@ -2897,6 +2883,20 @@ Intel local MCE
 No MCA capabilities in above list are enabled.
 
 =back
+
+=item B<msr_relaxed=BOOLEAN>
+
+The "msr_relaxed" boolean is an interim option, and defaults to false.
+
+In Xen 4.15, the default behaviour for unhandled MSRs has been changed,
+to avoid leaking host data into guests, and to avoid breaking guest
+logic which uses #GP probing to identify the availability of MSRs.
+
+However, this new stricter behaviour has the possibility to break
+guests, and a more 4.14-like behaviour can be selected by setting this
+option.
+
+If using this option is necessary to fix an issue, please report a bug.
 
 =back
 

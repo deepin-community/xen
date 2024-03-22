@@ -17,6 +17,14 @@
  * Copyright 2007-2008 Samuel Thibault <samuel.thibault@eu.citrix.com>.
  */
 
+/*
+ * xenctrl.h currently defines __XEN_TOOLS__ which affects what is
+ * exposed by Xen headers. As the define needs to be set consistently,
+ * we want to include xenctrl.h before the mini-os headers (they include
+ * public headers).
+ */
+#include <xenctrl.h>
+
 #include <mini-os/types.h>
 #include <mini-os/os.h>
 #include <mini-os/mm.h>
@@ -55,7 +63,7 @@ void *osdep_xenforeignmemory_map(xenforeignmemory_handle *fmem,
 int osdep_xenforeignmemory_unmap(xenforeignmemory_handle *fmem,
                                  void *addr, size_t num)
 {
-    return munmap(addr, num << PAGE_SHIFT);
+    return munmap(addr, num << XC_PAGE_SHIFT);
 }
 
 /*
