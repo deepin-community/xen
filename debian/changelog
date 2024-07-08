@@ -1,3 +1,9 @@
+xen (4.17.3+10-g091466ba55-1deepin1) unstable; urgency=medium
+
+  * No source change upload against python 3.12.
+
+ -- Tianyu Chen <sweetyfish@deepin.org>  Mon, 08 Jul 2024 09:58:33 +0200
+
 xen (4.17.3+10-g091466ba55-1) unstable; urgency=medium
 
   * Update to new upstream version 4.17.3+10-g091466ba55, which also contains
