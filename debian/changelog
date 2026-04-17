@@ -1,8 +1,106 @@
-xen (4.17.3+10-g091466ba55-1deepin1) unstable; urgency=medium
+xen (4.17.5+72-g01140da4e8-1deepin1) unstable; urgency=medium
 
-  * No source change upload against python 3.12.
+  * New upstream version 4.17.5+72-g01140da4e8
+  * Security fixes for the following CVEs:
+    - CVE-2025-58142: NULL pointer dereference in viridian code
+    - CVE-2025-58143: Race condition in reference TSC page mapping
+    - CVE-2025-58144: NULL pointer dereference in page mapping
+    - CVE-2025-58145: P2M lock not held during page reference
+    - CVE-2025-58147: Out-of-bounds write in vpmask_set()
+    - CVE-2025-58148: Out-of-bounds read in send_ipi()
+    - CVE-2025-58149: (XSA-475)
+    - CVE-2025-58150: (XSA-475)
+  * Reference: DSA-6068-1, XSA-472, XSA-473, XSA-475
 
- -- Tianyu Chen <sweetyfish@deepin.org>  Mon, 08 Jul 2024 09:58:33 +0200
+ -- deepin-ci-robot <packages@deepin.org>  Thu, 17 Apr 2026 13:25:00 +0800
+
+xen (4.17.5+72-g01140da4e8-1) bookworm-security; urgency=medium
+
+  Significant changes:
+  * Update to new upstream version 4.17.5+72-g01140da4e8, which also contains
+    security fixes for the following issues:
+    (Closes: #1105193) (Closes: #1120075)
+    - deadlock potential with VT-d and legacy PCI device pass-through
+      XSA-467 CVE-2025-1713
+    - x86: Indirect Target Selection
+      XSA-469 CVE-2024-28956
+    - x86: Incorrect stubs exception handling for flags recovery
+      XSA-470 CVE-2025-27465
+    - x86: Transitive Scheduler Attacks
+      XSA-471 CVE-2024-36350 CVE-2024-36357
+    - Multiple vulnerabilities in the Viridian interface
+      XSA-472 CVE-2025-27466 CVE-2025-58142 CVE-2025-58143
+    - Arm issues with page refcounting
+      XSA-473 CVE-2025-58144 CVE-2025-58145
+    - x86: Incorrect input sanitisation in Viridian hypercalls
+      XSA-475 CVE-2025-58147 CVE-2025-58148
+    - Incorrect removal of permissions on PCI device unplug
+      XSA-476 CVE-2025-58149
+  * Note that the following XSA are not listed, because...
+     - XSA-468 applies to Windows PV drivers
+     - XSA-474 applies to XAPI which is not included in Debian
+
+  Packaging minor fixes and improvements:
+  * debian/salsa-ci.yml: adjust for new salsa-ci pipeline
+
+  Additional changes for 4.17 that were not backported upstream:
+  * Cherry-pick dd05d265b8 ("x86/intel: Fix PERF_GLOBAL fixup when
+    virtualised") to fix a boot loop when using Xen under nested
+    virtualization (Closes: #1105222)
+
+ -- Hans van Kranenburg <hans@knorrie.org>  Sat, 29 Nov 2025 14:52:25 +0100
+
+xen (4.17.5+23-ga4e5191dc0-1+deb12u1) bookworm; urgency=medium
+
+  * Ignore lintian error not relevant for bookworm in salsa-ci.
+  * Cherry-pick e6472d4668 (tools/xg: increase LZMA_BLOCK_SIZE for
+    uncompressing the kernel) to allow direct kernel boot with kernels >=
+    6.12 (Closes: #1092495).
+
+ -- Maximilian Engelhardt <maxi@daemonizer.de>  Wed, 19 Feb 2025 00:00:27 +0100
+
+xen (4.17.5+23-ga4e5191dc0-1) bookworm-security; urgency=medium
+
+  * Update to new upstream version 4.17.5+23-ga4e5191dc0, which also contains
+    security fixes for the following issues:
+    - x86: shadow stack vs exceptions from emulation stubs
+      XSA-451 CVE-2023-46841
+    - x86: Register File Data Sampling
+      XSA-452 CVE-2023-28746
+    - GhostRace: Speculative Race Conditions
+      XSA-453 CVE-2024-2193
+    - x86 HVM hypercalls may trigger Xen bug check
+      XSA-454 CVE-2023-46842
+    - x86: Incorrect logic for BTC/SRSO mitigations
+      XSA-455 CVE-2024-31142
+    - x86: Native Branch History Injection
+      XSA-456 CVE-2024-2201
+    - double unlock in x86 guest IRQ handling
+      XSA-458 CVE-2024-31143
+    - error handling in x86 IOMMU identity mapping
+      XSA-460 CVE-2024-31145
+    - PCI device pass-through with shared resources
+      XSA-461 CVE-2024-31146
+    - x86: Deadlock in vlapic_error()
+      XSA-462 CVE-2024-45817
+    - Deadlock in x86 HVM standard VGA handling
+      XSA-463 CVE-2024-45818
+    - libxl leaks data to PVH guests via ACPI tables
+      XSA-464 CVE-2024-45819
+  * Note that the following XSA are not listed, because...
+    - XSA-457 and XSA-465 have patches for the Linux kernel.
+    - XSA-459 is within Xapi which is not shipped by this package.
+    - XSA-466 contains a documentation update that was only applied to the
+      current development version of Xen
+
+ -- Hans van Kranenburg <hans@knorrie.org>  Fri, 20 Dec 2024 18:46:37 +0100
+
+xen (4.17.3+10-g091466ba55-1~deb12u1) bookworm; urgency=medium
+
+  * Rebuild 4.17.3+10-g091466ba55-1 for Bookworm to address the security
+    issues since last Debian stable update.
+
+ -- Hans van Kranenburg <hans@knorrie.org>  Sun, 04 Feb 2024 16:31:59 +0100
 
 xen (4.17.3+10-g091466ba55-1) unstable; urgency=medium
 
@@ -21,6 +119,14 @@ xen (4.17.3+10-g091466ba55-1) unstable; urgency=medium
     (Closes: #1062048)
 
  -- Hans van Kranenburg <hans@knorrie.org>  Sun, 04 Feb 2024 13:45:17 +0100
+
+xen (4.17.2+76-ge1f9cb16e2-1~deb12u1) bookworm; urgency=medium
+
+  * Rebuild for bookworm to address the security issues since
+    4.17.1+2-gb773c48e36-1 listed blow.
+  * d/salsa-ci.yml: Set RELEASE variable to bookworm
+
+ -- Maximilian Engelhardt <maxi@daemonizer.de>  Sat, 02 Dec 2023 17:58:08 +0100
 
 xen (4.17.2+76-ge1f9cb16e2-1) unstable; urgency=medium
 

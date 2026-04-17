@@ -22,7 +22,7 @@ Maximilian Engelhardt <maxi@daemonizer.de>
  6 files changed, 32 insertions(+), 32 deletions(-)
 
 diff --git a/xen/build.mk b/xen/build.mk
-index 9ecb104..f5d9687 100644
+index b489f77..97e6ad7 100644
 --- a/xen/build.mk
 +++ b/xen/build.mk
 @@ -17,7 +17,6 @@ targets += .banner
