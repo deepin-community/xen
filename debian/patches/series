@@ -21,3 +21,5 @@ misc/tools-pygrub-remove-static-solaris-support
 0021-docs-set-date-to-SOURCE_DATE_EPOCH-if-available.patch
 0022-give-meaningful-error-message-if-qemu-device-model-i.patch
 0023-xen-arch-x86-make-objdump-output-user-locale-agnosti.patch
+0024-tools-xg-increase-LZMA_BLOCK_SIZE-for-uncompressing-.patch
+0025-x86-intel-Fix-PERF_GLOBAL-fixup-when-virtualised.patch

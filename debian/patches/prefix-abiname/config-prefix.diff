@@ -9,7 +9,7 @@ Patch-Name: config-prefix.diff
  2 files changed, 2 insertions(+), 1 deletion(-)
 
 diff --git a/Config.mk b/Config.mk
-index 8d91e4c..fc90691 100644
+index ad214a6..f07c53a 100644
 --- a/Config.mk
 +++ b/Config.mk
 @@ -78,7 +78,7 @@ EXTRA_LIB += $(EXTRA_PREFIX)/lib

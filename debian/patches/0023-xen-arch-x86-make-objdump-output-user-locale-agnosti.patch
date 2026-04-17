@@ -13,10 +13,10 @@ Signed-off-by: Maximilian Engelhardt <maxi@daemonizer.de>
  1 file changed, 1 insertion(+), 1 deletion(-)
 
 diff --git a/xen/arch/x86/arch.mk b/xen/arch/x86/arch.mk
-index 227d439..3b10eb3 100644
+index 379317c..f50c201 100644
 --- a/xen/arch/x86/arch.mk
 +++ b/xen/arch/x86/arch.mk
-@@ -108,7 +108,7 @@ endif
+@@ -111,7 +111,7 @@ endif
  ifeq ($(XEN_BUILD_PE),y)
  
  # Check if the linker produces fixups in PE by default
