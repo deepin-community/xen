@@ -19,6 +19,7 @@
 
 #ifdef CONFIG_PV32
 int8_t __read_mostly opt_pv32 = -1;
+unsigned long __ro_after_init cr4_pv32_mask;
 #endif
 
 static int __init cf_check parse_pv(const char *s)
@@ -245,6 +246,34 @@ int switch_compat(struct domain *d)
     d->arch.has_32bit_shinfo = 1;
     d->arch.pv.is_32bit = true;
 
+    /*
+     * For 32bit PV guests the shared_info machine address must fit in a 32-bit
+     * field within the guest's start_info structure.  We might need to free
+     * the current page and allocate a new one that fulfills this requirement.
+     */
+    if ( virt_to_maddr(d->shared_info) >> 32 )
+    {
+        shared_info_t *prev = d->shared_info;
+
+        d->shared_info = alloc_xenheap_pages(0, MEMF_bits(32));
+        if ( !d->shared_info )
+        {
+            d->shared_info = prev;
+            rc = -ENOMEM;
+            goto undo_and_fail;
+        }
+        clear_page(d->shared_info);
+        share_xen_page_with_guest(virt_to_page(d->shared_info), d, SHARE_rw);
+        /*
+         * Ensure all pointers to the old shared_info page are replaced.  vCPUs
+         * below XEN_LEGACY_MAX_VCPUS may have stashed a pointer to
+         * shared_info->vcpu_info[id].
+         */
+        for_each_vcpu ( d, v )
+            vcpu_info_reset(v);
+        put_page(virt_to_page(prev));
+    }
+
     for_each_vcpu( d, v )
     {
         if ( (rc = setup_compat_arg_xlat(v)) ||
@@ -375,15 +404,7 @@ int pv_domain_initialise(struct domain *d)
          (d->arch.pv.cpuidmasks = xmemdup(&cpuidmask_defaults)) == NULL )
         goto fail;
 
-    rc = create_perdomain_mapping(d, GDT_LDT_VIRT_START,
-                                  GDT_LDT_MBYTES << (20 - PAGE_SHIFT),
-                                  NULL, NULL);
-    if ( rc )
-        goto fail;
-
     d->arch.ctxt_switch = &pv_csw;
-
-    d->arch.pv.xpti = is_hardware_domain(d) ? opt_xpti_hwdom : opt_xpti_domu;
 
     if ( !is_pv_32bit_domain(d) && use_invpcid && cpu_has_pcid )
         switch ( ACCESS_ONCE(opt_pcid) )

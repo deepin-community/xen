@@ -23,6 +23,7 @@
  * their XEN_CPUFEATURE() being appropriate in the included context.
  */
 
+/* SAF-8-safe inclusion procedure left to caller */
 #ifndef XEN_CPUFEATURE
 
 /*
@@ -72,6 +73,11 @@ enum {
  *   'H' = HVM HAP guests (not PV or HVM Shadow guests).
  *   Upper case => Available by default
  *   Lower case => Can be opted-in to, but not available by default.
+ *
+ * Migration: '|'
+ *   This bit should be visible to a guest if any anywhere it might run has
+ *   the bit set.  i.e. it needs accumulating across the migration pool,
+ *   rather than intersecting.
  */
 
 /* Intel-defined CPU features, CPUID level 0x00000001.edx, word 0 */
@@ -115,6 +121,7 @@ XEN_CPUFEATURE(SMX,           1*32+ 6) /*   Safer Mode Extensions */
 XEN_CPUFEATURE(EIST,          1*32+ 7) /*   Enhanced SpeedStep */
 XEN_CPUFEATURE(TM2,           1*32+ 8) /*   Thermal Monitor 2 */
 XEN_CPUFEATURE(SSSE3,         1*32+ 9) /*A  Supplemental Streaming SIMD Extensions-3 */
+XEN_CPUFEATURE(SDBG,          1*32+11) /*   IA32_DEBUG_INTERFACE MSR for silicon debugging support */
 XEN_CPUFEATURE(FMA,           1*32+12) /*A  Fused Multiply Add */
 XEN_CPUFEATURE(CX16,          1*32+13) /*A  CMPXCHG16B */
 XEN_CPUFEATURE(XTPR,          1*32+14) /*   Send Task Priority Messages */
@@ -123,7 +130,7 @@ XEN_CPUFEATURE(PCID,          1*32+17) /*H  Process Context ID */
 XEN_CPUFEATURE(DCA,           1*32+18) /*   Direct Cache Access */
 XEN_CPUFEATURE(SSE4_1,        1*32+19) /*A  Streaming SIMD Extensions 4.1 */
 XEN_CPUFEATURE(SSE4_2,        1*32+20) /*A  Streaming SIMD Extensions 4.2 */
-XEN_CPUFEATURE(X2APIC,        1*32+21) /*!A Extended xAPIC */
+XEN_CPUFEATURE(X2APIC,        1*32+21) /*!S Extended xAPIC */
 XEN_CPUFEATURE(MOVBE,         1*32+22) /*A  movbe instruction */
 XEN_CPUFEATURE(POPCNT,        1*32+23) /*A  POPCNT instruction */
 XEN_CPUFEATURE(TSC_DEADLINE,  1*32+24) /*S  TSC Deadline Timer */
@@ -168,12 +175,14 @@ XEN_CPUFEATURE(TBM,           3*32+21) /*A  trailing bit manipulations */
 XEN_CPUFEATURE(TOPOEXT,       3*32+22) /*   topology extensions CPUID leafs */
 XEN_CPUFEATURE(DBEXT,         3*32+26) /*A  data breakpoint extension */
 XEN_CPUFEATURE(MONITORX,      3*32+29) /*   MONITOR extension (MONITORX/MWAITX) */
+XEN_CPUFEATURE(ADDR_MSK_EXT,  3*32+30) /*A  Address Mask Extentions */
 
 /* Intel-defined CPU features, CPUID level 0x0000000D:1.eax, word 4 */
 XEN_CPUFEATURE(XSAVEOPT,      4*32+ 0) /*A  XSAVEOPT instruction */
 XEN_CPUFEATURE(XSAVEC,        4*32+ 1) /*A  XSAVEC/XRSTORC instructions */
 XEN_CPUFEATURE(XGETBV1,       4*32+ 2) /*A  XGETBV with %ecx=1 */
 XEN_CPUFEATURE(XSAVES,        4*32+ 3) /*S  XSAVES/XRSTORS instructions */
+XEN_CPUFEATURE(XFD,           4*32+ 4) /*   MSR_XFD{,_ERR} (eXtended Feature Disable) */
 
 /* Intel-defined CPU features, CPUID level 0x00000007:0.ebx, word 5 */
 XEN_CPUFEATURE(FSGSBASE,      5*32+ 0) /*A  {RD,WR}{FS,GS}BASE instructions */
@@ -201,8 +210,8 @@ XEN_CPUFEATURE(AVX512_IFMA,   5*32+21) /*A  AVX-512 Integer Fused Multiply Add *
 XEN_CPUFEATURE(CLFLUSHOPT,    5*32+23) /*A  CLFLUSHOPT instruction */
 XEN_CPUFEATURE(CLWB,          5*32+24) /*!A CLWB instruction */
 XEN_CPUFEATURE(PROC_TRACE,    5*32+25) /*   Processor Trace */
-XEN_CPUFEATURE(AVX512PF,      5*32+26) /*A  AVX-512 Prefetch Instructions */
-XEN_CPUFEATURE(AVX512ER,      5*32+27) /*A  AVX-512 Exponent & Reciprocal Instrs */
+XEN_CPUFEATURE(AVX512PF,      5*32+26) /*   Xeon Phi AVX-512 Prefetch Instructions */
+XEN_CPUFEATURE(AVX512ER,      5*32+27) /*   Xeon Phi AVX-512 Exponent & Reciprocal Instrs */
 XEN_CPUFEATURE(AVX512CD,      5*32+28) /*A  AVX-512 Conflict Detection Instrs */
 XEN_CPUFEATURE(SHA,           5*32+29) /*A  SHA1 & SHA256 instructions */
 XEN_CPUFEATURE(AVX512BW,      5*32+30) /*A  AVX-512 Byte and Word Instructions */
@@ -214,6 +223,7 @@ XEN_CPUFEATURE(AVX512_VBMI,   6*32+ 1) /*A  AVX-512 Vector Byte Manipulation Ins
 XEN_CPUFEATURE(UMIP,          6*32+ 2) /*S  User Mode Instruction Prevention */
 XEN_CPUFEATURE(PKU,           6*32+ 3) /*H  Protection Keys for Userspace */
 XEN_CPUFEATURE(OSPKE,         6*32+ 4) /*!  OS Protection Keys Enable */
+XEN_CPUFEATURE(WAITPKG,       6*32+ 5) /*   UMONITOR/UMWAIT/TPAUSE */
 XEN_CPUFEATURE(AVX512_VBMI2,  6*32+ 6) /*A  Additional AVX-512 Vector Byte Manipulation Instrs */
 XEN_CPUFEATURE(CET_SS,        6*32+ 7) /*   CET - Shadow Stacks */
 XEN_CPUFEATURE(GFNI,          6*32+ 8) /*A  Galois Field Instrs */
@@ -221,12 +231,17 @@ XEN_CPUFEATURE(VAES,          6*32+ 9) /*A  Vector AES Instrs */
 XEN_CPUFEATURE(VPCLMULQDQ,    6*32+10) /*A  Vector Carry-less Multiplication Instrs */
 XEN_CPUFEATURE(AVX512_VNNI,   6*32+11) /*A  Vector Neural Network Instrs */
 XEN_CPUFEATURE(AVX512_BITALG, 6*32+12) /*A  Support for VPOPCNT[B,W] and VPSHUFBITQMB */
+XEN_CPUFEATURE(TME,           6*32+13) /*   Total Memory Encryption */
 XEN_CPUFEATURE(AVX512_VPOPCNTDQ, 6*32+14) /*A  POPCNT for vectors of DW/QW */
+XEN_CPUFEATURE(LA57,          6*32+16) /*   5-level paging (57-bit linear address) */
 XEN_CPUFEATURE(RDPID,         6*32+22) /*A  RDPID instruction */
+XEN_CPUFEATURE(BLD,           6*32+24) /*   BusLock Detect (#DB trap) support */
 XEN_CPUFEATURE(CLDEMOTE,      6*32+25) /*A  CLDEMOTE instruction */
 XEN_CPUFEATURE(MOVDIRI,       6*32+27) /*a  MOVDIRI instruction */
 XEN_CPUFEATURE(MOVDIR64B,     6*32+28) /*a  MOVDIR64B instruction */
 XEN_CPUFEATURE(ENQCMD,        6*32+29) /*   ENQCMD{,S} instructions */
+XEN_CPUFEATURE(SGX_LC,        6*32+30) /*   SGX Launch Configuration */
+XEN_CPUFEATURE(PKS,           6*32+31) /*H  Protection Key for Supervisor */
 
 /* AMD-defined CPU features, CPUID level 0x80000007.edx, word 7 */
 XEN_CPUFEATURE(HW_PSTATE,     7*32+ 7) /*   Hardware Pstates */
@@ -245,7 +260,7 @@ XEN_CPUFEATURE(IBRS_ALWAYS,   8*32+16) /*S  IBRS preferred always on */
 XEN_CPUFEATURE(STIBP_ALWAYS,  8*32+17) /*S  STIBP preferred always on */
 XEN_CPUFEATURE(IBRS_FAST,     8*32+18) /*S  IBRS preferred over software options */
 XEN_CPUFEATURE(IBRS_SAME_MODE, 8*32+19) /*S  IBRS provides same-mode protection */
-XEN_CPUFEATURE(NO_LMSL,       8*32+20) /*S  EFER.LMSLE no longer supported. */
+XEN_CPUFEATURE(NO_LMSL,       8*32+20) /*S| EFER.LMSLE no longer supported. */
 XEN_CPUFEATURE(AMD_PPIN,      8*32+23) /*   Protected Processor Inventory Number */
 XEN_CPUFEATURE(AMD_SSBD,      8*32+24) /*S  MSR_SPEC_CTRL.SSBD available */
 XEN_CPUFEATURE(VIRT_SSBD,     8*32+25) /*!  MSR_VIRT_SPEC_CTRL.SSBD */
@@ -255,18 +270,26 @@ XEN_CPUFEATURE(BTC_NO,        8*32+29) /*A  Hardware not vulnerable to Branch Ty
 XEN_CPUFEATURE(IBPB_RET,      8*32+30) /*A  IBPB clears RSB/RAS too. */
 
 /* Intel-defined CPU features, CPUID level 0x00000007:0.edx, word 9 */
-XEN_CPUFEATURE(AVX512_4VNNIW, 9*32+ 2) /*A  AVX512 Neural Network Instructions */
-XEN_CPUFEATURE(AVX512_4FMAPS, 9*32+ 3) /*A  AVX512 Multiply Accumulation Single Precision */
+XEN_CPUFEATURE(SGX_KEYS,      9*32+ 1) /*   SGX Attestation Service */
+XEN_CPUFEATURE(AVX512_4VNNIW, 9*32+ 2) /*   Xeon Phi AVX512 Neural Network Instructions */
+XEN_CPUFEATURE(AVX512_4FMAPS, 9*32+ 3) /*   Xeon Phi AVX512 Multiply Accumulation Single Precision */
 XEN_CPUFEATURE(FSRM,          9*32+ 4) /*A  Fast Short REP MOVS */
+XEN_CPUFEATURE(UINTR,         9*32+ 5) /*   User-mode Interrupts */
 XEN_CPUFEATURE(AVX512_VP2INTERSECT, 9*32+8) /*a  VP2INTERSECT{D,Q} insns */
 XEN_CPUFEATURE(SRBDS_CTRL,    9*32+ 9) /*   MSR_MCU_OPT_CTRL and RNGDS_MITG_DIS. */
-XEN_CPUFEATURE(MD_CLEAR,      9*32+10) /*A  VERW clears microarchitectural buffers */
-XEN_CPUFEATURE(RTM_ALWAYS_ABORT, 9*32+11) /*! June 2021 TSX defeaturing in microcode. */
+XEN_CPUFEATURE(MD_CLEAR,      9*32+10) /*!A| VERW clears microarchitectural buffers */
+XEN_CPUFEATURE(RTM_ALWAYS_ABORT, 9*32+11) /*! RTM disabled (but XBEGIN wont fault) */
 XEN_CPUFEATURE(TSX_FORCE_ABORT, 9*32+13) /* MSR_TSX_FORCE_ABORT.RTM_ABORT */
 XEN_CPUFEATURE(SERIALIZE,     9*32+14) /*A  SERIALIZE insn */
+XEN_CPUFEATURE(HYBRID,        9*32+15) /*   Heterogeneous platform */
 XEN_CPUFEATURE(TSXLDTRK,      9*32+16) /*a  TSX load tracking suspend/resume insns */
+XEN_CPUFEATURE(PCONFIG,       9*32+18) /*   PCONFIG instruction */
+XEN_CPUFEATURE(ARCH_LBR,      9*32+19) /*   Architectural Last Branch Record */
 XEN_CPUFEATURE(CET_IBT,       9*32+20) /*   CET - Indirect Branch Tracking */
-XEN_CPUFEATURE(AVX512_FP16,   9*32+23) /*   AVX512 FP16 instructions */
+XEN_CPUFEATURE(AMX_BF16,      9*32+22) /*   AMX BFloat16 instruction */
+XEN_CPUFEATURE(AVX512_FP16,   9*32+23) /*A  AVX512 FP16 instructions */
+XEN_CPUFEATURE(AMX_TILE,      9*32+24) /*   AMX Tile architecture */
+XEN_CPUFEATURE(AMX_INT8,      9*32+25) /*   AMX 8-bit integer instructions */
 XEN_CPUFEATURE(IBRSB,         9*32+26) /*A  IBRS and IBPB support (used by Intel) */
 XEN_CPUFEATURE(STIBP,         9*32+27) /*A  STIBP */
 XEN_CPUFEATURE(L1D_FLUSH,     9*32+28) /*S  MSR_FLUSH_CMD and L1D flush. */
@@ -275,33 +298,57 @@ XEN_CPUFEATURE(CORE_CAPS,     9*32+30) /*   IA32_CORE_CAPABILITIES MSR */
 XEN_CPUFEATURE(SSBD,          9*32+31) /*A  MSR_SPEC_CTRL.SSBD available */
 
 /* Intel-defined CPU features, CPUID level 0x00000007:1.eax, word 10 */
+XEN_CPUFEATURE(SHA512,       10*32+ 0) /*A  SHA512 Instructions */
+XEN_CPUFEATURE(SM3,          10*32+ 1) /*A  SM3 Instructions */
+XEN_CPUFEATURE(SM4,          10*32+ 2) /*A  SM4 Instructions */
 XEN_CPUFEATURE(AVX_VNNI,     10*32+ 4) /*A  AVX-VNNI Instructions */
 XEN_CPUFEATURE(AVX512_BF16,  10*32+ 5) /*A  AVX512 BFloat16 Instructions */
+XEN_CPUFEATURE(CMPCCXADD,    10*32+ 7) /*a  CMPccXADD Instructions */
 XEN_CPUFEATURE(FZRM,         10*32+10) /*A  Fast Zero-length REP MOVSB */
 XEN_CPUFEATURE(FSRS,         10*32+11) /*A  Fast Short REP STOSB */
 XEN_CPUFEATURE(FSRCS,        10*32+12) /*A  Fast Short REP CMPSB/SCASB */
+XEN_CPUFEATURE(WRMSRNS,      10*32+19) /*S  WRMSR Non-Serialising */
+XEN_CPUFEATURE(AMX_FP16,     10*32+21) /*   AMX FP16 instruction */
+XEN_CPUFEATURE(AVX_IFMA,     10*32+23) /*A  AVX-IFMA Instructions */
 
 /* AMD-defined CPU features, CPUID level 0x80000021.eax, word 11 */
+XEN_CPUFEATURE(NO_NEST_BP,         11*32+ 0) /*A  No Nested Data Breakpoints */
+XEN_CPUFEATURE(FS_GS_NS,           11*32+ 1) /*S| FS/GS base MSRs non-serialising */
 XEN_CPUFEATURE(LFENCE_DISPATCH,    11*32+ 2) /*A  LFENCE always serializing */
+XEN_CPUFEATURE(VERW_CLEAR,         11*32+ 5) /*!A| VERW clears microarchitectural buffers */
 XEN_CPUFEATURE(NSCB,               11*32+ 6) /*A  Null Selector Clears Base (and limit too) */
-XEN_CPUFEATURE(AUTO_IBRS,          11*32+ 8) /*   Automatic IBRS */
+XEN_CPUFEATURE(AUTO_IBRS,          11*32+ 8) /*S  Automatic IBRS */
+XEN_CPUFEATURE(AMD_FSRS,           11*32+10) /*A  Fast Short REP STOSB */
+XEN_CPUFEATURE(AMD_FSRC,           11*32+11) /*A  Fast Short REP CMPSB */
+XEN_CPUFEATURE(CPUID_USER_DIS,     11*32+17) /*   CPUID disable for CPL > 0 software */
+XEN_CPUFEATURE(EPSF,               11*32+18) /*A  Enhanced Predictive Store Forwarding */
+XEN_CPUFEATURE(FSRSC,              11*32+19) /*A  Fast Short REP SCASB */
+XEN_CPUFEATURE(AMD_PREFETCHI,      11*32+20) /*A  PREFETCHIT{0,1} Instructions */
 XEN_CPUFEATURE(SBPB,               11*32+27) /*A  Selective Branch Predictor Barrier */
 XEN_CPUFEATURE(IBPB_BRTYPE,        11*32+28) /*A  IBPB flushes Branch Type predictions too */
-XEN_CPUFEATURE(SRSO_NO,            11*32+29) /*A  Hardware not vulenrable to Speculative Return Stack Overflow */
+XEN_CPUFEATURE(SRSO_NO,            11*32+29) /*A  Hardware not vulnerable to Speculative Return Stack Overflow */
+XEN_CPUFEATURE(SRSO_US_NO,         11*32+30) /*A! Hardware not vulnerable to SRSO across the User/Supervisor boundary */
+XEN_CPUFEATURE(SRSO_MSR_FIX,       11*32+31) /*   MSR_BP_CFG.BP_SPEC_REDUCE available */
 
 /* Intel-defined CPU features, CPUID level 0x00000007:1.ebx, word 12 */
 XEN_CPUFEATURE(INTEL_PPIN,         12*32+ 0) /*   Protected Processor Inventory Number */
 
 /* Intel-defined CPU features, CPUID level 0x00000007:2.edx, word 13 */
 XEN_CPUFEATURE(INTEL_PSFD,         13*32+ 0) /*A  MSR_SPEC_CTRL.PSFD */
-XEN_CPUFEATURE(IPRED_CTRL,         13*32+ 1) /*   MSR_SPEC_CTRL.IPRED_DIS_* */
-XEN_CPUFEATURE(RRSBA_CTRL,         13*32+ 2) /*   MSR_SPEC_CTRL.RRSBA_DIS_* */
-XEN_CPUFEATURE(BHI_CTRL,           13*32+ 4) /*   MSR_SPEC_CTRL.BHI_DIS_S */
+XEN_CPUFEATURE(IPRED_CTRL,         13*32+ 1) /*S  MSR_SPEC_CTRL.IPRED_DIS_* */
+XEN_CPUFEATURE(RRSBA_CTRL,         13*32+ 2) /*S  MSR_SPEC_CTRL.RRSBA_DIS_* */
+XEN_CPUFEATURE(DDP_CTRL,           13*32+ 3) /*   MSR_SPEC_CTRL.DDP_DIS_U */
+XEN_CPUFEATURE(BHI_CTRL,           13*32+ 4) /*S  MSR_SPEC_CTRL.BHI_DIS_S */
 XEN_CPUFEATURE(MCDT_NO,            13*32+ 5) /*A  MCDT_NO */
 
 /* Intel-defined CPU features, CPUID level 0x00000007:1.ecx, word 14 */
 
 /* Intel-defined CPU features, CPUID level 0x00000007:1.edx, word 15 */
+XEN_CPUFEATURE(AVX_VNNI_INT8,      15*32+ 4) /*A  AVX-VNNI-INT8 Instructions */
+XEN_CPUFEATURE(AVX_NE_CONVERT,     15*32+ 5) /*A  AVX-NE-CONVERT Instructions */
+XEN_CPUFEATURE(AMX_COMPLEX,        15*32+ 8) /*   AMX Complex Instructions */
+XEN_CPUFEATURE(AVX_VNNI_INT16,     15*32+10) /*A  AVX-VNNI-INT16 Instructions */
+XEN_CPUFEATURE(PREFETCHI,          15*32+14) /*A  PREFETCHIT{0,1} Instructions */
 XEN_CPUFEATURE(CET_SSS,            15*32+18) /*   CET Supervisor Shadow Stacks safe to use */
 
 /* Intel-defined CPU features, MSR_ARCH_CAPS 0x10a.eax, word 16 */
@@ -321,7 +368,7 @@ XEN_CPUFEATURE(DOITM,              16*32+12) /*   Data Operand Invariant Timing 
 XEN_CPUFEATURE(SBDR_SSDP_NO,       16*32+13) /*A  No Shared Buffer Data Read or Sideband Stale Data Propagation */
 XEN_CPUFEATURE(FBSDP_NO,           16*32+14) /*A  No Fill Buffer Stale Data Propagation */
 XEN_CPUFEATURE(PSDP_NO,            16*32+15) /*A  No Primary Stale Data Propagation */
-XEN_CPUFEATURE(FB_CLEAR,           16*32+17) /*A  Fill Buffers cleared by VERW */
+XEN_CPUFEATURE(FB_CLEAR,           16*32+17) /*!A| Fill Buffers cleared by VERW */
 XEN_CPUFEATURE(FB_CLEAR_CTRL,      16*32+18) /*   MSR_OPT_CPU_CTRL.FB_CLEAR_DIS */
 XEN_CPUFEATURE(RRSBA,              16*32+19) /*!  Restricted RSB Alternative */
 XEN_CPUFEATURE(BHI_NO,             16*32+20) /*A  No Branch History Injection  */
@@ -330,8 +377,16 @@ XEN_CPUFEATURE(OVRCLK_STATUS,      16*32+23) /*   MSR_OVERCLOCKING_STATUS */
 XEN_CPUFEATURE(PBRSB_NO,           16*32+24) /*A  No Post-Barrier RSB predictions */
 XEN_CPUFEATURE(GDS_CTRL,           16*32+25) /*   MCU_OPT_CTRL.GDS_MIT_{DIS,LOCK} */
 XEN_CPUFEATURE(GDS_NO,             16*32+26) /*A  No Gather Data Sampling */
+XEN_CPUFEATURE(RFDS_NO,            16*32+27) /*A  No Register File Data Sampling */
+XEN_CPUFEATURE(RFDS_CLEAR,         16*32+28) /*!A| Register File(s) cleared by VERW */
 
-/* Intel-defined CPU features, MSR_ARCH_CAPS 0x10a.edx, word 17 */
+/* Intel-defined CPU features, MSR_ARCH_CAPS 0x10a.edx, word 17 (express in terms of word 16) */
+XEN_CPUFEATURE(PB_OPT_CTRL,        16*32+32) /*   MSR_PB_OPT_CTRL.IBPB_ALT */
+XEN_CPUFEATURE(ITS_NO,             16*32+62) /*!A No Indirect Target Selection */
+
+/* AMD-defined CPU features, CPUID level 0x80000021.ecx, word 18 */
+XEN_CPUFEATURE(TSA_SQ_NO,          18*32+ 1) /*A  No Store Queue Transitive Scheduler Attacks */
+XEN_CPUFEATURE(TSA_L1_NO,          18*32+ 2) /*A  No L1D Transitive Scheduler Attacks */
 
 #endif /* XEN_CPUFEATURE */
 

@@ -1,20 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * nested_ept.c: Handling virtulized EPT for guest in nested case.
  *
  * Copyright (c) 2012, Intel Corporation
  *  Xiantao Zhang <xiantao.zhang@intel.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 #include <xen/vm_event.h>
 #include <xen/event.h>
@@ -25,7 +14,6 @@
 #include <asm/p2m.h>
 #include <asm/mem_sharing.h>
 #include <asm/hap.h>
-#include <asm/hvm/support.h>
 
 #include <asm/hvm/nestedhvm.h>
 
@@ -54,7 +42,7 @@
 #define NEPT_2M_ENTRY_FLAG (1 << 10)
 #define NEPT_4K_ENTRY_FLAG (1 << 9)
 
-static bool_t nept_rsv_bits_check(ept_entry_t e, uint32_t level)
+static bool nept_rsv_bits_check(ept_entry_t e, uint32_t level)
 {
     uint64_t rsv_bits = EPT_MUST_RSV_BITS;
 
@@ -80,24 +68,24 @@ static bool_t nept_rsv_bits_check(ept_entry_t e, uint32_t level)
 }
 
 /* EMT checking*/
-static bool_t nept_emt_bits_check(ept_entry_t e, uint32_t level)
+static bool nept_emt_bits_check(ept_entry_t e, uint32_t level)
 {
     if ( e.sp || level == 1 )
     {
-        if ( e.emt == EPT_EMT_RSV0 || e.emt == EPT_EMT_RSV1 ||
-             e.emt == EPT_EMT_RSV2 )
+        if ( e.emt == X86_MT_RSVD_2 || e.emt == X86_MT_RSVD_3 ||
+             e.emt == X86_MT_UCM )
             return 1;
     }
     return 0;
 }
 
-static bool_t nept_permission_check(uint32_t rwx_acc, uint32_t rwx_bits)
+static bool nept_permission_check(uint32_t rwx_acc, uint32_t rwx_bits)
 {
     return !(EPTE_RWX_MASK & rwx_acc & ~rwx_bits);
 }
 
 /* nept's non-present check */
-static bool_t nept_non_present_check(ept_entry_t e)
+static bool nept_non_present_check(ept_entry_t e)
 {
     if ( e.epte & EPTE_RWX_MASK )
         return 0;
@@ -118,7 +106,7 @@ uint64_t nept_get_ept_vpid_cap(void)
     return caps;
 }
 
-static bool_t nept_rwx_bits_check(ept_entry_t e)
+static bool nept_rwx_bits_check(ept_entry_t e)
 {
     /*write only or write/execute only*/
     uint8_t rwx_bits = e.epte & EPTE_RWX_MASK;
@@ -134,7 +122,7 @@ static bool_t nept_rwx_bits_check(ept_entry_t e)
 }
 
 /* nept's misconfiguration check */
-static bool_t nept_misconfiguration_check(ept_entry_t e, uint32_t level)
+static bool nept_misconfiguration_check(ept_entry_t e, uint32_t level)
 {
     return nept_rsv_bits_check(e, level) ||
            nept_emt_bits_check(e, level) ||

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /******************************************************************************
  * xen/asm-x86/guest_pt.h
  *
@@ -10,19 +11,6 @@
  * Parts of this code are Copyright (c) 2006 by XenSource Inc.
  * Parts of this code are Copyright (c) 2006 by Michael A Fetterman
  * Parts based on earlier work by Michael A Fetterman, Ian Pratt et al.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef _XEN_ASM_GUEST_PT_H
@@ -32,27 +20,21 @@
 #error GUEST_PAGING_LEVELS not defined
 #endif
 
-static inline paddr_t
-gfn_to_paddr(gfn_t gfn)
-{
-    return ((paddr_t)gfn_x(gfn)) << PAGE_SHIFT;
-}
-
 /* Override get_gfn to work with gfn_t */
 #undef get_gfn
 #define get_gfn(d, g, t) get_gfn_type((d), gfn_x(g), (t), P2M_ALLOC)
 
 /* Mask covering the reserved bits from superpage alignment. */
 #define SUPERPAGE_RSVD(bit)                                             \
-    (((1ul << (bit)) - 1) & ~(_PAGE_PSE_PAT | (_PAGE_PSE_PAT - 1ul)))
+    (((1UL << (bit)) - 1) & ~(_PAGE_PSE_PAT | (_PAGE_PSE_PAT - 1UL)))
 
 static inline uint32_t fold_pse36(uint64_t val)
 {
-    return (val & ~(0x1fful << 13)) | ((val & (0x1fful << 32)) >> (32 - 13));
+    return (val & ~(0x1ffUL << 13)) | ((val & (0x1ffUL << 32)) >> (32 - 13));
 }
 static inline uint64_t unfold_pse36(uint32_t val)
 {
-    return (val & ~(0x1fful << 13)) | ((val & (0x1fful << 13)) << (32 - 13));
+    return (val & ~(0x1ffUL << 13)) | ((val & (0x1ffUL << 13)) << (32 - 13));
 }
 
 /* Types of the guest's page tables and access functions for them */
@@ -111,10 +93,10 @@ static inline guest_l2e_t guest_l2e_from_gfn(gfn_t gfn, u32 flags)
 #define GUEST_L2_PAGETABLE_SHIFT         21
 #define GUEST_L3_PAGETABLE_SHIFT         30
 
-#define GUEST_L1_PAGETABLE_RSVD            0x7ff0000000000000ul
-#define GUEST_L2_PAGETABLE_RSVD            0x7ff0000000000000ul
+#define GUEST_L1_PAGETABLE_RSVD            0x7ff0000000000000UL
+#define GUEST_L2_PAGETABLE_RSVD            0x7ff0000000000000UL
 #define GUEST_L3_PAGETABLE_RSVD                                      \
-    (0xfff0000000000000ul | _PAGE_GLOBAL | _PAGE_PSE | _PAGE_DIRTY | \
+    (0xfff0000000000000UL | _PAGE_GLOBAL | _PAGE_PSE | _PAGE_DIRTY | \
      _PAGE_ACCESSED | _PAGE_USER | _PAGE_RW)
 
 #else /* GUEST_PAGING_LEVELS == 4 */
@@ -282,13 +264,18 @@ static always_inline bool guest_pku_enabled(const struct vcpu *v)
     return !is_pv_vcpu(v) && hvm_pku_enabled(v);
 }
 
+static always_inline bool guest_pks_enabled(const struct vcpu *v)
+{
+    return !is_pv_vcpu(v) && hvm_pks_enabled(v);
+}
+
 /* Helpers for identifying whether guest entries have reserved bits set. */
 
 /* Bits reserved because of maxphysaddr, and (lack of) EFER.NX */
 static always_inline uint64_t guest_rsvd_bits(const struct vcpu *v)
 {
     return ((PADDR_MASK &
-             ~((1ul << v->domain->arch.cpuid->extd.maxphysaddr) - 1)) |
+             ~((1UL << v->domain->arch.cpuid->extd.maxphysaddr) - 1)) |
             (guest_nx_enabled(v) ? 0 : put_pte_flags(_PAGE_NX_BIT)));
 }
 
@@ -308,7 +295,7 @@ static always_inline bool guest_l2e_rsvd_bits(const struct vcpu *v,
             ((l2e.l2 & _PAGE_PSE) &&
              (l2e.l2 & ((GUEST_PAGING_LEVELS == 2 && guest_can_use_pse36(v->domain))
                           /* PSE36 tops out at 40 bits of address width. */
-                        ? (fold_pse36(rsvd_bits | (1ul << 40)))
+                        ? (fold_pse36(rsvd_bits | (1UL << 40)))
                         : SUPERPAGE_RSVD(GUEST_L2_PAGETABLE_SHIFT)))));
 }
 
@@ -384,7 +371,7 @@ static inline paddr_t guest_walk_to_gpa(const walk_t *gw)
     if ( gfn_eq(gfn, INVALID_GFN) )
         return INVALID_PADDR;
 
-    return (gfn_x(gfn) << PAGE_SHIFT) | (gw->va & ~PAGE_MASK);
+    return gfn_to_gaddr(gfn) | (gw->va & ~PAGE_MASK);
 }
 
 /* Given a walk_t from a successful walk, return the page-order of the
@@ -429,7 +416,7 @@ static inline unsigned int guest_walk_to_page_order(const walk_t *gw)
 
 bool
 guest_walk_tables(const struct vcpu *v, struct p2m_domain *p2m,
-                  unsigned long va, walk_t *gw, uint32_t pfec,
+                  unsigned long va, walk_t *gw, uint32_t walk,
                   gfn_t top_gfn, mfn_t top_mfn, void *top_map);
 
 /* Pretty-print the contents of a guest-walk */

@@ -66,6 +66,8 @@ int do_get_pm_info(struct xen_sysctl_get_pmstat *op)
             return -ENODEV;
         if ( !cpufreq_driver.init )
             return -ENODEV;
+        if ( hwp_active() )
+            return -EOPNOTSUPP;
         if ( !pmpt || !(pmpt->perf.init & XEN_PX_INIT) )
             return -EINVAL;
         break;
@@ -101,8 +103,14 @@ int do_get_pm_info(struct xen_sysctl_get_pmstat *op)
 
         cpufreq_residency_update(op->cpuid, pxpt->u.cur);
 
+        /*
+         * Avoid partial copying of 2-D array, whereas partial copying of a
+         * simple vector (further down) is deemed okay.
+         */
         ct = pmpt->perf.state_count;
-        if ( copy_to_guest(op->u.getpx.trans_pt, pxpt->u.trans_pt, ct*ct) )
+        if ( ct > op->u.getpx.total )
+            ct = op->u.getpx.total;
+        else if ( copy_to_guest(op->u.getpx.trans_pt, pxpt->u.trans_pt, ct * ct) )
         {
             spin_unlock(cpufreq_statistic_lock);
             ret = -EFAULT;
@@ -225,7 +233,7 @@ static int get_cpufreq_para(struct xen_sysctl_pm_op *op)
                        affected_cpus, op->u.get_para.cpu_num);
     xfree(affected_cpus);
     if ( ret )
-        return ret;
+        return -EFAULT;
 
     if ( !(scaling_available_frequencies =
            xzalloc_array(uint32_t, op->u.get_para.freq_num)) )
@@ -237,60 +245,69 @@ static int get_cpufreq_para(struct xen_sysctl_pm_op *op)
                    scaling_available_frequencies, op->u.get_para.freq_num);
     xfree(scaling_available_frequencies);
     if ( ret )
-        return ret;
-
-    if ( !(scaling_available_governors =
-           xzalloc_array(char, gov_num * CPUFREQ_NAME_LEN)) )
-        return -ENOMEM;
-    if ( (ret = read_scaling_available_governors(scaling_available_governors,
-                gov_num * CPUFREQ_NAME_LEN * sizeof(char))) )
-    {
-        xfree(scaling_available_governors);
-        return ret;
-    }
-    ret = copy_to_guest(op->u.get_para.scaling_available_governors,
-                scaling_available_governors, gov_num * CPUFREQ_NAME_LEN);
-    xfree(scaling_available_governors);
-    if ( ret )
-        return ret;
+        return -EFAULT;
 
     op->u.get_para.cpuinfo_cur_freq =
-        cpufreq_driver.get ? cpufreq_driver.get(op->cpuid) : policy->cur;
+        cpufreq_driver.get ? alternative_call(cpufreq_driver.get, op->cpuid)
+                           : policy->cur;
     op->u.get_para.cpuinfo_max_freq = policy->cpuinfo.max_freq;
     op->u.get_para.cpuinfo_min_freq = policy->cpuinfo.min_freq;
-    op->u.get_para.scaling_cur_freq = policy->cur;
-    op->u.get_para.scaling_max_freq = policy->max;
-    op->u.get_para.scaling_min_freq = policy->min;
+    op->u.get_para.turbo_enabled = cpufreq_get_turbo_status(op->cpuid);
 
     if ( cpufreq_driver.name[0] )
-        strlcpy(op->u.get_para.scaling_driver, 
+        strlcpy(op->u.get_para.scaling_driver,
             cpufreq_driver.name, CPUFREQ_NAME_LEN);
     else
         strlcpy(op->u.get_para.scaling_driver, "Unknown", CPUFREQ_NAME_LEN);
 
-    if ( policy->governor->name[0] )
-        strlcpy(op->u.get_para.scaling_governor, 
-            policy->governor->name, CPUFREQ_NAME_LEN);
+    if ( IS_ENABLED(CONFIG_INTEL) &&
+         !strncmp(op->u.get_para.scaling_driver, XEN_HWP_DRIVER_NAME,
+                  CPUFREQ_NAME_LEN) )
+        ret = get_hwp_para(policy->cpu, &op->u.get_para.u.cppc_para);
     else
-        strlcpy(op->u.get_para.scaling_governor, "Unknown", CPUFREQ_NAME_LEN);
-
-    /* governor specific para */
-    if ( !strncasecmp(op->u.get_para.scaling_governor,
-                      "userspace", CPUFREQ_NAME_LEN) )
     {
-        op->u.get_para.u.userspace.scaling_setspeed = policy->cur;
-    }
+        if ( !(scaling_available_governors =
+               xzalloc_array(char, gov_num * CPUFREQ_NAME_LEN)) )
+            return -ENOMEM;
+        if ( (ret = read_scaling_available_governors(
+                        scaling_available_governors,
+                        (gov_num * CPUFREQ_NAME_LEN *
+                         sizeof(*scaling_available_governors)))) )
+        {
+            xfree(scaling_available_governors);
+            return ret;
+        }
+        ret = copy_to_guest(op->u.get_para.scaling_available_governors,
+                            scaling_available_governors,
+                            gov_num * CPUFREQ_NAME_LEN);
+        xfree(scaling_available_governors);
+        if ( ret )
+            return -EFAULT;
 
-    if ( !strncasecmp(op->u.get_para.scaling_governor,
-                      "ondemand", CPUFREQ_NAME_LEN) )
-    {
-        ret = get_cpufreq_ondemand_para(
-            &op->u.get_para.u.ondemand.sampling_rate_max,
-            &op->u.get_para.u.ondemand.sampling_rate_min,
-            &op->u.get_para.u.ondemand.sampling_rate,
-            &op->u.get_para.u.ondemand.up_threshold);
+        op->u.get_para.u.s.scaling_cur_freq = policy->cur;
+        op->u.get_para.u.s.scaling_max_freq = policy->max;
+        op->u.get_para.u.s.scaling_min_freq = policy->min;
+
+        if ( policy->governor->name[0] )
+            strlcpy(op->u.get_para.u.s.scaling_governor,
+                policy->governor->name, CPUFREQ_NAME_LEN);
+        else
+            strlcpy(op->u.get_para.u.s.scaling_governor, "Unknown",
+                    CPUFREQ_NAME_LEN);
+
+        /* governor specific para */
+        if ( !strncasecmp(op->u.get_para.u.s.scaling_governor,
+                          "userspace", CPUFREQ_NAME_LEN) )
+            op->u.get_para.u.s.u.userspace.scaling_setspeed = policy->cur;
+
+        if ( !strncasecmp(op->u.get_para.u.s.scaling_governor,
+                          "ondemand", CPUFREQ_NAME_LEN) )
+            ret = get_cpufreq_ondemand_para(
+                &op->u.get_para.u.s.u.ondemand.sampling_rate_max,
+                &op->u.get_para.u.s.u.ondemand.sampling_rate_min,
+                &op->u.get_para.u.s.u.ondemand.sampling_rate,
+                &op->u.get_para.u.s.u.ondemand.up_threshold);
     }
-    op->u.get_para.turbo_enabled = cpufreq_get_turbo_status(op->cpuid);
 
     return ret;
 }
@@ -321,6 +338,9 @@ static int set_cpufreq_para(struct xen_sysctl_pm_op *op)
 
     if ( !policy || !policy->governor )
         return -EINVAL;
+
+    if ( hwp_active() )
+        return -EOPNOTSUPP;
 
     switch(op->u.set_para.ctrl_type)
     {
@@ -391,6 +411,19 @@ static int set_cpufreq_para(struct xen_sysctl_pm_op *op)
     }
 
     return ret;
+}
+
+static int set_cpufreq_cppc(struct xen_sysctl_pm_op *op)
+{
+    struct cpufreq_policy *policy = per_cpu(cpufreq_cpu_policy, op->cpuid);
+
+    if ( !policy || !policy->governor )
+        return -ENOENT;
+
+    if ( !hwp_active() )
+        return -EOPNOTSUPP;
+
+    return set_hwp_para(policy, &op->u.set_cppc);
 }
 
 int do_pm_op(struct xen_sysctl_pm_op *op)
@@ -464,6 +497,10 @@ int do_pm_op(struct xen_sysctl_pm_op *op)
         ret = set_cpufreq_para(op);
         break;
     }
+
+    case SET_CPUFREQ_CPPC:
+        ret = set_cpufreq_cppc(op);
+        break;
 
     case GET_CPUFREQ_AVGFREQ:
     {

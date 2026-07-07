@@ -1,6 +1,8 @@
 #ifndef _LIB_UBSAN_H
 #define _LIB_UBSAN_H
 
+#include <xen/linux-compat.h>
+
 enum {
 	type_kind_int = 0,
 	type_kind_float = 1,
@@ -10,7 +12,7 @@ enum {
 struct type_descriptor {
 	u16 type_kind;
 	u16 type_info;
-	char type_name[1];
+	char type_name[];
 };
 
 struct source_location {

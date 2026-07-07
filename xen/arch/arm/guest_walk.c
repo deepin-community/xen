@@ -1,18 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Guest page table walk
  * Copyright (c) 2017 Sergej Proskurin <proskurin@sec.in.tum.de>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <xen/domain_page.h>
@@ -96,7 +85,7 @@ static bool guest_walk_sd(const struct vcpu *v,
     paddr |= (gva & mask) >> 18;
 
     /* Access the guest's memory to read only one PTE. */
-    ret = access_guest_memory_by_ipa(d, paddr, &pte, sizeof(short_desc_t), false);
+    ret = access_guest_memory_by_gpa(d, paddr, &pte, sizeof(short_desc_t), false);
     if ( ret )
         return false;
 
@@ -121,7 +110,7 @@ static bool guest_walk_sd(const struct vcpu *v,
         paddr = ((paddr_t)pte.walk.base << 10) | ((gva & mask) >> 10);
 
         /* Access the guest's memory to read only one PTE. */
-        ret = access_guest_memory_by_ipa(d, paddr, &pte, sizeof(short_desc_t), false);
+        ret = access_guest_memory_by_gpa(d, paddr, &pte, sizeof(short_desc_t), false);
         if ( ret )
             return false;
 
@@ -165,8 +154,10 @@ static bool guest_walk_sd(const struct vcpu *v,
             mask = (1ULL << L1DESC_SUPERSECTION_SHIFT) - 1;
             *ipa = gva & mask;
             *ipa |= (paddr_t)(pte.supersec.base) << L1DESC_SUPERSECTION_SHIFT;
+#ifndef CONFIG_PHYS_ADDR_T_32
             *ipa |= (paddr_t)(pte.supersec.extbase1) << L1DESC_SUPERSECTION_EXT_BASE1_SHIFT;
             *ipa |= (paddr_t)(pte.supersec.extbase2) << L1DESC_SUPERSECTION_EXT_BASE2_SHIFT;
+#endif /* CONFIG_PHYS_ADDR_T_32 */
         }
 
         /* Set permissions so that the caller can check the flags by herself. */
@@ -174,6 +165,8 @@ static bool guest_walk_sd(const struct vcpu *v,
             *perms |= GV2M_WRITE;
         if ( !pte.sec.xn )
             *perms |= GV2M_EXEC;
+
+        break;
     }
 
     return true;
@@ -269,6 +262,7 @@ static bool get_ttbr_and_gran_64bit(uint64_t *ttbr, unsigned int *gran,
              * fall back to 4K by default.
              */
             *gran = GRANULE_SIZE_INDEX_4K;
+            break;
         }
 
         /* Use TTBR0 for GVA to IPA translation. */
@@ -300,6 +294,7 @@ static bool get_ttbr_and_gran_64bit(uint64_t *ttbr, unsigned int *gran,
              * fall back to 4K by default.
              */
             *gran = GRANULE_SIZE_INDEX_4K;
+            break;
         }
 
         /* Use TTBR1 for GVA to IPA translation. */
@@ -490,7 +485,7 @@ static bool guest_walk_ld(const struct vcpu *v,
         paddr |= LPAE_TABLE_INDEX_GS(grainsizes[gran], level, gva) << 3;
 
         /* Access the guest's memory to read only one PTE. */
-        ret = access_guest_memory_by_ipa(d, paddr, &pte, sizeof(lpae_t), false);
+        ret = access_guest_memory_by_gpa(d, paddr, &pte, sizeof(lpae_t), false);
         if ( ret )
             return false;
 

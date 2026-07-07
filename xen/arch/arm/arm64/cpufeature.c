@@ -69,6 +69,7 @@
  *   KVM guests.
  */
 
+#include <xen/bug.h>
 #include <xen/types.h>
 #include <xen/kernel.h>
 #include <asm/sysregs.h>
@@ -77,13 +78,13 @@
 
 #define __ARM64_FTR_BITS(SIGNED, VISIBLE, STRICT, TYPE, SHIFT, WIDTH, SAFE_VAL) \
 	{						\
-		.sign = SIGNED,				\
-		.visible = VISIBLE,			\
-		.strict = STRICT,			\
-		.type = TYPE,				\
-		.shift = SHIFT,				\
-		.width = WIDTH,				\
-		.safe_val = SAFE_VAL,			\
+		.sign = (SIGNED),				\
+		.visible = (VISIBLE),			\
+		.strict = (STRICT),			\
+		.type = (TYPE),				\
+		.shift = (SHIFT),				\
+		.width = (WIDTH),				\
+		.safe_val = (SAFE_VAL),			\
 	}
 
 /* Define a feature with unsigned values */
@@ -455,15 +456,11 @@ static const struct arm64_ftr_bits ftr_id_dfr1[] = {
 	ARM64_FTR_END,
 };
 
-#if 0
-/* TODO: use this to sanitize SVE once we support it */
-
 static const struct arm64_ftr_bits ftr_zcr[] = {
 	ARM64_FTR_BITS(FTR_HIDDEN, FTR_NONSTRICT, FTR_LOWER_SAFE,
 		ZCR_ELx_LEN_SHIFT, ZCR_ELx_LEN_SIZE, 0),	/* LEN */
 	ARM64_FTR_END,
 };
-#endif
 
 /*
  * Common ftr bits for a 32bit register with all hidden, strict
@@ -602,6 +599,9 @@ void update_system_features(const struct cpuinfo_arm *new)
 	SANITIZE_ID_REG(isa64, 2, aa64isar2);
 
 	SANITIZE_ID_REG(zfr64, 0, aa64zfr0);
+
+	if ( cpu_has_sve )
+		SANITIZE_REG(zcr64, 0, zcr);
 
 	/*
 	 * Comment from Linux:

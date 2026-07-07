@@ -14,17 +14,18 @@
 #include <xen/delay.h>
 #include <xen/perfc.h>
 #include <xen/spinlock.h>
+
+#include <asm/apic.h>
 #include <asm/current.h>
+#include <asm/genapic.h>
 #include <asm/guest.h>
+#include <asm/irq-vectors.h>
 #include <asm/smp.h>
 #include <asm/mc146818rtc.h>
 #include <asm/flushtlb.h>
 #include <asm/hardirq.h>
 #include <asm/hpet.h>
-#include <asm/hvm/support.h>
 #include <asm/setup.h>
-#include <irq_vectors.h>
-#include <mach_apic.h>
 
 /* Helper functions to prepare APIC register values. */
 static unsigned int prepare_ICR(unsigned int shortcut, int vector)
@@ -89,7 +90,7 @@ void send_IPI_mask(const cpumask_t *mask, int vector)
      * the system have been accounted for.
      */
     if ( system_state > SYS_STATE_smp_boot &&
-         !unaccounted_cpus && !disabled_cpus &&
+         !unaccounted_cpus && !disabled_cpus && !cpu_in_hotplug_context() &&
          /* NB: get_cpu_maps lock requires enabled interrupts. */
          local_irq_is_enabled() && (cpus_locked = get_cpu_maps()) &&
          (park_offline_cpus ||
@@ -246,7 +247,7 @@ static cpumask_t flush_cpumask;
 static const void *flush_va;
 static unsigned int flush_flags;
 
-void cf_check invalidate_interrupt(struct cpu_user_regs *regs)
+void cf_check invalidate_interrupt(void)
 {
     unsigned int flags = flush_flags;
     ack_APIC_irq();
@@ -344,6 +345,11 @@ void __stop_this_cpu(void)
 
 static void cf_check stop_this_cpu(void *dummy)
 {
+    const bool *stop_aps = dummy;
+
+    while ( !*stop_aps )
+        cpu_relax();
+
     __stop_this_cpu();
     for ( ; ; )
         halt();
@@ -356,16 +362,29 @@ static void cf_check stop_this_cpu(void *dummy)
 void smp_send_stop(void)
 {
     unsigned int cpu = smp_processor_id();
+    bool stop_aps = false;
+
+    /*
+     * Perform AP offlining and disabling of interrupt controllers with all
+     * CPUs on the system having interrupts disabled to prevent interrupt
+     * delivery errors.  On AMD systems "Receive accept error" will be
+     * broadcast to local APICs if interrupts target CPUs that are offline.
+     */
+    if ( num_online_cpus() > 1 )
+        smp_call_function(stop_this_cpu, &stop_aps, 0);
+
+    local_irq_disable();
+    pci_disable_msi_all();
+    disable_IO_APIC();
+    hpet_disable();
+    iommu_quiesce();
 
     if ( num_online_cpus() > 1 )
     {
         int timeout = 10;
 
-        local_irq_disable();
-        fixup_irqs(cpumask_of(cpu), 0);
-        local_irq_enable();
-
-        smp_call_function(stop_this_cpu, NULL, 0);
+        /* Signal APs to stop. */
+        stop_aps = true;
 
         /* Wait 10ms for all other CPUs to go offline. */
         while ( (num_online_cpus() > 1) && (timeout-- > 0) )
@@ -374,13 +393,10 @@ void smp_send_stop(void)
 
     if ( cpu_online(cpu) )
     {
-        local_irq_disable();
-        disable_IO_APIC();
-        hpet_disable();
         __stop_this_cpu();
         x2apic_enabled = (current_local_apic_mode() == APIC_MODE_X2APIC);
-        local_irq_enable();
     }
+    local_irq_enable();
 }
 
 void smp_send_nmi_allbutself(void)
@@ -388,14 +404,14 @@ void smp_send_nmi_allbutself(void)
     send_IPI_mask(&cpu_online_map, APIC_DM_NMI);
 }
 
-void cf_check event_check_interrupt(struct cpu_user_regs *regs)
+void cf_check event_check_interrupt(void)
 {
     ack_APIC_irq();
     perfc_incr(ipis);
     this_cpu(irq_count)++;
 }
 
-void cf_check call_function_interrupt(struct cpu_user_regs *regs)
+void cf_check call_function_interrupt(void)
 {
     ack_APIC_irq();
     perfc_incr(ipis);

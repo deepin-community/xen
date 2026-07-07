@@ -31,12 +31,15 @@
 #include <xen/pci.h>
 #include <xen/pci_regs.h>
 #include <xen/keyhandler.h>
+
+#include <asm/apic.h>
+#include <asm/io_apic.h>
 #include <asm/msi.h>
 #include <asm/nops.h>
 #include <asm/irq.h>
 #include <asm/hvm/vmx/vmx.h>
 #include <asm/p2m.h>
-#include <mach_apic.h>
+
 #include "iommu.h"
 #include "dmar.h"
 #include "extern.h"
@@ -53,9 +56,6 @@
 #define DEVICE_PGTABLE(d, pdev) ((d) != dom_io \
                                  ? dom_iommu(d)->arch.vtd.pgd_maddr \
                                  : (pdev)->arch.vtd.pgd_maddr)
-
-/* Possible unfiltered LAPIC/MSI messages from untrusted sources? */
-bool __read_mostly untrusted_msi;
 
 bool __read_mostly iommu_igfx = true;
 bool __read_mostly iommu_qinval = true;
@@ -441,7 +441,7 @@ static paddr_t domain_pgd_maddr(struct domain *d, paddr_t pgd_maddr,
 
     if ( pgd_maddr )
         /* nothing */;
-    else if ( IS_ENABLED(CONFIG_HVM) && iommu_use_hap_pt(d) )
+    else if ( iommu_use_hap_pt(d) )
     {
         pagetable_t pgt = p2m_get_pagetable(p2m_get_hostp2m(d));
 
@@ -645,8 +645,8 @@ static int __must_check iommu_flush_iotlb_global(struct vtd_iommu *iommu,
 }
 
 static int __must_check iommu_flush_iotlb_dsi(struct vtd_iommu *iommu, u16 did,
-                                              bool_t flush_non_present_entry,
-                                              bool_t flush_dev_iotlb)
+                                              bool flush_non_present_entry,
+                                              bool flush_dev_iotlb)
 {
     int status;
 
@@ -664,8 +664,8 @@ static int __must_check iommu_flush_iotlb_dsi(struct vtd_iommu *iommu, u16 did,
 
 static int __must_check iommu_flush_iotlb_psi(struct vtd_iommu *iommu, u16 did,
                                               u64 addr, unsigned int order,
-                                              bool_t flush_non_present_entry,
-                                              bool_t flush_dev_iotlb)
+                                              bool flush_non_present_entry,
+                                              bool flush_dev_iotlb)
 {
     int status;
 
@@ -695,7 +695,7 @@ static int __must_check iommu_flush_all(void)
 {
     struct acpi_drhd_unit *drhd;
     struct vtd_iommu *iommu;
-    bool_t flush_dev_iotlb;
+    bool flush_dev_iotlb;
     int rc = 0;
 
     flush_local(FLUSH_CACHE);
@@ -737,7 +737,7 @@ static int __must_check cf_check iommu_flush_iotlb(struct domain *d, dfn_t dfn,
     struct domain_iommu *hd = dom_iommu(d);
     struct acpi_drhd_unit *drhd;
     struct vtd_iommu *iommu;
-    bool_t flush_dev_iotlb;
+    bool flush_dev_iotlb;
     int iommu_domid;
     int ret = 0;
 
@@ -1120,8 +1120,7 @@ static void cf_check do_iommu_page_fault(void *unused)
         __do_iommu_page_fault(drhd->iommu);
 }
 
-static void cf_check iommu_page_fault(
-    int irq, void *dev_id, struct cpu_user_regs *regs)
+static void cf_check iommu_page_fault(int irq, void *dev_id)
 {
     /*
      * Just flag the tasklet as runnable. This is fine, according to VT-d
@@ -1486,12 +1485,12 @@ int domain_context_mapping_one(
 {
     struct domain_iommu *hd = dom_iommu(domain);
     struct context_entry *context, *context_entries, lctxt;
-    __uint128_t old;
+    __uint128_t res, old;
     uint64_t maddr;
     uint16_t seg = iommu->drhd->segment, prev_did = 0;
     struct domain *prev_dom = NULL;
     int rc, ret;
-    bool_t flush_dev_iotlb;
+    bool flush_dev_iotlb;
 
     if ( QUARANTINE_SKIP(domain, pgd_maddr) )
         return 0;
@@ -1499,6 +1498,11 @@ int domain_context_mapping_one(
     ASSERT(pcidevs_locked());
     spin_lock(&iommu->lock);
     maddr = bus_to_context_maddr(iommu, bus);
+    if ( !maddr )
+    {
+        spin_unlock(&iommu->lock);
+        return -ENOMEM;
+    }
     context_entries = (struct context_entry *)map_vtd_domain_page(maddr);
     context = &context_entries[devfn];
     old = (lctxt = *context).full;
@@ -1584,55 +1588,23 @@ int domain_context_mapping_one(
         ASSERT(!context_fault_disable(lctxt));
     }
 
-    if ( cpu_has_cx16 )
-    {
-        __uint128_t res = cmpxchg16b(context, &old, &lctxt.full);
+    res = cmpxchg16b(context, &old, &lctxt.full);
 
-        /*
-         * Hardware does not update the context entry behind our backs,
-         * so the return value should match "old".
-         */
-        if ( res != old )
-        {
-            if ( pdev )
-                check_cleanup_domid_map(domain, pdev, iommu);
-            printk(XENLOG_ERR
-                   "%pp: unexpected context entry %016lx_%016lx (expected %016lx_%016lx)\n",
-                   &PCI_SBDF(seg, bus, devfn),
-                   (uint64_t)(res >> 64), (uint64_t)res,
-                   (uint64_t)(old >> 64), (uint64_t)old);
-            rc = -EILSEQ;
-            goto unlock;
-        }
-    }
-    else if ( !prev_dom || !(mode & MAP_WITH_RMRR) )
+    /*
+     * Hardware does not update the context entry behind our backs,
+     * so the return value should match "old".
+     */
+    if ( res != old )
     {
-        context_clear_present(*context);
-        iommu_sync_cache(context, sizeof(*context));
-
-        write_atomic(&context->hi, lctxt.hi);
-        /* No barrier should be needed between these two. */
-        write_atomic(&context->lo, lctxt.lo);
-    }
-    else /* Best effort, updating DID last. */
-    {
-         /*
-          * By non-atomically updating the context entry's DID field last,
-          * during a short window in time TLB entries with the old domain ID
-          * but the new page tables may be inserted.  This could affect I/O
-          * of other devices using this same (old) domain ID.  Such updating
-          * therefore is not a problem if this was the only device associated
-          * with the old domain ID.  Diverting I/O of any of a dying domain's
-          * devices to the quarantine page tables is intended anyway.
-          */
-        if ( !(mode & (MAP_OWNER_DYING | MAP_SINGLE_DEVICE)) )
-            printk(XENLOG_WARNING VTDPREFIX
-                   " %pp: reassignment may cause %pd data corruption\n",
-                   &PCI_SBDF(seg, bus, devfn), prev_dom);
-
-        write_atomic(&context->lo, lctxt.lo);
-        /* No barrier should be needed between these two. */
-        write_atomic(&context->hi, lctxt.hi);
+        if ( pdev )
+            check_cleanup_domid_map(domain, pdev, iommu);
+        printk(XENLOG_ERR
+                "%pp: unexpected context entry %016lx_%016lx (expected %016lx_%016lx)\n",
+                &PCI_SBDF(seg, bus, devfn),
+                (uint64_t)(res >> 64), (uint64_t)res,
+                (uint64_t)(old >> 64), (uint64_t)old);
+        rc = -EILSEQ;
+        goto unlock;
     }
 
     iommu_sync_cache(context, sizeof(struct context_entry));
@@ -1728,15 +1700,9 @@ static int domain_context_mapping(struct domain *domain, u8 devfn,
         break;
     }
 
-    if ( domain != pdev->domain && pdev->domain != dom_io )
-    {
-        if ( pdev->domain->is_dying )
-            mode |= MAP_OWNER_DYING;
-        else if ( drhd &&
-                  !any_pdev_behind_iommu(pdev->domain, pdev, drhd->iommu) &&
-                  !pdev->phantom_stride )
-            mode |= MAP_SINGLE_DEVICE;
-    }
+    if ( domain != pdev->domain && pdev->domain != dom_io &&
+         pdev->domain->is_dying )
+        mode |= MAP_OWNER_DYING;
 
     switch ( pdev->type )
     {
@@ -1885,12 +1851,18 @@ int domain_context_unmap_one(
     struct context_entry *context, *context_entries;
     u64 maddr;
     int iommu_domid, rc, ret;
-    bool_t flush_dev_iotlb;
+    bool flush_dev_iotlb;
 
     ASSERT(pcidevs_locked());
     spin_lock(&iommu->lock);
 
     maddr = bus_to_context_maddr(iommu, bus);
+    if ( !maddr )
+    {
+        ASSERT_UNREACHABLE();
+        spin_unlock(&iommu->lock);
+        return 0;
+    }
     context_entries = (struct context_entry *)map_vtd_domain_page(maddr);
     context = &context_entries[devfn];
 
@@ -2544,7 +2516,7 @@ static int __must_check init_vtd_hw(bool resume)
     /*
      * Enable interrupt remapping
      */  
-    if ( iommu_intremap )
+    if ( iommu_intremap != iommu_intremap_off )
     {
         int apic;
         for ( apic = 0; apic < nr_ioapics; apic++ )
@@ -2560,7 +2532,7 @@ static int __must_check init_vtd_hw(bool resume)
             }
         }
     }
-    if ( iommu_intremap )
+    if ( iommu_intremap != iommu_intremap_off )
     {
         for_each_drhd_unit ( drhd )
         {
@@ -2634,6 +2606,13 @@ static int __init cf_check vtd_setup(void)
     int ret;
     bool reg_inval_supported = true;
 
+    if ( unlikely(!cpu_has_cx16) )
+    {
+        printk(XENLOG_ERR VTDPREFIX "no CMPXCHG16B support, disabling IOMMU\n");
+        ret = -ENODEV;
+        goto error;
+    }
+
     if ( list_empty(&acpi_drhd_units) )
     {
         ret = -ENODEV;
@@ -2696,12 +2675,7 @@ static int __init cf_check vtd_setup(void)
             iommu_intremap = iommu_intremap_off;
 
 #ifndef iommu_intpost
-        /*
-         * We cannot use posted interrupt if X86_FEATURE_CX16 is
-         * not supported, since we count on this feature to
-         * atomically update 16-byte IRTE in posted format.
-         */
-        if ( !cap_intr_post(iommu->cap) || !iommu_intremap || !cpu_has_cx16 )
+        if ( !cap_intr_post(iommu->cap) || !iommu_intremap )
             iommu_intpost = false;
 #endif
 
@@ -2758,9 +2732,6 @@ static int __init cf_check vtd_setup(void)
 
  error:
     iommu_enabled = 0;
-#ifndef iommu_snoop
-    iommu_snoop = false;
-#endif
     iommu_hwdom_passthrough = false;
     iommu_qinval = 0;
     iommu_intremap = iommu_intremap_off;
@@ -2782,6 +2753,7 @@ static int cf_check reassign_device_ownership(
         if ( !has_arch_pdevs(target) )
             vmx_pi_hooks_assign(target);
 
+#ifdef CONFIG_PV
         /*
          * Devices assigned to untrusted domains (here assumed to be any domU)
          * can attempt to send arbitrary LAPIC/MSI messages. We are unprotected
@@ -2790,6 +2762,7 @@ static int cf_check reassign_device_ownership(
         if ( !iommu_intremap && !is_hardware_domain(target) &&
              !is_system_domain(target) )
             untrusted_msi = true;
+#endif
 
         ret = domain_context_mapping(target, devfn, pdev);
 
@@ -2818,8 +2791,15 @@ static int cf_check reassign_device_ownership(
 
     if ( devfn == pdev->devfn && pdev->domain != target )
     {
-        list_move(&pdev->domain_list, &target->pdev_list);
+        write_lock(&source->pci_lock);
+        list_del(&pdev->domain_list);
+        write_unlock(&source->pci_lock);
+
         pdev->domain = target;
+
+        write_lock(&target->pci_lock);
+        list_add(&pdev->domain_list, &target->pdev_list);
+        write_unlock(&target->pci_lock);
     }
 
     if ( !has_arch_pdevs(source) )
@@ -2885,7 +2865,7 @@ static int cf_check intel_iommu_assign_device(
         if ( rmrr->segment == seg && bdf == PCI_BDF(bus, devfn) &&
              rmrr->scope.devices_cnt > 1 )
         {
-            bool_t relaxed = !!(flag & XEN_DOMCTL_DEV_RDM_RELAXED);
+            bool relaxed = flag & XEN_DOMCTL_DEV_RDM_RELAXED;
 
             printk(XENLOG_GUEST "%s" VTDPREFIX
                    " It's %s to assign %pp"
@@ -3164,7 +3144,7 @@ static int cf_check intel_iommu_quarantine_init(struct pci_dev *pdev,
 {
     struct domain_iommu *hd = dom_iommu(dom_io);
     struct page_info *pg;
-    unsigned int agaw = width_to_agaw(DEFAULT_DOMAIN_ADDRESS_WIDTH);
+    unsigned int agaw = hd->arch.vtd.agaw;
     unsigned int level = agaw_to_level(agaw);
     const struct acpi_drhd_unit *drhd;
     const struct acpi_rmrr_unit *rmrr;
@@ -3238,6 +3218,24 @@ static int cf_check intel_iommu_quarantine_init(struct pci_dev *pdev,
     return rc;
 }
 
+static void cf_check vtd_quiesce(void)
+{
+    const struct acpi_drhd_unit *drhd;
+
+    for_each_drhd_unit ( drhd )
+    {
+        const struct vtd_iommu *iommu = drhd->iommu;
+        uint32_t sts = dmar_readl(iommu->reg, DMAR_FECTL_REG);
+
+        /*
+         * Open code dma_msi_mask() to avoid taking the spinlock which could
+         * deadlock if called from crash context.
+         */
+        sts |= DMA_FECTL_IM;
+        dmar_writel(iommu->reg, DMAR_FECTL_REG, sts);
+    }
+}
+
 static const struct iommu_ops __initconst_cf_clobber vtd_ops = {
     .page_sizes = PAGE_SIZE_4K,
     .init = intel_iommu_domain_init,
@@ -3267,6 +3265,7 @@ static const struct iommu_ops __initconst_cf_clobber vtd_ops = {
     .iotlb_flush = iommu_flush_iotlb,
     .get_reserved_device_memory = intel_iommu_get_reserved_device_memory,
     .dump_page_tables = vtd_dump_page_tables,
+    .quiesce = vtd_quiesce,
 };
 
 const struct iommu_init_ops __initconstrel intel_iommu_init_ops = {

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Kernel image loading.
  *
@@ -15,7 +16,6 @@
 #include <xen/vmap.h>
 
 #include <asm/byteorder.h>
-#include <asm/fixmap.h>
 #include <asm/kernel.h>
 #include <asm/setup.h>
 
@@ -38,47 +38,21 @@ struct minimal_dtb_header {
     /* There are other fields but we don't use them yet. */
 };
 
-#define DTB_MAGIC 0xd00dfeed
-
-/**
- * copy_from_paddr - copy data from a physical address
- * @dst: destination virtual address
- * @paddr: source physical address
- * @len: length to copy
- */
-void __init copy_from_paddr(void *dst, paddr_t paddr, unsigned long len)
-{
-    void *src = (void *)FIXMAP_ADDR(FIXMAP_MISC);
-
-    while (len) {
-        unsigned long l, s;
-
-        s = paddr & (PAGE_SIZE-1);
-        l = min(PAGE_SIZE - s, len);
-
-        set_fixmap(FIXMAP_MISC, maddr_to_mfn(paddr), PAGE_HYPERVISOR_WC);
-        memcpy(dst, src + s, l);
-        clean_dcache_va_range(dst, l);
-        clear_fixmap(FIXMAP_MISC);
-
-        paddr += l;
-        dst += l;
-        len -= l;
-    }
-}
+#define DTB_MAGIC 0xd00dfeedU
 
 static void __init place_modules(struct kernel_info *info,
                                  paddr_t kernbase, paddr_t kernend)
 {
     /* Align DTB and initrd size to 2Mb. Linux only requires 4 byte alignment */
     const struct bootmodule *mod = info->initrd_bootmodule;
+    const struct membanks *mem = kernel_info_get_mem(info);
     const paddr_t initrd_len = ROUNDUP(mod ? mod->size : 0, MB(2));
     const paddr_t dtb_len = ROUNDUP(fdt_totalsize(info->fdt), MB(2));
     const paddr_t modsize = initrd_len + dtb_len;
 
     /* Convenient */
-    const paddr_t rambase = info->mem.bank[0].start;
-    const paddr_t ramsize = info->mem.bank[0].size;
+    const paddr_t rambase = mem->bank[0].start;
+    const paddr_t ramsize = mem->bank[0].size;
     const paddr_t ramend = rambase + ramsize;
     const paddr_t kernsize = ROUNDUP(kernend, MB(2)) - kernbase;
     const paddr_t ram128mb = rambase + MB(128);
@@ -123,11 +97,12 @@ static void __init place_modules(struct kernel_info *info,
 
 static paddr_t __init kernel_zimage_place(struct kernel_info *info)
 {
+    const struct membanks *mem = kernel_info_get_mem(info);
     paddr_t load_addr;
 
 #ifdef CONFIG_ARM_64
-    if ( info->type == DOMAIN_64BIT )
-        return info->mem.bank[0].start + info->zimage.text_offset;
+    if ( (info->type == DOMAIN_64BIT) && (info->zimage.start == 0) )
+        return mem->bank[0].start + info->zimage.text_offset;
 #endif
 
     /*
@@ -140,8 +115,8 @@ static paddr_t __init kernel_zimage_place(struct kernel_info *info)
     {
         paddr_t load_end;
 
-        load_end = info->mem.bank[0].start + info->mem.bank[0].size;
-        load_end = MIN(info->mem.bank[0].start + MB(128), load_end);
+        load_end = mem->bank[0].start + mem->bank[0].size;
+        load_end = MIN(mem->bank[0].start + MB(128), load_end);
 
         load_addr = load_end - info->zimage.len;
         /* Align to 2MB */
@@ -161,7 +136,12 @@ static void __init kernel_zimage_load(struct kernel_info *info)
     void *kernel;
     int rc;
 
-    info->entry = load_addr;
+    /*
+     * If the image does not have a fixed entry point, then use the load
+     * address as the entry point.
+     */
+    if ( info->entry == 0 )
+        info->entry = load_addr;
 
     place_modules(info, load_addr, load_addr + len);
 
@@ -180,78 +160,12 @@ static void __init kernel_zimage_load(struct kernel_info *info)
     iounmap(kernel);
 }
 
-/*
- * Uimage CPU Architecture Codes
- */
-#define IH_ARCH_ARM             2       /* ARM          */
-#define IH_ARCH_ARM64           22      /* ARM64        */
-
-/*
- * Check if the image is a uImage and setup kernel_info
- */
-static int __init kernel_uimage_probe(struct kernel_info *info,
-                                      paddr_t addr, paddr_t size)
-{
-    struct {
-        __be32 magic;   /* Image Header Magic Number */
-        __be32 hcrc;    /* Image Header CRC Checksum */
-        __be32 time;    /* Image Creation Timestamp  */
-        __be32 size;    /* Image Data Size           */
-        __be32 load;    /* Data Load Address         */
-        __be32 ep;      /* Entry Point Address       */
-        __be32 dcrc;    /* Image Data CRC Checksum   */
-        uint8_t os;     /* Operating System          */
-        uint8_t arch;   /* CPU architecture          */
-        uint8_t type;   /* Image Type                */
-        uint8_t comp;   /* Compression Type          */
-        uint8_t name[UIMAGE_NMLEN]; /* Image Name  */
-    } uimage;
-
-    uint32_t len;
-
-    if ( size < sizeof(uimage) )
-        return -EINVAL;
-
-    copy_from_paddr(&uimage, addr, sizeof(uimage));
-
-    if ( be32_to_cpu(uimage.magic) != UIMAGE_MAGIC )
-        return -EINVAL;
-
-    len = be32_to_cpu(uimage.size);
-
-    if ( len > size - sizeof(uimage) )
-        return -EINVAL;
-
-    info->zimage.kernel_addr = addr + sizeof(uimage);
-    info->zimage.len = len;
-
-    info->entry = info->zimage.start;
-    info->load = kernel_zimage_load;
-
-#ifdef CONFIG_ARM_64
-    switch ( uimage.arch )
-    {
-    case IH_ARCH_ARM:
-        info->type = DOMAIN_32BIT;
-        break;
-    case IH_ARCH_ARM64:
-        info->type = DOMAIN_64BIT;
-        break;
-    default:
-        printk(XENLOG_ERR "Unsupported uImage arch type %d\n", uimage.arch);
-        return -EINVAL;
-    }
-#endif
-
-    return 0;
-}
-
 static __init uint32_t output_length(char *image, unsigned long image_len)
 {
     return *(uint32_t *)&image[image_len - 4];
 }
 
-static __init int kernel_decompress(struct bootmodule *mod)
+static __init int kernel_decompress(struct bootmodule *mod, uint32_t offset)
 {
     char *output, *input;
     char magic[2];
@@ -263,6 +177,17 @@ static __init int kernel_decompress(struct bootmodule *mod)
     int i;
     paddr_t addr = mod->start;
     paddr_t size = mod->size;
+
+    if ( size < offset )
+        return -EINVAL;
+
+    /*
+     * It might be that gzip header does not appear at the start address
+     * (e.g. in case of compressed uImage) so take into account offset to
+     * gzip header.
+     */
+    addr += offset;
+    size -= offset;
 
     if ( size < 2 )
         return -EINVAL;
@@ -286,7 +211,7 @@ static __init int kernel_decompress(struct bootmodule *mod)
         return -ENOMEM;
     }
     mfn = page_to_mfn(pages);
-    output = __vmap(&mfn, 1 << kernel_order_out, 1, 1, PAGE_HYPERVISOR, VMAP_DEFAULT);
+    output = vmap_contig(mfn, 1 << kernel_order_out);
 
     rc = perform_gunzip(output, input, size);
     clean_dcache_va_range(output, output_size);
@@ -311,10 +236,160 @@ static __init int kernel_decompress(struct bootmodule *mod)
         free_domheap_page(pages + i);
 
     /*
+     * When using static heap feature, don't give bootmodules memory back to
+     * the heap allocator
+     */
+    if ( using_static_heap )
+        return 0;
+
+    /*
+     * When freeing the kernel, we need to pass the module start address and
+     * size as they were before taking an offset to gzip header into account,
+     * so that the entire region will be freed.
+     */
+    addr -= offset;
+    size += offset;
+
+    /*
      * Free the original kernel, update the pointers to the
      * decompressed kernel
      */
     fw_unreserved_regions(addr, addr + size, init_domheap_pages, 0);
+
+    return 0;
+}
+
+/*
+ * Uimage CPU Architecture Codes
+ */
+#define IH_ARCH_ARM             2       /* ARM          */
+#define IH_ARCH_ARM64           22      /* ARM64        */
+
+/* uImage Compression Types */
+#define IH_COMP_GZIP            1
+
+/*
+ * Check if the image is a uImage and setup kernel_info
+ */
+static int __init kernel_uimage_probe(struct kernel_info *info,
+                                      struct bootmodule *mod)
+{
+    struct {
+        __be32 magic;   /* Image Header Magic Number */
+        __be32 hcrc;    /* Image Header CRC Checksum */
+        __be32 time;    /* Image Creation Timestamp  */
+        __be32 size;    /* Image Data Size           */
+        __be32 load;    /* Data Load Address         */
+        __be32 ep;      /* Entry Point Address       */
+        __be32 dcrc;    /* Image Data CRC Checksum   */
+        uint8_t os;     /* Operating System          */
+        uint8_t arch;   /* CPU architecture          */
+        uint8_t type;   /* Image Type                */
+        uint8_t comp;   /* Compression Type          */
+        uint8_t name[UIMAGE_NMLEN]; /* Image Name  */
+    } uimage;
+
+    uint32_t len;
+    paddr_t addr = mod->start;
+    paddr_t size = mod->size;
+
+    if ( size < sizeof(uimage) )
+        return -ENOENT;
+
+    copy_from_paddr(&uimage, addr, sizeof(uimage));
+
+    if ( be32_to_cpu(uimage.magic) != UIMAGE_MAGIC )
+        return -ENOENT;
+
+    len = be32_to_cpu(uimage.size);
+
+    if ( len > size - sizeof(uimage) )
+        return -EINVAL;
+
+    /* Only gzip compression is supported. */
+    if ( uimage.comp && uimage.comp != IH_COMP_GZIP )
+    {
+        printk(XENLOG_ERR
+               "Unsupported uImage compression type %"PRIu8"\n", uimage.comp);
+        return -EOPNOTSUPP;
+    }
+
+    info->zimage.start = be32_to_cpu(uimage.load);
+    info->entry = be32_to_cpu(uimage.ep);
+
+    /*
+     * While uboot considers 0x0 to be a valid load/start address, for Xen
+     * to maintain parity with zImage, we consider 0x0 to denote position
+     * independent image. That means Xen is free to load such an image at
+     * any valid address.
+     */
+    if ( info->zimage.start == 0 )
+        printk(XENLOG_INFO
+               "No load address provided. Xen will decide where to load it.\n");
+    else
+        printk(XENLOG_INFO
+               "Provided load address: %"PRIpaddr" and entry address: %"PRIpaddr"\n",
+               info->zimage.start, info->entry);
+
+    /*
+     * If the image supports position independent execution, then user cannot
+     * provide an entry point as Xen will load such an image at any appropriate
+     * memory address. Thus, we need to return error.
+     */
+    if ( (info->zimage.start == 0) && (info->entry != 0) )
+    {
+        printk(XENLOG_ERR
+               "Entry point cannot be non zero for PIE image.\n");
+        return -EINVAL;
+    }
+
+    if ( uimage.comp )
+    {
+        int rc;
+
+        /*
+         * In case of a compressed uImage, the gzip header is right after
+         * the u-boot header, so pass sizeof(uimage) as an offset to gzip
+         * header.
+         */
+        rc = kernel_decompress(mod, sizeof(uimage));
+        if ( rc )
+            return rc;
+
+        info->zimage.kernel_addr = mod->start;
+        info->zimage.len = mod->size;
+    }
+    else
+    {
+        info->zimage.kernel_addr = addr + sizeof(uimage);
+        info->zimage.len = len;
+    }
+
+    info->load = kernel_zimage_load;
+
+#ifdef CONFIG_ARM_64
+    switch ( uimage.arch )
+    {
+    case IH_ARCH_ARM:
+        info->type = DOMAIN_32BIT;
+        break;
+    case IH_ARCH_ARM64:
+        info->type = DOMAIN_64BIT;
+        break;
+    default:
+        printk(XENLOG_ERR "Unsupported uImage arch type %d\n", uimage.arch);
+        return -EINVAL;
+    }
+
+    /*
+     * If there is a uImage header, then we do not parse zImage or zImage64
+     * header. In other words if the user provides a uImage header on top of
+     * zImage or zImage64 header, Xen uses the attributes of uImage header only.
+     * Thus, Xen uses uimage.load attribute to determine the load address and
+     * zimage.text_offset is ignored.
+     */
+    info->zimage.text_offset = 0;
+#endif
 
     return 0;
 }
@@ -365,6 +440,7 @@ static int __init kernel_zimage64_probe(struct kernel_info *info,
     info->zimage.kernel_addr = addr;
     info->zimage.len = end - start;
     info->zimage.text_offset = zimage.text_offset;
+    info->zimage.start = 0;
 
     info->load = kernel_zimage_load;
 
@@ -434,6 +510,15 @@ int __init kernel_probe(struct kernel_info *info,
     struct dt_device_node *node;
     u64 kernel_addr, initrd_addr, dtb_addr, size;
     int rc;
+
+    /*
+     * We need to initialize start to 0. This field may be populated during
+     * kernel_xxx_probe() if the image has a fixed entry point (for e.g.
+     * uimage.ep).
+     * We will use this to determine if the image has a fixed entry point or
+     * the load address should be used as the start address.
+     */
+    info->entry = 0;
 
     /* domain is NULL only for the hardware domain */
     if ( domain == NULL )
@@ -508,8 +593,22 @@ int __init kernel_probe(struct kernel_info *info,
         printk("Loading ramdisk from boot module @ %"PRIpaddr"\n",
                info->initrd_bootmodule->start);
 
-    /* if it is a gzip'ed image, 32bit or 64bit, uncompress it */
-    rc = kernel_decompress(mod);
+    /*
+     * uImage header always appears at the top of the image (even compressed),
+     * so it needs to be probed first. Note that in case of compressed uImage,
+     * kernel_decompress is called from kernel_uimage_probe making the function
+     * self-containing (i.e. fall through only in case of a header not found).
+     */
+    rc = kernel_uimage_probe(info, mod);
+    if ( rc != -ENOENT )
+        return rc;
+
+    /*
+     * If it is a gzip'ed image, 32bit or 64bit, uncompress it.
+     * At this point, gzip header appears (if at all) at the top of the image,
+     * so pass 0 as an offset.
+     */
+    rc = kernel_decompress(mod, 0);
     if ( rc && rc != -EINVAL )
         return rc;
 
@@ -517,8 +616,6 @@ int __init kernel_probe(struct kernel_info *info,
     rc = kernel_zimage64_probe(info, mod->start, mod->size);
     if (rc < 0)
 #endif
-        rc = kernel_uimage_probe(info, mod->start, mod->size);
-    if (rc < 0)
         rc = kernel_zimage32_probe(info, mod->start, mod->size);
 
     return rc;

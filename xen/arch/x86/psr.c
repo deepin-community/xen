@@ -191,7 +191,7 @@ static struct feat_node *feat_l2_cat;
 static struct feat_node *feat_mba;
 
 /* Common functions */
-#define cat_default_val(len) (0xffffffff >> (32 - (len)))
+#define cat_default_val(len) (0xffffffffU >> (32 - (len)))
 
 /*
  * get_cdp_data - get DATA COS register value from input COS ID.
@@ -276,6 +276,7 @@ static enum psr_feat_type psr_type_to_feat_type(enum psr_type type)
 
     default:
         ASSERT_UNREACHABLE();
+        break;
     }
 
     return feat_type;
@@ -289,7 +290,7 @@ static bool cf_check cat_check_cbm(const struct feat_node *feat, uint32_t *val)
     unsigned long cbm = *val;
 
     /* Set bits should only in the range of [0, cbm_len). */
-    if ( cbm & (~0ul << cbm_len) )
+    if ( cbm & (~0UL << cbm_len) )
         return false;
 
     /* At least one bit need to be set. */
@@ -360,7 +361,7 @@ static bool cat_init_feature(const struct cpuid_leaf *regs,
         wrmsrl(MSR_IA32_PSR_L3_MASK(1), cat_default_val(feat->cat.cbm_len));
         rdmsrl(MSR_IA32_PSR_L3_QOS_CFG, val);
         wrmsrl(MSR_IA32_PSR_L3_QOS_CFG,
-               val | (1ull << PSR_L3_QOS_CDP_ENABLE_BIT));
+               val | (1ULL << PSR_L3_QOS_CDP_ENABLE_BIT));
 
         break;
     }
@@ -636,7 +637,7 @@ static void __init init_psr_cmt(unsigned int rmid_max)
 
     psr_cmt->features = edx;
     psr_cmt->rmid_max = min(rmid_max, ebx);
-    rmid_mask = ~(~0ull << get_count_order(ebx));
+    rmid_mask = ~(~0ULL << get_count_order(ebx));
 
     if ( psr_cmt->features & PSR_RESOURCE_TYPE_L3 )
     {
@@ -738,7 +739,7 @@ static void psr_assoc_init(void)
         unsigned int cos_max = get_max_cos_max(info);
 
         if ( info->feat_init )
-            psra->cos_mask = ((1ull << get_count_order(cos_max)) - 1) <<
+            psra->cos_mask = ((1ULL << get_count_order(cos_max)) - 1) <<
                              ASSOC_REG_SHIFT;
     }
 
@@ -1252,7 +1253,7 @@ static void cf_check do_write_psr_msrs(void *data)
 {
     const struct cos_write_info *info = data;
     unsigned int i, index, cos = info->cos;
-    const struct psr_socket_info *socket_info =
+    const struct psr_socket_info *sock_info =
         get_socket_info(cpu_to_socket(smp_processor_id()));
 
     /*
@@ -1261,7 +1262,7 @@ static void cf_check do_write_psr_msrs(void *data)
      */
     for ( index = i = 0; i < ARRAY_SIZE(feat_props); i++ )
     {
-        struct feat_node *feat = socket_info->features[i];
+        struct feat_node *feat = sock_info->features[i];
         const struct feat_props *props = feat_props[i];
         unsigned int cos_num, j;
 
@@ -1663,7 +1664,7 @@ static int cf_check cpu_callback(
         break;
     }
 
-    return !rc ? NOTIFY_DONE : notifier_from_errno(rc);
+    return notifier_from_errno(rc);
 }
 
 static struct notifier_block cpu_nfb = {

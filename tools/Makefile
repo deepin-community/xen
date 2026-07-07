@@ -8,7 +8,8 @@ SUBDIRS-y :=
 SUBDIRS-y += libs
 SUBDIRS-y += flask
 SUBDIRS-y += fuzz
-SUBDIRS-y += xenstore
+SUBDIRS-y += xs-clients
+SUBDIRS-$(XENSTORE_XENSTORED) += xenstored
 SUBDIRS-y += misc
 SUBDIRS-y += examples
 SUBDIRS-y += hotplug
@@ -18,7 +19,7 @@ SUBDIRS-$(CONFIG_X86) += firmware
 SUBDIRS-y += console
 SUBDIRS-y += xenmon
 SUBDIRS-$(XENSTAT_XENTOP) += xentop
-SUBDIRS-y += libfsimage
+SUBDIRS-$(CONFIG_LIBFSIMAGE) += libfsimage
 SUBDIRS-$(CONFIG_Linux) += vchan
 
 # do not recurse in to a dir we are about to delete
@@ -31,12 +32,13 @@ SUBDIRS-y += xenpmd
 SUBDIRS-$(CONFIG_GOLANG) += golang
 SUBDIRS-y += xl
 SUBDIRS-y += helpers
+SUBDIRS-y += 9pfsd
 SUBDIRS-$(CONFIG_X86) += xenpaging
 SUBDIRS-$(CONFIG_X86) += debugger
 SUBDIRS-$(CONFIG_TESTS) += tests
 
 SUBDIRS-y += python
-SUBDIRS-y += pygrub
+SUBDIRS-$(CONFIG_PYGRUB) += pygrub
 SUBDIRS-$(OCAML_TOOLS) += ocaml
 
 ifeq ($(CONFIG_RUMP),y)
@@ -58,9 +60,7 @@ build all: subdirs-all
 install:
 	$(INSTALL_DIR) -m 700 $(DESTDIR)$(XEN_DUMP_DIR)
 	$(INSTALL_DIR) $(DESTDIR)$(XEN_LOG_DIR)
-	$(INSTALL_DIR) $(DESTDIR)$(XEN_RUN_DIR)
 	$(INSTALL_DIR) $(DESTDIR)$(XEN_LIB_DIR)
-	$(INSTALL_DIR) $(DESTDIR)$(XEN_RUN_STORED)
 	$(INSTALL_DIR) $(DESTDIR)$(PKG_INSTALLDIR)
 	$(MAKE) subdirs-install
 
@@ -282,8 +282,3 @@ endif
 ifeq ($(CONFIG_X86),y)
 	$(MAKE) -C firmware subtree-force-update
 endif
-
-subtree-force-update-all:
-	$(MAKE) qemu-xen-dir-force-update
-	$(MAKE) qemu-xen-traditional-dir-force-update
-	$(MAKE) -C firmware subtree-force-update-all

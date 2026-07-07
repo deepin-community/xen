@@ -17,12 +17,12 @@
 #include <xen/sched.h>
 #include <asm/acpi.h>
 #include <asm/irq.h>
-#include <asm/init.h>
 #include <xen/spinlock.h>
 #include <xen/sched.h>
 #include <xen/domain.h>
 #include <xen/console.h>
 #include <xen/iommu.h>
+#include <xen/softirq.h>
 #include <xen/watchdog.h>
 #include <xen/cpu.h>
 #include <public/platform.h>
@@ -30,7 +30,10 @@
 #include <asm/apic.h>
 #include <asm/io_apic.h>
 #include <asm/microcode.h>
+#include <asm/prot-key.h>
 #include <asm/spec_ctrl.h>
+#include <asm/trampoline.h>
+
 #include <acpi/cpufreq/cpufreq.h>
 
 uint32_t system_reset_counter = 1;
@@ -56,7 +59,7 @@ static int __init cf_check parse_acpi_sleep(const char *s)
         s = ss + 1;
     } while ( *ss );
 
-    acpi_video_flags |= flag;
+    bootsym(video_flags) |= flag;
 
     return rc;
 }
@@ -246,7 +249,7 @@ static int enter_state(u32 state)
 
     ci = get_cpu_info();
     /* Avoid NMI/#MC using unsafe MSRs until we've reloaded microcode. */
-    ci->spec_ctrl_flags &= ~SCF_IST_MASK;
+    ci->scf &= ~SCF_IST_MASK;
 
     ACPI_FLUSH_CPU_CACHE();
 
@@ -290,7 +293,7 @@ static int enter_state(u32 state)
         panic("Missing previously available feature(s)\n");
 
     /* Re-enabled default NMI/#MC use of MSRs now microcode is loaded. */
-    ci->spec_ctrl_flags |= (default_spec_ctrl_flags & SCF_IST_MASK);
+    ci->scf |= (default_scf & SCF_IST_MASK);
 
     if ( boot_cpu_has(X86_FEATURE_IBRSB) || boot_cpu_has(X86_FEATURE_IBRS) )
     {
@@ -299,6 +302,16 @@ static int enter_state(u32 state)
     }
 
     update_mcu_opt_ctrl();
+    update_pb_opt_ctrl();
+
+    /*
+     * This should be before restoring CR4, but that is earlier in asm and
+     * awkward.  Instead, we rely on MSR_PKRS being something sane out of S3
+     * (0, or Xen's previous value) until this point, where we need to become
+     * certain that Xen's cache matches reality.
+     */
+    if ( cpu_has_pks )
+        wrpkrs_and_cache(0);
 
     /* (re)initialise SYSCALL/SYSENTER state, amongst other things. */
     percpu_traps_init();
@@ -320,6 +333,7 @@ static int enter_state(u32 state)
     thaw_domains();
     system_state = SYS_STATE_active;
     spin_unlock(&pm_lock);
+    raise_softirq(TIMER_SOFTIRQ);
     return error;
 }
 
@@ -333,7 +347,7 @@ static long cf_check enter_state_helper(void *data)
  * Dom0 issues this hypercall in place of writing pm1a_cnt. Xen then
  * takes over the control and put the system into sleep state really.
  */
-int acpi_enter_sleep(struct xenpf_enter_acpi_sleep *sleep)
+int acpi_enter_sleep(const struct xenpf_enter_acpi_sleep *sleep)
 {
     if ( sleep->sleep_state == ACPI_STATE_S3 &&
          (!acpi_sinfo.wakeup_vector || !acpi_sinfo.vector_width ||
@@ -413,12 +427,12 @@ static void tboot_sleep(u8 sleep_state)
 {
     uint32_t shutdown_type;
 
-#define TB_COPY_GAS(tbg, g)             \
-    tbg.space_id = g.space_id;          \
-    tbg.bit_width = g.bit_width;        \
-    tbg.bit_offset = g.bit_offset;      \
-    tbg.access_width = g.access_width;  \
-    tbg.address = g.address;
+#define TB_COPY_GAS(tbg, g)                 \
+    (tbg).space_id = (g).space_id;          \
+    (tbg).bit_width = (g).bit_width;        \
+    (tbg).bit_offset = (g).bit_offset;      \
+    (tbg).access_width = (g).access_width;  \
+    (tbg).address = (g).address;
 
     /* sizes are not same (due to packing) so copy each one */
     TB_COPY_GAS(g_tboot_shared->acpi_sinfo.pm1a_cnt_blk,

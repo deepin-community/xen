@@ -22,8 +22,8 @@
 #include <asm/current.h>
 #include <xen/hypercall.h>
 #include <public/sysctl.h>
-#include <asm/numa.h>
 #include <xen/nodemask.h>
+#include <xen/numa.h>
 #include <xsm/xsm.h>
 #include <xen/pmstat.h>
 #include <xen/livepatch.h>
@@ -71,7 +71,7 @@ long do_sysctl(XEN_GUEST_HANDLE_PARAM(xen_sysctl_t) u_sysctl)
         break;
 
     case XEN_SYSCTL_sched_id:
-        op->u.sched_id.sched_id = sched_id();
+        op->u.sched_id.sched_id = scheduler_id();
         break;
 
     case XEN_SYSCTL_getdomaininfolist:
@@ -89,7 +89,7 @@ long do_sysctl(XEN_GUEST_HANDLE_PARAM(xen_sysctl_t) u_sysctl)
             if ( num_domains == op->u.getdomaininfolist.max_domains )
                 break;
 
-            if ( xsm_getdomaininfo(XSM_HOOK, d) )
+            if ( xsm_getdomaininfo(XSM_XS_PRIV, d) )
                 continue;
 
             getdomaininfo(d, &info);
@@ -134,7 +134,7 @@ long do_sysctl(XEN_GUEST_HANDLE_PARAM(xen_sysctl_t) u_sysctl)
         {
             if ( copy_from_guest_offset(&c, op->u.debug_keys.keys, i, 1) )
                 goto out;
-            handle_keypress(c, guest_cpu_user_regs());
+            handle_keypress(c, false);
         }
         ret = 0;
         copyback = 0;
@@ -297,8 +297,8 @@ long do_sysctl(XEN_GUEST_HANDLE_PARAM(xen_sysctl_t) u_sysctl)
     {
         unsigned int i, j, num_nodes;
         struct xen_sysctl_numainfo *ni = &op->u.numainfo;
-        bool_t do_meminfo = !guest_handle_is_null(ni->meminfo);
-        bool_t do_distance = !guest_handle_is_null(ni->distance);
+        bool do_meminfo = !guest_handle_is_null(ni->meminfo);
+        bool do_distance = !guest_handle_is_null(ni->distance);
 
         num_nodes = last_node(node_online_map) + 1;
 

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /******************************************************************************
  * arch/x86/mm/p2m-pt.c
  *
@@ -9,19 +10,6 @@
  * Parts of this code are Copyright (c) 2006-2007 by XenSource Inc.
  * Parts of this code are Copyright (c) 2006 by Michael A Fetterman
  * Parts based on earlier work by Michael A Fetterman, Ian Pratt et al.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <xen/vm_event.h>
@@ -99,13 +87,13 @@ static unsigned long p2m_type_to_flags(const struct p2m_domain *p2m,
         return flags | P2M_BASE_FLAGS | _PAGE_RW | _PAGE_NX_BIT;
     case p2m_mmio_direct:
         if ( !rangeset_contains_singleton(mmio_ro_ranges, mfn_x(mfn)) )
-            flags |= _PAGE_RW;
+            flags |= _PAGE_RW | _PAGE_UCM;
         else
         {
-            flags |= _PAGE_PWT;
+            flags |= _PAGE_UC;
             ASSERT(!level);
         }
-        return flags | P2M_BASE_FLAGS | _PAGE_PCD;
+        return flags | P2M_BASE_FLAGS;
     }
 }
 
@@ -225,7 +213,7 @@ p2m_free_entry(struct p2m_domain *p2m, l1_pgentry_t *p2m_entry, int page_order)
 static int
 p2m_next_level(struct p2m_domain *p2m, void **table,
                unsigned long *gfn_remainder, unsigned long gfn, u32 shift,
-               u32 max, unsigned int level, bool_t unmap)
+               u32 max, unsigned int level, bool unmap)
 {
     l1_pgentry_t *p2m_entry, new_entry;
     void *next;
@@ -620,7 +608,7 @@ p2m_pt_set_entry(struct p2m_domain *p2m, gfn_t gfn_, mfn_t mfn,
         t.d = d->domain_id;
         t.order = page_order;
 
-        __trace_var(TRC_MEM_SET_P2M_ENTRY, 0, sizeof(t), &t);
+        trace(TRC_MEM_SET_P2M_ENTRY, sizeof(t), &t);
     }
 
     /* Carry out any eventually pending earlier changes first. */
@@ -757,9 +745,9 @@ p2m_pt_set_entry(struct p2m_domain *p2m, gfn_t gfn_, mfn_t mfn,
     if ( need_iommu_pt_sync(p2m->domain) &&
          (iommu_old_flags != iommu_pte_flags || old_mfn != mfn_x(mfn)) )
         rc = iommu_pte_flags
-             ? iommu_legacy_map(d, _dfn(gfn), mfn, 1ul << page_order,
+             ? iommu_legacy_map(d, _dfn(gfn), mfn, 1UL << page_order,
                                 iommu_pte_flags)
-             : iommu_legacy_unmap(d, _dfn(gfn), 1ul << page_order);
+             : iommu_legacy_unmap(d, _dfn(gfn), 1UL << page_order);
 
     /*
      * Free old intermediate tables if necessary.  This has to be the
@@ -777,7 +765,7 @@ p2m_pt_set_entry(struct p2m_domain *p2m, gfn_t gfn_, mfn_t mfn,
 static mfn_t cf_check
 p2m_pt_get_entry(struct p2m_domain *p2m, gfn_t gfn_,
                  p2m_type_t *t, p2m_access_t *a, p2m_query_t q,
-                 unsigned int *page_order, bool_t *sve)
+                 unsigned int *page_order, bool *sve)
 {
     mfn_t mfn;
     unsigned long gfn = gfn_x(gfn_);
@@ -786,7 +774,7 @@ p2m_pt_get_entry(struct p2m_domain *p2m, gfn_t gfn_,
     l1_pgentry_t *l1e;
     unsigned int flags;
     p2m_type_t l1t;
-    bool_t recalc;
+    bool recalc;
 
     ASSERT(paging_mode_translate(p2m->domain));
 

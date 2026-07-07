@@ -32,7 +32,14 @@
 #define cpu_has_thumbee   (boot_cpu_feature32(thumbee) == 1)
 #define cpu_has_aarch32   (cpu_has_arm || cpu_has_thumb)
 
+#ifdef CONFIG_ARM64_SVE
+#define cpu_has_sve       (boot_cpu_feature64(sve) == 1)
+#else
+#define cpu_has_sve       0
+#endif
+
 #ifdef CONFIG_ARM_32
+#define cpu_has_gicv3     (boot_cpu_feature32(gic) >= 1)
 #define cpu_has_gentimer  (boot_cpu_feature32(gentimer) == 1)
 /*
  * On Armv7, the value 0 is used to indicate that PMUv2 is not
@@ -91,11 +98,6 @@ static inline bool cpus_have_cap(unsigned int num)
     return test_bit(num, cpu_hwcaps);
 }
 
-static inline int cpu_nr_siblings(unsigned int cpu)
-{
-    return 1;
-}
-
 /* System capability check for constant cap */
 #define cpus_have_const_cap(num) ({                 \
         register_t __ret;                           \
@@ -120,8 +122,8 @@ static inline void cpus_set_cap(unsigned int num)
 struct arm_cpu_capabilities {
     const char *desc;
     u16 capability;
-    bool (*matches)(const struct arm_cpu_capabilities *);
-    int (*enable)(void *); /* Called on every active CPUs */
+    bool (*matches)(const struct arm_cpu_capabilities *entry);
+    int (*enable)(void *data); /* Called on every active CPUs */
     union {
         struct {    /* To be used for eratum handling only */
             u32 midr_model;
@@ -200,7 +202,9 @@ struct cpuinfo_arm {
             unsigned long mte:4;
             unsigned long ras_frac:4;
             unsigned long mpam_frac:4;
-            unsigned long __res1:44;
+            unsigned long __res1:4;
+            unsigned long sme:4;
+            unsigned long __res2:36;
         };
     } pfr64;
 
@@ -323,6 +327,14 @@ struct cpuinfo_arm {
         };
     } isa64;
 
+    union {
+        register_t bits[1];
+        struct {
+            unsigned long len:4;
+            unsigned long __res0:60;
+        };
+    } zcr64;
+
     struct {
         register_t bits[1];
     } zfr64;
@@ -433,10 +445,10 @@ struct cpuinfo_arm {
 
 extern struct cpuinfo_arm system_cpuinfo;
 
-extern void identify_cpu(struct cpuinfo_arm *);
+extern void identify_cpu(struct cpuinfo_arm *c);
 
 #ifdef CONFIG_ARM_64
-extern void update_system_features(const struct cpuinfo_arm *);
+extern void update_system_features(const struct cpuinfo_arm *new);
 #else
 static inline void update_system_features(const struct cpuinfo_arm *cpuinfo)
 {
@@ -447,7 +459,7 @@ static inline void update_system_features(const struct cpuinfo_arm *cpuinfo)
 extern struct cpuinfo_arm cpu_data[];
 #define current_cpu_data cpu_data[smp_processor_id()]
 
-extern struct cpuinfo_arm guest_cpuinfo;
+extern struct cpuinfo_arm domain_cpuinfo;
 
 #endif /* __ASSEMBLY__ */
 

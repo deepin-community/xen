@@ -1,31 +1,20 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * vmx.h: VMX Architecture related definitions
  * Copyright (c) 2004, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  *
  */
 #ifndef __ASM_X86_HVM_VMX_VMX_H__
 #define __ASM_X86_HVM_VMX_VMX_H__
 
 #include <xen/sched.h>
-#include <asm/types.h>
+#include <xen/types.h>
+
 #include <asm/regs.h>
 #include <asm/asm_defns.h>
 #include <asm/processor.h>
+#include <asm/p2m.h>
 #include <asm/i387.h>
-#include <asm/hvm/support.h>
-#include <asm/hvm/trace.h>
 #include <asm/hvm/vmx/vmcs.h>
 
 extern int8_t opt_ept_exec_sp;
@@ -45,8 +34,8 @@ typedef union {
                                EPT/VT-d usage */
         mfn         :   40, /* bits 51:12 - Machine physical frame number */
         sa_p2mt     :   6,  /* bits 57:52 - Software available 2 */
-        access      :   4,  /* bits 61:58 - p2m_access_t */
-        _rsvd       :   1,  /* bit 62 - reserved */
+        pw          :   1,  /* bit 58 - Paging-write access */
+        access      :   4,  /* bits 62:59 - p2m_access_t */
         suppress_ve :   1;  /* bit 63 - suppress #VE */
     };
     u64 epte;
@@ -80,28 +69,18 @@ typedef enum {
 #define EPTE_RWX_MASK           0x7
 #define EPTE_FLAG_MASK          0x7f
 
-#define EPT_EMT_UC              0
-#define EPT_EMT_WC              1
-#define EPT_EMT_RSV0            2
-#define EPT_EMT_RSV1            3
-#define EPT_EMT_WT              4
-#define EPT_EMT_WP              5
-#define EPT_EMT_WB              6
-#define EPT_EMT_RSV2            7
-
 #define PI_xAPIC_NDST_MASK      0xFF00
 
-void vmx_asm_vmexit_handler(struct cpu_user_regs);
 void vmx_intr_assist(void);
 void noreturn cf_check vmx_do_resume(void);
-void vmx_vlapic_msr_changed(struct vcpu *v);
+void cf_check vmx_vlapic_msr_changed(struct vcpu *v);
 struct hvm_emulate_ctxt;
 void vmx_realmode_emulate_one(struct hvm_emulate_ctxt *hvmemul_ctxt);
 void vmx_realmode(struct cpu_user_regs *regs);
-void vmx_update_debug_state(struct vcpu *v);
 void vmx_update_exception_bitmap(struct vcpu *v);
 void vmx_update_cpu_exec_control(struct vcpu *v);
 void vmx_update_secondary_exec_control(struct vcpu *v);
+void vmx_update_tertiary_exec_control(const struct vcpu *v);
 
 #define POSTED_INTR_ON  0
 #define POSTED_INTR_SN  1
@@ -158,7 +137,7 @@ static inline void pi_clear_sn(struct pi_desc *pi_desc)
 /*
  * Exit Reasons
  */
-#define VMX_EXIT_REASONS_FAILED_VMENTRY 0x80000000
+#define VMX_EXIT_REASONS_FAILED_VMENTRY (1u << 31)
 #define VMX_EXIT_REASONS_BUS_LOCK       (1u << 26)
 
 #define EXIT_REASON_EXCEPTION_NMI       0
@@ -230,12 +209,12 @@ static inline void pi_clear_sn(struct pi_desc *pi_desc)
  * Note INTR_INFO_NMI_UNBLOCKED_BY_IRET is also used with Exit Qualification
  * field for EPT violations, PML full and SPP-related event vmexits.
  */
-#define INTR_INFO_VECTOR_MASK           0xff            /* 7:0 */
-#define INTR_INFO_INTR_TYPE_MASK        0x700           /* 10:8 */
-#define INTR_INFO_DELIVER_CODE_MASK     0x800           /* 11 */
-#define INTR_INFO_NMI_UNBLOCKED_BY_IRET 0x1000          /* 12 */
-#define INTR_INFO_VALID_MASK            0x80000000      /* 31 */
-#define INTR_INFO_RESVD_BITS_MASK       0x7ffff000
+#define INTR_INFO_VECTOR_MASK           0x000000ffU     /* 7:0 */
+#define INTR_INFO_INTR_TYPE_MASK        0x00000700U     /* 10:8 */
+#define INTR_INFO_DELIVER_CODE_MASK     0x00000800U     /* 11 */
+#define INTR_INFO_NMI_UNBLOCKED_BY_IRET 0x00001000U     /* 12 */
+#define INTR_INFO_VALID_MASK            0x80000000U     /* 31 */
+#define INTR_INFO_RESVD_BITS_MASK       0x7ffff000U
 
 /*
  * Exit Qualifications for NOTIFY VM EXIT
@@ -606,9 +585,10 @@ void vmx_inject_extint(int trap, uint8_t source);
 void vmx_inject_nmi(void);
 
 void ept_walk_table(struct domain *d, unsigned long gfn);
-bool_t ept_handle_misconfig(uint64_t gpa);
+bool ept_handle_misconfig(uint64_t gpa);
 int epte_get_entry_emt(struct domain *d, gfn_t gfn, mfn_t mfn,
                        unsigned int order, bool *ipat, p2m_type_t type);
+void ept_vcpu_flush_pml_buffer(struct vcpu *v);
 void setup_ept_dump(void);
 /* Locate an alternate p2m by its EPTP */
 unsigned int p2m_find_altp2m_by_eptp(struct domain *d, uint64_t eptp);
@@ -620,7 +600,7 @@ void vmx_pi_desc_fixup(unsigned int cpu);
 
 void vmx_sync_exit_bitmap(struct vcpu *v);
 
-#ifdef CONFIG_HVM
+#ifdef CONFIG_INTEL_VMX
 void vmx_pi_hooks_assign(struct domain *d);
 void vmx_pi_hooks_deassign(struct domain *d);
 #else
@@ -628,7 +608,7 @@ static inline void vmx_pi_hooks_assign(struct domain *d) {}
 static inline void vmx_pi_hooks_deassign(struct domain *d) {}
 #endif
 
-#define APIC_INVALID_DEST           0xffffffff
+#define APIC_INVALID_DEST           0xffffffffU
 
 /* EPT violation qualifications definitions */
 typedef union ept_qual {

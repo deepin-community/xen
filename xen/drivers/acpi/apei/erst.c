@@ -58,7 +58,7 @@
 #define FIRMWARE_MAX_STALL	50			/* 50us */
 
 static struct acpi_table_erst *__read_mostly erst_tab;
-static bool_t __read_mostly erst_enabled;
+static bool __read_mostly erst_enabled;
 
 /* ERST Error Log Address Range atrributes */
 #define ERST_RANGE_RESERVED	0x0001
@@ -105,7 +105,7 @@ static inline int erst_errno(int command_status)
 
 static int erst_timedout(u64 *t, u64 spin_unit)
 {
-	if ((s64)*t < spin_unit) {
+	if ((int64_t)*t < spin_unit) {
 		printk(XENLOG_WARNING "Firmware does not respond in time\n");
 		return 1;
 	}

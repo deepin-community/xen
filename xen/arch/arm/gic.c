@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * xen/arch/arm/gic.c
  *
@@ -5,16 +6,6 @@
  *
  * Tim Deegan <tim@xen.org>
  * Copyright (c) 2011 Citrix Systems.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <xen/lib.h>
@@ -47,7 +38,7 @@ const struct gic_hw_operations *gic_hw_ops;
 static void __init __maybe_unused build_assertions(void)
 {
     /* Check our enum gic_sgi only covers SGIs */
-    BUILD_BUG_ON(GIC_SGI_MAX > NR_GIC_SGI);
+    BUILD_BUG_ON(GIC_SGI_STATIC_MAX > NR_GIC_SGI);
 }
 
 void register_gic_ops(const struct gic_hw_operations *ops)
@@ -126,7 +117,9 @@ void gic_route_irq_to_xen(struct irq_desc *desc, unsigned int priority)
 
     desc->handler = gic_hw_ops->gic_host_irq_type;
 
-    gic_set_irq_type(desc, desc->arch.type);
+    /* SGIs are always edge-triggered, so there is need to set it */
+    if ( desc->irq >= NR_GIC_SGI)
+        gic_set_irq_type(desc, desc->arch.type);
     gic_set_irq_priority(desc, priority);
 }
 
@@ -143,14 +136,6 @@ int gic_route_irq_to_guest(struct domain *d, unsigned int virq,
     ASSERT(virq >= 32);
     ASSERT(virq < vgic_num_irqs(d));
     ASSERT(!is_lpi(virq));
-
-    /*
-     * When routing an IRQ to guest, the virtual state is not synced
-     * back to the physical IRQ. To prevent get unsync, restrict the
-     * routing to when the Domain is been created.
-     */
-    if ( d->creation_finished )
-        return -EBUSY;
 
     ret = vgic_connect_hw_irq(d, NULL, virq, desc, true);
     if ( ret )
@@ -229,36 +214,6 @@ int gic_map_hwdom_extra_mappings(struct domain *d)
     return 0;
 }
 
-static void __init gic_dt_preinit(void)
-{
-    int rc;
-    struct dt_device_node *node;
-    uint8_t num_gics = 0;
-
-    dt_for_each_device_node( dt_host, node )
-    {
-        if ( !dt_get_property(node, "interrupt-controller", NULL) )
-            continue;
-
-        if ( !dt_get_parent(node) )
-            continue;
-
-        rc = device_init(node, DEVICE_GIC, NULL);
-        if ( !rc )
-        {
-            /* NOTE: Only one GIC is supported */
-            num_gics = 1;
-            break;
-        }
-    }
-    if ( !num_gics )
-        panic("Unable to find compatible GIC in the device tree\n");
-
-    /* Set the GIC as the primary interrupt controller */
-    dt_interrupt_controller = node;
-    dt_device_set_used_by(node, DOMID_XEN);
-}
-
 #ifdef CONFIG_ACPI
 static void __init gic_acpi_preinit(void)
 {
@@ -271,7 +226,7 @@ static void __init gic_acpi_preinit(void)
 
     dist = container_of(header, struct acpi_madt_generic_distributor, header);
 
-    if ( acpi_device_init(DEVICE_GIC, NULL, dist->version) )
+    if ( acpi_device_init(DEVICE_INTERRUPT_CONTROLLER, NULL, dist->version) )
         panic("Unable to find compatible GIC in the ACPI table\n");
 }
 #else
@@ -284,7 +239,7 @@ static void __init gic_acpi_preinit(void) { }
 void __init gic_preinit(void)
 {
     if ( acpi_disabled )
-        gic_dt_preinit();
+        intc_dt_preinit();
     else
         gic_acpi_preinit();
 }
@@ -339,7 +294,7 @@ void gic_disable_cpu(void)
     gic_hw_ops->disable_interface();
 }
 
-static void do_sgi(struct cpu_user_regs *regs, enum gic_sgi sgi)
+static void do_static_sgi(struct cpu_user_regs *regs, enum gic_sgi sgi)
 {
     struct irq_desc *desc = irq_to_desc(sgi);
 
@@ -384,7 +339,7 @@ void gic_interrupt(struct cpu_user_regs *regs, int is_fiq)
         /* Reading IRQ will ACK it */
         irq = gic_hw_ops->read_irq();
 
-        if ( likely(irq >= 16 && irq < 1020) )
+        if ( likely(irq >= GIC_SGI_STATIC_MAX && irq < 1020) )
         {
             isb();
             do_IRQ(regs, irq, is_fiq);
@@ -396,7 +351,7 @@ void gic_interrupt(struct cpu_user_regs *regs, int is_fiq)
         }
         else if ( unlikely(irq < 16) )
         {
-            do_sgi(regs, irq);
+            do_static_sgi(regs, irq);
         }
         else
         {
@@ -406,7 +361,7 @@ void gic_interrupt(struct cpu_user_regs *regs, int is_fiq)
     } while (1);
 }
 
-static void maintenance_interrupt(int irq, void *dev_id, struct cpu_user_regs *regs)
+static void maintenance_interrupt(int irq, void *dev_id)
 {
     /*
      * This is a dummy interrupt handler.

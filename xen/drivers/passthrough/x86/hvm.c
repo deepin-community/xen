@@ -14,6 +14,7 @@
  * this program; If not, see <http://www.gnu.org/licenses/>.
  *
  * Copyright (C) Allen Kay <allen.m.kay@intel.com>
+ * Copyright (C) Weidong Han <weidong.han@intel.com>
  * Copyright (C) Xiaohui Xin <xiaohui.xin@intel.com>
  */
 
@@ -22,7 +23,6 @@
 #include <xen/cpu.h>
 #include <xen/irq.h>
 #include <asm/hvm/irq.h>
-#include <asm/hvm/support.h>
 #include <asm/io_apic.h>
 
 /*
@@ -381,8 +381,15 @@ int pt_irq_create_bind(
 
         /* Use interrupt posting if it is supported. */
         if ( iommu_intpost )
-            pi_update_irte(vcpu ? &vcpu->arch.hvm.vmx.pi_desc : NULL,
-                           info, pirq_dpci->gmsi.gvec);
+        {
+            rc = hvm_pi_update_irte(vcpu, info, pirq_dpci->gmsi.gvec);
+
+            if ( rc )
+            {
+                pt_irq_destroy_bind(d, pt_irq_bind);
+                return rc;
+            }
+        }
 
         if ( pt_irq_bind->u.msi.gflags & XEN_DOMCTL_VMSI_X86_UNMASKED )
         {
@@ -672,7 +679,7 @@ int pt_irq_destroy_bind(
             what = "bogus";
     }
     else if ( pirq_dpci && pirq_dpci->gmsi.posted )
-        pi_update_irte(NULL, pirq, 0);
+        hvm_pi_update_irte(NULL, pirq, 0);
 
     if ( pirq_dpci && (pirq_dpci->flags & HVM_IRQ_DPCI_MAPPED) &&
          list_empty(&pirq_dpci->digl_list) )
@@ -725,8 +732,8 @@ bool pt_pirq_cleanup_check(struct hvm_pirq_dpci *dpci)
 }
 
 int pt_pirq_iterate(struct domain *d,
-                    int (*cb)(struct domain *,
-                              struct hvm_pirq_dpci *, void *),
+                    int (*cb)(struct domain *d,
+                              struct hvm_pirq_dpci *pirq_dpci, void *arg),
                     void *arg)
 {
     int rc = 0;
@@ -925,6 +932,50 @@ static void hvm_gsi_eoi(struct domain *d, unsigned int gsi)
     hvm_pirq_eoi(pirq);
 }
 
+static int cf_check _hvm_dpci_isairq_eoi(
+    struct domain *d, struct hvm_pirq_dpci *pirq_dpci, void *arg)
+{
+    const struct hvm_irq *hvm_irq = hvm_domain_irq(d);
+    unsigned int isairq = (long)arg;
+    const struct dev_intx_gsi_link *digl;
+
+    list_for_each_entry ( digl, &pirq_dpci->digl_list, list )
+    {
+        unsigned int link = hvm_pci_intx_link(digl->device, digl->intx);
+
+        if ( hvm_irq->pci_link.route[link] == isairq )
+        {
+            hvm_pci_intx_deassert(d, digl->device, digl->intx);
+            if ( --pirq_dpci->pending == 0 )
+                pirq_guest_eoi(dpci_pirq(pirq_dpci));
+        }
+    }
+
+    return 0;
+}
+
+static void hvm_dpci_isairq_eoi(struct domain *d, unsigned int isairq)
+{
+    const struct hvm_irq_dpci *dpci = NULL;
+
+    ASSERT(isairq < NR_ISAIRQS);
+
+    if ( !is_iommu_enabled(d) )
+        return;
+
+    write_lock(&d->event_lock);
+
+    dpci = domain_get_irq_dpci(d);
+
+    if ( dpci && test_bit(isairq, dpci->isairq_map) )
+    {
+        /* Multiple mirq may be mapped to one isa irq */
+        pt_pirq_iterate(d, _hvm_dpci_isairq_eoi, (void *)(long)isairq);
+    }
+
+    write_unlock(&d->event_lock);
+}
+
 void hvm_dpci_eoi(struct domain *d, unsigned int guest_gsi)
 {
     const struct hvm_irq_dpci *hvm_irq_dpci;
@@ -1062,22 +1113,26 @@ static int cf_check cpu_callback(
     struct notifier_block *nfb, unsigned long action, void *hcpu)
 {
     unsigned int cpu = (unsigned long)hcpu;
+    unsigned long flags;
 
     switch ( action )
     {
     case CPU_UP_PREPARE:
         INIT_LIST_HEAD(&per_cpu(dpci_list, cpu));
         break;
+
     case CPU_UP_CANCELED:
-    case CPU_DEAD:
-        /*
-         * On CPU_DYING this callback is called (on the CPU that is dying)
-         * with an possible HVM_DPIC_SOFTIRQ pending - at which point we can
-         * clear out any outstanding domains (by the virtue of the idle loop
-         * calling the softirq later). In CPU_DEAD case the CPU is deaf and
-         * there are no pending softirqs for us to handle so we can chill.
-         */
         ASSERT(list_empty(&per_cpu(dpci_list, cpu)));
+        break;
+
+    case CPU_DEAD:
+        if ( list_empty(&per_cpu(dpci_list, cpu)) )
+            break;
+        /* Take whatever dpci interrupts are pending on the dead CPU. */
+        local_irq_save(flags);
+        list_splice_init(&per_cpu(dpci_list, cpu), &this_cpu(dpci_list));
+        local_irq_restore(flags);
+        raise_softirq(HVM_DPCI_SOFTIRQ);
         break;
     }
 

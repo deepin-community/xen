@@ -1,16 +1,7 @@
+/* SPDX-License-Identifier: LGPL-2.1-only */
 /*
  * Copyright (c) 2004, Intel Corporation.
  * Copyright (c) 2006, Keir Fraser, XenSource Inc.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published
- * by the Free Software Foundation; version 2.1 only. with the special
- * exception on linking described in file LICENSE.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Lesser General Public License for more details.
  */
 
 #include LIBACPI_STDUTILS
@@ -19,6 +10,7 @@
 #include "ssdt_s3.h"
 #include "ssdt_s4.h"
 #include "ssdt_tpm.h"
+#include "ssdt_tpm2.h"
 #include "ssdt_pm.h"
 #include "ssdt_laptop_slate.h"
 #include <xen/hvm/hvm_info_table.h>
@@ -350,6 +342,7 @@ static int construct_secondary_tables(struct acpi_ctxt *ctxt,
     struct acpi_20_hpet *hpet;
     struct acpi_20_waet *waet;
     struct acpi_20_tcpa *tcpa;
+    struct acpi_20_tpm2 *tpm2;
     unsigned char *ssdt;
     void *lasa;
 
@@ -409,38 +402,84 @@ static int construct_secondary_tables(struct acpi_ctxt *ctxt,
         memcpy(ssdt, ssdt_laptop_slate, sizeof(ssdt_laptop_slate));
         table_ptrs[nr_tables++] = ctxt->mem_ops.v2p(ctxt, ssdt);
     }
-
-    /* TPM TCPA and SSDT. */
-    if ( (config->table_flags & ACPI_HAS_TCPA) &&
-         (config->tis_hdr[0] != 0 && config->tis_hdr[0] != 0xffff) &&
-         (config->tis_hdr[1] != 0 && config->tis_hdr[1] != 0xffff) )
+    /* TPM and its SSDT. */
+    if ( config->table_flags & ACPI_HAS_TPM )
     {
-        ssdt = ctxt->mem_ops.alloc(ctxt, sizeof(ssdt_tpm), 16);
-        if (!ssdt) return -1;
-        memcpy(ssdt, ssdt_tpm, sizeof(ssdt_tpm));
-        table_ptrs[nr_tables++] = ctxt->mem_ops.v2p(ctxt, ssdt);
-
-        tcpa = ctxt->mem_ops.alloc(ctxt, sizeof(struct acpi_20_tcpa), 16);
-        if (!tcpa) return -1;
-        memset(tcpa, 0, sizeof(*tcpa));
-        table_ptrs[nr_tables++] = ctxt->mem_ops.v2p(ctxt, tcpa);
-
-        tcpa->header.signature = ACPI_2_0_TCPA_SIGNATURE;
-        tcpa->header.length    = sizeof(*tcpa);
-        tcpa->header.revision  = ACPI_2_0_TCPA_REVISION;
-        fixed_strcpy(tcpa->header.oem_id, ACPI_OEM_ID);
-        fixed_strcpy(tcpa->header.oem_table_id, ACPI_OEM_TABLE_ID);
-        tcpa->header.oem_revision = ACPI_OEM_REVISION;
-        tcpa->header.creator_id   = ACPI_CREATOR_ID;
-        tcpa->header.creator_revision = ACPI_CREATOR_REVISION;
-        if ( (lasa = ctxt->mem_ops.alloc(ctxt, ACPI_2_0_TCPA_LAML_SIZE, 16)) != NULL )
+        switch ( config->tpm_version )
         {
-            tcpa->lasa = ctxt->mem_ops.v2p(ctxt, lasa);
-            tcpa->laml = ACPI_2_0_TCPA_LAML_SIZE;
-            memset(lasa, 0, tcpa->laml);
-            set_checksum(tcpa,
+        case 1:
+            if ( config->tis_hdr[0] == 0 || config->tis_hdr[0] == 0xffff ||
+                 config->tis_hdr[1] == 0 || config->tis_hdr[1] == 0xffff )
+                break;
+
+            ssdt = ctxt->mem_ops.alloc(ctxt, sizeof(ssdt_tpm), 16);
+            if (!ssdt) return -1;
+            memcpy(ssdt, ssdt_tpm, sizeof(ssdt_tpm));
+            table_ptrs[nr_tables++] = ctxt->mem_ops.v2p(ctxt, ssdt);
+
+            tcpa = ctxt->mem_ops.alloc(ctxt, sizeof(struct acpi_20_tcpa), 16);
+            if (!tcpa) return -1;
+            memset(tcpa, 0, sizeof(*tcpa));
+            table_ptrs[nr_tables++] = ctxt->mem_ops.v2p(ctxt, tcpa);
+
+            tcpa->header.signature = ACPI_2_0_TCPA_SIGNATURE;
+            tcpa->header.length    = sizeof(*tcpa);
+            tcpa->header.revision  = ACPI_2_0_TCPA_REVISION;
+            fixed_strcpy(tcpa->header.oem_id, ACPI_OEM_ID);
+            fixed_strcpy(tcpa->header.oem_table_id, ACPI_OEM_TABLE_ID);
+            tcpa->header.oem_revision = ACPI_OEM_REVISION;
+            tcpa->header.creator_id   = ACPI_CREATOR_ID;
+            tcpa->header.creator_revision = ACPI_CREATOR_REVISION;
+
+            lasa = ctxt->mem_ops.alloc(ctxt, ACPI_2_0_TCPA_LAML_SIZE, 16);
+            if ( lasa )
+            {
+                tcpa->lasa = ctxt->mem_ops.v2p(ctxt, lasa);
+                tcpa->laml = ACPI_2_0_TCPA_LAML_SIZE;
+                memset(lasa, 0, tcpa->laml);
+                set_checksum(tcpa,
+                             offsetof(struct acpi_header, checksum),
+                             tcpa->header.length);
+            }
+            break;
+
+        case 2:
+            /*
+             * Check VID stored in bits 37:32 (3rd 16 bit word) of CRB
+             * identifier register.  See table 16 of TCG PC client platform
+             * TPM profile specification for TPM 2.0.
+             */
+            if ( config->crb_id[2] == 0 || config->crb_id[2] == 0xffff )
+                break;
+
+            ssdt = ctxt->mem_ops.alloc(ctxt, sizeof(ssdt_tpm2), 16);
+            if (!ssdt) return -1;
+            memcpy(ssdt, ssdt_tpm2, sizeof(ssdt_tpm2));
+            table_ptrs[nr_tables++] = ctxt->mem_ops.v2p(ctxt, ssdt);
+
+            tpm2 = ctxt->mem_ops.alloc(ctxt, sizeof(struct acpi_20_tpm2), 16);
+            if (!tpm2) return -1;
+            memset(tpm2, 0, sizeof(*tpm2));
+            table_ptrs[nr_tables++] = ctxt->mem_ops.v2p(ctxt, tpm2);
+
+            tpm2->header.signature = ACPI_2_0_TPM2_SIGNATURE;
+            tpm2->header.length    = sizeof(*tpm2);
+            tpm2->header.revision  = ACPI_2_0_TPM2_REVISION;
+            fixed_strcpy(tpm2->header.oem_id, ACPI_OEM_ID);
+            fixed_strcpy(tpm2->header.oem_table_id, ACPI_OEM_TABLE_ID);
+            tpm2->header.oem_revision = ACPI_OEM_REVISION;
+            tpm2->header.creator_id   = ACPI_CREATOR_ID;
+            tpm2->header.creator_revision = ACPI_CREATOR_REVISION;
+            tpm2->platform_class = TPM2_ACPI_CLASS_CLIENT;
+            tpm2->control_area_address = TPM_CRB_CTRL_REQ;
+            tpm2->start_method = TPM2_START_METHOD_CRB;
+            tpm2->log_area_minimum_length = TPM_LOG_AREA_MINIMUM_SIZE;
+            tpm2->log_area_start_address = TPM_LOG_AREA_ADDRESS;
+
+            set_checksum(tpm2,
                          offsetof(struct acpi_header, checksum),
-                         tcpa->header.length);
+                         tpm2->header.length);
+            break;
         }
     }
 

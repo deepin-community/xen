@@ -1,20 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * hvm_vlapic.h: virtualize LAPIC definitions.
  *
  * Copyright (c) 2004, Intel Corporation.
  * Copyright (c) 2006 Keir Fraser, XenSource Inc.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef __ASM_X86_HVM_VLAPIC_H__
@@ -77,7 +66,7 @@ struct vlapic {
     struct hvm_hw_lapic      hw;
     struct hvm_hw_lapic_regs *regs;
     struct {
-        bool_t               hw, regs;
+        bool                 hw, regs;
         uint32_t             id, ldr;
     }                        loaded;
     spinlock_t               esr_lock;
@@ -108,13 +97,13 @@ static inline void vlapic_set_reg(
 
 void vlapic_reg_write(struct vcpu *v, unsigned int reg, uint32_t val);
 
-bool_t is_vlapic_lvtpc_enabled(struct vlapic *vlapic);
+bool is_vlapic_lvtpc_enabled(struct vlapic *vlapic);
 
 bool vlapic_test_irq(const struct vlapic *vlapic, uint8_t vec);
 void vlapic_set_irq(struct vlapic *vlapic, uint8_t vec, uint8_t trig);
 
 int vlapic_has_pending_irq(struct vcpu *v);
-int vlapic_ack_pending_irq(struct vcpu *v, int vector, bool_t force_ack);
+int vlapic_ack_pending_irq(struct vcpu *v, int vector, bool force_ack);
 
 int  vlapic_init(struct vcpu *v);
 void vlapic_destroy(struct vcpu *v);
@@ -142,16 +131,10 @@ int vlapic_apicv_write(struct vcpu *v, unsigned int offset);
 
 struct vlapic *vlapic_lowest_prio(
     struct domain *d, const struct vlapic *source,
-    int short_hand, uint32_t dest, bool_t dest_mode);
+    int short_hand, uint32_t dest, bool dest_mode);
 
-bool_t vlapic_match_dest(
+bool vlapic_match_dest(
     const struct vlapic *target, const struct vlapic *source,
-    int short_hand, uint32_t dest, bool_t dest_mode);
-
-static inline void vlapic_sync_pir_to_irr(struct vcpu *v)
-{
-    if ( hvm_funcs.sync_pir_to_irr )
-        alternative_vcall(hvm_funcs.sync_pir_to_irr, v);
-}
+    int short_hand, uint32_t dest, bool dest_mode);
 
 #endif /* __ASM_X86_HVM_VLAPIC_H__ */

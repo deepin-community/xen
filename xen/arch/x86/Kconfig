@@ -11,6 +11,8 @@ config X86
 	select ARCH_MAP_DOMAIN_PAGE
 	select ARCH_SUPPORTS_INT128
 	imply CORE_PARKING
+	select FUNCTION_ALIGNMENT_16B
+	select GENERIC_BUG_FRAME
 	select HAS_ALTERNATIVE
 	select HAS_COMPAT
 	select HAS_CPUFREQ
@@ -24,9 +26,10 @@ config X86
 	select HAS_PASSTHROUGH
 	select HAS_PCI
 	select HAS_PCI_MSI
-	select HAS_PDX
+	select HAS_PIRQ
 	select HAS_SCHED_GRANULARITY
 	select HAS_UBSAN
+	select HAS_VMAP
 	select HAS_VPCI if HVM
 	select NEEDS_LIBELF
 
@@ -35,8 +38,13 @@ config ARCH_DEFCONFIG
 	default "arch/x86/configs/x86_64_defconfig"
 
 config CC_HAS_INDIRECT_THUNK
+	# GCC >= 8 or Clang >= 6
 	def_bool $(cc-option,-mindirect-branch-register) || \
 	         $(cc-option,-mretpoline-external-thunk)
+
+config CC_HAS_RETURN_THUNK
+	# GCC >= 8 or Clang >= 15
+	def_bool $(cc-option,-mfunction-return=thunk-extern)
 
 config HAS_AS_CET_SS
 	# binutils >= 2.29 or LLVM >= 6
@@ -49,12 +57,14 @@ config HAS_CC_CET_IBT
 
 menu "Architecture Features"
 
+source "arch/x86/Kconfig.cpu"
+
 source "arch/Kconfig"
 
 config PV
 	def_bool y
 	prompt "PV support"
-	---help---
+	help
 	  Interfaces to support PV domains. These require guest kernel support
 	  to run as a PV guest, but don't require any specific hardware support.
 
@@ -67,7 +77,7 @@ config PV32
 	depends on PV
 	default PV_SHIM
 	select COMPAT
-	---help---
+	help
 	  The 32bit PV ABI uses Ring1, an area of the x86 architecture which
 	  was deprecated and mostly removed in the AMD64 spec.  As a result,
 	  it occasionally conflicts with newer x86 hardware features, causing
@@ -86,7 +96,7 @@ config PV_LINEAR_PT
        bool "Support for PV linear pagetables"
        depends on PV
        default y
-       ---help---
+       help
          Linear pagetables (also called "recursive pagetables") refers
          to the practice of a guest operating system having pagetable
          entries pointing to other pagetables of the same level (i.e.,
@@ -109,7 +119,7 @@ config HVM
 	select COMPAT
 	select IOREQ_SERVER
 	select MEM_ACCESS_ALWAYS_ON
-	---help---
+	help
 	  Interfaces to support HVM domains.  HVM domains require hardware
 	  virtualisation extensions (e.g. Intel VT-x, AMD SVM), but can boot
 	  guests which have no specific Xen knowledge.
@@ -118,11 +128,32 @@ config HVM
 
 	  If unsure, say Y.
 
+config AMD_SVM
+	bool "AMD-V" if EXPERT
+	depends on HVM
+	default y
+	help
+	  Enables virtual machine extensions on platforms that implement the
+	  AMD Virtualization Technology (AMD-V).
+	  If your system includes a processor with AMD-V support, say Y.
+	  If in doubt, say Y.
+
+config INTEL_VMX
+	bool "Intel VT-x" if EXPERT
+	depends on HVM
+	default y
+	select ARCH_VCPU_IOREQ_COMPLETION
+	help
+	  Enables virtual machine extensions on platforms that implement the
+	  Intel Virtualization Technology (Intel VT-x).
+	  If your system includes a processor with Intel VT-x support, say Y.
+	  If in doubt, say Y.
+
 config XEN_SHSTK
 	bool "Supervisor Shadow Stacks"
 	depends on HAS_AS_CET_SS
 	default y
-	---help---
+	help
 	  Control-flow Enforcement Technology (CET) is a set of features in
 	  hardware designed to combat Return-oriented Programming (ROP, also
 	  call/jump COP/JOP) attacks.  Shadow Stacks are one CET feature
@@ -148,7 +179,7 @@ config SHADOW_PAGING
 	bool "Shadow Paging"
 	default !PV_SHIM_EXCLUSIVE
 	depends on PV || HVM
-	---help---
+	help
 
           Shadow paging is a software alternative to hardware paging support
           (Intel EPT, AMD NPT).
@@ -167,7 +198,7 @@ config SHADOW_PAGING
 config BIGMEM
 	bool "big memory support"
 	default n
-	---help---
+	help
 	  Allows Xen to support up to 123Tb of memory.
 
 	  This requires enlarging struct page_info as well as shrinking
@@ -179,7 +210,7 @@ config HVM_FEP
 	bool "HVM Forced Emulation Prefix support (UNSUPPORTED)" if UNSUPPORTED
 	default DEBUG
 	depends on HVM
-	---help---
+	help
 
 	  Compiles in a feature that allows HVM guest to arbitrarily
 	  exercise the instruction emulator.
@@ -196,12 +227,22 @@ config HVM_FEP
 
 config TBOOT
 	bool "Xen tboot support (UNSUPPORTED)"
-	depends on UNSUPPORTED
+	depends on INTEL && UNSUPPORTED
 	default !PV_SHIM_EXCLUSIVE
 	select CRYPTO
-	---help---
+	help
 	  Allows support for Trusted Boot using the Intel(R) Trusted Execution
 	  Technology (TXT)
+
+	  If unsure, stay with the default.
+
+config X86_PSR
+	bool "Platform Shared Resource support" if EXPERT
+	default INTEL
+	help
+	  Support of Platform Shared Resource technology, which is basis for
+	  monitoring and control of resources like cache and memory bandwidth.
+	  See xl-psr documentation for details.
 
 	  If unsure, stay with the default.
 
@@ -209,14 +250,14 @@ choice
 	prompt "Alignment of Xen image"
 	default XEN_ALIGN_2M if PV_SHIM_EXCLUSIVE
 	default XEN_ALIGN_DEFAULT
-	---help---
+	help
 	  Specify alignment for Xen image.
 
 	  If unsure, choose "default".
 
 config XEN_ALIGN_DEFAULT
 	bool "Default alignment"
-	---help---
+	help
 	  Pick alignment according to build variants.
 
 	  For EFI build the default alignment is 2M. For ELF build
@@ -249,18 +290,6 @@ config X2APIC_PHYSICAL
 	  destination inter processor interrupts (IPIs) slightly slower than
 	  Logical Destination mode.
 
-config X2APIC_CLUSTER
-	bool "Cluster Destination mode"
-	help
-	  When using this mode APICs are addressed using the Cluster Logical
-	  Destination mode.
-
-	  Cluster Destination has the benefit of sending IPIs faster since
-	  multiple APICs can be targeted as destinations of a single IPI.
-	  However the vector space is shared between all CPUs on the cluster,
-	  and hence using this mode reduces the number of available vectors
-	  when compared to Physical mode.
-
 config X2APIC_MIXED
 	bool "Mixed Destination mode"
 	help
@@ -277,7 +306,7 @@ config GUEST
 config XEN_GUEST
 	bool "Xen Guest"
 	select GUEST
-	---help---
+	help
 	  Support for Xen detecting when it is running under Xen.
 
 	  If unsure, say N.
@@ -286,7 +315,7 @@ config PVH_GUEST
 	def_bool y
 	prompt "PVH Guest"
 	depends on XEN_GUEST
-	---help---
+	help
 	  Support booting using the PVH ABI.
 
 	  If unsure, say Y.
@@ -295,7 +324,7 @@ config PV_SHIM
 	def_bool y
 	prompt "PV Shim"
 	depends on PV && XEN_GUEST
-	---help---
+	help
 	  Build Xen with a mode which acts as a shim to allow PV guest to run
 	  in an HVM/PVH container. This mode can only be enabled with command
 	  line option.
@@ -305,7 +334,7 @@ config PV_SHIM
 config PV_SHIM_EXCLUSIVE
 	bool "PV Shim Exclusive"
 	depends on PV_SHIM
-	---help---
+	help
 	  Build Xen in a way which unconditionally assumes PV_SHIM mode.  This
 	  option is only intended for use when building a dedicated PV Shim
 	  firmware, and will not function correctly in other scenarios.
@@ -317,7 +346,7 @@ if !PV_SHIM_EXCLUSIVE
 config HYPERV_GUEST
 	bool "Hyper-V Guest"
 	select GUEST
-	---help---
+	help
 	  Support for Xen detecting when it is running under Hyper-V.
 
 	  If unsure, say N.
@@ -331,6 +360,33 @@ config MEM_PAGING
 config MEM_SHARING
 	bool "Xen memory sharing support (UNSUPPORTED)" if UNSUPPORTED
 	depends on HVM
+
+config REQUIRE_NX
+	bool "Require NX (No eXecute) support"
+	help
+	  No-eXecute (also called XD "eXecute Disable" and DEP "Data
+	  Execution Prevention") is a security feature designed originally
+	  to combat buffer overflow attacks by marking regions of memory
+	  which the CPU must not interpret as instructions.
+
+	  The NX feature exists in every 64bit CPU except for some very
+	  early Pentium 4 Prescott machines.
+
+	  Enabling this option will improve Xen's security by removing
+	  cases where Xen could be tricked into thinking that the feature
+	  was unavailable. However, if enabled, Xen will no longer boot on
+	  any CPU which is lacking NX support.
+
+config ALTP2M
+	bool "Alternate P2M support" if EXPERT
+	depends on INTEL_VMX
+	default y
+	help
+	  Alternate-p2m allows a guest to manage multiple p2m guest physical
+	  "memory views" (as opposed to a single p2m).
+	  Useful for memory introspection.
+
+	  If unsure, stay with defaults.
 
 endmenu
 

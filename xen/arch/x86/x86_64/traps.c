@@ -23,7 +23,6 @@
 #include <asm/page.h>
 #include <asm/shared.h>
 #include <asm/hvm/hvm.h>
-#include <asm/hvm/support.h>
 
 
 static void print_xen_info(void)
@@ -97,7 +96,7 @@ static void _show_registers(
     if ( context == CTXT_hypervisor )
         printk(" %pS", _p(regs->rip));
     printk("\nRFLAGS: %016lx   ", regs->rflags);
-    if ( (context == CTXT_pv_guest) && v && v->vcpu_info )
+    if ( (context == CTXT_pv_guest) && v && v->vcpu_info_area.map )
         printk("EM: %d   ", !!vcpu_info(v, evtchn_upcall_mask));
     printk("CONTEXT: %s", context_names[context]);
     if ( v && !is_idle_vcpu(v) )
@@ -267,7 +266,7 @@ void show_page_walk(unsigned long addr)
            l1_table_offset(addr), l1e_get_intpte(l1e), pfn);
 }
 
-void do_double_fault(struct cpu_user_regs *regs)
+void asmlinkage do_double_fault(struct cpu_user_regs *regs)
 {
     unsigned int cpu;
     unsigned long crs[8];
@@ -334,8 +333,8 @@ static unsigned int write_stub_trampoline(
 
 DEFINE_PER_CPU(struct stubs, stubs);
 
-void lstar_enter(void);
-void cstar_enter(void);
+void nocall lstar_enter(void);
+void nocall cstar_enter(void);
 
 void subarch_percpu_traps_init(void)
 {

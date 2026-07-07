@@ -5,45 +5,15 @@
 #define __ASM_X86_PROCESSOR_H
 
 #ifndef __ASSEMBLY__
-#include <xen/cache.h>
 #include <xen/types.h>
 #include <xen/smp.h>
 #include <xen/percpu.h>
-#include <asm/types.h>
 #include <asm/cpufeature.h>
 #include <asm/desc.h>
 #endif
 
 #include <asm/x86-defns.h>
 #include <asm/x86-vendors.h>
-
-/*
- * Trap/fault mnemonics.
- */
-#define TRAP_divide_error      0
-#define TRAP_debug             1
-#define TRAP_nmi               2
-#define TRAP_int3              3
-#define TRAP_overflow          4
-#define TRAP_bounds            5
-#define TRAP_invalid_op        6
-#define TRAP_no_device         7
-#define TRAP_double_fault      8
-#define TRAP_copro_seg         9
-#define TRAP_invalid_tss      10
-#define TRAP_no_segment       11
-#define TRAP_stack_error      12
-#define TRAP_gp_fault         13
-#define TRAP_page_fault       14
-#define TRAP_spurious_int     15
-#define TRAP_copro_error      16
-#define TRAP_alignment_check  17
-#define TRAP_machine_check    18
-#define TRAP_simd_error       19
-#define TRAP_virtualisation   20
-#define TRAP_nr               32
-
-#define TRAP_HAVE_EC X86_EXC_HAVE_EC
 
 /* Set for entry via SYSCALL. Informs return code to use SYSRETQ not IRETQ. */
 /* NB. Same as VGCF_in_syscall. No bits in common with any other TRAP_ defn. */
@@ -96,7 +66,14 @@
  * Host IA32_CR_PAT value to cover all memory types.  This is not the default
  * MSR_PAT value, and is an ABI with PV guests.
  */
-#define XEN_MSR_PAT _AC(0x050100070406, ULL)
+#define XEN_MSR_PAT ((_AC(X86_MT_WB,  ULL) << 0x00) | \
+                     (_AC(X86_MT_WT,  ULL) << 0x08) | \
+                     (_AC(X86_MT_UCM, ULL) << 0x10) | \
+                     (_AC(X86_MT_UC,  ULL) << 0x18) | \
+                     (_AC(X86_MT_WC,  ULL) << 0x20) | \
+                     (_AC(X86_MT_WP,  ULL) << 0x28) | \
+                     (_AC(X86_MT_UC,  ULL) << 0x30) | \
+                     (_AC(X86_MT_UC,  ULL) << 0x38))
 
 #ifndef __ASSEMBLY__
 
@@ -111,34 +88,6 @@ struct x86_cpu_id {
     const void *driver_data;
 };
 
-struct cpuinfo_x86 {
-    __u8 x86;            /* CPU family */
-    __u8 x86_vendor;     /* CPU vendor */
-    __u8 x86_model;
-    __u8 x86_mask;
-    int  cpuid_level;    /* Maximum supported CPUID level, -1=no CPUID */
-    __u32 extended_cpuid_level; /* Maximum supported CPUID extended level */
-    unsigned int x86_capability[NCAPINTS];
-    char x86_vendor_id[16];
-    char x86_model_id[64];
-    int  x86_cache_size; /* in KB - valid for CPUS which support this call  */
-    int  x86_cache_alignment;    /* In bytes */
-    __u32 x86_max_cores; /* cpuid returned max cores value */
-    __u32 booted_cores;  /* number of cores as seen by OS */
-    __u32 x86_num_siblings; /* cpuid logical cpus per chip value */
-    __u32 apicid;
-    __u32 phys_proc_id;    /* package ID of each logical CPU */
-    __u32 cpu_core_id;     /* core ID of each logical CPU*/
-    __u32 compute_unit_id; /* AMD compute unit ID of each logical CPU */
-    unsigned short x86_clflush_size;
-} __cacheline_aligned;
-
-/*
- * capabilities of CPUs
- */
-
-extern struct cpuinfo_x86 boot_cpu_data;
-
 extern struct cpuinfo_x86 cpu_data[];
 #define current_cpu_data cpu_data[smp_processor_id()]
 
@@ -146,9 +95,7 @@ extern bool probe_cpuid_faulting(void);
 extern void ctxt_switch_levelling(const struct vcpu *next);
 extern void (*ctxt_switch_masking)(const struct vcpu *next);
 
-extern bool_t opt_cpu_info;
-extern u32 trampoline_efer;
-extern u64 trampoline_misc_enable_off;
+extern bool opt_cpu_info;
 
 /* Maximum width of physical addresses supported by the hardware. */
 extern unsigned int paddr_bits;
@@ -159,35 +106,17 @@ extern unsigned int vaddr_bits;
 
 extern const struct x86_cpu_id *x86_match_cpu(const struct x86_cpu_id table[]);
 
-extern void identify_cpu(struct cpuinfo_x86 *);
-extern void setup_clear_cpu_cap(unsigned int);
-extern void setup_force_cpu_cap(unsigned int);
-extern bool is_forced_cpu_cap(unsigned int);
+extern void identify_cpu(struct cpuinfo_x86 *c);
+extern void setup_clear_cpu_cap(unsigned int cap);
+extern void setup_force_cpu_cap(unsigned int cap);
+extern bool is_forced_cpu_cap(unsigned int cap);
 extern void print_cpu_info(unsigned int cpu);
 extern void init_intel_cacheinfo(struct cpuinfo_x86 *c);
 
 #define cpu_to_core(_cpu)   (cpu_data[_cpu].cpu_core_id)
 #define cpu_to_socket(_cpu) (cpu_data[_cpu].phys_proc_id)
 
-unsigned int apicid_to_socket(unsigned int);
-
-static inline int cpu_nr_siblings(unsigned int cpu)
-{
-    return cpu_data[cpu].x86_num_siblings;
-}
-
-/*
- * Generic CPUID function
- * clear %ecx since some cpus (Cyrix MII) do not set or clear %ecx
- * resulting in stale register contents being returned.
- */
-#define cpuid(_op,_eax,_ebx,_ecx,_edx)          \
-    asm volatile ( "cpuid"                      \
-          : "=a" (*(int *)(_eax)),              \
-            "=b" (*(int *)(_ebx)),              \
-            "=c" (*(int *)(_ecx)),              \
-            "=d" (*(int *)(_edx))               \
-          : "0" (_op), "2" (0) )
+unsigned int apicid_to_socket(unsigned int apicid);
 
 /* Some CPUID calls want 'count' to be placed in ecx */
 static inline void cpuid_count(
@@ -201,6 +130,21 @@ static inline void cpuid_count(
     asm volatile ( "cpuid"
           : "=a" (*eax), "=b" (*ebx), "=c" (*ecx), "=d" (*edx)
           : "0" (op), "c" (count) );
+}
+
+/*
+ * Generic CPUID function
+ * clear %ecx since some cpus (Cyrix MII) do not set or clear %ecx
+ * resulting in stale register contents being returned.
+ */
+static inline void cpuid(
+    unsigned int leaf,
+    unsigned int *eax,
+    unsigned int *ebx,
+    unsigned int *ecx,
+    unsigned int *edx)
+{
+    cpuid_count(leaf, 0, eax, ebx, ecx, edx);
 }
 
 /*
@@ -360,66 +304,15 @@ static inline void stts(void)
  * after us can get the correct flags.
  */
 extern unsigned long mmu_cr4_features;
+extern unsigned long cr4_pv32_mask;
 
 static always_inline void set_in_cr4 (unsigned long mask)
 {
     mmu_cr4_features |= mask;
     write_cr4(read_cr4() | mask);
-}
 
-static inline unsigned int rdpkru(void)
-{
-    unsigned int pkru;
-
-    asm volatile (".byte 0x0f,0x01,0xee"
-        : "=a" (pkru) : "c" (0) : "dx");
-
-    return pkru;
-}
-
-static inline void wrpkru(unsigned int pkru)
-{
-    asm volatile ( ".byte 0x0f, 0x01, 0xef"
-                   :: "a" (pkru), "d" (0), "c" (0) );
-}
-
-/* Macros for PKRU domain */
-#define PKRU_READ  (0)
-#define PKRU_WRITE (1)
-#define PKRU_ATTRS (2)
-
-/*
- * PKRU defines 32 bits, there are 16 domains and 2 attribute bits per
- * domain in pkru, pkeys is index to a defined domain, so the value of
- * pte_pkeys * PKRU_ATTRS + R/W is offset of a defined domain attribute.
- */
-static inline bool_t read_pkru_ad(uint32_t pkru, unsigned int pkey)
-{
-    ASSERT(pkey < 16);
-    return (pkru >> (pkey * PKRU_ATTRS + PKRU_READ)) & 1;
-}
-
-static inline bool_t read_pkru_wd(uint32_t pkru, unsigned int pkey)
-{
-    ASSERT(pkey < 16);
-    return (pkru >> (pkey * PKRU_ATTRS + PKRU_WRITE)) & 1;
-}
-
-static always_inline void __monitor(const void *eax, unsigned long ecx,
-                                    unsigned long edx)
-{
-    /* "monitor %eax,%ecx,%edx;" */
-    asm volatile (
-        ".byte 0x0f,0x01,0xc8;"
-        : : "a" (eax), "c" (ecx), "d"(edx) );
-}
-
-static always_inline void __mwait(unsigned long eax, unsigned long ecx)
-{
-    /* "mwait %eax,%ecx;" */
-    asm volatile (
-        ".byte 0x0f,0x01,0xc9;"
-        : : "a" (eax), "c" (ecx) );
+    if ( IS_ENABLED(CONFIG_PV32) && (mask & XEN_CR4_PV32_BITS) )
+        cr4_pv32_mask |= (mask & XEN_CR4_PV32_BITS);
 }
 
 #define IOBMP_BYTES             8192
@@ -462,18 +355,18 @@ static inline void set_ist(idt_entry_t *idt, unsigned int ist)
 
 static inline void enable_each_ist(idt_entry_t *idt)
 {
-    set_ist(&idt[TRAP_double_fault],  IST_DF);
-    set_ist(&idt[TRAP_nmi],           IST_NMI);
-    set_ist(&idt[TRAP_machine_check], IST_MCE);
-    set_ist(&idt[TRAP_debug],         IST_DB);
+    set_ist(&idt[X86_EXC_DF],  IST_DF);
+    set_ist(&idt[X86_EXC_NMI], IST_NMI);
+    set_ist(&idt[X86_EXC_MC],  IST_MCE);
+    set_ist(&idt[X86_EXC_DB],  IST_DB);
 }
 
 static inline void disable_each_ist(idt_entry_t *idt)
 {
-    set_ist(&idt[TRAP_double_fault],  IST_NONE);
-    set_ist(&idt[TRAP_nmi],           IST_NONE);
-    set_ist(&idt[TRAP_machine_check], IST_NONE);
-    set_ist(&idt[TRAP_debug],         IST_NONE);
+    set_ist(&idt[X86_EXC_DF],  IST_NONE);
+    set_ist(&idt[X86_EXC_NMI], IST_NONE);
+    set_ist(&idt[X86_EXC_MC],  IST_NONE);
+    set_ist(&idt[X86_EXC_DB],  IST_NONE);
 }
 
 #define IDT_ENTRIES 256
@@ -495,50 +388,17 @@ static always_inline void rep_nop(void)
 void show_code(const struct cpu_user_regs *regs);
 void show_stack_overflow(unsigned int cpu, const struct cpu_user_regs *regs);
 void show_registers(const struct cpu_user_regs *regs);
-void show_execution_state(const struct cpu_user_regs *regs);
-void cf_check show_execution_state_nonconst(struct cpu_user_regs *regs);
-#define dump_execution_state() \
-    run_in_exception_handler(show_execution_state_nonconst)
+#define dump_execution_state() run_in_exception_handler(show_execution_state)
 void show_page_walk(unsigned long addr);
-void noreturn fatal_trap(const struct cpu_user_regs *regs, bool_t show_remote);
+void noreturn fatal_trap(const struct cpu_user_regs *regs, bool show_remote);
 
 extern void mtrr_ap_init(void);
 extern void mtrr_bp_init(void);
 
-void mcheck_init(struct cpuinfo_x86 *c, bool_t bsp);
+void mcheck_init(struct cpuinfo_x86 *c, bool bsp);
 
-#define DECLARE_TRAP_HANDLER(_name)                    \
-    void _name(void);                                  \
-    void do_ ## _name(struct cpu_user_regs *regs)
-#define DECLARE_TRAP_HANDLER_CONST(_name)              \
-    void _name(void);                                  \
-    void do_ ## _name(const struct cpu_user_regs *regs)
-
-DECLARE_TRAP_HANDLER(divide_error);
-DECLARE_TRAP_HANDLER(debug);
-DECLARE_TRAP_HANDLER_CONST(nmi);
-DECLARE_TRAP_HANDLER(int3);
-DECLARE_TRAP_HANDLER(overflow);
-DECLARE_TRAP_HANDLER(bounds);
-DECLARE_TRAP_HANDLER(invalid_op);
-DECLARE_TRAP_HANDLER(device_not_available);
-DECLARE_TRAP_HANDLER(double_fault);
-DECLARE_TRAP_HANDLER(invalid_TSS);
-DECLARE_TRAP_HANDLER(segment_not_present);
-DECLARE_TRAP_HANDLER(stack_segment);
-DECLARE_TRAP_HANDLER(general_protection);
-DECLARE_TRAP_HANDLER(page_fault);
-DECLARE_TRAP_HANDLER(early_page_fault);
-DECLARE_TRAP_HANDLER(coprocessor_error);
-DECLARE_TRAP_HANDLER(simd_coprocessor_error);
-DECLARE_TRAP_HANDLER_CONST(machine_check);
-DECLARE_TRAP_HANDLER(alignment_check);
-DECLARE_TRAP_HANDLER(entry_CP);
-
-DECLARE_TRAP_HANDLER(entry_int82);
-
-#undef DECLARE_TRAP_HANDLER_CONST
-#undef DECLARE_TRAP_HANDLER
+void do_nmi(const struct cpu_user_regs *regs);
+void do_machine_check(const struct cpu_user_regs *regs);
 
 void trap_nop(void);
 
@@ -582,9 +442,7 @@ static inline void enable_nmis(void)
                      [cs] "r" (__HYPERVISOR_CS) );
 }
 
-void sysenter_entry(void);
-void sysenter_eflags_saved(void);
-void int80_direct_trap(void);
+void nocall sysenter_entry(void);
 
 struct stubs {
     union {
@@ -624,20 +482,27 @@ static inline uint8_t get_cpu_family(uint32_t raw, uint8_t *model,
     return fam;
 }
 
+#ifdef CONFIG_INTEL
 extern int8_t opt_tsx;
 extern bool rtm_disabled;
 void tsx_init(void);
+#else
+#define opt_tsx      0     /* explicitly indicate TSX is off */
+#define rtm_disabled false /* RTM was not force-disabled */
+static inline void tsx_init(void) {}
+#endif
 
 void update_mcu_opt_ctrl(void);
 void set_in_mcu_opt_ctrl(uint32_t mask, uint32_t val);
+
+void update_pb_opt_ctrl(void);
+void set_in_pb_opt_ctrl(uint32_t mask, uint32_t val);
 
 enum ap_boot_method {
     AP_BOOT_NORMAL,
     AP_BOOT_SKINIT,
 };
 extern enum ap_boot_method ap_boot_method;
-
-void amd_check_zenbleed(void);
 
 #endif /* !__ASSEMBLY__ */
 

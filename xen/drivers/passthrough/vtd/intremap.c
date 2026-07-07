@@ -150,6 +150,19 @@ bool __init cf_check intel_iommu_supports_eim(void)
     if ( !iommu_qinval || !iommu_intremap || list_empty(&acpi_drhd_units) )
         return false;
 
+    if ( unlikely(!cpu_has_cx16) )
+    {
+        printk(XENLOG_ERR VTDPREFIX "no CMPXCHG16B support, disabling IOMMU\n");
+        /*
+         * Disable IOMMU support at once: there's no reason to check for CX16
+         * yet again when attempting to initialize IOMMU DMA remapping
+         * functionality or interrupt remapping without x2APIC support.
+         */
+        iommu_enable = false;
+        iommu_intremap = iommu_intremap_off;
+        return false;
+    }
+
     /* We MUST have a DRHD unit for each IOAPIC. */
     for ( apic = 0; apic < nr_ioapics; apic++ )
         if ( !ioapic_to_drhd(IO_APIC_ID(apic)) )
@@ -171,49 +184,26 @@ bool __init cf_check intel_iommu_supports_eim(void)
 
 /*
  * Assume iremap_lock has been acquired. It is to make sure software will not
- * change the same IRTE behind us. With this assumption, if only high qword or
- * low qword in IRTE is to be updated, this function's atomic variant can
- * present an atomic update to VT-d hardware even when cmpxchg16b
- * instruction is not supported.
+ * change the same IRTE behind us.
  */
 static void update_irte(struct vtd_iommu *iommu, struct iremap_entry *entry,
                         const struct iremap_entry *new_ire, bool atomic)
 {
+    __uint128_t ret;
+    struct iremap_entry old_ire;
+
     ASSERT(spin_is_locked(&iommu->intremap.lock));
 
-    if ( cpu_has_cx16 )
-    {
-        __uint128_t ret;
-        struct iremap_entry old_ire;
+    old_ire = *entry;
+    ret = cmpxchg16b(entry, &old_ire, new_ire);
 
-        old_ire = *entry;
-        ret = cmpxchg16b(entry, &old_ire, new_ire);
-
-        /*
-         * In the above, we use cmpxchg16 to atomically update the 128-bit
-         * IRTE, and the hardware cannot update the IRTE behind us, so
-         * the return value of cmpxchg16 should be the same as old_ire.
-         * This ASSERT validate it.
-         */
-        ASSERT(ret == old_ire.val);
-    }
-    else
-    {
-        /*
-         * VT-d hardware doesn't update IRTEs behind us, nor the software
-         * since we hold iremap_lock. If the caller wants VT-d hardware to
-         * always see a consistent entry, but we can't meet it, a bug will
-         * be raised.
-         */
-        if ( entry->lo == new_ire->lo )
-            write_atomic(&entry->hi, new_ire->hi);
-        else if ( entry->hi == new_ire->hi )
-            write_atomic(&entry->lo, new_ire->lo);
-        else if ( !atomic )
-            *entry = *new_ire;
-        else
-            BUG();
-    }
+    /*
+     * In the above, we use cmpxchg16 to atomically update the 128-bit
+     * IRTE, and the hardware cannot update the IRTE behind us, so
+     * the return value of cmpxchg16 should be the same as old_ire.
+     * This ASSERT validate it.
+     */
+    ASSERT(ret == old_ire.val);
 }
 
 /* Mark specified intr remap entry as free */
@@ -395,7 +385,6 @@ static int ioapic_rte_to_remap_entry(struct vtd_iommu *iommu,
     /* Indicate remap format. */
     remap_rte->format = 1;
 
-    /* If cmpxchg16b is not available the caller must mask the IO-APIC pin. */
     update_irte(iommu, iremap_entry, &new_ire, !init && !masked);
     iommu_sync_cache(iremap_entry, sizeof(*iremap_entry));
     iommu_flush_iec_index(iommu, 0, index);
@@ -432,38 +421,17 @@ unsigned int cf_check io_apic_read_remap_rte(
 void cf_check io_apic_write_remap_rte(
     unsigned int apic, unsigned int pin, uint64_t rte)
 {
-    struct IO_xAPIC_route_entry new_rte = { .raw = rte };
-    struct IO_xAPIC_route_entry old_rte = { };
+    struct IO_xAPIC_route_entry old_rte = {}, new_rte;
     struct vtd_iommu *iommu = ioapic_to_iommu(IO_APIC_ID(apic));
-    bool masked = true;
     int rc;
 
-    if ( !cpu_has_cx16 )
-    {
-       /*
-        * Cannot atomically update the IRTE entry: mask the IO-APIC pin to
-        * avoid interrupts seeing an inconsistent IRTE entry.
-        */
-        old_rte = __ioapic_read_entry(apic, pin, true);
-        if ( !old_rte.mask )
-        {
-            masked = false;
-            old_rte.mask = 1;
-            __ioapic_write_entry(apic, pin, true, old_rte);
-        }
-    }
+    /* Not the initializer, for old gcc to cope. */
+    new_rte.raw = rte;
 
     rc = ioapic_rte_to_remap_entry(iommu, apic, pin, &old_rte, new_rte);
     if ( rc )
-    {
-        if ( !masked )
-        {
-            /* Recover the original value of 'mask' bit */
-            old_rte.mask = 0;
-            __ioapic_write_entry(apic, pin, true, old_rte);
-        }
         return;
-    }
+
     /* old_rte will contain the updated IO-APIC RTE on success. */
     __ioapic_write_entry(apic, pin, true, old_rte);
 }
@@ -862,40 +830,4 @@ void cf_check intel_iommu_disable_eim(void)
 
     for_each_drhd_unit ( drhd )
         disable_qinval(drhd->iommu);
-}
-
-/*
- * This function is used to update the IRTE for posted-interrupt
- * when guest changes MSI/MSI-X information.
- */
-int pi_update_irte(const struct pi_desc *pi_desc, const struct pirq *pirq,
-    const uint8_t gvec)
-{
-    struct irq_desc *desc;
-    struct msi_desc *msi_desc;
-    int rc;
-
-    desc = pirq_spin_lock_irq_desc(pirq, NULL);
-    if ( !desc )
-        return -EINVAL;
-
-    msi_desc = desc->msi_desc;
-    if ( !msi_desc )
-    {
-        rc = -ENODEV;
-        goto unlock_out;
-    }
-    msi_desc->pi_desc = pi_desc;
-    msi_desc->gvec = gvec;
-
-    spin_unlock_irq(&desc->lock);
-
-    ASSERT(pcidevs_locked());
-
-    return msi_msg_write_remap_rte(msi_desc, &msi_desc->msg);
-
- unlock_out:
-    spin_unlock_irq(&desc->lock);
-
-    return rc;
 }

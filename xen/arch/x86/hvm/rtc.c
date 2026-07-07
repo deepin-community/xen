@@ -22,11 +22,12 @@
  * IN THE SOFTWARE.
  */
 
+#include <xen/sched.h>
 #include <asm/mc146818rtc.h>
 #include <asm/hvm/vpt.h>
 #include <asm/hvm/io.h>
-#include <asm/hvm/support.h>
-#include <asm/current.h>
+#include <asm/hvm/save.h>
+#include <asm/iocap.h>
 #include <xen/trace.h>
 #include <public/hvm/params.h>
 
@@ -44,7 +45,7 @@
 #define vrtc_domain(x) (container_of(x, struct pl_time, vrtc)->domain)
 #define vrtc_vcpu(x)   (pt_global_vcpu_target(vrtc_domain(x)))
 #define epoch_year     1900
-#define get_year(x)    (x + epoch_year)
+#define get_year(x)    ((x) + epoch_year)
 
 enum rtc_mode {
    rtc_mode_no_ack,
@@ -57,8 +58,6 @@ enum rtc_mode {
 
 static void rtc_copy_date(RTCState *s);
 static void rtc_set_time(RTCState *s);
-static inline int from_bcd(RTCState *s, int a);
-static inline int convert_hour(RTCState *s, int hour);
 
 static void rtc_update_irq(RTCState *s)
 {
@@ -92,7 +91,7 @@ static void cf_check rtc_pf_callback(struct vcpu *v, void *opaque)
          && ++(s->pt_dead_ticks) >= 10 )
     {
         /* VM is ignoring its RTC; no point in running the timer */
-        TRACE_0D(TRC_HVM_EMUL_RTC_STOP_TIMER);
+        TRACE_TIME(TRC_HVM_EMUL_RTC_STOP_TIMER);
         destroy_periodic_time(&s->pt);
         s->period = 0;
     }
@@ -155,7 +154,7 @@ static void rtc_timer_update(RTCState *s)
                     delta = period - ((now - s->start_time) % period);
                 if ( s->hw.cmos_data[RTC_REG_B] & RTC_PIE )
                 {
-                    TRACE_2D(TRC_HVM_EMUL_RTC_START_TIMER, delta, period);
+                    TRACE_TIME(TRC_HVM_EMUL_RTC_START_TIMER, delta, period);
                     create_periodic_time(v, &s->pt, delta, period,
                                          RTC_IRQ, rtc_pf_callback, s, false);
                 }
@@ -166,7 +165,7 @@ static void rtc_timer_update(RTCState *s)
         }
         /* fall through */
     default:
-        TRACE_0D(TRC_HVM_EMUL_RTC_STOP_TIMER);
+        TRACE_TIME(TRC_HVM_EMUL_RTC_STOP_TIMER);
         destroy_periodic_time(&s->pt);
         s->period = 0;
         break;
@@ -203,6 +202,7 @@ static void check_update_timer(RTCState *s)
         }
         else
         {
+            s->hw.cmos_data[RTC_REG_A] &= ~RTC_UIP;
             next_update_time = (USEC_PER_SEC - guest_usec - 244) * NS_PER_USEC;
             expire_time = NOW() + next_update_time;
             s->next_update_time = expire_time;
@@ -243,6 +243,40 @@ static void cf_check rtc_update_timer2(void *opaque)
         check_update_timer(s);
     }
     spin_unlock(&s->lock);
+}
+
+static unsigned int to_bcd(const RTCState *s, unsigned int a)
+{
+    if ( s->hw.cmos_data[RTC_REG_B] & RTC_DM_BINARY )
+        return a;
+
+    return ((a / 10) << 4) | (a % 10);
+}
+
+static unsigned int from_bcd(const RTCState *s, unsigned int a)
+{
+    if ( s->hw.cmos_data[RTC_REG_B] & RTC_DM_BINARY )
+        return a;
+
+    return ((a >> 4) * 10) + (a & 0x0f);
+}
+
+/*
+ * Hours in 12 hour mode are in 1-12 range, not 0-11. So we need convert it
+ * before use.
+ */
+static unsigned int convert_hour(const RTCState *s, unsigned int raw)
+{
+    unsigned int hour = from_bcd(s, raw & 0x7f);
+
+    if ( !(s->hw.cmos_data[RTC_REG_B] & RTC_24H) )
+    {
+        hour %= 12;
+        if ( raw & 0x80 )
+            hour += 12;
+    }
+
+    return hour;
 }
 
 /* handle alarm timer */
@@ -519,7 +553,7 @@ static int rtc_ioport_write(void *opaque, uint32_t addr, uint32_t data)
         rtc_update_irq(s);
         if ( (data ^ orig) & RTC_PIE )
         {
-            TRACE_0D(TRC_HVM_EMUL_RTC_STOP_TIMER);
+            TRACE_TIME(TRC_HVM_EMUL_RTC_STOP_TIMER);
             destroy_periodic_time(&s->pt);
             s->period = 0;
             rtc_timer_update(s);
@@ -538,37 +572,6 @@ static int rtc_ioport_write(void *opaque, uint32_t addr, uint32_t data)
     spin_unlock(&s->lock);
 
     return 1;
-}
-
-static inline int to_bcd(RTCState *s, int a)
-{
-    if ( s->hw.cmos_data[RTC_REG_B] & RTC_DM_BINARY )
-        return a;
-    else
-        return ((a / 10) << 4) | (a % 10);
-}
-
-static inline int from_bcd(RTCState *s, int a)
-{
-    if ( s->hw.cmos_data[RTC_REG_B] & RTC_DM_BINARY )
-        return a;
-    else
-        return ((a >> 4) * 10) + (a & 0x0f);
-}
-
-/* Hours in 12 hour mode are in 1-12 range, not 0-11.
- * So we need convert it before using it*/
-static inline int convert_hour(RTCState *s, int raw)
-{
-    int hour = from_bcd(s, raw & 0x7f);
-
-    if (!(s->hw.cmos_data[RTC_REG_B] & RTC_24H))
-    {
-        hour %= 12;
-        if (raw & 0x80)
-            hour += 12;
-    }
-    return hour;
 }
 
 static void rtc_set_time(RTCState *s)
@@ -644,13 +647,10 @@ static int update_in_progress(RTCState *s)
     return 0;
 }
 
-static uint32_t rtc_ioport_read(RTCState *s, uint32_t addr)
+static uint32_t rtc_ioport_read(RTCState *s)
 {
     int ret;
     struct domain *d = vrtc_domain(s);
-
-    if ( (addr & 1) == 0 )
-        return 0xff;
 
     spin_lock(&s->lock);
 
@@ -713,9 +713,14 @@ static int cf_check handle_rtc_io(
         if ( rtc_ioport_write(vrtc, port, (uint8_t)*val) )
             return X86EMUL_OKAY;
     }
+    else if ( !(port & 1) )
+    {
+        *val = 0xff;
+        return X86EMUL_OKAY;
+    }
     else if ( vrtc->hw.cmos_index < RTC_CMOS_SIZE )
     {
-        *val = rtc_ioport_read(vrtc, port);
+        *val = rtc_ioport_read(vrtc);
         return X86EMUL_OKAY;
     }
 
@@ -793,7 +798,7 @@ static int cf_check rtc_load(struct domain *d, hvm_domain_context_t *h)
     return 0;
 }
 
-HVM_REGISTER_SAVE_RESTORE(RTC, rtc_save, rtc_load, 1, HVMSR_PER_DOM);
+HVM_REGISTER_SAVE_RESTORE(RTC, rtc_save, NULL, rtc_load, 1, HVMSR_PER_DOM);
 
 void rtc_reset(struct domain *d)
 {
@@ -802,7 +807,7 @@ void rtc_reset(struct domain *d)
     if ( !has_vrtc(d) )
         return;
 
-    TRACE_0D(TRC_HVM_EMUL_RTC_STOP_TIMER);
+    TRACE_TIME(TRC_HVM_EMUL_RTC_STOP_TIMER);
     destroy_periodic_time(&s->pt);
     s->period = 0;
     s->pt.source = PTSRC_isa;
@@ -835,9 +840,19 @@ void rtc_init(struct domain *d)
 
     if ( !has_vrtc(d) )
     {
-        if ( is_hardware_domain(d) )
-            /* Hardware domain gets mediated access to the physical RTC. */
-            register_portio_handler(d, RTC_PORT(0), 2, hw_rtc_io);
+        unsigned int port;
+
+        if ( !is_hardware_domain(d) )
+            return;
+
+        /*
+         * Hardware domain gets mediated access to the physical RTC/CMOS (of
+         * course unless we don't use it ourselves, for there being none).
+         */
+        for ( port = RTC_PORT(0); port < RTC_PORT(0) + 0x10; port += 2 )
+            if ( is_cmos_port(port, 2, d) )
+                register_portio_handler(d, port, 2, hw_rtc_io);
+
         return;
     }
 
@@ -877,7 +892,7 @@ void rtc_deinit(struct domain *d)
 
     spin_barrier(&s->lock);
 
-    TRACE_0D(TRC_HVM_EMUL_RTC_STOP_TIMER);
+    TRACE_TIME(TRC_HVM_EMUL_RTC_STOP_TIMER);
     destroy_periodic_time(&s->pt);
     kill_timer(&s->update_timer);
     kill_timer(&s->update_timer2);

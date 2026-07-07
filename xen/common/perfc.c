@@ -1,14 +1,13 @@
 
-#include <xen/lib.h>
-#include <xen/smp.h>
-#include <xen/time.h>
-#include <xen/perfc.h>
-#include <xen/keyhandler.h> 
-#include <xen/spinlock.h>
-#include <xen/mm.h>
+#include <xen/cpumask.h>
+#include <xen/errno.h>
 #include <xen/guest_access.h>
+#include <xen/lib.h>
+#include <xen/perfc.h>
+#include <xen/spinlock.h>
+#include <xen/time.h>
+
 #include <public/sysctl.h>
-#include <asm/perfc.h>
 
 #define PERFCOUNTER( var, name )              { name, TYPE_SINGLE, 0 },
 #define PERFCOUNTER_ARRAY( var, name, size )  { name, TYPE_ARRAY,  size },
@@ -47,7 +46,7 @@ void cf_check perfc_printall(unsigned char key)
         case TYPE_S_SINGLE:
             for_each_online_cpu ( cpu )
                 sum += per_cpu(perfcounters, cpu)[j];
-            if ( perfc_info[i].type == TYPE_S_SINGLE ) 
+            if ( perfc_info[i].type == TYPE_S_SINGLE )
                 sum = (perfc_t) sum;
             printk("TOTAL[%12Lu]", sum);
             if ( sum )
@@ -57,7 +56,7 @@ void cf_check perfc_printall(unsigned char key)
                 {
                     if ( k > 0 && (k % 4) == 0 )
                         printk("\n%53s", "");
-                    printk("  CPU%02u[%10"PRIperfc"u]", cpu, per_cpu(perfcounters, cpu)[j]);
+                    printk("  CPU%02u[%10u]", cpu, per_cpu(perfcounters, cpu)[j]);
                     ++k;
                 }
             }
@@ -72,7 +71,7 @@ void cf_check perfc_printall(unsigned char key)
                 for ( k = 0; k < perfc_info[i].nr_elements; k++ )
                     sum += counters[k];
             }
-            if ( perfc_info[i].type == TYPE_S_ARRAY ) 
+            if ( perfc_info[i].type == TYPE_S_ARRAY )
                 sum = (perfc_t) sum;
             printk("TOTAL[%12Lu]", sum);
             if (sum)
@@ -83,7 +82,7 @@ void cf_check perfc_printall(unsigned char key)
                     sum = 0;
                     for_each_online_cpu ( cpu )
                         sum += per_cpu(perfcounters, cpu)[j + k];
-                    if ( perfc_info[i].type == TYPE_S_ARRAY ) 
+                    if ( perfc_info[i].type == TYPE_S_ARRAY )
                         sum = (perfc_t) sum;
                     if ( (k % 4) == 0 )
                         printk("\n%16s", "");
@@ -99,7 +98,7 @@ void cf_check perfc_printall(unsigned char key)
                     sum = 0;
                     for ( n = 0; n < perfc_info[i].nr_elements; n++ )
                         sum += counters[n];
-                    if ( perfc_info[i].type == TYPE_S_ARRAY ) 
+                    if ( perfc_info[i].type == TYPE_S_ARRAY )
                         sum = (perfc_t) sum;
                     if ( k > 0 && (k % 4) == 0 )
                         printk("\n%53s", "");
@@ -134,6 +133,7 @@ void cf_check perfc_reset(unsigned char key)
         case TYPE_SINGLE:
             for_each_online_cpu ( cpu )
                 per_cpu(perfcounters, cpu)[j] = 0;
+            fallthrough;
         case TYPE_S_SINGLE:
             ++j;
             break;
@@ -141,13 +141,12 @@ void cf_check perfc_reset(unsigned char key)
             for_each_online_cpu ( cpu )
                 memset(per_cpu(perfcounters, cpu) + j, 0,
                        perfc_info[i].nr_elements * sizeof(perfc_t));
+            fallthrough;
         case TYPE_S_ARRAY:
             j += perfc_info[i].nr_elements;
             break;
         }
     }
-
-    arch_perfc_reset();
 }
 
 static struct xen_sysctl_perfc_desc perfc_d[NR_PERFCTRS];
@@ -196,9 +195,6 @@ static int perfc_copy_info(XEN_GUEST_HANDLE_64(xen_sysctl_perfc_desc_t) desc,
 
     if ( perfc_vals == NULL )
         return -ENOMEM;
-
-    /* Architecture may fill counters from hardware.  */
-    arch_perfc_gather();
 
     /* We gather the counts together every time. */
     for ( i = j = v = 0; i < NR_PERFCTRS; i++ )

@@ -28,7 +28,7 @@
 /* dom_io is used as a sentinel for quarantined devices */
 #define QUARANTINE_SKIP(d, p) ((d) == dom_io && !(p)->arch.amd.root_table)
 
-static bool_t __read_mostly init_done;
+static bool __read_mostly init_done;
 
 static const struct iommu_init_ops _iommu_init_ops;
 
@@ -114,6 +114,16 @@ static bool any_pdev_behind_iommu(const struct domain *d,
     return false;
 }
 
+static bool use_ats(
+    const struct pci_dev *pdev,
+    const struct amd_iommu *iommu,
+    const struct ivrs_mappings *ivrs_dev)
+{
+    return !ivrs_dev->block_ats &&
+           iommu_has_cap(iommu, PCI_CAP_IOTLB_SHIFT) &&
+           pci_ats_device(iommu->seg, pdev->bus, pdev->devfn);
+}
+
 static int __must_check amd_iommu_setup_domain_device(
     struct domain *domain, struct amd_iommu *iommu,
     uint8_t devfn, struct pci_dev *pdev)
@@ -185,9 +195,7 @@ static int __must_check amd_iommu_setup_domain_device(
         dte->ex = ivrs_dev->dte_allow_exclusion;
         dte->sys_mgt = MASK_EXTR(ivrs_dev->device_flags, ACPI_IVHD_SYSTEM_MGMT);
 
-        if ( pci_ats_device(iommu->seg, bus, pdev->devfn) &&
-             !ivrs_dev->block_ats &&
-             iommu_has_cap(iommu, PCI_CAP_IOTLB_SHIFT) )
+        if ( use_ats(pdev, iommu, ivrs_dev) )
             dte->i = ats_enabled;
 
         spin_unlock_irqrestore(&iommu->lock, flags);
@@ -248,9 +256,7 @@ static int __must_check amd_iommu_setup_domain_device(
         ASSERT(dte->sys_mgt == MASK_EXTR(ivrs_dev->device_flags,
                                          ACPI_IVHD_SYSTEM_MGMT));
 
-        if ( pci_ats_device(iommu->seg, bus, pdev->devfn) &&
-             !ivrs_dev->block_ats &&
-             iommu_has_cap(iommu, PCI_CAP_IOTLB_SHIFT) )
+        if ( use_ats(pdev, iommu, ivrs_dev) )
             ASSERT(dte->i == ats_enabled);
 
         spin_unlock_irqrestore(&iommu->lock, flags);
@@ -268,9 +274,7 @@ static int __must_check amd_iommu_setup_domain_device(
 
     ASSERT(pcidevs_locked());
 
-    if ( pci_ats_device(iommu->seg, bus, pdev->devfn) &&
-         !ivrs_dev->block_ats &&
-         iommu_has_cap(iommu, PCI_CAP_IOTLB_SHIFT) &&
+    if ( use_ats(pdev, iommu, ivrs_dev) &&
          !pci_ats_enabled(iommu->seg, bus, pdev->devfn) )
     {
         if ( devfn == pdev->devfn )
@@ -304,6 +308,12 @@ static int __init cf_check iov_detect(void)
 {
     if ( !iommu_enable && !iommu_intremap )
         return 0;
+
+    if ( unlikely(!cpu_has_cx16) )
+    {
+        AMD_IOMMU_ERROR("no CMPXCHG16B support, disabling IOMMU\n");
+        return -ENODEV;
+    }
 
     if ( (init_done ? amd_iommu_init_late()
                     : amd_iommu_init(false)) != 0 )
@@ -359,21 +369,17 @@ int __read_mostly amd_iommu_min_paging_mode = 1;
 static int cf_check amd_iommu_domain_init(struct domain *d)
 {
     struct domain_iommu *hd = dom_iommu(d);
+    int pglvl = amd_iommu_get_paging_mode(
+                    1UL << (domain_max_paddr_bits(d) - PAGE_SHIFT));
+
+    if ( pglvl < 0 )
+        return pglvl;
 
     /*
-     * Choose the number of levels for the IOMMU page tables.
-     * - PV needs 3 or 4, depending on whether there is RAM (including hotplug
-     *   RAM) above the 512G boundary.
-     * - HVM could in principle use 3 or 4 depending on how much guest
-     *   physical address space we give it, but this isn't known yet so use 4
-     *   unilaterally.
-     * - Unity maps may require an even higher number.
+     * Choose the number of levels for the IOMMU page tables, taking into
+     * account unity maps.
      */
-    hd->arch.amd.paging_mode = max(amd_iommu_get_paging_mode(
-            is_hvm_domain(d)
-            ? 1ul << (DEFAULT_DOMAIN_ADDRESS_WIDTH - PAGE_SHIFT)
-            : get_upper_mfn_bound() + 1),
-        amd_iommu_min_paging_mode);
+    hd->arch.amd.paging_mode = max(pglvl, amd_iommu_min_paging_mode);
 
     return 0;
 }
@@ -481,8 +487,15 @@ static int cf_check reassign_device(
 
     if ( devfn == pdev->devfn && pdev->domain != target )
     {
-        list_move(&pdev->domain_list, &target->pdev_list);
+        write_lock(&source->pci_lock);
+        list_del(&pdev->domain_list);
+        write_unlock(&source->pci_lock);
+
         pdev->domain = target;
+
+        write_lock(&target->pci_lock);
+        list_add(&pdev->domain_list, &target->pdev_list);
+        write_unlock(&target->pci_lock);
     }
 
     /*
@@ -778,6 +791,7 @@ static const struct iommu_ops __initconst_cf_clobber _iommu_ops = {
     .crash_shutdown = amd_iommu_crash_shutdown,
     .get_reserved_device_memory = amd_iommu_get_reserved_device_memory,
     .dump_page_tables = amd_dump_page_tables,
+    .quiesce = amd_iommu_quiesce,
 };
 
 static const struct iommu_init_ops __initconstrel _iommu_init_ops = {

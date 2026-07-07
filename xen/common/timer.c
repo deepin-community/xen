@@ -11,6 +11,7 @@
 #include <xen/sched.h>
 #include <xen/lib.h>
 #include <xen/param.h>
+#include <xen/sections.h>
 #include <xen/smp.h>
 #include <xen/perfc.h>
 #include <xen/time.h>
@@ -22,7 +23,6 @@
 #include <xen/rcupdate.h>
 #include <xen/symbols.h>
 #include <asm/system.h>
-#include <asm/desc.h>
 #include <asm/atomic.h>
 
 /* We program the time hardware this far behind the closest deadline. */
@@ -240,7 +240,7 @@ static inline void deactivate_timer(struct timer *timer)
     list_add(&timer->inactive, &per_cpu(timers, timer->cpu).inactive);
 }
 
-static inline bool_t timer_lock(struct timer *timer)
+static inline bool timer_lock_unsafe(struct timer *timer)
 {
     unsigned int cpu;
 
@@ -254,7 +254,8 @@ static inline bool_t timer_lock(struct timer *timer)
             rcu_read_unlock(&timer_cpu_read_lock);
             return 0;
         }
-        spin_lock(&per_cpu(timers, cpu).lock);
+        /* Use the speculation unsafe variant, the wrapper has the barrier. */
+        _spin_lock(&per_cpu(timers, cpu).lock);
         if ( likely(timer->cpu == cpu) )
             break;
         spin_unlock(&per_cpu(timers, cpu).lock);
@@ -265,10 +266,11 @@ static inline bool_t timer_lock(struct timer *timer)
 }
 
 #define timer_lock_irqsave(t, flags) ({         \
-    bool_t __x;                                 \
+    bool __x;                                   \
     local_irq_save(flags);                      \
-    if ( !(__x = timer_lock(t)) )               \
+    if ( !(__x = timer_lock_unsafe(t)) )        \
         local_irq_restore(flags);               \
+    block_lock_speculation();                   \
     __x;                                        \
 })
 
@@ -292,7 +294,7 @@ static bool active_timer(const struct timer *timer)
 
 void init_timer(
     struct timer *timer,
-    void        (*function)(void *),
+    void        (*function)(void *data),
     void         *data,
     unsigned int  cpu)
 {
@@ -358,7 +360,8 @@ bool timer_expires_before(struct timer *timer, s_time_t t)
 void migrate_timer(struct timer *timer, unsigned int new_cpu)
 {
     unsigned int old_cpu;
-    bool_t active;
+#if CONFIG_NR_CPUS > 1
+    bool active;
     unsigned long flags;
 
     rcu_read_lock(&timer_cpu_read_lock);
@@ -405,6 +408,11 @@ void migrate_timer(struct timer *timer, unsigned int new_cpu)
 
     spin_unlock(&per_cpu(timers, old_cpu).lock);
     spin_unlock_irqrestore(&per_cpu(timers, new_cpu).lock, flags);
+#else /* CONFIG_NR_CPUS == 1 */
+    old_cpu = read_atomic(&timer->cpu);
+    if ( old_cpu != TIMER_CPU_status_killed )
+        WARN_ON(new_cpu != old_cpu);
+#endif /* CONFIG_NR_CPUS */
 }
 
 
@@ -436,7 +444,7 @@ void kill_timer(struct timer *timer)
 
 static void execute_timer(struct timers *ts, struct timer *t)
 {
-    void (*fn)(void *) = t->function;
+    void (*fn)(void *data) = t->function;
     void *data = t->data;
 
     t->status = TIMER_STATUS_inactive;
@@ -575,7 +583,7 @@ static void migrate_timers_from_cpu(unsigned int old_cpu)
     unsigned int new_cpu = cpumask_any(&cpu_online_map);
     struct timers *old_ts, *new_ts;
     struct timer *t;
-    bool_t notify = 0;
+    bool notify = false;
 
     ASSERT(!cpu_online(old_cpu) && cpu_online(new_cpu));
 

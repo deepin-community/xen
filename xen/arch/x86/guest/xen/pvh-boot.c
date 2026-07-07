@@ -1,20 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /******************************************************************************
  * arch/x86/guest/pvh-boot.c
  *
  * PVH boot time support
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
  *
  * Copyright (c) 2017 Citrix Systems Ltd.
  */
@@ -24,8 +12,13 @@
 
 #include <asm/e820.h>
 #include <asm/guest.h>
+#include <asm/trampoline.h>
 
 #include <public/arch-x86/hvm/start_info.h>
+
+#ifdef CONFIG_VIDEO
+# include "../../boot/video.h"
+#endif
 
 /* Initialised in head.S, before .bss is zeroed. */
 bool __initdata pvh_boot;
@@ -107,6 +100,11 @@ void __init pvh_init(multiboot_info_t **mbi, module_t **mod)
     ASSERT(xen_guest);
 
     get_memory_map();
+
+#ifdef CONFIG_VIDEO
+    /* No VGA available when booted from the PVH entry point. */
+    memset(&bootsym(boot_vid_info), 0, sizeof(boot_vid_info));
+#endif
 }
 
 void __init pvh_print_info(void)

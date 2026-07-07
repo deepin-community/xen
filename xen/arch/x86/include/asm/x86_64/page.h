@@ -19,7 +19,9 @@ static inline unsigned long canonicalise_addr(unsigned long addr)
         return addr & ~CANONICAL_MASK;
 }
 
-#include <asm/types.h>
+#include <xen/bug.h>
+
+#include <xen/types.h>
 
 #include <xen/pdx.h>
 
@@ -32,30 +34,28 @@ static inline unsigned long canonicalise_addr(unsigned long addr)
 #define pdx_to_virt(pdx) ((void *)(DIRECTMAP_VIRT_START + \
                                    ((unsigned long)(pdx) << PAGE_SHIFT)))
 
-static inline unsigned long __virt_to_maddr(unsigned long va)
+static inline unsigned long virt_to_maddr(unsigned long va)
 {
     ASSERT(va < DIRECTMAP_VIRT_END);
     if ( va >= DIRECTMAP_VIRT_START )
-        va -= DIRECTMAP_VIRT_START;
-    else
-    {
-        BUILD_BUG_ON(XEN_VIRT_END - XEN_VIRT_START != GB(1));
-        /* Signed, so ((long)XEN_VIRT_START >> 30) fits in an imm32. */
-        ASSERT(((long)va >> (PAGE_ORDER_1G + PAGE_SHIFT)) ==
-               ((long)XEN_VIRT_START >> (PAGE_ORDER_1G + PAGE_SHIFT)));
+        return directmapoff_to_maddr(va - DIRECTMAP_VIRT_START);
 
-        va += xen_phys_start - XEN_VIRT_START;
-    }
-    return (va & ma_va_bottom_mask) |
-           ((va << pfn_pdx_hole_shift) & ma_top_mask);
+    BUILD_BUG_ON(XEN_VIRT_END - XEN_VIRT_START != GB(1));
+    /* Signed, so ((long)XEN_VIRT_START >> 30) fits in an imm32. */
+    ASSERT(((long)va >> (PAGE_ORDER_1G + PAGE_SHIFT)) ==
+           ((long)XEN_VIRT_START >> (PAGE_ORDER_1G + PAGE_SHIFT)));
+
+    return xen_phys_start + va - XEN_VIRT_START;
 }
+#define virt_to_maddr(va) virt_to_maddr((unsigned long)(va))
 
-static inline void *__maddr_to_virt(unsigned long ma)
+static inline void *maddr_to_virt(unsigned long ma)
 {
-    ASSERT(pfn_to_pdx(ma >> PAGE_SHIFT) < (DIRECTMAP_SIZE >> PAGE_SHIFT));
-    return (void *)(DIRECTMAP_VIRT_START +
-                    ((ma & ma_va_bottom_mask) |
-                     ((ma & ma_top_mask) >> pfn_pdx_hole_shift)));
+    /* Offset in the direct map, accounting for pdx compression */
+    unsigned long va_offset = maddr_to_directmapoff(ma);
+
+    ASSERT(va_offset < DIRECTMAP_SIZE);
+    return (void *)(DIRECTMAP_VIRT_START + va_offset);
 }
 
 /* read access (should only be used for debug printk's) */
@@ -69,10 +69,6 @@ typedef struct { intpte_t l4; } l4_pgentry_t;
 typedef l4_pgentry_t root_pgentry_t;
 
 #endif /* !__ASSEMBLY__ */
-
-#define pte_read_atomic(ptep)       read_atomic(ptep)
-#define pte_write_atomic(ptep, pte) write_atomic(ptep, pte)
-#define pte_write(ptep, pte)        write_atomic(ptep, pte)
 
 /* Given a virtual address, get an entry offset into a linear page table. */
 #define l1_linear_offset(_a) (((_a) & VADDR_MASK) >> L1_PAGETABLE_SHIFT)

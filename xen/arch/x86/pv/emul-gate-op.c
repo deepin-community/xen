@@ -1,22 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /******************************************************************************
  * arch/x86/pv/emul-gate-op.c
  *
  * Emulate gate op for PV guests
  *
  * Modifications to Linux original are copyright (c) 2002-2004, K A Fraser
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <xen/err.h>
@@ -185,12 +173,12 @@ void pv_emulate_gate_op(struct cpu_user_regs *regs)
          (((ar >> 13) & 3) < (regs->cs & 3)) ||
          ((ar & _SEGMENT_TYPE) != 0xc00) )
     {
-        pv_inject_hw_exception(TRAP_gp_fault, regs->error_code);
+        pv_inject_hw_exception(X86_EXC_GP, regs->error_code);
         return;
     }
     if ( !(ar & _SEGMENT_P) )
     {
-        pv_inject_hw_exception(TRAP_no_segment, regs->error_code);
+        pv_inject_hw_exception(X86_EXC_NP, regs->error_code);
         return;
     }
     dpl = (ar >> 13) & 3;
@@ -206,7 +194,7 @@ void pv_emulate_gate_op(struct cpu_user_regs *regs)
          !(ar & _SEGMENT_P) ||
          !(ar & _SEGMENT_CODE) )
     {
-        pv_inject_hw_exception(TRAP_gp_fault, regs->error_code);
+        pv_inject_hw_exception(X86_EXC_GP, regs->error_code);
         return;
     }
 
@@ -219,7 +207,7 @@ void pv_emulate_gate_op(struct cpu_user_regs *regs)
         if ( PTR_ERR(state) == -X86EMUL_EXCEPTION )
             pv_inject_event(&ctxt.ctxt.event);
         else
-            pv_inject_hw_exception(TRAP_gp_fault, regs->error_code);
+            pv_inject_hw_exception(X86_EXC_GP, regs->error_code);
         return;
     }
 
@@ -268,7 +256,7 @@ void pv_emulate_gate_op(struct cpu_user_regs *regs)
          (opnd_sel & ~3) != regs->error_code ||
          dpl < (opnd_sel & 3) )
     {
-        pv_inject_hw_exception(TRAP_gp_fault, regs->error_code);
+        pv_inject_hw_exception(X86_EXC_GP, regs->error_code);
         return;
     }
 
@@ -279,17 +267,17 @@ void pv_emulate_gate_op(struct cpu_user_regs *regs)
           ((ar >> 13) & 3) > (regs->cs & 3) :
           ((ar >> 13) & 3) != (regs->cs & 3)) )
     {
-        pv_inject_hw_exception(TRAP_gp_fault, sel);
+        pv_inject_hw_exception(X86_EXC_GP, sel);
         return;
     }
     if ( !(ar & _SEGMENT_P) )
     {
-        pv_inject_hw_exception(TRAP_no_segment, sel);
+        pv_inject_hw_exception(X86_EXC_NP, sel);
         return;
     }
     if ( off > limit )
     {
-        pv_inject_hw_exception(TRAP_gp_fault, 0);
+        pv_inject_hw_exception(X86_EXC_GP, 0);
         return;
     }
 
@@ -316,7 +304,7 @@ void pv_emulate_gate_op(struct cpu_user_regs *regs)
             /* Inner stack known only for kernel ring. */
             if ( (sel & 3) != GUEST_KERNEL_RPL(v->domain) )
             {
-                pv_inject_hw_exception(TRAP_gp_fault, regs->error_code);
+                pv_inject_hw_exception(X86_EXC_GP, regs->error_code);
                 return;
             }
             esp = v->arch.pv.kernel_sp;
@@ -328,19 +316,19 @@ void pv_emulate_gate_op(struct cpu_user_regs *regs)
                  (ar & _SEGMENT_CODE) ||
                  !(ar & _SEGMENT_WR) )
             {
-                pv_inject_hw_exception(TRAP_invalid_tss, ss & ~3);
+                pv_inject_hw_exception(X86_EXC_TS, ss & ~3);
                 return;
             }
             if ( !(ar & _SEGMENT_P) ||
                  !check_stack_limit(ar, limit, esp, (4 + nparm) * 4) )
             {
-                pv_inject_hw_exception(TRAP_stack_error, ss & ~3);
+                pv_inject_hw_exception(X86_EXC_SS, ss & ~3);
                 return;
             }
             stkp = (unsigned int *)(unsigned long)((unsigned int)base + esp);
             if ( !compat_access_ok(stkp - 4 - nparm, 16 + nparm * 4) )
             {
-                pv_inject_hw_exception(TRAP_gp_fault, regs->error_code);
+                pv_inject_hw_exception(X86_EXC_GP, regs->error_code);
                 return;
             }
             push(regs->ss);
@@ -356,12 +344,12 @@ void pv_emulate_gate_op(struct cpu_user_regs *regs)
                      (ar & _SEGMENT_CODE) ||
                      !(ar & _SEGMENT_WR) ||
                      !check_stack_limit(ar, limit, esp + nparm * 4, nparm * 4) )
-                    return pv_inject_hw_exception(TRAP_gp_fault, regs->error_code);
+                    return pv_inject_hw_exception(X86_EXC_GP, regs->error_code);
                 ustkp = (unsigned int *)(unsigned long)
                         ((unsigned int)base + regs->esp + nparm * 4);
                 if ( !compat_access_ok(ustkp - nparm, 0 + nparm * 4) )
                 {
-                    pv_inject_hw_exception(TRAP_gp_fault, regs->error_code);
+                    pv_inject_hw_exception(X86_EXC_GP, regs->error_code);
                     return;
                 }
                 do
@@ -387,18 +375,18 @@ void pv_emulate_gate_op(struct cpu_user_regs *regs)
             if ( !pv_emul_read_descriptor(ss, v, &base, &limit, &ar, 0) ||
                  ((ar >> 13) & 3) != (sel & 3) )
             {
-                pv_inject_hw_exception(TRAP_gp_fault, regs->error_code);
+                pv_inject_hw_exception(X86_EXC_GP, regs->error_code);
                 return;
             }
             if ( !check_stack_limit(ar, limit, esp, 2 * 4) )
             {
-                pv_inject_hw_exception(TRAP_stack_error, 0);
+                pv_inject_hw_exception(X86_EXC_SS, 0);
                 return;
             }
             stkp = (unsigned int *)(unsigned long)((unsigned int)base + esp);
             if ( !compat_access_ok(stkp - 2, 2 * 4) )
             {
-                pv_inject_hw_exception(TRAP_gp_fault, regs->error_code);
+                pv_inject_hw_exception(X86_EXC_GP, regs->error_code);
                 return;
             }
         }

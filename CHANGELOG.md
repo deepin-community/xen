@@ -4,19 +4,147 @@ Notable changes to Xen will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
-## [4.17.3](https://xenbits.xen.org/gitweb/?p=xen.git;a=shortlog;h=RELEASE-4.17.3)
-
-### Changed
- - Ignore VCPUOP_set_singleshot_timer's VCPU_SSHOTTMR_future flag. The only
-   known user doesn't use it properly, leading to in-guest breakage.
+## [4.20.1](https://xenbits.xenproject.org/gitweb/?p=xen.git;a=shortlog;h=RELEASE-4.20.1)
 
 ### Added
- - On x86, support for enforcing system-wide operation in Data Operand
-   Independent Timing Mode.
- - On x86, introduce a new x2APIC driver that uses Cluster Logical addressing
-   mode for IPIs and Physical addressing mode for external interrupts.
+ - On x86:
+   - Option to attempt to fixup p2m page-faults on PVH dom0.
 
-## [4.17.0](https://xenbits.xen.org/gitweb/?p=xen.git;a=shortlog;h=RELEASE-4.17.0) - 2022-12-12
+## [4.20.0](https://xenbits.xenproject.org/gitweb/?p=xen.git;a=shortlog;h=RELEASE-4.20.0) - 2025-03-05
+
+### Changed
+ - Fixed blkif protocol specification for sector sizes different than 512b.
+ - The dombuilder in libxenguest no longer un-gzips secondary modules, instead
+   leaving this to the guest kernel to do in guest context.
+ - Reduce xenstore library dependencies.
+ - On Arm:
+   - Several FF-A support improvements: add indirect messages support, transmit
+     RXTX buffer to the SPMC, fix version negotication and partition information
+     retrieval.
+ - On x86:
+   - Prefer ACPI reboot over UEFI ResetSystem() run time service call.
+   - Prefer CMOS over EFI_GET_TIME as time source.
+   - Switched the xAPIC flat driver to use physical destination mode for external
+     interrupts instead of logical destination mode.
+
+### Added
+ - Enable CONFIG_UBSAN (Arm64, x86, PPC, RISC-V) for GitLab CI.
+ - On Arm:
+   - Experimental support for Armv8-R.
+   - Support for NXP S32G3 Processors Family and NXP LINFlexD UART driver.
+   - Basic handling for SCMI requests over SMC using Shared Memory, by allowing
+     forwarding the calls to EL3 FW if coming from hwdom.
+   - Support for LLC (Last Level Cache) coloring.
+ - On x86:
+   - xl suspend/resume subcommands.
+   - `wallclock` command line option to select time source.
+   - Support for Intel EPT Paging-Write Feature.
+   - AMD Zen 5 CPU support, including for new hardware mitigations for the
+     SRSO speculative vulnerability.
+
+### Removed
+ - On x86:
+   - Support for running on Xeon Phi processors.
+   - Removed the `ucode=allow-same` command line option.
+   - Removed x2APIC Cluster Mode for external interrupts.  x2APIC Physical and
+     Mixed Modes are still available.
+
+## [4.19.0](https://xenbits.xenproject.org/gitweb/?p=xen.git;a=shortlog;h=RELEASE-4.19.0) - 2024-07-29
+
+### Changed
+ - Changed flexible array definitions in public I/O interface headers to not
+   use "1" as the number of array elements.
+ - The minimum supported OCaml toolchain version is now 4.05
+ - On x86:
+   - HVM PIRQs are disabled by default.
+   - Reduce IOMMU setup time for hardware domain.
+   - Allow HVM/PVH domains to map foreign pages.
+   - Declare PVH dom0 supported with caveats.
+ - xl/libxl configures vkb=[] for HVM domains with priority over vkb_device.
+ - Increase the maximum number of CPUs Xen can be built for from 4095 to
+   16383.
+ - When building with Systemd support (./configure --enable-systemd), remove
+   libsystemd as a build dependency.  Systemd Notify support is retained, now
+   using a standalone library implementation.
+ - xenalyze no longer requires `--svm-mode` when analyzing traces
+   generated on AMD CPUs
+ - Code symbol annotations and MISRA compliance improvements.
+ - CI updates:
+   - Minimum fixes to rebuild the containers, following the HEREDOC problems.
+   - Rebuild containers to have testing with up-to-date LTS distros.
+   - Few build system checks, and strip the obsolete contents of
+     the build containers.
+
+### Added
+ - On x86:
+   - Introduce a new x2APIC driver that uses Cluster Logical addressing mode
+     for IPIs and Physical addressing mode for external interrupts.
+ - On Arm:
+   - FF-A notification support.
+   - Introduction of dynamic node programming using overlay dtbo.
+ - Add a new 9pfs backend running as a daemon in dom0. First user is
+   Xenstore-stubdom now being able to support full Xenstore trace capability.
+ - libxl support for backendtype=tap with tapback.
+
+### Removed
+ - caml-stubdom.  It hasn't built since 2014, was pinned to Ocaml 4.02, and has
+   been superseded by the MirageOS/SOLO5 projects.
+ - /usr/bin/pygrub symlink.  This was deprecated in Xen 4.2 (2012) but left for
+   compatibility reasons.  VMs configured with bootloader="/usr/bin/pygrub"
+   should be updated to just bootloader="pygrub".
+ - The Xen gdbstub on x86.
+ - xentrace_format has been removed; use xenalyze instead.
+
+## [4.18.0](https://xenbits.xenproject.org/gitweb/?p=xen.git;a=shortlog;h=RELEASE-4.18.0) - 2023-11-16
+
+### Changed
+ - Repurpose command line gnttab_max_{maptrack_,}frames options so they don't
+   cap toolstack provided values.
+ - Ignore VCPUOP_set_singleshot_timer's VCPU_SSHOTTMR_future flag. The only
+   known user doesn't use it properly, leading to in-guest breakage.
+ - The "dom0" option is now supported on Arm and "sve=" sub-option can be used
+   to enable dom0 guest to use SVE/SVE2 instructions.
+ - Physical CPU Hotplug downgraded to Experimental and renamed "ACPI CPU
+   Hotplug" for clarity
+
+### Added
+ - On x86:
+   - On all Intel systems, MSR_ARCH_CAPS is now visible in guests, and
+     controllable from the VM's config file.  For CPUs from ~2019 onwards,
+     this allows guest kernels to see details about hardware fixes for
+     speculative mitigations.  (Backported as XSA-435 to older releases).
+   - xl/libxl can customize SMBIOS strings for HVM guests.
+   - Support for enforcing system-wide operation in Data Operand Independent
+     Timing Mode.
+   - Add Intel Hardware P-States (HWP) cpufreq driver.
+   - Support for features new in AMD Genoa CPUs:
+     - CPUID_USER_DIS (CPUID Faulting) used by Xen to control PV guest's view
+       of CPUID data.
+   - Support for features new in Intel Sapphire Rapids CPUs:
+     - PKS (Protection Key Supervisor) available to HVM/PVH guests.
+     - VM-Notify used by Xen to mitigate certain micro-architectural pipeline
+       livelocks, instead of crashing the entire server.
+     - Bus-lock detection, used by Xen to mitigate (by rate-limiting) the
+       system wide impact of a guest misusing atomic instructions.
+   - Support for features new in Intel Granite Rapids CPUs:
+     - AVX512-FP16.
+ - On Arm:
+   - Xen supports guests running SVE/SVE2 instructions. (Tech Preview)
+   - Add suport for Firmware Framework for Arm A-profile (FF-A) Mediator (Tech
+     Preview)
+   - Experimental support for dynamic addition/removal of Xen device tree
+     nodes using a device tree overlay binary (.dtbo).
+ - Introduce two new hypercalls to map the vCPU runstate and time areas by
+   physical rather than linear/virtual addresses.
+ - The project has now officially adopted 6 directives and 65 rules of MISRA-C.
+
+### Removed
+ - On x86, the "pku" command line option has been removed.  It has never
+   behaved precisely as described, and was redundant with the unsupported
+   "cpuid=no-pku".  Visibility of PKU to guests should be via its vm.cfg file.
+ - xenpvnetboot removed as unable to convert to Python 3.
+
+## [4.17.0](https://xenbits.xenproject.org/gitweb/?p=xen.git;a=shortlog;h=RELEASE-4.17.0) - 2022-12-12
 
 ### Changed
  - On x86 "vga=current" can now be used together with GrUB2's gfxpayload setting. Note that
@@ -62,7 +190,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 ### Removed / support downgraded
  - dropped support for the (x86-only) "vesa-mtrr" and "vesa-remap" command line options
 
-## [4.16.0](https://xenbits.xen.org/gitweb/?p=xen.git;a=shortlog;h=RELEASE-4.16.0) - 2021-12-02
+## [4.16.0](https://xenbits.xenproject.org/gitweb/?p=xen.git;a=shortlog;h=RELEASE-4.16.0) - 2021-12-02
 
 ### Removed
  - XENSTORED_ROOTDIR environment variable from configuartion files and
@@ -105,7 +233,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
  - Support of generic DT IOMMU bindings for Arm SMMU v2.
  - Limit grant table version on a per-domain basis.
 
-## [4.15.0](https://xenbits.xen.org/gitweb/?p=xen.git;a=shortlog;h=RELEASE-4.15.0) - 2021-04-08
+## [4.15.0](https://xenbits.xenproject.org/gitweb/?p=xen.git;a=shortlog;h=RELEASE-4.15.0) - 2021-04-08
 
 ### Added / support upgraded
  - ARM IOREQ servers (device emulation etc.) (Tech Preview)
@@ -139,7 +267,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
    support, not recommended".  (Use as stub domain device model is still
    supported - see SUPPORT.md.)
 
-## [4.14.0](https://xenbits.xen.org/gitweb/?p=xen.git;a=shortlog;h=RELEASE-4.14.0) - 2020-07-23
+## [4.14.0](https://xenbits.xenproject.org/gitweb/?p=xen.git;a=shortlog;h=RELEASE-4.14.0) - 2020-07-23
 
 ### Added
  - This file and MAINTAINERS entry.
@@ -166,6 +294,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
    An administrator still needs to take care to ensure the features visible to
    the guest at boot are compatible with anywhere it might migrate.
 
-## [4.13.0](https://xenbits.xen.org/gitweb/?p=xen.git;a=shortlog;h=RELEASE-4.13.0) - 2019-12-17
+## [4.13.0](https://xenbits.xenproject.org/gitweb/?p=xen.git;a=shortlog;h=RELEASE-4.13.0) - 2019-12-17
 
 > Pointer to release from which CHANGELOG tracking starts

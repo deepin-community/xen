@@ -49,46 +49,45 @@ const struct genapic *apic_x2apic_probe(void);
  * Basic functions accessing APICs.
  */
 
-static __inline void apic_mem_write(unsigned long reg, u32 v)
+static inline void apic_mem_write(unsigned int reg, uint32_t v)
 {
-	*((volatile u32 *)(APIC_BASE+reg)) = v;
+    volatile uint32_t *addr = fix_to_virt(FIX_APIC_BASE) + reg;
+
+    *addr = v;
 }
 
-static __inline void apic_mem_write_atomic(unsigned long reg, u32 v)
+static inline uint32_t apic_mem_read(unsigned int reg)
 {
-	(void)xchg((volatile u32 *)(APIC_BASE+reg), v);
-}
+    const volatile uint32_t *addr = fix_to_virt(FIX_APIC_BASE) + reg;
 
-static __inline u32 apic_mem_read(unsigned long reg)
-{
-	return *((volatile u32 *)(APIC_BASE+reg));
+    return *addr;
 }
 
 /* NOTE: in x2APIC mode, we should use apic_icr_write()/apic_icr_read() to
  * access the 64-bit ICR register.
  */
 
-static __inline void apic_wrmsr(unsigned long reg, uint64_t msr_content)
+static inline void apic_wrmsr(unsigned int reg, uint64_t msr_content)
 {
     if (reg == APIC_DFR || reg == APIC_ID || reg == APIC_LDR ||
         reg == APIC_LVR)
         return;
 
-    wrmsrl(APIC_MSR_BASE + (reg >> 4), msr_content);
+    wrmsrl(MSR_X2APIC_FIRST + (reg >> 4), msr_content);
 }
 
-static __inline uint64_t apic_rdmsr(unsigned long reg)
+static inline uint64_t apic_rdmsr(unsigned int reg)
 {
     uint64_t msr_content;
 
     if (reg == APIC_DFR)
         return -1u;
 
-    rdmsrl(APIC_MSR_BASE + (reg >> 4), msr_content);
+    rdmsrl(MSR_X2APIC_FIRST + (reg >> 4), msr_content);
     return msr_content;
 }
 
-static __inline void apic_write(unsigned long reg, u32 v)
+static inline void apic_write(unsigned int reg, uint32_t v)
 {
 
     if ( x2apic_enabled )
@@ -97,15 +96,7 @@ static __inline void apic_write(unsigned long reg, u32 v)
         apic_mem_write(reg, v);
 }
 
-static __inline void apic_write_atomic(unsigned long reg, u32 v)
-{
-    if ( x2apic_enabled )
-        apic_wrmsr(reg, v);
-    else
-        apic_mem_write_atomic(reg, v);
-}
-
-static __inline u32 apic_read(unsigned long reg)
+static inline u32 apic_read(unsigned int reg)
 {
     if ( x2apic_enabled )
         return apic_rdmsr(reg);
@@ -113,7 +104,7 @@ static __inline u32 apic_read(unsigned long reg)
         return apic_mem_read(reg);
 }
 
-static __inline u64 apic_icr_read(void)
+static inline u64 apic_icr_read(void)
 {
     u32 lo, hi;
 
@@ -128,7 +119,7 @@ static __inline u64 apic_icr_read(void)
     return ((u64)lo) | (((u64)hi) << 32);
 }
 
-static __inline void apic_icr_write(u32 low, u32 dest)
+static inline void apic_icr_write(u32 low, u32 dest)
 {
     if ( x2apic_enabled )
         apic_wrmsr(APIC_ICR, low | ((uint64_t)dest << 32));
@@ -139,13 +130,22 @@ static __inline void apic_icr_write(u32 low, u32 dest)
     }
 }
 
-static __inline bool_t apic_isr_read(u8 vector)
+static inline bool apic_isr_read(unsigned int vector)
 {
-    return (apic_read(APIC_ISR + ((vector & ~0x1f) >> 1)) >>
-            (vector & 0x1f)) & 1;
+    return apic_read(APIC_ISR + (vector / 32 * 0x10)) & (1U << (vector % 32));
 }
 
-static __inline u32 get_apic_id(void) /* Get the physical APIC id */
+static inline bool apic_tmr_read(unsigned int vector)
+{
+    return apic_read(APIC_TMR + (vector / 32 * 0x10)) & (1U << (vector % 32));
+}
+
+static inline bool apic_irr_read(unsigned int vector)
+{
+    return apic_read(APIC_IRR + (vector / 32 * 0x10)) & (1U << (vector % 32));
+}
+
+static inline u32 get_apic_id(void)
 {
     u32 id = apic_read(APIC_ID);
     return x2apic_enabled ? id : GET_xAPIC_ID(id);
@@ -199,7 +199,6 @@ extern void check_nmi_watchdog(void);
 
 extern unsigned int nmi_watchdog;
 #define NMI_NONE	0
-#define NMI_IO_APIC	1
-#define NMI_LOCAL_APIC	2
+#define NMI_LOCAL_APIC	1
 
 #endif /* __ASM_APIC_H */

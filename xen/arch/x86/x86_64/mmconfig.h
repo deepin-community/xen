@@ -1,17 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2006, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  *
  * Author: Allen Kay <allen.m.kay@intel.com> - adapted from linux
  */
@@ -81,5 +70,5 @@ int pci_mmcfg_reserved(uint64_t address, unsigned int segment,
                        unsigned int start_bus, unsigned int end_bus,
                        unsigned int flags);
 int pci_mmcfg_arch_init(void);
-int pci_mmcfg_arch_enable(unsigned int);
-void pci_mmcfg_arch_disable(unsigned int);
+int pci_mmcfg_arch_enable(unsigned int idx);
+void pci_mmcfg_arch_disable(unsigned int idx);

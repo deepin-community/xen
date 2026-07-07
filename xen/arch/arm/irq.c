@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * xen/arch/arm/irq.c
  *
@@ -5,16 +6,6 @@
  *
  * Ian Campbell <ian.campbell@citrix.com>
  * Copyright (c) 2011 Citrix Systems.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <xen/cpu.h>
@@ -40,12 +31,12 @@ struct irq_guest
     unsigned int virq;
 };
 
-static void ack_none(struct irq_desc *irq)
+void irq_ack_none(struct irq_desc *desc)
 {
-    printk("unexpected IRQ trap at irq %02x\n", irq->irq);
+    printk("unexpected IRQ trap at irq %02x\n", desc->irq);
 }
 
-static void end_none(struct irq_desc *irq)
+void irq_end_none(struct irq_desc *irq)
 {
     /*
      * Still allow a CPU to end an interrupt if we receive a spurious
@@ -54,20 +45,10 @@ static void end_none(struct irq_desc *irq)
     gic_hw_ops->gic_host_irq_type->end(irq);
 }
 
-hw_irq_controller no_irq_type = {
-    .typename = "none",
-    .startup = irq_startup_none,
-    .shutdown = irq_shutdown_none,
-    .enable = irq_enable_none,
-    .disable = irq_disable_none,
-    .ack = ack_none,
-    .end = end_none
-};
-
 static irq_desc_t irq_desc[NR_IRQS];
 static DEFINE_PER_CPU(irq_desc_t[NR_LOCAL_IRQS], local_irq_desc);
 
-irq_desc_t *__irq_to_desc(int irq)
+struct irq_desc *__irq_to_desc(unsigned int irq)
 {
     if ( irq < NR_LOCAL_IRQS )
         return &this_cpu(local_irq_desc)[irq];
@@ -148,7 +129,7 @@ static int cpu_callback(struct notifier_block *nfb, unsigned long action,
         break;
     }
 
-    return !rc ? NOTIFY_DONE : notifier_from_errno(rc);
+    return notifier_from_errno(rc);
 }
 
 static struct notifier_block cpu_nfb = {
@@ -161,7 +142,13 @@ void __init init_IRQ(void)
 
     spin_lock(&local_irqs_type_lock);
     for ( irq = 0; irq < NR_LOCAL_IRQS; irq++ )
-        local_irqs_type[irq] = IRQ_TYPE_INVALID;
+    {
+        /* SGIs are always edge-triggered */
+        if ( irq < NR_GIC_SGI )
+            local_irqs_type[irq] = IRQ_TYPE_EDGE_RISING;
+        else
+            local_irqs_type[irq] = IRQ_TYPE_INVALID;
+    }
     spin_unlock(&local_irqs_type_lock);
 
     BUG_ON(init_local_irq_data(smp_processor_id()) < 0);
@@ -184,14 +171,14 @@ static inline struct domain *irq_get_domain(struct irq_desc *desc)
     return irq_get_guest_info(desc)->d;
 }
 
-void irq_set_affinity(struct irq_desc *desc, const cpumask_t *cpu_mask)
+void irq_set_affinity(struct irq_desc *desc, const cpumask_t *mask)
 {
     if ( desc != NULL )
-        desc->handler->set_affinity(desc, cpu_mask);
+        desc->handler->set_affinity(desc, mask);
 }
 
 int request_irq(unsigned int irq, unsigned int irqflags,
-                void (*handler)(int, void *, struct cpu_user_regs *),
+                void (*handler)(int irq, void *dev_id),
                 const char *devname, void *dev_id)
 {
     struct irqaction *action;
@@ -229,12 +216,16 @@ void do_IRQ(struct cpu_user_regs *regs, unsigned int irq, int is_fiq)
 {
     struct irq_desc *desc = irq_to_desc(irq);
     struct irqaction *action;
+    const struct cpu_user_regs *old_regs = set_irq_regs(regs);
 
     perfc_incr(irqs);
 
-    ASSERT(irq >= 16); /* SGIs do not come down this path */
+    /* Statically assigned SGIs do not come down this path */
+    ASSERT(irq >= GIC_SGI_STATIC_MAX);
 
-    if ( irq < 32 )
+    if ( irq < NR_GIC_SGI )
+        perfc_incr(ipis);
+    else if ( irq < NR_GIC_LOCAL_IRQS )
         perfc_incr(ppis);
     else
         perfc_incr(spis);
@@ -268,6 +259,7 @@ void do_IRQ(struct cpu_user_regs *regs, unsigned int irq, int is_fiq)
          * The irq cannot be a PPI, we only support delivery of SPIs to
          * guests.
          */
+        ASSERT(irq >= NR_GIC_SGI);
         vgic_inject_irq(info->d, NULL, info->virq, true);
         goto out_no_end;
     }
@@ -283,7 +275,7 @@ void do_IRQ(struct cpu_user_regs *regs, unsigned int irq, int is_fiq)
 
     do
     {
-        action->handler(irq, action->dev_id, regs);
+        action->handler(irq, action->dev_id);
         action = action->next;
     } while ( action );
 
@@ -296,6 +288,7 @@ out:
 out_no_end:
     spin_unlock(&desc->lock);
     irq_exit();
+    set_irq_regs(old_regs);
 }
 
 void release_irq(unsigned int irq, const void *dev_id)
@@ -403,7 +396,7 @@ int setup_irq(unsigned int irq, unsigned int irqflags, struct irqaction *new)
     {
         gic_route_irq_to_xen(desc, GIC_PRI_IRQ);
         /* It's fine to use smp_processor_id() because:
-         * For PPI: irq_desc is banked
+         * For SGI and PPI: irq_desc is banked
          * For SPI: we don't care for now which CPU will receive the
          * interrupt
          * TODO: Handle case where SPI is setup on different CPU than
@@ -725,6 +718,20 @@ int platform_get_irq(const struct dt_device_node *device, int index)
         return -1;
 
     return irq;
+}
+
+int platform_get_irq_byname(const struct dt_device_node *np, const char *name)
+{
+	int index;
+
+	if ( unlikely(!name) )
+		return -EINVAL;
+
+	index = dt_property_match_string(np, "interrupt-names", name);
+	if ( index < 0 )
+		return index;
+
+	return platform_get_irq(np, index);
 }
 
 /*

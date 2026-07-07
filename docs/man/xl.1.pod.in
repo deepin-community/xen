@@ -222,7 +222,8 @@ Attach to the console of a domain specified by I<domain-id>.  If you've set up
 your domains to have a traditional login console this will look much like a
 normal text login screen.
 
-Use the key combination Ctrl+] to detach from the domain console.
+Use the escape character key combination (default Ctrl+]) to detach from the
+domain console.
 
 B<OPTIONS>
 
@@ -238,6 +239,11 @@ emulated serial for HVM guests and PV console for PV guests.
 =item I<-n NUM>
 
 Connect to console number I<NUM>. Console numbers start from 0.
+
+=item I<-e escapechar>
+
+Customize the escape sequence used to detach from the domain console to
+I<escapechar>. If not specified, the value "^]" is used.
 
 =back
 
@@ -676,6 +682,10 @@ Pass the VNC password to vncviewer via stdin.
 
 =back
 
+=item B<resume> I<domain-id>
+
+Resume a domain, after having been suspended.
+
 =item B<save> [I<OPTIONS>] I<domain-id> I<checkpointfile> [I<configfile>]
 
 Saves a running domain to a state file so that it can be restored
@@ -753,6 +763,14 @@ You should ensure that the guest is configured to behave as expected
 in response to this event.
 
 =back
+
+=item B<suspend> I<domain-id>
+
+Suspend a domain.  This is a cooperative operation where the domain must
+respond to the xenstore trigger.  When in a suspended state the domain
+still consumes allocated resources (such as memory), but is not eligible
+for scheduling by the Xen hypervisor.  It is in a shutdown state, but
+not dying.
 
 =item B<sysrq> I<domain-id> I<letter>
 
@@ -1965,28 +1983,19 @@ The following environment variables shall affect the execution of xl:
 
 =item LIBXL_BOOTLOADER_RESTRICT
 
-Attempt to restrict the bootloader after startup, to limit the
-consequences of security vulnerabilities due to parsing guest
-owned image files.
+Equivalent to L<xl.cfg(5)> B<bootloader_restrict> option.  Provided for
+compatibility reasons.  Having this variable set is equivalent to enabling
+the option, even if the value is 0.
 
-See docs/features/qemu-deprivilege.pandoc for more information
-on how to setup the unprivileged users.
-
-Note that running the bootloader in restricted mode also implies using
-non-interactive mode, and the disk image must be readable by the
-restricted user.
-
-Having this variable set is equivalent to enabling the option, even if the
-value is 0.
+If set takes precedence over L<xl.cfg(5)> and L<xl.conf(5)>
+B<bootloader_restrict> options.
 
 =item LIBXL_BOOTLOADER_USER
 
-When using bootloader_restrict, run the bootloader as this user.  If
-not set the default QEMU restrict users will be used.
+Equivalent to L<xl.cfg(5)> B<bootloader_user> option.  Provided for
+compatibility reasons.
 
-NOTE: Each domain MUST have a SEPARATE username.
-
-See docs/features/qemu-deprivilege.pandoc for more information.
+If set takes precedence over L<xl.cfg(5)> B<bootloader_user> option.
 
 =item LIBXL_BOOTLOADER_TIMEOUT
 

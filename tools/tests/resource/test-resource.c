@@ -7,7 +7,7 @@
 #include <xenctrl.h>
 #include <xenforeignmemory.h>
 #include <xengnttab.h>
-#include <xen-tools/libs.h>
+#include <xen-tools/common-macros.h>
 
 static unsigned int nr_failures;
 #define fail(fmt, ...)                          \
@@ -19,6 +19,8 @@ static unsigned int nr_failures;
 static xc_interface *xch;
 static xenforeignmemory_handle *fh;
 static xengnttab_handle *gh;
+
+static xc_physinfo_t physinfo;
 
 static void test_gnttab(uint32_t domid, unsigned int nr_frames,
                         unsigned long gfn)
@@ -121,6 +123,16 @@ static void test_gnttab(uint32_t domid, unsigned int nr_frames,
         fail("    Fail: Managed to map gnttab v2 status frames in v1 mode\n");
         xenforeignmemory_unmap_resource(fh, res);
     }
+
+    /*
+     * If this check starts failing, you've found the right place to test your
+     * addition to the Acquire Resource infrastructure.
+     */
+    rc = xenforeignmemory_resource_size(fh, domid, 3, 0, &size);
+
+    /* Check that Xen rejected the resource type. */
+    if ( !rc )
+        fail("    Fail: Expected error on an invalid resource type, got success\n");
 }
 
 static void test_domain_configurations(void)
@@ -172,6 +184,37 @@ static void test_domain_configurations(void)
 
         printf("Test %s\n", t->name);
 
+#if defined(__x86_64__) || defined(__i386__)
+        if ( t->create.flags & XEN_DOMCTL_CDF_hvm )
+        {
+            if ( !(physinfo.capabilities & XEN_SYSCTL_PHYSCAP_hvm) )
+            {
+                printf("  Skip: HVM not available\n");
+                continue;
+            }
+
+            /*
+             * On x86, use HAP guests if possible, but skip if neither HAP nor
+             * SHADOW is available.
+             */
+            if ( physinfo.capabilities & XEN_SYSCTL_PHYSCAP_hap )
+                t->create.flags |= XEN_DOMCTL_CDF_hap;
+            else if ( !(physinfo.capabilities & XEN_SYSCTL_PHYSCAP_shadow) )
+            {
+                printf("  Skip: Neither HAP or SHADOW available\n");
+                continue;
+            }
+        }
+        else
+        {
+            if ( !(physinfo.capabilities & XEN_SYSCTL_PHYSCAP_pv) )
+            {
+                printf("  Skip: PV not available\n");
+                continue;
+            }
+        }
+#endif
+
         rc = xc_domain_create(xch, &domid, &t->create);
         if ( rc )
         {
@@ -214,6 +257,8 @@ static void test_domain_configurations(void)
 
 int main(int argc, char **argv)
 {
+    int rc;
+
     printf("XENMEM_acquire_resource tests\n");
 
     xch = xc_interface_open(NULL, NULL, 0);
@@ -226,6 +271,10 @@ int main(int argc, char **argv)
         err(1, "xenforeignmemory_open");
     if ( !gh )
         err(1, "xengnttab_open");
+
+    rc = xc_physinfo(xch, &physinfo);
+    if ( rc )
+        err(1, "Failed to obtain physinfo");
 
     test_domain_configurations();
 

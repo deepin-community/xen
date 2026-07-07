@@ -81,7 +81,6 @@ extern bool acpi_lapic, acpi_ioapic, acpi_noirq;
 extern bool acpi_force, acpi_ht, acpi_disabled;
 extern u32 acpi_smi_cmd;
 extern u8 acpi_enable_value, acpi_disable_value;
-void acpi_pic_sci_set_trigger(unsigned int, u16);
 
 static inline void disable_acpi(void)
 {
@@ -101,14 +100,11 @@ extern unsigned long acpi_wakeup_address;
 
 #define ARCH_HAS_POWER_INIT	1
 
-extern s8 acpi_numa;
-extern int acpi_scan_nodes(u64 start, u64 end);
-#define NR_NODE_MEMBLKS (MAX_NUMNODES*2)
+extern int8_t acpi_numa;
 
 extern struct acpi_sleep_info acpi_sinfo;
-#define acpi_video_flags bootsym(video_flags)
 struct xenpf_enter_acpi_sleep;
-extern int acpi_enter_sleep(struct xenpf_enter_acpi_sleep *sleep);
+extern int acpi_enter_sleep(const struct xenpf_enter_acpi_sleep *sleep);
 extern int acpi_enter_state(u32 state);
 
 struct acpi_sleep_info {
@@ -129,7 +125,7 @@ struct acpi_sleep_info {
     uint32_t sleep_state;
     uint64_t wakeup_vector;
     uint32_t vector_width;
-    bool_t sleep_extended;
+    bool sleep_extended;
 };
 
 #define MAX_MADT_ENTRIES	MAX(256, 2 * NR_CPUS)
@@ -142,8 +138,12 @@ extern u32 pmtmr_ioport;
 extern unsigned int pmtmr_width;
 
 void acpi_iommu_init(void);
-int acpi_dmar_init(void);
+
+#ifdef CONFIG_AMD_IOMMU
 int acpi_ivrs_init(void);
+#else
+static inline int acpi_ivrs_init(void) { return -ENODEV; }
+#endif
 
 void acpi_mmcfg_init(void);
 

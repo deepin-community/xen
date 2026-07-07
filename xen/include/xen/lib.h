@@ -1,26 +1,7 @@
 #ifndef __LIB_H__
 #define __LIB_H__
 
-#define ROUNDUP(x, a) (((x) + (a) - 1) & ~((a) - 1))
-
-#define IS_ALIGNED(val, align) (!((val) & ((align) - 1)))
-
-#define DIV_ROUND(n, d) (((n) + (d) / 2) / (d))
-#define DIV_ROUND_UP(n, d) (((n) + (d) - 1) / (d))
-
-#define MASK_EXTR(v, m) (((v) & (m)) / ((m) & -(m)))
-#define MASK_INSR(v, m) (((v) * ((m) & -(m))) & (m))
-
-#define count_args_(dot, a1, a2, a3, a4, a5, a6, a7, a8, x, ...) x
-#define count_args(args...) \
-    count_args_(., ## args, 8, 7, 6, 5, 4, 3, 2, 1, 0)
-
-/* Indirect macros required for expanded argument pasting. */
-#define PASTE_(a, b) a ## b
-#define PASTE(a, b) PASTE_(a, b)
-
-#define __STR(...) #__VA_ARGS__
-#define STR(...) __STR(__VA_ARGS__)
+#include <xen/macros.h>
 
 #ifndef __ASSEMBLY__
 
@@ -29,52 +10,7 @@
 #include <xen/types.h>
 #include <xen/xmalloc.h>
 #include <xen/string.h>
-#include <asm/bug.h>
-
-#define BUG_ON(p)  do { if (unlikely(p)) BUG();  } while (0)
-#define WARN_ON(p)  ({                  \
-    bool ret_warn_on_ = (p);            \
-                                        \
-    if ( unlikely(ret_warn_on_) )       \
-        WARN();                         \
-    unlikely(ret_warn_on_);             \
-})
-
-/* All clang versions supported by Xen have _Static_assert. */
-#if defined(__clang__) || \
-    (__GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 6))
-/* Force a compilation error if condition is true */
-#define BUILD_BUG_ON(cond) ({ _Static_assert(!(cond), "!(" #cond ")"); })
-
-/* Force a compilation error if condition is true, but also produce a
-   result (of value 0 and type size_t), so the expression can be used
-   e.g. in a structure initializer (or where-ever else comma expressions
-   aren't permitted). */
-#define BUILD_BUG_ON_ZERO(cond) \
-    sizeof(struct { _Static_assert(!(cond), "!(" #cond ")"); })
-#else
-#define BUILD_BUG_ON_ZERO(cond) sizeof(struct { int:-!!(cond); })
-#define BUILD_BUG_ON(cond) ((void)BUILD_BUG_ON_ZERO(cond))
-#endif
-
-#ifndef NDEBUG
-#define ASSERT(p) \
-    do { if ( unlikely(!(p)) ) assert_failed(#p); } while (0)
-#define ASSERT_UNREACHABLE() assert_failed("unreachable")
-#else
-#define ASSERT(p) do { if ( 0 && (p) ) {} } while (0)
-#define ASSERT_UNREACHABLE() do { } while (0)
-#endif
-
-#define ABS(_x) ({                              \
-    typeof(_x) __x = (_x);                      \
-    (__x < 0) ? -__x : __x;                     \
-})
-
-#define SWAP(_a, _b) \
-   do { typeof(_a) _t = (_a); (_a) = (_b); (_b) = _t; } while ( 0 )
-
-#define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]) + __must_be_array(x))
+#include <xen/sections.h>
 
 #define __ACCESS_ONCE(x) ({                             \
             (void)(typeof(x))0; /* Scalar typecheck. */ \
@@ -95,6 +31,16 @@ int parse_bool(const char *s, const char *e);
 int parse_boolean(const char *name, const char *s, const char *e);
 
 /**
+ * Given a specific name, parses a string of the form:
+ *   $NAME=<integer number>
+ * returning 0 and a value in val, for a recognised integer.
+ * Returns -1 for name not found, general errors, or -2 if name is found but
+ * not recognised number.
+ */
+int parse_signed_integer(const char *name, const char *s, const char *e,
+                         long long *val);
+
+/**
  * Very similar to strcmp(), but will declare a match if the NUL in 'name'
  * lines up with comma, colon, semicolon or equals in 'frag'.  Designed for
  * picking exact string matches out of a delimited command line list.
@@ -112,10 +58,13 @@ static inline void
 debugtrace_printk(const char *fmt, ...) {}
 #endif
 
-/* Allows us to use '%p' as general-purpose machine-word format char. */
-#define _p(_x) ((void *)(unsigned long)(_x))
-extern void printk(const char *format, ...)
-    __attribute__ ((format (printf, 1, 2)));
+/* Common log prefixes for platform related issues. */
+#define DEV_BUG_PREFIX "DEVICE BUG: "
+
+extern void printk(const char *fmt, ...)
+    __attribute__ ((format (printf, 1, 2), cold));
+void vprintk(const char *fmt, va_list args)
+    __attribute__ ((format (printf, 1, 0), cold));
 
 #define printk_once(fmt, args...)               \
 ({                                              \
@@ -127,9 +76,9 @@ extern void printk(const char *format, ...)
     }                                           \
 })
 
-extern void guest_printk(const struct domain *d, const char *format, ...)
+extern void guest_printk(const struct domain *d, const char *fmt, ...)
     __attribute__ ((format (printf, 2, 3)));
-extern void noreturn panic(const char *format, ...)
+extern void noreturn panic(const char *fmt, ...)
     __attribute__ ((format (printf, 1, 2)));
 extern int __printk_ratelimit(int ratelimit_ms, int ratelimit_burst);
 extern int printk_ratelimit(void);
@@ -201,7 +150,7 @@ uint64_t muldiv64(uint64_t a, uint32_t b, uint32_t c);
 #define TAINT_MACHINE_CHECK             (1u << 1)
 #define TAINT_ERROR_INJECT              (1u << 2)
 #define TAINT_HVM_FEP                   (1u << 3)
-#define TAINT_MACHINE_UNSECURE          (1u << 4)
+#define TAINT_MACHINE_INSECURE          (1u << 4)
 #define TAINT_CPU_OUT_OF_SPEC           (1u << 5)
 extern unsigned int tainted;
 #define TAINT_STRING_MAX_LEN            20
@@ -209,7 +158,7 @@ extern char *print_tainted(char *str);
 extern void add_taint(unsigned int taint);
 
 struct cpu_user_regs;
-void cf_check dump_execstate(struct cpu_user_regs *);
+void cf_check dump_execstate(const struct cpu_user_regs *regs);
 
 void init_constructors(void);
 

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /******************************************************************************
  * x86_emulate.h
  *
@@ -5,19 +6,6 @@
  *
  * Copyright (c) 2005-2007 Keir Fraser
  * Copyright (c) 2005-2007 XenSource Inc.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef __X86_EMULATE_H__
@@ -55,7 +43,8 @@ enum x86_segment {
     x86_seg_ldtr,
     x86_seg_gdtr,
     x86_seg_idtr,
-    /* No Segment: For accesses which are already linear. */
+    /* No Segment: For (system/normal) accesses which are already linear. */
+    x86_seg_sys,
     x86_seg_none
 };
 
@@ -70,27 +59,17 @@ static inline bool is_x86_system_segment(enum x86_segment seg)
     return seg >= x86_seg_tr && seg < x86_seg_none;
 }
 
-/*
- * x86 event types. This enumeration is valid for:
- *  Intel VMX: {VM_ENTRY,VM_EXIT,IDT_VECTORING}_INTR_INFO[10:8]
- *  AMD SVM: eventinj[10:8] and exitintinfo[10:8] (types 0-4 only)
- */
-enum x86_event_type {
-    X86_EVENTTYPE_EXT_INTR,         /* External interrupt */
-    X86_EVENTTYPE_NMI = 2,          /* NMI */
-    X86_EVENTTYPE_HW_EXCEPTION,     /* Hardware exception */
-    X86_EVENTTYPE_SW_INTERRUPT,     /* Software interrupt (CD nn) */
-    X86_EVENTTYPE_PRI_SW_EXCEPTION, /* ICEBP (F1) */
-    X86_EVENTTYPE_SW_EXCEPTION,     /* INT3 (CC), INTO (CE) */
-};
 #define X86_EVENT_NO_EC (-1)        /* No error code. */
 
 struct x86_event {
     int16_t       vector;
-    uint8_t       type;         /* X86_EVENTTYPE_* */
+    uint8_t       type;         /* X86_ET_* */
     uint8_t       insn_len;     /* Instruction length */
     int32_t       error_code;   /* X86_EVENT_NO_EC if n/a */
-    unsigned long cr2;          /* Only for TRAP_page_fault h/w exception */
+    union {
+        unsigned long cr2;         /* #PF */
+        unsigned long pending_dbg; /* #DB (new DR6 bits, positive polarity) */
+    };
 };
 
 /*
@@ -228,7 +207,7 @@ struct x86_emulate_ops
      * All functions:
      *  @ctxt:  [IN ] Emulation context info as passed to the emulator.
      * All memory-access functions:
-     *  @seg:   [IN ] Segment being dereferenced (specified as x86_seg_??).
+     *  @seg:   [IN ] Segment being dereferenced (specified as x86_seg_?).
      *  @offset:[IN ] Offset within segment.
      *  @p_data:[IN ] Pointer to i/o data buffer (length is @bytes)
      * Read functions:
@@ -622,6 +601,8 @@ struct x86_emulate_ctxt
  *    0x0fxxxx for 0f-prefixed opcodes (or their VEX/EVEX equivalents)
  *  0x0f38xxxx for 0f38-prefixed opcodes (or their VEX/EVEX equivalents)
  *  0x0f3axxxx for 0f3a-prefixed opcodes (or their VEX/EVEX equivalents)
+ *     0x5xxxx for Map5 opcodes (EVEX only)
+ *     0x6xxxx for Map6 opcodes (EVEX only)
  *  0x8f08xxxx for 8f/8-prefixed XOP opcodes
  *  0x8f09xxxx for 8f/9-prefixed XOP opcodes
  *  0x8f0axxxx for 8f/a-prefixed XOP opcodes
@@ -630,7 +611,7 @@ struct x86_emulate_ctxt
  * below).
  * Hence no separate #define-s get added.
  */
-#define X86EMUL_OPC_EXT_MASK         0xffff0000
+#define X86EMUL_OPC_EXT_MASK         0xffff0000U
 #define X86EMUL_OPC(ext, byte)       ((uint8_t)(byte) | \
                                       MASK_INSR((ext), X86EMUL_OPC_EXT_MASK))
 /*
@@ -756,36 +737,36 @@ x86_decode_insn(
         struct x86_emulate_ctxt *ctxt));
 
 unsigned int
-x86_insn_opsize(const struct x86_emulate_state *state);
+x86_insn_opsize(const struct x86_emulate_state *s);
 int
-x86_insn_modrm(const struct x86_emulate_state *state,
+x86_insn_modrm(const struct x86_emulate_state *s,
                unsigned int *rm, unsigned int *reg);
 unsigned long
-x86_insn_operand_ea(const struct x86_emulate_state *state,
+x86_insn_operand_ea(const struct x86_emulate_state *s,
                     enum x86_segment *seg);
 unsigned long
-x86_insn_immediate(const struct x86_emulate_state *state,
+x86_insn_immediate(const struct x86_emulate_state *s,
                    unsigned int nr);
 unsigned int
-x86_insn_length(const struct x86_emulate_state *state,
+x86_insn_length(const struct x86_emulate_state *s,
                 const struct x86_emulate_ctxt *ctxt);
 bool cf_check
-x86_insn_is_mem_access(const struct x86_emulate_state *state,
+x86_insn_is_mem_access(const struct x86_emulate_state *s,
                        const struct x86_emulate_ctxt *ctxt);
 bool cf_check
-x86_insn_is_mem_write(const struct x86_emulate_state *state,
+x86_insn_is_mem_write(const struct x86_emulate_state *s,
                       const struct x86_emulate_ctxt *ctxt);
 bool cf_check
-x86_insn_is_portio(const struct x86_emulate_state *state,
+x86_insn_is_portio(const struct x86_emulate_state *s,
                    const struct x86_emulate_ctxt *ctxt);
 bool cf_check
-x86_insn_is_cr_access(const struct x86_emulate_state *state,
+x86_insn_is_cr_access(const struct x86_emulate_state *s,
                       const struct x86_emulate_ctxt *ctxt);
 
 #if !defined(__XEN__) || defined(NDEBUG)
-static inline void x86_emulate_free_state(struct x86_emulate_state *state) {}
+static inline void x86_emulate_free_state(struct x86_emulate_state *s) {}
 #else
-void x86_emulate_free_state(struct x86_emulate_state *state);
+void x86_emulate_free_state(struct x86_emulate_state *s);
 #endif
 
 #ifdef __XEN__
@@ -810,7 +791,7 @@ x86_emul_rmw(
     void *ptr,
     unsigned int bytes,
     uint32_t *eflags,
-    struct x86_emulate_state *state,
+    struct x86_emulate_state *s,
     struct x86_emulate_ctxt *ctxt);
 int
 x86_emul_blk(
@@ -818,7 +799,7 @@ x86_emul_blk(
     void *data,
     unsigned int bytes,
     uint32_t *eflags,
-    struct x86_emulate_state *state,
+    struct x86_emulate_state *s,
     struct x86_emulate_ctxt *ctxt);
 
 static inline void x86_emul_hw_exception(
@@ -827,7 +808,7 @@ static inline void x86_emul_hw_exception(
     ASSERT(!ctxt->event_pending);
 
     ctxt->event.vector = vector;
-    ctxt->event.type = X86_EVENTTYPE_HW_EXCEPTION;
+    ctxt->event.type = X86_ET_HW_EXC;
     ctxt->event.error_code = error_code;
 
     ctxt->event_pending = true;
@@ -838,8 +819,8 @@ static inline void x86_emul_pagefault(
 {
     ASSERT(!ctxt->event_pending);
 
-    ctxt->event.vector = 14; /* TRAP_page_fault */
-    ctxt->event.type = X86_EVENTTYPE_HW_EXCEPTION;
+    ctxt->event.vector = X86_EXC_PF;
+    ctxt->event.type = X86_ET_HW_EXC;
     ctxt->event.error_code = error_code;
     ctxt->event.cr2 = cr2;
 

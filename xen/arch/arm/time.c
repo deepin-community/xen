@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * xen/arch/arm/time.c
  *
@@ -5,16 +6,6 @@
  *
  * Tim Deegan <tim@xen.org>
  * Copyright (c) 2011 Citrix Systems.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <xen/console.h>
@@ -26,6 +17,7 @@
 #include <xen/softirq.h>
 #include <xen/sched.h>
 #include <xen/time.h>
+#include <xen/delay.h>
 #include <xen/sched.h>
 #include <xen/event.h>
 #include <xen/acpi.h>
@@ -86,10 +78,6 @@ static int __init arch_timer_acpi_init(struct acpi_table_header *header)
     irq_set_type(gtdt->non_secure_el1_interrupt, irq_type);
     timer_irq[TIMER_PHYS_NONSECURE_PPI] = gtdt->non_secure_el1_interrupt;
 
-    irq_type = acpi_get_timer_irq_type(gtdt->secure_el1_flags);
-    irq_set_type(gtdt->secure_el1_interrupt, irq_type);
-    timer_irq[TIMER_PHYS_SECURE_PPI] = gtdt->secure_el1_interrupt;
-
     irq_type = acpi_get_timer_irq_type(gtdt->virtual_timer_flags);
     irq_set_type(gtdt->virtual_timer_interrupt, irq_type);
     timer_irq[TIMER_VIRT_PPI] = gtdt->virtual_timer_interrupt;
@@ -108,6 +96,17 @@ static void __init preinit_acpi_xen_time(void)
 #else
 static void __init preinit_acpi_xen_time(void) { }
 #endif
+
+static void __init validate_timer_frequency(void)
+{
+    /*
+     * ARM ARM does not impose any strict limit on the range of allowable
+     * system counter frequencies. However, we operate under the assumption
+     * that cpu_khz must not be 0.
+     */
+    if ( !cpu_khz )
+        panic("Timer frequency is less than 1 KHz\n");
+}
 
 /* Set up the timer on the boot CPU (early init function) */
 static void __init preinit_dt_xen_time(void)
@@ -130,6 +129,7 @@ static void __init preinit_dt_xen_time(void)
     if ( res )
     {
         cpu_khz = rate / 1000;
+        validate_timer_frequency();
         timer_dt_clock_frequency = rate;
     }
 }
@@ -145,7 +145,10 @@ void __init preinit_xen_time(void)
         preinit_acpi_xen_time();
 
     if ( !cpu_khz )
+    {
         cpu_khz = (READ_SYSREG(CNTFRQ_EL0) & CNTFRQ_MASK) / 1000;
+        validate_timer_frequency();
+    }
 
     res = platform_init_time();
     if ( res )
@@ -158,15 +161,33 @@ static void __init init_dt_xen_time(void)
 {
     int res;
     unsigned int i;
+    bool has_names;
+    static const char * const timer_irq_names[MAX_TIMER_PPI] __initconst = {
+        [TIMER_PHYS_SECURE_PPI] = "sec-phys",
+        [TIMER_PHYS_NONSECURE_PPI] = "phys",
+        [TIMER_VIRT_PPI] = "virt",
+        [TIMER_HYP_PPI] = "hyp-phys",
+        [TIMER_HYP_VIRT_PPI] = "hyp-virt",
+    };
+
+    has_names = dt_property_read_bool(timer, "interrupt-names");
 
     /* Retrieve all IRQs for the timer */
     for ( i = TIMER_PHYS_SECURE_PPI; i < MAX_TIMER_PPI; i++ )
     {
-        res = platform_get_irq(timer, i);
+        if ( has_names )
+            res = platform_get_irq_byname(timer, timer_irq_names[i]);
+        else
+            res = platform_get_irq(timer, i);
 
-        if ( res < 0 )
+        if ( res > 0 )
+            timer_irq[i] = res;
+        /*
+         * Do not panic if "hyp-virt" PPI is not found, since it's not
+         * currently used.
+         */
+        else if ( i != TIMER_HYP_VIRT_PPI )
             panic("Timer: Unable to retrieve IRQ %u from the device tree\n", i);
-        timer_irq[i] = res;
     }
 }
 
@@ -220,30 +241,21 @@ int reprogram_timer(s_time_t timeout)
 }
 
 /* Handle the firing timer */
-static void timer_interrupt(int irq, void *dev_id, struct cpu_user_regs *regs)
+static void htimer_interrupt(int irq, void *dev_id)
 {
-    if ( irq == (timer_irq[TIMER_HYP_PPI]) &&
-         READ_SYSREG(CNTHP_CTL_EL2) & CNTx_CTL_PENDING )
-    {
-        perfc_incr(hyp_timer_irqs);
-        /* Signal the generic timer code to do its work */
-        raise_softirq(TIMER_SOFTIRQ);
-        /* Disable the timer to avoid more interrupts */
-        WRITE_SYSREG(0, CNTHP_CTL_EL2);
-    }
+    if ( unlikely(!(READ_SYSREG(CNTHP_CTL_EL2) & CNTx_CTL_PENDING)) )
+        return;
 
-    if ( irq == (timer_irq[TIMER_PHYS_NONSECURE_PPI]) &&
-         READ_SYSREG(CNTP_CTL_EL0) & CNTx_CTL_PENDING )
-    {
-        perfc_incr(phys_timer_irqs);
-        /* Signal the generic timer code to do its work */
-        raise_softirq(TIMER_SOFTIRQ);
-        /* Disable the timer to avoid more interrupts */
-        WRITE_SYSREG(0, CNTP_CTL_EL0);
-    }
+    perfc_incr(hyp_timer_irqs);
+
+    /* Signal the generic timer code to do its work */
+    raise_softirq(TIMER_SOFTIRQ);
+
+    /* Disable the timer to avoid more interrupts */
+    WRITE_SYSREG(0, CNTHP_CTL_EL2);
 }
 
-static void vtimer_interrupt(int irq, void *dev_id, struct cpu_user_regs *regs)
+static void vtimer_interrupt(int irq, void *dev_id)
 {
     /*
      * Edge-triggered interrupts can be used for the virtual timer. Even
@@ -302,12 +314,10 @@ void init_timer_interrupt(void)
     WRITE_SYSREG(0, CNTHP_CTL_EL2);   /* Hypervisor's timer disabled */
     isb();
 
-    request_irq(timer_irq[TIMER_HYP_PPI], 0, timer_interrupt,
+    request_irq(timer_irq[TIMER_HYP_PPI], 0, htimer_interrupt,
                 "hyptimer", NULL);
     request_irq(timer_irq[TIMER_VIRT_PPI], 0, vtimer_interrupt,
                    "virtimer", NULL);
-    request_irq(timer_irq[TIMER_PHYS_NONSECURE_PPI], 0, timer_interrupt,
-                "phytimer", NULL);
 
     check_timer_irq_cfg(timer_irq[TIMER_HYP_PPI], "hypervisor");
     check_timer_irq_cfg(timer_irq[TIMER_VIRT_PPI], "virtual");
@@ -326,7 +336,6 @@ static void deinit_timer_interrupt(void)
 
     release_irq(timer_irq[TIMER_HYP_PPI], NULL);
     release_irq(timer_irq[TIMER_VIRT_PPI], NULL);
-    release_irq(timer_irq[TIMER_PHYS_NONSECURE_PPI], NULL);
 }
 
 /* Wait a set number of microseconds */

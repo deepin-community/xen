@@ -13,34 +13,27 @@ utilities in their own directory, to allow them to be coinstalled.)
 
 Signed-off-by: Ian Jackson <ian.jackson@citrix.com>
 ---
- tools/pygrub/Makefile | 3 ++-
+ tools/pygrub/Makefile | 1 +
  tools/pygrub/setup.py | 5 +++++
- 2 files changed, 7 insertions(+), 1 deletion(-)
+ 2 files changed, 6 insertions(+)
 
 diff --git a/tools/pygrub/Makefile b/tools/pygrub/Makefile
-index 37b2146..17bdd2d 100644
+index d5e291e..03f089a 100644
 --- a/tools/pygrub/Makefile
 +++ b/tools/pygrub/Makefile
-@@ -10,12 +10,13 @@ INSTALL_LOG = build/installed_files.txt
- all: build
- .PHONY: build
- build:
--	CC="$(CC)" CFLAGS="$(PY_CFLAGS)" LDSHARED="$(CC)" LDFLAGS="$(PY_LDFLAGS)" $(PYTHON) setup.py build
-+	CC="$(CC)" CFLAGS="$(PY_CFLAGS)" LDSHARED="$(CC)" LDFLAGS="$(PY_LDFLAGS)" LIBEXEC_LIB=$(LIBEXEC_LIB) $(PYTHON) setup.py build
+@@ -7,6 +7,7 @@ PY_LDFLAGS = $(SHLIB_LDFLAGS) $(APPEND_LDFLAGS)
+ INSTALL_LOG = build/installed_files.txt
  
- .PHONY: install
- install: all
- 	$(INSTALL_DIR) $(DESTDIR)/$(bindir)
- 	CC="$(CC)" CFLAGS="$(PY_CFLAGS)" LDSHARED="$(CC)" \
-+		LIBEXEC_LIB=$(LIBEXEC_LIB) \
- 		LDFLAGS="$(PY_LDFLAGS)" $(PYTHON) setup.py install \
- 		--record $(INSTALL_LOG) $(PYTHON_PREFIX_ARG) \
- 		 --root="$(DESTDIR)" --install-scripts=$(LIBEXEC_BIN) --force
+ setup.py = CC="$(CC)" CFLAGS="$(PY_CFLAGS)" LDSHARED="$(CC)" LDFLAGS="$(PY_LDFLAGS)" \
++           LIBEXEC_LIB="$(LIBEXEC_LIB)" \
+            $(PYTHON) setup.py
+ 
+ .PHONY: all
 diff --git a/tools/pygrub/setup.py b/tools/pygrub/setup.py
-index 06b9673..2915190 100644
+index be5d3ff..dcdce77 100644
 --- a/tools/pygrub/setup.py
 +++ b/tools/pygrub/setup.py
-@@ -5,10 +5,15 @@ import sys
+@@ -8,10 +8,15 @@ import sys
  
  extra_compile_args  = [ "-fno-strict-aliasing" ]
  

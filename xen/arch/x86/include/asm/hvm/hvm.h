@@ -1,20 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * hvm.h: Hardware virtual machine assist interface definitions.
  *
  * Leendert van Doorn, leendert@watson.ibm.com
  * Copyright (c) 2005, International Business Machines Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef __ASM_X86_HVM_HVM_H__
@@ -28,12 +17,28 @@
 #include <asm/x86_emulate.h>
 #include <asm/hvm/asid.h>
 
+struct pirq; /* needed by pi_update_irte */
+
 #ifdef CONFIG_HVM_FEP
 /* Permit use of the Forced Emulation Prefix in HVM guests */
-extern bool_t opt_hvm_fep;
+extern bool opt_hvm_fep;
 #else
 #define opt_hvm_fep 0
 #endif
+
+/*
+ * Results for hvm_guest_x86_mode().
+ *
+ * Note, some callers depend on the order of these constants.
+ *
+ * TODO: Rework hvm_guest_x86_mode() to avoid mixing the architectural
+ * concepts of mode and operand size.
+ */
+#define X86_MODE_REAL  0
+#define X86_MODE_VM86  1
+#define X86_MODE_16BIT 2
+#define X86_MODE_32BIT 4
+#define X86_MODE_64BIT 8
 
 /* Interrupt acknowledgement sources. */
 enum hvm_intsrc {
@@ -70,14 +75,6 @@ enum hvm_intblk {
 #define HVM_INTR_SHADOW_SMI    0x00000004
 #define HVM_INTR_SHADOW_NMI    0x00000008
 
-/*
- * HAP super page capabilities:
- * bit0: if 2MB super page is allowed?
- * bit1: if 1GB super page is allowed?
- */
-#define HVM_HAP_SUPERPAGE_2MB   0x00000001
-#define HVM_HAP_SUPERPAGE_1GB   0x00000002
-
 #define HVM_EVENT_VECTOR_UNSET    (-1)
 #define HVM_EVENT_VECTOR_UPDATING (-2)
 
@@ -101,20 +98,24 @@ struct hvm_vcpu_nonreg_state {
  * supports Intel's VT-x and AMD's SVM extensions.
  */
 struct hvm_function_table {
-    char *name;
+    const char *name;
 
-    /* Support Hardware-Assisted Paging? */
-    bool_t hap_supported;
+    struct {
+        /* Indicate HAP capabilities. */
+        bool hap:1,
+             hap_superpage_1gb:1,
+             hap_superpage_2mb:1,
 
-    /* Necessary hardware support for alternate p2m's? */
-    bool altp2m_supported;
-    bool singlestep_supported;
+             /* Altp2m capabilities */
+             altp2m:1,
+             singlestep:1,
+            
+             /* Hardware virtual interrupt delivery enable? */
+             virtual_intr_delivery:1,
 
-    /* Hardware virtual interrupt delivery enable? */
-    bool virtual_intr_delivery_enabled;
-
-    /* Indicate HAP capabilities. */
-    unsigned int hap_capabilities;
+             /* Nested virt capabilities */
+             nested_virt:1;
+    } caps;
 
     /*
      * Initialise/destroy HVM domain/vcpu resources
@@ -160,8 +161,8 @@ struct hvm_function_table {
 
     void (*fpu_leave)(struct vcpu *v);
 
-    int  (*get_guest_pat)(struct vcpu *v, u64 *);
-    int  (*set_guest_pat)(struct vcpu *v, u64);
+    int  (*get_guest_pat)(struct vcpu *v, uint64_t *gpat);
+    int  (*set_guest_pat)(struct vcpu *v, uint64_t gpat);
 
     void (*set_tsc_offset)(struct vcpu *v, u64 offset, u64 at_tsc);
 
@@ -189,8 +190,8 @@ struct hvm_function_table {
     int (*msr_write_intercept)(unsigned int msr, uint64_t msr_content);
     void (*handle_cd)(struct vcpu *v, unsigned long value);
     void (*set_info_guest)(struct vcpu *v);
-    void (*set_rdtsc_exiting)(struct vcpu *v, bool_t);
-    void (*set_descriptor_access_exiting)(struct vcpu *v, bool);
+    void (*set_rdtsc_exiting)(struct vcpu *v, bool enable);
+    void (*set_descriptor_access_exiting)(struct vcpu *v, bool enable);
 
     /* Nested HVM */
     int (*nhvm_vcpu_initialise)(struct vcpu *v);
@@ -198,10 +199,10 @@ struct hvm_function_table {
     int (*nhvm_vcpu_reset)(struct vcpu *v);
     int (*nhvm_vcpu_vmexit_event)(struct vcpu *v, const struct x86_event *event);
     uint64_t (*nhvm_vcpu_p2m_base)(struct vcpu *v);
-    bool_t (*nhvm_vmcx_guest_intercepts_event)(
+    bool (*nhvm_vmcx_guest_intercepts_event)(
         struct vcpu *v, unsigned int vector, int errcode);
 
-    bool_t (*nhvm_vmcx_hap_enabled)(struct vcpu *v);
+    bool (*nhvm_vmcx_hap_enabled)(struct vcpu *v);
 
     enum hvm_intblk (*nhvm_intr_blocked)(struct vcpu *v);
     void (*nhvm_domain_relinquish_resources)(struct domain *d);
@@ -213,6 +214,9 @@ struct hvm_function_table {
     void (*sync_pir_to_irr)(struct vcpu *v);
     bool (*test_pir)(const struct vcpu *v, uint8_t vector);
     void (*handle_eoi)(uint8_t vector, int isr);
+    int (*pi_update_irte)(const struct vcpu *v, const struct pirq *pirq,
+                          uint8_t gvec);
+    void (*update_vlapic_mode)(struct vcpu *v);
 
     /*Walk nested p2m  */
     int (*nhvm_hap_walk_L1_p2m)(struct vcpu *v, paddr_t L2_gpa,
@@ -224,7 +228,7 @@ struct hvm_function_table {
     /* Alternate p2m */
     void (*altp2m_vcpu_update_p2m)(struct vcpu *v);
     void (*altp2m_vcpu_update_vmfunc_ve)(struct vcpu *v);
-    bool_t (*altp2m_vcpu_emulate_ve)(struct vcpu *v);
+    bool (*altp2m_vcpu_emulate_ve)(struct vcpu *v);
     int (*altp2m_vcpu_emulate_vmfunc)(const struct cpu_user_regs *regs);
 
     /* vmtrace */
@@ -246,15 +250,12 @@ struct hvm_function_table {
         uint8_t  ratio_frac_bits;
         /* maximum-allowed TSC scaling ratio */
         uint64_t max_ratio;
-
-        /* Architecture function to setup TSC scaling ratio */
-        void (*setup)(struct vcpu *v);
     } tsc_scaling;
 };
 
 extern struct hvm_function_table hvm_funcs;
-extern bool_t hvm_enabled;
-extern s8 hvm_port80_allowed;
+extern bool hvm_enabled;
+extern int8_t hvm_port80_allowed;
 
 extern const struct hvm_function_table *start_svm(void);
 extern const struct hvm_function_table *start_vmx(void);
@@ -271,10 +272,10 @@ int hvm_vcpu_cacheattr_init(struct vcpu *v);
 void hvm_vcpu_cacheattr_destroy(struct vcpu *v);
 void hvm_vcpu_reset_state(struct vcpu *v, uint16_t cs, uint16_t ip);
 
-void hvm_get_guest_pat(struct vcpu *v, u64 *guest_pat);
-int hvm_set_guest_pat(struct vcpu *v, u64 guest_pat);
+void hvm_get_guest_pat(struct vcpu *v, uint64_t *guest_pat);
+int hvm_set_guest_pat(struct vcpu *v, uint64_t guest_pat);
 
-u64 hvm_get_guest_tsc_fixed(struct vcpu *v, u64 at_tsc);
+uint64_t hvm_get_guest_tsc_fixed(struct vcpu *v, uint64_t at_tsc);
 
 u64 hvm_scale_tsc(const struct domain *d, u64 tsc);
 u64 hvm_get_tsc_scaling_ratio(u32 gtsc_khz);
@@ -288,7 +289,7 @@ int vmsi_deliver(
     uint8_t dest, uint8_t dest_mode,
     uint8_t delivery_mode, uint8_t trig_mode);
 struct hvm_pirq_dpci;
-void vmsi_deliver_pirq(struct domain *d, const struct hvm_pirq_dpci *);
+void vmsi_deliver_pirq(struct domain *d, const struct hvm_pirq_dpci *pirq_dpci);
 int hvm_girq_dest_2_vcpu_id(struct domain *d, uint8_t dest, uint8_t dest_mode);
 
 enum hvm_intblk
@@ -315,7 +316,7 @@ int hvm_event_needs_reinjection(uint8_t type, uint8_t vector);
 
 uint8_t hvm_combine_hw_exceptions(uint8_t vec1, uint8_t vec2);
 
-void hvm_set_rdtsc_exiting(struct domain *d, bool_t enable);
+void hvm_set_rdtsc_exiting(struct domain *d, bool enable);
 
 enum hvm_task_switch_reason { TSW_jmp, TSW_iret, TSW_call_or_int };
 void hvm_task_switch(
@@ -352,11 +353,11 @@ static inline bool hvm_virtual_to_linear_addr(
                                       access_type, active_cs, linear);
 }
 
-void *hvm_map_guest_frame_rw(unsigned long gfn, bool_t permanent,
-                             bool_t *writable);
-void *hvm_map_guest_frame_ro(unsigned long gfn, bool_t permanent);
-void hvm_unmap_guest_frame(void *p, bool_t permanent);
-void hvm_mapped_guest_frames_mark_dirty(struct domain *);
+void *hvm_map_guest_frame_rw(unsigned long gfn, bool permanent,
+                             bool *writable);
+void *hvm_map_guest_frame_ro(unsigned long gfn, bool permanent);
+void hvm_unmap_guest_frame(void *p, bool permanent);
+void hvm_mapped_guest_frames_mark_dirty(struct domain *d);
 
 int hvm_debug_op(struct vcpu *v, int32_t op);
 
@@ -372,9 +373,19 @@ const char *hvm_efer_valid(const struct vcpu *v, uint64_t value,
                            signed int cr0_pg);
 unsigned long hvm_cr4_guest_valid_bits(const struct domain *d);
 
-int hvm_copy_context_and_params(struct domain *src, struct domain *dst);
+int hvm_copy_context_and_params(struct domain *dst, struct domain *src);
 
 int hvm_get_param(struct domain *d, uint32_t index, uint64_t *value);
+
+static inline bool using_vmx(void)
+{
+    return IS_ENABLED(CONFIG_INTEL_VMX) && cpu_has_vmx;
+}
+
+static inline bool using_svm(void)
+{
+    return IS_ENABLED(CONFIG_AMD_SVM) && cpu_has_svm;
+}
 
 #ifdef CONFIG_HVM
 
@@ -407,10 +418,12 @@ int hvm_get_param(struct domain *d, uint32_t index, uint64_t *value);
     ((v)->arch.hvm.guest_efer & EFER_NXE)
 #define hvm_pku_enabled(v) \
     (hvm_paging_enabled(v) && ((v)->arch.hvm.guest_cr[4] & X86_CR4_PKE))
+#define hvm_pks_enabled(v) \
+    (hvm_paging_enabled(v) && ((v)->arch.hvm.guest_cr[4] & X86_CR4_PKS))
 
 /* Can we use superpages in the HAP p2m table? */
-#define hap_has_1gb (!!(hvm_funcs.hap_capabilities & HVM_HAP_SUPERPAGE_1GB))
-#define hap_has_2mb (!!(hvm_funcs.hap_capabilities & HVM_HAP_SUPERPAGE_2MB))
+#define hap_has_1gb hvm_funcs.caps.hap_superpage_1gb
+#define hap_has_2mb hvm_funcs.caps.hap_superpage_2mb
 
 #define hvm_long_mode_active(v) (!!((v)->arch.hvm.guest_efer & EFER_LMA))
 
@@ -523,7 +536,7 @@ static inline void hvm_inject_hw_exception(unsigned int vector, int errcode)
 {
     struct x86_event event = {
         .vector = vector,
-        .type = X86_EVENTTYPE_HW_EXCEPTION,
+        .type = X86_ET_HW_EXC,
         .error_code = errcode,
     };
 
@@ -533,11 +546,12 @@ static inline void hvm_inject_hw_exception(unsigned int vector, int errcode)
 static inline void hvm_inject_page_fault(int errcode, unsigned long cr2)
 {
     struct x86_event event = {
-        .vector = TRAP_page_fault,
-        .type = X86_EVENTTYPE_HW_EXCEPTION,
+        .vector = X86_EXC_PF,
+        .type = X86_ET_HW_EXC,
         .error_code = errcode,
-        .cr2 = cr2,
     };
+
+    event.cr2 = cr2;
 
     hvm_inject_event(&event);
 }
@@ -557,9 +571,9 @@ static inline void hvm_invlpg(struct vcpu *v, unsigned long linear)
     (X86_CR4_VMXE | X86_CR4_PAE | X86_CR4_MCE))
 
 /* These exceptions must always be intercepted. */
-#define HVM_TRAP_MASK ((1U << TRAP_debug)           | \
-                       (1U << TRAP_alignment_check) | \
-                       (1U << TRAP_machine_check))
+#define HVM_TRAP_MASK ((1U << X86_EXC_DB)           | \
+                       (1U << X86_EXC_AC) | \
+                       (1U << X86_EXC_MC))
 
 /* Called in boot/resume paths.  Must cope with no HVM support. */
 static inline int hvm_cpu_up(void)
@@ -583,8 +597,24 @@ static inline unsigned int hvm_get_insn_bytes(struct vcpu *v, uint8_t *buf)
             ? alternative_call(hvm_funcs.get_insn_bytes, v, buf) : 0);
 }
 
-static inline void hvm_invalidate_regs_fields(struct cpu_user_regs *regs)
+static inline void hvm_sanitize_regs_fields(struct cpu_user_regs *regs,
+                                            bool compat)
 {
+    if ( compat )
+    {
+        /* Clear GPR upper halves, to counteract guests playing games. */
+        regs->rbp = (uint32_t)regs->rbp;
+        regs->rbx = (uint32_t)regs->rbx;
+        regs->rax = (uint32_t)regs->rax;
+        regs->rcx = (uint32_t)regs->rcx;
+        regs->rdx = (uint32_t)regs->rdx;
+        regs->rsi = (uint32_t)regs->rsi;
+        regs->rdi = (uint32_t)regs->rdi;
+        regs->rip = (uint32_t)regs->rip;
+        regs->rflags = (uint32_t)regs->rflags;
+        regs->rsp = (uint32_t)regs->rsp;
+    }
+
 #ifndef NDEBUG
     regs->error_code = 0xbeef;
     regs->entry_vector = 0xbeef;
@@ -620,7 +650,7 @@ static inline uint64_t nhvm_vcpu_p2m_base(struct vcpu *v)
 }
 
 /* returns true, when l1 guest intercepts the specified trap */
-static inline bool_t nhvm_vmcx_guest_intercepts_event(
+static inline bool nhvm_vmcx_guest_intercepts_event(
     struct vcpu *v, unsigned int vector, int errcode)
 {
     return alternative_call(hvm_funcs.nhvm_vmcx_guest_intercepts_event, v,
@@ -628,7 +658,7 @@ static inline bool_t nhvm_vmcx_guest_intercepts_event(
 }
 
 /* returns true when l1 guest wants to use hap to run l2 guest */
-static inline bool_t nhvm_vmcx_hap_enabled(struct vcpu *v)
+static inline bool nhvm_vmcx_hap_enabled(struct vcpu *v)
 {
     return alternative_call(hvm_funcs.nhvm_vmcx_hap_enabled, v);
 }
@@ -654,18 +684,24 @@ static inline void hvm_enable_msr_interception(struct domain *d, uint32_t msr)
 
 static inline bool hvm_is_singlestep_supported(void)
 {
-    return hvm_funcs.singlestep_supported;
+    return hvm_funcs.caps.singlestep;
 }
 
 static inline bool hvm_hap_supported(void)
 {
-    return hvm_funcs.hap_supported;
+    return hvm_funcs.caps.hap;
 }
 
 /* returns true if hardware supports alternate p2m's */
 static inline bool hvm_altp2m_supported(void)
 {
-    return hvm_funcs.altp2m_supported;
+    return IS_ENABLED(CONFIG_ALTP2M) && hvm_funcs.caps.altp2m;
+}
+
+/* Returns true if we have the minimum hardware requirements for nested virt */
+static inline bool hvm_nested_virt_supported(void)
+{
+    return hvm_funcs.caps.nested_virt;
 }
 
 /* updates the current hardware p2m */
@@ -774,6 +810,24 @@ static inline void hvm_set_nonreg_state(struct vcpu *v,
         alternative_vcall(hvm_funcs.set_nonreg_state, v, nrs);
 }
 
+static inline int hvm_pi_update_irte(const struct vcpu *v,
+                                     const struct pirq *pirq, uint8_t gvec)
+{
+    return alternative_call(hvm_funcs.pi_update_irte, v, pirq, gvec);
+}
+
+static inline void hvm_update_vlapic_mode(struct vcpu *v)
+{
+    if ( hvm_funcs.update_vlapic_mode )
+        alternative_vcall(hvm_funcs.update_vlapic_mode, v);
+}
+
+static inline void hvm_sync_pir_to_irr(struct vcpu *v)
+{
+    if ( hvm_funcs.sync_pir_to_irr )
+        alternative_vcall(hvm_funcs.sync_pir_to_irr, v);
+}
+
 #else  /* CONFIG_HVM */
 
 #define hvm_enabled false
@@ -795,6 +849,16 @@ static inline bool hvm_is_singlestep_supported(void)
 }
 
 static inline bool hvm_hap_supported(void)
+{
+    return false;
+}
+
+static inline bool hvm_altp2m_supported(void)
+{
+    return false;
+}
+
+static inline bool hvm_nested_virt_supported(void)
 {
     return false;
 }
@@ -911,6 +975,7 @@ static inline void hvm_set_reg(struct vcpu *v, unsigned int reg, uint64_t val)
 #define hvm_smap_enabled(v) ((void)(v), false)
 #define hvm_nx_enabled(v) ((void)(v), false)
 #define hvm_pku_enabled(v) ((void)(v), false)
+#define hvm_pks_enabled(v) ((void)(v), false)
 
 #define arch_vcpu_block(v) ((void)(v))
 

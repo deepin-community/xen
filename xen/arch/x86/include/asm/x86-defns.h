@@ -30,17 +30,17 @@
 /*
  * Intel CPU flags in CR0
  */
-#define X86_CR0_PE              0x00000001 /* Enable Protected Mode    (RW) */
-#define X86_CR0_MP              0x00000002 /* Monitor Coprocessor      (RW) */
-#define X86_CR0_EM              0x00000004 /* Require FPU Emulation    (RO) */
-#define X86_CR0_TS              0x00000008 /* Task Switched            (RW) */
-#define X86_CR0_ET              0x00000010 /* Extension type           (RO) */
-#define X86_CR0_NE              0x00000020 /* Numeric Error Reporting  (RW) */
-#define X86_CR0_WP              0x00010000 /* Supervisor Write Protect (RW) */
-#define X86_CR0_AM              0x00040000 /* Alignment Checking       (RW) */
-#define X86_CR0_NW              0x20000000 /* Not Write-Through        (RW) */
-#define X86_CR0_CD              0x40000000 /* Cache Disable            (RW) */
-#define X86_CR0_PG              0x80000000 /* Paging                   (RW) */
+#define X86_CR0_PE              _AC(0x00000001, UL) /* Enable Protected Mode    (RW) */
+#define X86_CR0_MP              _AC(0x00000002, UL) /* Monitor Coprocessor      (RW) */
+#define X86_CR0_EM              _AC(0x00000004, UL) /* Require FPU Emulation    (RO) */
+#define X86_CR0_TS              _AC(0x00000008, UL) /* Task Switched            (RW) */
+#define X86_CR0_ET              _AC(0x00000010, UL) /* Extension type           (RO) */
+#define X86_CR0_NE              _AC(0x00000020, UL) /* Numeric Error Reporting  (RW) */
+#define X86_CR0_WP              _AC(0x00010000, UL) /* Supervisor Write Protect (RW) */
+#define X86_CR0_AM              _AC(0x00040000, UL) /* Alignment Checking       (RW) */
+#define X86_CR0_NW              _AC(0x20000000, UL) /* Not Write-Through        (RW) */
+#define X86_CR0_CD              _AC(0x40000000, UL) /* Cache Disable            (RW) */
+#define X86_CR0_PG              _AC(0x80000000, UL) /* Paging                   (RW) */
 
 /*
  * Intel CPU flags in CR3
@@ -74,40 +74,80 @@
 #define X86_CR4_SMAP       0x00200000 /* enable SMAP */
 #define X86_CR4_PKE        0x00400000 /* enable PKE */
 #define X86_CR4_CET        0x00800000 /* Control-flow Enforcement Technology */
+#define X86_CR4_PKS        0x01000000 /* Protection Key Supervisor */
+
+#define X86_CR8_VALID_MASK 0xf
 
 /*
- * XSTATE component flags in XCR0
+ * XSTATE component flags in XCR0 | MSR_XSS
  */
-#define X86_XCR0_FP_POS           0
-#define X86_XCR0_FP               (1ULL << X86_XCR0_FP_POS)
-#define X86_XCR0_SSE_POS          1
-#define X86_XCR0_SSE              (1ULL << X86_XCR0_SSE_POS)
-#define X86_XCR0_YMM_POS          2
-#define X86_XCR0_YMM              (1ULL << X86_XCR0_YMM_POS)
-#define X86_XCR0_BNDREGS_POS      3
-#define X86_XCR0_BNDREGS          (1ULL << X86_XCR0_BNDREGS_POS)
-#define X86_XCR0_BNDCSR_POS       4
-#define X86_XCR0_BNDCSR           (1ULL << X86_XCR0_BNDCSR_POS)
-#define X86_XCR0_OPMASK_POS       5
-#define X86_XCR0_OPMASK           (1ULL << X86_XCR0_OPMASK_POS)
-#define X86_XCR0_ZMM_POS          6
-#define X86_XCR0_ZMM              (1ULL << X86_XCR0_ZMM_POS)
-#define X86_XCR0_HI_ZMM_POS       7
-#define X86_XCR0_HI_ZMM           (1ULL << X86_XCR0_HI_ZMM_POS)
-#define X86_XCR0_PKRU_POS         9
-#define X86_XCR0_PKRU             (1ULL << X86_XCR0_PKRU_POS)
-#define X86_XCR0_LWP_POS          62
-#define X86_XCR0_LWP              (1ULL << X86_XCR0_LWP_POS)
+#define X86_XCR0_X87              (_AC(1, ULL) <<  0)
+#define X86_XCR0_SSE              (_AC(1, ULL) <<  1)
+#define X86_XCR0_YMM              (_AC(1, ULL) <<  2)
+#define X86_XCR0_BNDREGS          (_AC(1, ULL) <<  3)
+#define X86_XCR0_BNDCSR           (_AC(1, ULL) <<  4)
+#define X86_XCR0_OPMASK           (_AC(1, ULL) <<  5)
+#define X86_XCR0_ZMM              (_AC(1, ULL) <<  6)
+#define X86_XCR0_HI_ZMM           (_AC(1, ULL) <<  7)
+#define X86_XSS_PROC_TRACE        (_AC(1, ULL) <<  8)
+#define X86_XCR0_PKRU             (_AC(1, ULL) <<  9)
+#define X86_XSS_PASID             (_AC(1, ULL) << 10)
+#define X86_XSS_CET_U             (_AC(1, ULL) << 11)
+#define X86_XSS_CET_S             (_AC(1, ULL) << 12)
+#define X86_XSS_HDC               (_AC(1, ULL) << 13)
+#define X86_XSS_UINTR             (_AC(1, ULL) << 14)
+#define X86_XSS_LBR               (_AC(1, ULL) << 15)
+#define X86_XSS_HWP               (_AC(1, ULL) << 16)
+#define X86_XCR0_TILE_CFG         (_AC(1, ULL) << 17)
+#define X86_XCR0_TILE_DATA        (_AC(1, ULL) << 18)
+#define X86_XCR0_LWP              (_AC(1, ULL) << 62)
+
+#define X86_XCR0_STATES                                                 \
+    (X86_XCR0_X87 | X86_XCR0_SSE | X86_XCR0_YMM | X86_XCR0_BNDREGS |    \
+     X86_XCR0_BNDCSR | X86_XCR0_OPMASK | X86_XCR0_ZMM |                 \
+     X86_XCR0_HI_ZMM | X86_XCR0_PKRU | X86_XCR0_TILE_CFG |              \
+     X86_XCR0_TILE_DATA |                                               \
+     X86_XCR0_LWP)
+
+#define X86_XSS_STATES                                                  \
+    (X86_XSS_PROC_TRACE | X86_XSS_PASID | X86_XSS_CET_U |               \
+     X86_XSS_CET_S | X86_XSS_HDC | X86_XSS_UINTR | X86_XSS_LBR |        \
+     X86_XSS_HWP |                                                      \
+     0)
 
 /*
  * Debug status flags in DR6.
+ *
+ * For backwards compatibility, status flags which overlap with
+ * X86_DR6_DEFAULT have inverted polarity.
  */
-#define X86_DR6_DEFAULT         0xffff0ff0  /* Default %dr6 value. */
+#define X86_DR6_B0              (_AC(1, UL) <<  0)   /* Breakpoint 0                */
+#define X86_DR6_B1              (_AC(1, UL) <<  1)   /* Breakpoint 1                */
+#define X86_DR6_B2              (_AC(1, UL) <<  2)   /* Breakpoint 2                */
+#define X86_DR6_B3              (_AC(1, UL) <<  3)   /* Breakpoint 3                */
+#define X86_DR6_BLD             (_AC(1, UL) << 11)   /* BusLock detect (INV)        */
+#define X86_DR6_BD              (_AC(1, UL) << 13)   /* %dr access                  */
+#define X86_DR6_BS              (_AC(1, UL) << 14)   /* Single step                 */
+#define X86_DR6_BT              (_AC(1, UL) << 15)   /* Task switch                 */
+#define X86_DR6_RTM             (_AC(1, UL) << 16)   /* #DB/#BP in RTM region (INV) */
+
+#define X86_DR6_ZEROS           _AC(0x00001000, UL)  /* %dr6 bits forced to 0       */
+#define X86_DR6_DEFAULT         _AC(0xffff0ff0, UL)  /* Default %dr6 value          */
+
+#define X86_DR6_BP_MASK                                 \
+    (X86_DR6_B0 | X86_DR6_B1 | X86_DR6_B2 | X86_DR6_B3)
+
+#define X86_DR6_KNOWN_MASK                                              \
+    (X86_DR6_BP_MASK | X86_DR6_BLD | X86_DR6_BD | X86_DR6_BS |          \
+     X86_DR6_BT | X86_DR6_RTM)
 
 /*
  * Debug control flags in DR7.
  */
-#define X86_DR7_DEFAULT         0x00000400  /* Default %dr7 value. */
+#define X86_DR7_RTM             (_AC(1, UL) << 11)   /* RTM debugging enable        */
+
+#define X86_DR7_ZEROS           _AC(0x0000d000, UL)  /* %dr7 bits forced to 0       */
+#define X86_DR7_DEFAULT         _AC(0x00000400, UL)  /* Default %dr7 value          */
 
 /*
  * Invalidation types for the INVPCID instruction.
@@ -133,7 +173,7 @@
 #define X86_EXC_TS            10 /* Invalid TSS */
 #define X86_EXC_NP            11 /* Segment Not Present */
 #define X86_EXC_SS            12 /* Stack-Segment Fault */
-#define X86_EXC_GP            13 /* General Porection Fault */
+#define X86_EXC_GP            13 /* General Protection Fault */
 #define X86_EXC_PF            14 /* Page Fault */
 #define X86_EXC_SPV           15 /* PIC Spurious Interrupt Vector */
 #define X86_EXC_MF            16 /* Maths fault (x87 FPU) */
@@ -146,11 +186,38 @@
 #define X86_EXC_VC            29 /* VMM Communication */
 #define X86_EXC_SX            30 /* Security Exception */
 
+#define X86_EXC_NUM           32 /* 32 reserved vectors */
+
 /* Bitmap of exceptions which have error codes. */
 #define X86_EXC_HAVE_EC                                             \
     ((1u << X86_EXC_DF) | (1u << X86_EXC_TS) | (1u << X86_EXC_NP) | \
      (1u << X86_EXC_SS) | (1u << X86_EXC_GP) | (1u << X86_EXC_PF) | \
      (1u << X86_EXC_AC) | (1u << X86_EXC_CP) |                      \
      (1u << X86_EXC_VC) | (1u << X86_EXC_SX))
+
+/* Memory types */
+#define X86_MT_UC     0x00 /* uncachable */
+#define X86_MT_WC     0x01 /* write-combined */
+#define X86_MT_RSVD_2 0x02 /* reserved */
+#define X86_MT_RSVD_3 0x03 /* reserved */
+#define X86_MT_WT     0x04 /* write-through */
+#define X86_MT_WP     0x05 /* write-protect */
+#define X86_MT_WB     0x06 /* write-back */
+#define X86_MT_UCM    0x07 /* UC- */
+#define X86_NUM_MT    0x08
+
+/*
+ * Event Types.
+ *
+ * These encodings were first used in VMCB/VMCS fields, but have become
+ * architectural in the FRED spec.
+ */
+#define X86_ET_EXT_INTR    0 /* External Interrupt */
+#define X86_ET_NMI         2 /* NMI */
+#define X86_ET_HW_EXC      3 /* Hardware Exception (#PF/#GP/etc) */
+#define X86_ET_SW_INT      4 /* Software Interrupt (INT $n) */
+#define X86_ET_PRIV_SW_EXC 5 /* Privileged Software Exception (ICEBP/INT1) */
+#define X86_ET_SW_EXC      6 /* Software Exception (INT3, INTO) */
+#define X86_ET_OTHER       7 /* Misc event: MTF=0, SYSCALL=1, SYSENTER=2 */
 
 #endif	/* __XEN_X86_DEFNS_H__ */

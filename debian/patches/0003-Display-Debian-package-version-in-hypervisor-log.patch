@@ -18,11 +18,11 @@ Maximilian Engelhardt <maxi@daemonizer.de>
  xen/common/version.c         | 22 +++++++++++-----------
  xen/drivers/char/console.c   | 11 ++++-------
  xen/include/xen/compile.h.in |  8 ++++----
- xen/include/xen/version.h    |  7 ++++---
- 6 files changed, 32 insertions(+), 32 deletions(-)
+ xen/include/xen/version.h    |  8 ++++----
+ 6 files changed, 32 insertions(+), 33 deletions(-)
 
 diff --git a/xen/build.mk b/xen/build.mk
-index 9ecb104..f5d9687 100644
+index 942ff38..872b529 100644
 --- a/xen/build.mk
 +++ b/xen/build.mk
 @@ -17,7 +17,6 @@ targets += .banner
@@ -53,10 +53,10 @@ index 9ecb104..f5d9687 100644
  	$(call if_changed,compile.h)
  
 diff --git a/xen/common/kernel.c b/xen/common/kernel.c
-index f64f7da..65a2091 100644
+index 8b63ca5..3381a70 100644
 --- a/xen/common/kernel.c
 +++ b/xen/common/kernel.c
-@@ -419,9 +419,9 @@ static int __init cf_check buildinfo_init(void)
+@@ -455,9 +455,9 @@ static int __init cf_check buildinfo_init(void)
  
      hypfs_add_dir(&buildinfo, &compileinfo, true);
      hypfs_string_set_reference(&compiler, xen_compiler());
@@ -68,7 +68,7 @@ index f64f7da..65a2091 100644
      hypfs_add_leaf(&compileinfo, &compiler, true);
      hypfs_add_leaf(&compileinfo, &compile_by, true);
      hypfs_add_leaf(&compileinfo, &compile_date, true);
-@@ -502,8 +502,8 @@ DO(xen_version)(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
+@@ -594,8 +594,8 @@ long do_xen_version(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
  
          memset(&info, 0, sizeof(info));
          safe_strcpy(info.compiler,       deny ? xen_deny() : xen_compiler());
@@ -80,7 +80,7 @@ index f64f7da..65a2091 100644
          if ( copy_to_guest(arg, &info, 1) )
              return -EFAULT;
 diff --git a/xen/common/version.c b/xen/common/version.c
-index d320135..b44d411 100644
+index bc3714b..a275e38 100644
 --- a/xen/common/version.c
 +++ b/xen/common/version.c
 @@ -20,19 +20,24 @@ const char *xen_compile_time(void)
@@ -127,16 +127,16 @@ index d320135..b44d411 100644
  {
      return "<denied>";
 diff --git a/xen/drivers/char/console.c b/xen/drivers/char/console.c
-index e8468c1..0a5bf92 100644
+index 2926c97..9050552 100644
 --- a/xen/drivers/char/console.c
 +++ b/xen/drivers/char/console.c
-@@ -1000,14 +1000,11 @@ void __init console_init_preirq(void)
+@@ -1035,14 +1035,11 @@ void __init console_init_preirq(void)
      pv_console_set_rx_handler(serial_rx);
  
      /* HELLO WORLD --- start-of-day banner text. */
--    spin_lock(&console_lock);
+-    nrspin_lock(&console_lock);
 -    __putstr(xen_banner());
--    spin_unlock(&console_lock);
+-    nrspin_unlock(&console_lock);
 -    printk("Xen version %d.%d%s (%s@%s) (%s) %s %s\n",
 +    printk("Xen version %d.%d%s (%s %s) (%s@%s) (%s) %s %s\n",
             xen_major_version(), xen_minor_version(), xen_extra_version(),
@@ -172,10 +172,10 @@ index 3151d1e..b4f7c98 100644
  #define XEN_CHANGESET		"@@changeset@@"
 -#define XEN_BANNER		\
 diff --git a/xen/include/xen/version.h b/xen/include/xen/version.h
-index 93c5877..9d98d6e 100644
+index 4856ad1..4373de90 100644
 --- a/xen/include/xen/version.h
 +++ b/xen/include/xen/version.h
-@@ -6,9 +6,10 @@
+@@ -6,15 +6,15 @@
  
  const char *xen_compile_date(void);
  const char *xen_compile_time(void);
@@ -189,3 +189,9 @@ index 93c5877..9d98d6e 100644
  const char *xen_compiler(void);
  unsigned int xen_major_version(void);
  unsigned int xen_minor_version(void);
+ const char *xen_extra_version(void);
+ const char *xen_changeset(void);
+-const char *xen_banner(void);
+ const char *xen_deny(void);
+ const char *xen_build_info(void);
+ int xen_build_id(const void **p, unsigned int *len);

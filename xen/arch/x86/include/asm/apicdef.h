@@ -8,7 +8,7 @@
  * Ingo Molnar <mingo@redhat.com>, 1999, 2000
  */
 
-#define		APIC_DEFAULT_PHYS_BASE	0xfee00000
+#define		APIC_DEFAULT_PHYS_BASE	0xfee00000U
  
 #define		APIC_ID		0x20
 #define			APIC_ID_MASK		(0xFFu<<24)
@@ -34,8 +34,8 @@
 #define			SET_xAPIC_LOGICAL_ID(x)	(((x)<<24))
 #define			APIC_ALL_CPUS		0xFF
 #define		APIC_DFR	0xE0
-#define			APIC_DFR_CLUSTER		0x0FFFFFFFul
-#define			APIC_DFR_FLAT			0xFFFFFFFFul
+#define			APIC_DFR_CLUSTER		0x0FFFFFFFUL
+#define			APIC_DFR_FLAT			0xFFFFFFFFUL
 #define		APIC_SPIV	0xF0
 #define			APIC_SPIV_FOCUS_DISABLED	(1<<9)
 #define			APIC_SPIV_APIC_ENABLED		(1<<8)
@@ -68,6 +68,7 @@
 #define			APIC_DEST_MASK		0x00800
 #define			APIC_DEST_LOGICAL	0x00800
 #define			APIC_DEST_PHYSICAL	0x00000
+#define			APIC_DM_MASK		0x00700
 #define			APIC_DM_FIXED		0x00000
 #define			APIC_DM_LOWEST		0x00100
 #define			APIC_DM_SMI		0x00200
@@ -95,12 +96,6 @@
 #define			APIC_LVT_REMOTE_IRR		(1<<14)
 #define			APIC_INPUT_POLARITY		(1<<13)
 #define			APIC_SEND_PENDING		(1<<12)
-#define			APIC_MODE_MASK			0x700
-#define			GET_APIC_DELIVERY_MODE(x)	(((x)>>8)&0x7)
-#define			SET_APIC_DELIVERY_MODE(x,y)	(((x)&~0x700)|((y)<<8))
-#define				APIC_MODE_FIXED		0x0
-#define				APIC_MODE_NMI		0x4
-#define				APIC_MODE_EXTINT	0x7
 #define 	APIC_LVT1	0x360
 #define		APIC_LVTERR	0x370
 #define		APIC_TMICT	0x380
@@ -121,11 +116,6 @@
 
 /* Applicable to vectors, TPR, and PPR. */
 #define		APIC_PRIO_CLASS(v)	((v) & 0xF0)
-
-#define APIC_BASE __fix_to_virt(FIX_APIC_BASE)
-
-/* It's only used in x2APIC mode of an x2APIC unit. */
-#define APIC_MSR_BASE 0x800
 
 #define MAX_IO_APICS 128
 

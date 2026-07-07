@@ -67,8 +67,7 @@ static struct mvebu3700_uart {
 #define mvebu3700_read(uart, off)           readl((uart)->regs + (off))
 #define mvebu3700_write(uart, off, val)     writel(val, (uart)->regs + (off))
 
-static void mvebu3700_uart_interrupt(int irq, void *data,
-                                     struct cpu_user_regs *regs)
+static void mvebu3700_uart_interrupt(int irq, void *data)
 {
     struct serial_port *port = data;
     struct mvebu3700_uart *uart = port->uart;
@@ -76,10 +75,10 @@ static void mvebu3700_uart_interrupt(int irq, void *data,
 
     if ( st & (STATUS_RX_RDY | STATUS_OVR_ERR | STATUS_FRM_ERR |
                STATUS_BRK_DET) )
-        serial_rx_interrupt(port, regs);
+        serial_rx_interrupt(port);
 
     if ( st & STATUS_TX_RDY )
-        serial_tx_interrupt(port, regs);
+        serial_tx_interrupt(port);
 }
 
 static void __init mvebu3700_uart_init_preirq(struct serial_port *port)
@@ -124,16 +123,6 @@ static void __init mvebu3700_uart_init_postirq(struct serial_port *port)
     reg = mvebu3700_read(uart, UART_CTRL_REG);
     reg |= (CTRL_RX_RDY_INT | CTRL_TX_RDY_INT);
     mvebu3700_write(uart, UART_CTRL_REG, reg);
-}
-
-static void mvebu3700_uart_suspend(struct serial_port *port)
-{
-    BUG();
-}
-
-static void mvebu3700_uart_resume(struct serial_port *port)
-{
-    BUG();
 }
 
 static void mvebu3700_uart_putc(struct serial_port *port, char c)
@@ -214,9 +203,6 @@ static int mvebu3700_uart_tx_ready(struct serial_port *port)
 static struct uart_driver __read_mostly mvebu3700_uart_driver = {
     .init_preirq  = mvebu3700_uart_init_preirq,
     .init_postirq = mvebu3700_uart_init_postirq,
-    .endboot      = NULL,
-    .suspend      = mvebu3700_uart_suspend,
-    .resume       = mvebu3700_uart_resume,
     .putc         = mvebu3700_uart_putc,
     .getc         = mvebu3700_uart_getc,
     .tx_ready     = mvebu3700_uart_tx_ready,
@@ -231,14 +217,14 @@ static int __init mvebu_uart_init(struct dt_device_node *dev, const void *data)
     const char *config = data;
     struct mvebu3700_uart *uart;
     int res;
-    u64 addr, size;
+    paddr_t addr, size;
 
     if ( strcmp(config, "") )
         printk("WARNING: UART configuration is not supported\n");
 
     uart = &mvebu3700_com;
 
-    res = dt_device_get_address(dev, 0, &addr, &size);
+    res = dt_device_get_paddr(dev, 0, &addr, &size);
     if ( res )
     {
         printk("mvebu3700: Unable to retrieve the base address of the UART\n");

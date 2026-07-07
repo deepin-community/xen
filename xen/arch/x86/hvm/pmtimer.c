@@ -1,25 +1,15 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * hvm/pmtimer.c: emulation of the ACPI PM timer 
  *
  * Copyright (c) 2007, XenSource inc.
  * Copyright (c) 2006, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <xen/sched.h>
 #include <asm/hvm/vpt.h>
 #include <asm/hvm/io.h>
-#include <asm/hvm/support.h>
+#include <asm/hvm/save.h>
 #include <asm/acpi.h> /* for hvm_acpi_power_button prototype */
 #include <public/hvm/params.h>
 
@@ -50,8 +40,8 @@
 #define SCI_IRQ 9
 
 /* We provide a 32-bit counter (must match the TMR_VAL_EXT bit in the FADT) */
-#define TMR_VAL_MASK  (0xffffffff)
-#define TMR_VAL_MSB   (0x80000000)
+#define TMR_VAL_MASK  (0xffffffffU)
+#define TMR_VAL_MSB   (0x80000000U)
 
 /* Dispatch SCIs based on the PM1a_STS and PM1a_EN registers */
 static void pmt_update_sci(PMTState *s)
@@ -195,6 +185,7 @@ static int cf_check handle_evt_io(
                 gdprintk(XENLOG_WARNING, 
                          "Bad ACPI PM register write: %x bytes (%x) at %x\n", 
                          bytes, *val, port);
+                break;
             }
         }
         /* Fix up the SCI state to match the new register state */
@@ -310,7 +301,7 @@ static int cf_check acpi_load(struct domain *d, hvm_domain_context_t *h)
     return 0;
 }
 
-HVM_REGISTER_SAVE_RESTORE(PMTIMER, acpi_save, acpi_load,
+HVM_REGISTER_SAVE_RESTORE(PMTIMER, acpi_save, NULL, acpi_load,
                           1, HVMSR_PER_DOM);
 
 int pmtimer_change_ioport(struct domain *d, uint64_t version)

@@ -37,10 +37,11 @@ enum sched_gran {
  * locks.  The generic schedule init code will point each schedule lock
  * pointer to the schedule lock; if the scheduler wants to remap them,
  * it can simply modify the schedule locks.
- * 
+ *
  * For cache betterness, keep the actual lock in the same cache area
  * as the rest of the struct.  Just have the scheduler point to the
- * one it wants (This may be the one right in front of it).*/
+ * one it wants (This may be the one right in front of it).
+ */
 struct sched_resource {
     struct scheduler   *scheduler;
     struct cpupool     *cpupool;
@@ -207,8 +208,24 @@ DECLARE_PER_CPU(cpumask_t, cpumask_scratch);
 #define cpumask_scratch        (&this_cpu(cpumask_scratch))
 #define cpumask_scratch_cpu(c) (&per_cpu(cpumask_scratch, c))
 
+/*
+ * Deal with _spin_lock_irqsave() returning the flags value instead of storing
+ * it in a passed parameter.
+ */
+#define _sched_spinlock0(lock, irq) _spin_lock##irq(lock)
+#define _sched_spinlock1(lock, irq, arg) ({ \
+    BUILD_BUG_ON(sizeof(arg) != sizeof(unsigned long)); \
+    (arg) = _spin_lock##irq(lock); \
+})
+
+#define _sched_spinlock__(nr) _sched_spinlock ## nr
+#define _sched_spinlock_(nr)  _sched_spinlock__(nr)
+#define _sched_spinlock(lock, irq, args...) \
+    _sched_spinlock_(count_args(args))(lock, irq, ## args)
+
 #define sched_lock(kind, param, cpu, irq, arg...) \
-static inline spinlock_t *kind##_schedule_lock##irq(param EXTRA_TYPE(arg)) \
+static always_inline spinlock_t \
+*kind##_schedule_lock##irq(param EXTRA_TYPE(arg)) \
 { \
     for ( ; ; ) \
     { \
@@ -220,10 +237,16 @@ static inline spinlock_t *kind##_schedule_lock##irq(param EXTRA_TYPE(arg)) \
          * \
          * It may also be the case that v->processor may change but the \
          * lock may be the same; this will succeed in that case. \
+         * \
+         * Use the speculation unsafe locking helper, there's a speculation \
+         * barrier before returning to the caller. \
          */ \
-        spin_lock##irq(lock, ## arg); \
+        _sched_spinlock(lock, irq, ## arg); \
         if ( likely(lock == get_sched_res(cpu)->schedule_lock) ) \
+        { \
+            block_lock_speculation(); \
             return lock; \
+        } \
         spin_unlock##irq(lock, ## arg); \
     } \
 }
@@ -280,59 +303,65 @@ struct scheduler {
 
     int          (*global_init)    (void);
 
-    int          (*init)           (struct scheduler *);
-    void         (*deinit)         (struct scheduler *);
+    int          (*init)           (struct scheduler *ops);
+    void         (*deinit)         (struct scheduler *ops);
 
-    void         (*free_udata)     (const struct scheduler *, void *);
-    void *       (*alloc_udata)    (const struct scheduler *,
-                                    struct sched_unit *, void *);
-    void         (*free_pdata)     (const struct scheduler *, void *, int);
-    void *       (*alloc_pdata)    (const struct scheduler *, int);
-    void         (*deinit_pdata)   (const struct scheduler *, void *, int);
+    void         (*free_udata)     (const struct scheduler *ops, void *priv);
+    void *       (*alloc_udata)    (const struct scheduler *ops,
+                                    struct sched_unit *unit, void *dd);
+
+    void         (*free_pdata)     (const struct scheduler *ops,
+                                    void *pcpu, int cpu);
+    void *       (*alloc_pdata)    (const struct scheduler *ops, int cpu);
+    void         (*deinit_pdata)   (const struct scheduler *ops,
+                                    void *pcpu, int cpu);
 
     /* Returns ERR_PTR(-err) for error, NULL for 'nothing needed'. */
-    void *       (*alloc_domdata)  (const struct scheduler *, struct domain *);
+    void *       (*alloc_domdata)  (const struct scheduler *ops,
+                                    struct domain *dom);
     /* Idempotent. */
-    void         (*free_domdata)   (const struct scheduler *, void *);
+    void         (*free_domdata)   (const struct scheduler *ops, void *data);
 
-    spinlock_t * (*switch_sched)   (struct scheduler *, unsigned int,
-                                    void *, void *);
+    spinlock_t * (*switch_sched)   (struct scheduler *new_ops, unsigned int cpu,
+                                    void *pdata, void *vdata);
 
     /* Activate / deactivate units in a cpu pool */
-    void         (*insert_unit)    (const struct scheduler *,
-                                    struct sched_unit *);
-    void         (*remove_unit)    (const struct scheduler *,
-                                    struct sched_unit *);
+    void         (*insert_unit)    (const struct scheduler *ops,
+                                    struct sched_unit *unit);
+    void         (*remove_unit)    (const struct scheduler *ops,
+                                    struct sched_unit *unit);
 
-    void         (*sleep)          (const struct scheduler *,
-                                    struct sched_unit *);
-    void         (*wake)           (const struct scheduler *,
-                                    struct sched_unit *);
-    void         (*yield)          (const struct scheduler *,
-                                    struct sched_unit *);
-    void         (*context_saved)  (const struct scheduler *,
-                                    struct sched_unit *);
+    void         (*sleep)          (const struct scheduler *ops,
+                                    struct sched_unit *unit);
+    void         (*wake)           (const struct scheduler *ops,
+                                    struct sched_unit *unit);
+    void         (*yield)          (const struct scheduler *ops,
+                                    struct sched_unit *unit);
+    void         (*context_saved)  (const struct scheduler *ops,
+                                    struct sched_unit *unit);
 
-    void         (*do_schedule)    (const struct scheduler *,
-                                    struct sched_unit *, s_time_t,
+    void         (*do_schedule)    (const struct scheduler *ops,
+                                    struct sched_unit *currunit, s_time_t now,
                                     bool tasklet_work_scheduled);
 
-    struct sched_resource *(*pick_resource)(const struct scheduler *,
-                                            const struct sched_unit *);
-    void         (*migrate)        (const struct scheduler *,
-                                    struct sched_unit *, unsigned int);
-    int          (*adjust)         (const struct scheduler *, struct domain *,
-                                    struct xen_domctl_scheduler_op *);
-    void         (*adjust_affinity)(const struct scheduler *,
-                                    struct sched_unit *,
-                                    const struct cpumask *,
-                                    const struct cpumask *);
-    int          (*adjust_global)  (const struct scheduler *,
-                                    struct xen_sysctl_scheduler_op *);
-    void         (*dump_settings)  (const struct scheduler *);
-    void         (*dump_cpu_state) (const struct scheduler *, int);
-    void         (*move_timers)    (const struct scheduler *,
-                                    struct sched_resource *);
+    struct sched_resource *(*pick_resource)(const struct scheduler *ops,
+                                            const struct sched_unit *unit);
+    void         (*migrate)        (const struct scheduler *ops,
+                                    struct sched_unit *unit,
+                                    unsigned int new_cpu);
+    int          (*adjust)         (const struct scheduler *ops,
+                                    struct domain *d,
+                                    struct xen_domctl_scheduler_op *op);
+    void         (*adjust_affinity)(const struct scheduler *ops,
+                                    struct sched_unit *unit,
+                                    const struct cpumask *hard,
+                                    const struct cpumask *soft);
+    int          (*adjust_global)  (const struct scheduler *ops,
+                                    struct xen_sysctl_scheduler_op *sc);
+    void         (*dump_settings)  (const struct scheduler *ops);
+    void         (*dump_cpu_state) (const struct scheduler *ops, int cpu);
+    void         (*move_timers)    (const struct scheduler *ops,
+                                    struct sched_resource *sr);
 };
 
 static inline int sched_init(struct scheduler *s)
@@ -511,7 +540,7 @@ static inline void sched_unit_unpause(const struct sched_unit *unit)
 }
 
 #define REGISTER_SCHEDULER(x) static const struct scheduler *x##_entry \
-  __used_section(".data.schedulers") = &x;
+  __used_section(".data.schedulers") = &(x)
 
 struct cpupool
 {
@@ -629,7 +658,7 @@ int cpu_disable_scheduler(unsigned int cpu);
 int schedule_cpu_add(unsigned int cpu, struct cpupool *c);
 struct cpu_rm_data *alloc_cpu_rm_data(unsigned int cpu, bool aff_alloc);
 void free_cpu_rm_data(struct cpu_rm_data *mem, unsigned int cpu);
-int schedule_cpu_rm(unsigned int cpu, struct cpu_rm_data *mem);
+int schedule_cpu_rm(unsigned int cpu, struct cpu_rm_data *data);
 int sched_move_domain(struct domain *d, struct cpupool *c);
 void sched_migrate_timers(unsigned int cpu);
 struct cpupool *cpupool_get_by_id(unsigned int poolid);

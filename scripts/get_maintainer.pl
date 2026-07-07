@@ -732,8 +732,15 @@ sub get_maintainers {
         my @email_new;
         my $do_replace = 0;
         foreach my $email (@email_to) {
-            if ($email->[1] ne 'supporter:THE REST') {
+            # Replace @email_to list with a list which drop "THE REST" if
+            # there's a role other than "reviewer", that is if there's a
+            # maintainer/supporter in a section other than THE REST.
+            if ($email->[1] ne 'supporter:THE REST' and $email->[1] ne 'reviewer') {
                 $do_replace = 1;
+            }
+            # Prepare a new list without "THE REST", to be used if $do_replace
+            # is true.
+            if ($email->[1] ne 'supporter:THE REST') {
                 push @email_new, $email;
             }
         }
@@ -1457,7 +1464,7 @@ sub vcs_exists {
 	warn("$P: No supported VCS found.  Add --nogit to options?\n");
 	warn("Using a git repository produces better results.\n");
 	warn("Try latest git repository using:\n");
-	warn("git clone git://xenbits.xen.org/xen.git\n");
+	warn("git clone https://xenbits.xen.org/git-http/xen.git\n");
 	$printed_novcs = 1;
     }
     return 0;

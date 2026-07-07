@@ -1,55 +1,13 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * svm.h: SVM Architecture related definitions
  * Copyright (c) 2005, AMD Corporation.
  * Copyright (c) 2004, Intel Corporation.
  *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
- *
  */
 
 #ifndef __ASM_X86_HVM_SVM_H__
 #define __ASM_X86_HVM_SVM_H__
-
-#include <xen/types.h>
-
-static inline void svm_vmload_pa(paddr_t vmcb)
-{
-    asm volatile (
-        ".byte 0x0f,0x01,0xda" /* vmload */
-        : : "a" (vmcb) : "memory" );
-}
-
-static inline void svm_vmsave_pa(paddr_t vmcb)
-{
-    asm volatile (
-        ".byte 0x0f,0x01,0xdb" /* vmsave */
-        : : "a" (vmcb) : "memory" );
-}
-
-static inline void svm_invlpga(unsigned long linear, uint32_t asid)
-{
-    asm volatile (
-        ".byte 0x0f,0x01,0xdf"
-        : /* output */
-        : /* input */
-        "a" (linear), "c" (asid));
-}
-
-struct cpu_user_regs;
-struct vcpu;
-
-unsigned long *svm_msrbit(unsigned long *msr_bitmap, uint32_t msr);
-void __update_guest_eip(struct cpu_user_regs *regs, unsigned int inst_len);
 
 /*
  * PV context switch helpers.  Prefetching the VMCB area itself has been shown
@@ -80,7 +38,10 @@ extern u32 svm_feature_flags;
 #define SVM_FEATURE_SSS           19 /* NPT Supervisor Shadow Stacks */
 #define SVM_FEATURE_SPEC_CTRL     20 /* MSR_SPEC_CTRL virtualisation */
 
-#define cpu_has_svm_feature(f) (svm_feature_flags & (1u << (f)))
+static inline bool cpu_has_svm_feature(unsigned int feat)
+{
+    return svm_feature_flags & (1u << feat);
+}
 #define cpu_has_svm_npt       cpu_has_svm_feature(SVM_FEATURE_NPT)
 #define cpu_has_svm_lbrv      cpu_has_svm_feature(SVM_FEATURE_LBRV)
 #define cpu_has_svm_svml      cpu_has_svm_feature(SVM_FEATURE_SVML)
@@ -95,18 +56,5 @@ extern u32 svm_feature_flags;
 #define cpu_has_svm_vloadsave cpu_has_svm_feature(SVM_FEATURE_VLOADSAVE)
 #define cpu_has_svm_sss       cpu_has_svm_feature(SVM_FEATURE_SSS)
 #define cpu_has_svm_spec_ctrl cpu_has_svm_feature(SVM_FEATURE_SPEC_CTRL)
-
-#define SVM_PAUSEFILTER_INIT    4000
-#define SVM_PAUSETHRESH_INIT    1000
-
-/* TSC rate */
-#define DEFAULT_TSC_RATIO       0x0000000100000000ULL
-#define TSC_RATIO_RSVD_BITS     0xffffff0000000000ULL
-
-/* EXITINFO1 fields on NPT faults */
-#define _NPT_PFEC_with_gla     32
-#define NPT_PFEC_with_gla      (1UL<<_NPT_PFEC_with_gla)
-#define _NPT_PFEC_in_gpt       33
-#define NPT_PFEC_in_gpt        (1UL<<_NPT_PFEC_in_gpt)
 
 #endif /* __ASM_X86_HVM_SVM_H__ */

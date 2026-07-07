@@ -10,11 +10,15 @@
 #include <xen/cpu.h>
 #include <asm/processor.h>
 #include <public/sysctl.h>
+#include <asm/intel-family.h>
 #include <asm/system.h>
 #include <asm/msr.h>
 #include <asm/p2m.h>
 #include <asm/mce.h>
 #include <asm/apic.h>
+
+#include <acpi/cpufreq/cpufreq.h>
+
 #include "mce.h"
 #include "x86_mca.h"
 #include "barrier.h"
@@ -23,15 +27,11 @@
 #include "mcaction.h"
 
 static DEFINE_PER_CPU_READ_MOSTLY(struct mca_banks *, mce_banks_owned);
-bool __read_mostly cmci_support;
 static bool __read_mostly ser_support;
 static bool __read_mostly mce_force_broadcast;
 boolean_param("mce_fb", mce_force_broadcast);
 
 static int __read_mostly nr_intel_ext_msrs;
-
-/* If mce_force_broadcast == 1, lmce_support will be disabled forcibly. */
-bool __read_mostly lmce_support;
 
 /* Intel SDM define bit15~bit0 of IA32_MCi_STATUS as the MC error code */
 #define INTEL_MCCOD_MASK 0xFFFF
@@ -55,7 +55,7 @@ bool __read_mostly lmce_support;
 #define MCE_RING                0x1
 static DEFINE_PER_CPU(int, last_state);
 
-static void cf_check intel_thermal_interrupt(struct cpu_user_regs *regs)
+static void cf_check intel_thermal_interrupt(void)
 {
     uint64_t msr_content;
     unsigned int cpu = smp_processor_id();
@@ -63,6 +63,9 @@ static void cf_check intel_thermal_interrupt(struct cpu_user_regs *regs)
     int *this_last_state;
 
     ack_APIC_irq();
+
+    if ( hwp_active() )
+        wrmsr_safe(MSR_HWP_STATUS, 0);
 
     if ( NOW() < per_cpu(next, cpu) )
         return;
@@ -133,12 +136,12 @@ static void intel_init_thermal(struct cpuinfo_x86 *c)
      * BIOS has programmed on AP based on BSP's info we saved (since BIOS
      * is required to set the same value for all threads/cores).
      */
-    if ( (val & APIC_MODE_MASK) != APIC_DM_FIXED
+    if ( (val & APIC_DM_MASK) != APIC_DM_FIXED
          || (val & APIC_VECTOR_MASK) > 0xf )
         apic_write(APIC_LVTTHMR, val);
 
     if ( (msr_content & (1ULL<<3))
-         && (val & APIC_MODE_MASK) == APIC_DM_SMI )
+         && (val & APIC_DM_MASK) == APIC_DM_SMI )
     {
         if ( c == &boot_cpu_data )
             printk(KERN_DEBUG "Thermal monitoring handled by SMI\n");
@@ -636,7 +639,7 @@ static void cpu_mcheck_disable(void)
         clear_cmci();
 }
 
-static void cf_check cmci_interrupt(struct cpu_user_regs *regs)
+static void cf_check cmci_interrupt(void)
 {
     mctelem_cookie_t mctc;
     struct mca_summary bs;
@@ -814,7 +817,7 @@ static void intel_mce_post_reset(void)
     return;
 }
 
-static void intel_init_mce(void)
+static void intel_init_mce(bool bsp)
 {
     uint64_t msr_content;
     int i;
@@ -840,10 +843,8 @@ static void intel_init_mce(void)
     if ( firstbank ) /* if cmci enabled, firstbank = 0 */
         wrmsrl(MSR_IA32_MC0_STATUS, 0x0ULL);
 
-    x86_mce_vector_register(mcheck_cmn_handler);
-    mce_recoverable_register(intel_recoverable_scan);
-    mce_need_clearbank_register(intel_need_clearbank_scan);
-    mce_register_addrcheck(intel_checkaddr);
+    if ( !bsp )
+        return;
 
     mce_dhandlers = intel_mce_dhandlers;
     mce_dhandler_num = ARRAY_SIZE(intel_mce_dhandlers);
@@ -859,7 +860,7 @@ static void intel_init_ppin(const struct cpuinfo_x86 *c)
      * other purposes.  Despite the late addition of a CPUID bit (rendering
      * the MSR architectural), keep using the same detection logic there.
      */
-    switch ( c->x86_model )
+    switch ( c->x86 == 6 ? c->x86_model : 0 )
     {
         uint64_t val;
 
@@ -870,16 +871,15 @@ static void intel_init_ppin(const struct cpuinfo_x86 *c)
             return;
         }
         fallthrough;
-    case 0x3e: /* IvyBridge X */
-    case 0x3f: /* Haswell X */
-    case 0x4f: /* Broadwell X */
-    case 0x55: /* Skylake X */
-    case 0x56: /* Broadwell Xeon D */
-    case 0x57: /* Knights Landing */
-    case 0x6a: /* Icelake X */
-    case 0x6c: /* Icelake D */
-    case 0x85: /* Knights Mill */
-    case 0x8f: /* Sapphire Rapids X */
+    case INTEL_FAM6_IVYBRIDGE_X:
+    case INTEL_FAM6_HASWELL_X:
+    case INTEL_FAM6_BROADWELL_X:
+    case INTEL_FAM6_BROADWELL_D:
+    case INTEL_FAM6_SKYLAKE_X:
+    case INTEL_FAM6_ICELAKE_X:
+    case INTEL_FAM6_ICELAKE_D:
+    case INTEL_FAM6_SAPPHIRERAPIDS_X:
+    case INTEL_FAM6_EMERALDRAPIDS_X:
 
         if ( (c != &boot_cpu_data && !ppin_msr) ||
              rdmsr_safe(MSR_PPIN_CTL, val) )
@@ -896,6 +896,8 @@ static void intel_init_ppin(const struct cpuinfo_x86 *c)
             ppin_msr = 0;
         else if ( c == &boot_cpu_data )
             ppin_msr = MSR_PPIN;
+
+        break;
     }
 }
 
@@ -951,8 +953,15 @@ static int cf_check cpu_callback(
         break;
     }
 
-    return !rc ? NOTIFY_DONE : notifier_from_errno(rc);
+    return notifier_from_errno(rc);
 }
+
+static const struct mce_callbacks __initconst_cf_clobber intel_callbacks = {
+    .handler = mcheck_cmn_handler,
+    .check_addr = intel_checkaddr,
+    .recoverable_scan = intel_recoverable_scan,
+    .need_clearbank_scan = intel_need_clearbank_scan,
+};
 
 static struct notifier_block cpu_nfb = {
     .notifier_call = cpu_callback
@@ -979,9 +988,10 @@ enum mcheck_type intel_mcheck_init(struct cpuinfo_x86 *c, bool bsp)
 
     intel_init_mca(c);
 
-    mce_handler_init();
+    if ( bsp )
+        mce_handler_init(&intel_callbacks);
 
-    intel_init_mce();
+    intel_init_mce(bsp);
 
     intel_init_cmci(c);
 
@@ -1038,7 +1048,3 @@ int vmce_intel_rdmsr(const struct vcpu *v, uint32_t msr, uint64_t *val)
     return 1;
 }
 
-bool vmce_has_lmce(const struct vcpu *v)
-{
-    return v->arch.vmce.mcg_cap & MCG_LMCE_P;
-}

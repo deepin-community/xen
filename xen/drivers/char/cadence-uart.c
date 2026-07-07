@@ -40,7 +40,7 @@ static struct cuart {
 #define cuart_read(uart, off)           readl((uart)->regs + (off))
 #define cuart_write(uart, off,val)      writel((val), (uart)->regs + (off))
 
-static void cuart_interrupt(int irq, void *data, struct cpu_user_regs *regs)
+static void cuart_interrupt(int irq, void *data)
 {
     struct serial_port *port = data;
     struct cuart *uart = port->uart;
@@ -51,7 +51,7 @@ static void cuart_interrupt(int irq, void *data, struct cpu_user_regs *regs)
         /* ACK.  */
         if ( status & UART_SR_INTR_RTRIG )
         {
-            serial_rx_interrupt(port, regs);
+            serial_rx_interrupt(port);
             cuart_write(uart, R_UART_CISR, UART_SR_INTR_RTRIG);
         }
     } while ( status & UART_SR_INTR_RTRIG );
@@ -88,16 +88,6 @@ static void __init cuart_init_postirq(struct serial_port *port)
     /* Unmask interrupts */
     cuart_write(uart, R_UART_IDR, ~0);
     cuart_write(uart, R_UART_IER, UART_SR_INTR_RTRIG);
-}
-
-static void cuart_suspend(struct serial_port *port)
-{
-    BUG();
-}
-
-static void cuart_resume(struct serial_port *port)
-{
-    BUG();
 }
 
 static int cuart_tx_ready(struct serial_port *port)
@@ -143,9 +133,6 @@ static const struct vuart_info *cuart_vuart(struct serial_port *port)
 static struct uart_driver __read_mostly cuart_driver = {
     .init_preirq  = cuart_init_preirq,
     .init_postirq = cuart_init_postirq,
-    .endboot      = NULL,
-    .suspend      = cuart_suspend,
-    .resume       = cuart_resume,
     .tx_ready     = cuart_tx_ready,
     .putc         = cuart_putc,
     .getc         = cuart_getc,
@@ -158,14 +145,14 @@ static int __init cuart_init(struct dt_device_node *dev, const void *data)
     const char *config = data;
     struct cuart *uart;
     int res;
-    u64 addr, size;
+    paddr_t addr, size;
 
     if ( strcmp(config, "") )
         printk("WARNING: UART configuration is not supported\n");
 
     uart = &cuart_com;
 
-    res = dt_device_get_address(dev, 0, &addr, &size);
+    res = dt_device_get_paddr(dev, 0, &addr, &size);
     if ( res )
     {
         printk("cadence: Unable to retrieve the base"

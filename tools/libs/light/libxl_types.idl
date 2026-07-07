@@ -150,6 +150,12 @@ libxl_nic_type = Enumeration("nic_type", [
     (2, "VIF"),
     ])
 
+libxl_p9_type = Enumeration("p9_type", [
+    (0, "unknown"),
+    (1, "qemu"),
+    (2, "xen_9pfsd"),
+    ])
+
 libxl_action_on_shutdown = Enumeration("action_on_shutdown", [
     (1, "DESTROY"),
 
@@ -276,6 +282,11 @@ libxl_vkb_backend = Enumeration("vkb_backend", [
     (0, "UNKNOWN"),
     (1, "QEMU"),
     (2, "LINUX")
+    ])
+
+libxl_virtio_transport = Enumeration("virtio_transport", [
+    (0, "UNKNOWN"),
+    (1, "MMIO"),
     ])
 
 libxl_passthrough = Enumeration("passthrough", [
@@ -418,6 +429,32 @@ libxl_version_info = Struct("version_info", [
     ("build_id",          string),
     ], dir=DIR_OUT)
 
+libxl_smbios_type = Enumeration("smbios_type", [
+    (1,  "bios_vendor"),
+    (2,  "bios_version"),
+    (3,  "system_manufacturer"),
+    (4,  "system_product_name"),
+    (5,  "system_version"),
+    (6,  "system_serial_number"),
+    (7,  "baseboard_manufacturer"),
+    (8,  "baseboard_product_name"),
+    (9,  "baseboard_version"),
+    (10, "baseboard_serial_number"),
+    (11, "baseboard_asset_tag"),
+    (12, "baseboard_location_in_chassis"),
+    (13, "enclosure_manufacturer"),
+    (14, "enclosure_serial_number"),
+    (15, "enclosure_asset_tag"),
+    (16, "battery_manufacturer"),
+    (17, "battery_device_name"),
+    (18, "oem"),
+    ])
+
+libxl_smbios = Struct("smbios", [
+    ("key",          libxl_smbios_type),
+    ("value",        string),
+    ], dir=DIR_IN)
+
 libxl_domain_create_info = Struct("domain_create_info",[
     ("type",         libxl_domain_type),
     ("hap",          libxl_defbool),
@@ -489,8 +526,30 @@ libxl_gic_version = Enumeration("gic_version", [
 
 libxl_tee_type = Enumeration("tee_type", [
     (0, "none"),
-    (1, "optee")
+    (1, "optee"),
+    (2, "ffa"),
     ], init_val = "LIBXL_TEE_TYPE_NONE")
+
+libxl_sve_type = Enumeration("sve_type", [
+    (-1, "hw"),
+    (0, "disabled"),
+    (128, "128"),
+    (256, "256"),
+    (384, "384"),
+    (512, "512"),
+    (640, "640"),
+    (768, "768"),
+    (896, "896"),
+    (1024, "1024"),
+    (1152, "1152"),
+    (1280, "1280"),
+    (1408, "1408"),
+    (1536, "1536"),
+    (1664, "1664"),
+    (1792, "1792"),
+    (1920, "1920"),
+    (2048, "2048")
+    ], init_val = "LIBXL_SVE_TYPE_DISABLED")
 
 libxl_rdm_reserve = Struct("rdm_reserve", [
     ("strategy",    libxl_rdm_reserve_strategy),
@@ -557,6 +616,7 @@ libxl_domain_build_info = Struct("domain_build_info",[
     ("ioports",          Array(libxl_ioport_range, "num_ioports")),
     ("irqs",             Array(uint32, "num_irqs")),
     ("iomem",            Array(libxl_iomem_range, "num_iomem")),
+    ("llc_colors",       Array(uint32, "num_llc_colors")),
     ("claim_mode",	     libxl_defbool),
     ("event_channels",   uint32),
     ("kernel",           string),
@@ -571,6 +631,8 @@ libxl_domain_build_info = Struct("domain_build_info",[
     ("acpi",             libxl_defbool),
     ("bootloader",       string),
     ("bootloader_args",  libxl_string_list),
+    ("bootloader_restrict", libxl_defbool),
+    ("bootloader_user",  string),
     ("timer_mode",       libxl_timer_mode),
     ("nested_hvm",       libxl_defbool),
     ("apic",             libxl_defbool),
@@ -604,6 +666,7 @@ libxl_domain_build_info = Struct("domain_build_info",[
                                        ("altp2m",           libxl_defbool),
                                        ("system_firmware",  string),
                                        ("smbios_firmware",  string),
+                                       ("smbios",           Array(libxl_smbios, "num_smbios")),
                                        ("acpi_firmware",    string),
                                        ("hdtype",           libxl_hdtype),
                                        ("nographic",        libxl_defbool),
@@ -636,6 +699,7 @@ libxl_domain_build_info = Struct("domain_build_info",[
                                        ("rdm", libxl_rdm_reserve),
                                        ("rdm_mem_boundary_memkb", MemKB),
                                        ("mca_caps",         uint64),
+                                       ("pirq",             libxl_defbool),
                                        ])),
                  ("pv", Struct(None, [("kernel", string, {'deprecated_by': 'kernel'}),
                                       ("slack_memkb", MemKB),
@@ -658,6 +722,8 @@ libxl_domain_build_info = Struct("domain_build_info",[
 
     ("arch_arm", Struct(None, [("gic_version", libxl_gic_version),
                                ("vuart", libxl_vuart_type),
+                               ("sve_vl", libxl_sve_type),
+                               ("nr_spis", uint32),
                               ])),
     ("arch_x86", Struct(None, [("msr_relaxed", libxl_defbool),
                               ])),
@@ -703,6 +769,19 @@ libxl_device_vkb = Struct("device_vkb", [
     ("multi_touch_num_contacts", uint32)
     ])
 
+libxl_device_virtio = Struct("device_virtio", [
+    ("backend_domid", libxl_domid),
+    ("backend_domname", string),
+    ("type", string),
+    ("transport", libxl_virtio_transport),
+    ("grant_usage", libxl_defbool),
+    ("devid", libxl_devid),
+    # Note that virtio-mmio parameters (irq and base) are for internal
+    # use by libxl and can't be modified.
+    ("irq", uint32),
+    ("base", uint64)
+    ])
+
 libxl_device_disk = Struct("device_disk", [
     ("backend_domid", libxl_domid),
     ("backend_domname", string),
@@ -732,6 +811,7 @@ libxl_device_disk = Struct("device_disk", [
     ("active_disk", string),
     ("hidden_disk", string),
     ("trusted", libxl_defbool),
+    ("grant_usage", libxl_defbool),
     ])
 
 libxl_device_nic = Struct("device_nic", [
@@ -739,6 +819,7 @@ libxl_device_nic = Struct("device_nic", [
     ("backend_domname", string),
     ("devid", libxl_devid),
     ("mtu", integer),
+    ("vlan", string),
     ("model", string),
     ("mac", libxl_mac),
     ("ip", string),
@@ -872,6 +953,11 @@ libxl_device_p9 = Struct("device_p9", [
     ("path",             string),
     ("security_model",   string),
     ("devid",            libxl_devid),
+    ("type",             libxl_p9_type),
+    ("max_space",        integer),
+    ("max_files",        integer),
+    ("max_open_files",   integer),
+    ("auto_delete",      bool),
 ])
 
 libxl_device_pvcallsif = Struct("device_pvcallsif", [
@@ -980,6 +1066,7 @@ libxl_domain_config = Struct("domain_config", [
     ("dtdevs", Array(libxl_device_dtdev, "num_dtdevs")),
     ("vfbs", Array(libxl_device_vfb, "num_vfbs")),
     ("vkbs", Array(libxl_device_vkb, "num_vkbs")),
+    ("virtios", Array(libxl_device_virtio, "num_virtios")),
     ("vtpms", Array(libxl_device_vtpm, "num_vtpms")),
     ("p9s", Array(libxl_device_p9, "num_p9s")),
     ("pvcallsifs", Array(libxl_device_pvcallsif, "num_pvcallsifs")),
@@ -1088,6 +1175,7 @@ libxl_physinfo = Struct("physinfo", [
     ("cap_vpmu", bool),
     ("cap_gnttab_v1", bool),
     ("cap_gnttab_v2", bool),
+    ("arch_capabilities", uint32),
     ], dir=DIR_OUT)
 
 libxl_connectorinfo = Struct("connectorinfo", [

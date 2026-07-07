@@ -1,19 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Nested HVM
  * Copyright (c) 2011, Advanced Micro Devices, Inc.
  * Author: Christoph Egger <Christoph.Egger@amd.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef _HVM_NESTEDHVM_H
@@ -43,7 +32,7 @@ static inline bool nestedhvm_enabled(const struct domain *d)
 int nestedhvm_vcpu_initialise(struct vcpu *v);
 void nestedhvm_vcpu_destroy(struct vcpu *v);
 void nestedhvm_vcpu_reset(struct vcpu *v);
-bool_t nestedhvm_vcpu_in_guestmode(struct vcpu *v);
+bool nestedhvm_vcpu_in_guestmode(struct vcpu *v);
 #define nestedhvm_vcpu_enter_guestmode(v) \
     vcpu_nestedhvm(v).nv_guestmode = 1
 #define nestedhvm_vcpu_exit_guestmode(v)  \
@@ -61,7 +50,7 @@ int nestedhvm_hap_nested_page_fault(struct vcpu *v, paddr_t *L2_gpa,
                                     struct npfec npfec);
 
 /* IO permission map */
-unsigned long *nestedhvm_vcpu_iomap_get(bool_t ioport_80, bool_t ioport_ed);
+unsigned long *nestedhvm_vcpu_iomap_get(bool ioport_80, bool ioport_ed);
 
 /* Misc */
 #define nestedhvm_paging_mode_hap(v) (!!nhvm_vmcx_hap_enabled(v))
@@ -92,5 +81,9 @@ static inline bool vvmcx_valid(const struct vcpu *v)
 {
     return vcpu_nestedhvm(v).nv_vvmcxaddr != INVALID_PADDR;
 }
+
+
+void start_nested_svm(struct hvm_function_table *hvm_function_table);
+void start_nested_vmx(struct hvm_function_table *hvm_function_table);
 
 #endif /* _HVM_NESTEDHVM_H */

@@ -1,23 +1,12 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * vpt.c: Virtual Platform Timer
  *
  * Copyright (c) 2006, Xiaowei Yang, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <xen/sched.h>
 #include <xen/time.h>
-#include <asm/hvm/support.h>
 #include <asm/hvm/vpt.h>
 #include <asm/event.h>
 #include <asm/apic.h>
@@ -130,8 +119,7 @@ static int pt_irq_masked(struct periodic_time *pt)
 
         gsi = hvm_isa_irq_to_gsi(pt->irq);
     }
-
-    /* Fallthrough to check if the interrupt is masked on the IO APIC. */
+        fallthrough;
     case PTSRC_ioapic:
     {
         int mask = vioapic_get_mask(v->domain, gsi);
@@ -161,7 +149,7 @@ static int pt_irq_masked(struct periodic_time *pt)
  * pt->vcpu field, because another thread holding the pt_migrate lock
  * may already be spinning waiting for your vcpu lock.
  */
-static void pt_vcpu_lock(struct vcpu *v)
+static always_inline void pt_vcpu_lock(struct vcpu *v)
 {
     spin_lock(&v->arch.hvm.tm_lock);
 }
@@ -180,9 +168,13 @@ static void pt_vcpu_unlock(struct vcpu *v)
  * need to take an additional lock that protects against pt->vcpu
  * changing.
  */
-static void pt_lock(struct periodic_time *pt)
+static always_inline void pt_lock(struct periodic_time *pt)
 {
-    read_lock(&pt->vcpu->domain->arch.hvm.pl_time->pt_migrate);
+    /*
+     * Use the speculation unsafe variant for the first lock, as the following
+     * lock taking helper already includes a speculation barrier.
+     */
+    _read_lock(&pt->vcpu->domain->arch.hvm.pl_time->pt_migrate);
     spin_lock(&pt->vcpu->arch.hvm.tm_lock);
 }
 

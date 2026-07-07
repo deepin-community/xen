@@ -7,8 +7,6 @@
  * Copyright (c) 2004-2006, K A Fraser
  */
 
-#include "../xen.h"
-
 #ifndef __XEN_PUBLIC_ARCH_X86_XEN_H__
 #define __XEN_PUBLIC_ARCH_X86_XEN_H__
 
@@ -36,7 +34,7 @@
 #define __XEN_GUEST_HANDLE(name)        __guest_handle_ ## name
 #define XEN_GUEST_HANDLE(name)          __XEN_GUEST_HANDLE(name)
 #define XEN_GUEST_HANDLE_PARAM(name)    XEN_GUEST_HANDLE(name)
-#define set_xen_guest_handle_raw(hnd, val)  do { (hnd).p = val; } while (0)
+#define set_xen_guest_handle_raw(hnd, val)  do { (hnd).p = (val); } while (0)
 #define set_xen_guest_handle(hnd, val) set_xen_guest_handle_raw(hnd, val)
 
 #if defined(__i386__)

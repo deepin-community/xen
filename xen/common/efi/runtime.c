@@ -1,9 +1,10 @@
 #include "efi.h"
 #include "runtime.h"
-#include <xen/cache.h>
+
 #include <xen/errno.h>
 #include <xen/guest_access.h>
 #include <xen/irq.h>
+#include <xen/sections.h>
 #include <xen/time.h>
 
 DEFINE_XEN_GUEST_HANDLE(CHAR16);
@@ -26,7 +27,7 @@ struct efi_rs_state {
 };
 
 struct efi_rs_state efi_rs_enter(void);
-void efi_rs_leave(struct efi_rs_state *);
+void efi_rs_leave(struct efi_rs_state *state);
 
 #ifndef COMPAT
 
@@ -249,14 +250,20 @@ int efi_get_info(uint32_t idx, union xenpf_efi_info *info)
         info->cfg.addr = __pa(efi_ct);
         info->cfg.nent = efi_num_ct;
         break;
+
     case XEN_FW_EFI_VENDOR:
+    {
+        XEN_GUEST_HANDLE_PARAM(CHAR16) vendor_name =
+            guest_handle_cast(info->vendor.name, CHAR16);
+
         if ( !efi_fw_vendor )
             return -EOPNOTSUPP;
+
         info->vendor.revision = efi_fw_revision;
         n = info->vendor.bufsz / sizeof(*efi_fw_vendor);
-        if ( !guest_handle_okay(guest_handle_cast(info->vendor.name,
-                                                  CHAR16), n) )
+        if ( !guest_handle_okay(vendor_name, n) )
             return -EFAULT;
+
         for ( i = 0; i < n; ++i )
         {
             if ( __copy_to_guest_offset(info->vendor.name, i,
@@ -266,6 +273,8 @@ int efi_get_info(uint32_t idx, union xenpf_efi_info *info)
                 break;
         }
         break;
+    }
+
     case XEN_FW_EFI_MEM_INFO:
         for ( i = 0; i < efi_memmap_size; i += efi_mdesc_size )
         {
@@ -690,7 +699,7 @@ int efi_runtime_call(struct xenpf_efi_runtime_call *op)
 
         if ( !efi_enabled(EFI_RS) || (efi_rs->Hdr.Revision >> 16) < 2 )
             return -EOPNOTSUPP;
-        /* XXX fall through for now */
+        fallthrough; /* XXX fall through for now */
     default:
         return -ENOSYS;
     }
@@ -698,7 +707,7 @@ int efi_runtime_call(struct xenpf_efi_runtime_call *op)
 #ifndef COMPAT
     op->status = status;
 #else
-    op->status = (status & 0x3fffffff) | ((status >> 32) & 0xc0000000);
+    op->status = (status & 0x3fffffffU) | ((status >> 32) & 0xc0000000U);
 #endif
 
     return rc;

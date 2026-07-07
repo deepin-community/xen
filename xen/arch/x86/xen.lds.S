@@ -3,28 +3,25 @@
 
 #include <xen/cache.h>
 #include <xen/lib.h>
+
+#ifndef EFI
+# define DECL_SECTION_WITH_LADDR
+#endif
 #include <xen/xen.lds.h>
 #include <asm/page.h>
-#undef ENTRY
-#undef ALIGN
+#include <asm/trampoline.h>
 
 #ifdef EFI
 
 #define FORMAT "pei-x86-64"
 #undef __XEN_VIRT_START
 #define __XEN_VIRT_START __image_base__
-#define DECL_SECTION(x) x :
 
 ENTRY(efi_start)
 
 #else /* !EFI */
 
 #define FORMAT "elf64-x86-64"
-#ifdef CONFIG_LD_IS_GNU
-# define DECL_SECTION(x) x : AT(ADDR(#x) - __XEN_VIRT_START)
-#else
-# define DECL_SECTION(x) x : AT(ADDR(x) - __XEN_VIRT_START)
-#endif
 
 ENTRY(start_pa)
 
@@ -86,6 +83,7 @@ SECTIONS
        . = ALIGN(PAGE_SIZE);
        _stextentry = .;
        *(.text.entry)
+       *(.text.entry.*)
        . = ALIGN(PAGE_SIZE);
        _etextentry = .;
 
@@ -131,16 +129,7 @@ SECTIONS
        . = ALIGN(PAGE_SIZE);
        __ro_after_init_end = .;
 
-       /* Bug frames table */
-       __start_bug_frames = .;
-       *(.bug_frames.0)
-       __stop_bug_frames_0 = .;
-       *(.bug_frames.1)
-       __stop_bug_frames_1 = .;
-       *(.bug_frames.2)
-       __stop_bug_frames_2 = .;
-       *(.bug_frames.3)
-       __stop_bug_frames_3 = .;
+       BUGFRAMES
 
        *(.rodata)
        *(.rodata.*)
@@ -184,6 +173,8 @@ SECTIONS
        __note_gnu_build_id_end = .;
   } PHDR(note) PHDR(text)
 #elif defined(BUILD_ID_EFI)
+  /* Workaround bug in binutils < 2.36 */
+  . = ALIGN(32);
   DECL_SECTION(.buildid) {
        __note_gnu_build_id_start = .;
        *(.buildid)
@@ -334,14 +325,7 @@ SECTIONS
   DECL_SECTION(.bss) {
        __bss_start = .;
        *(.bss.page_aligned*)
-       . = ALIGN(PAGE_SIZE);
-       __per_cpu_start = .;
-       *(.bss.percpu.page_aligned)
-       *(.bss.percpu)
-       . = ALIGN(SMP_CACHE_BYTES);
-       *(.bss.percpu.read_mostly)
-       . = ALIGN(SMP_CACHE_BYTES);
-       __per_cpu_data_end = .;
+       PERCPU_BSS
        *(.bss .bss.*)
        . = ALIGN(POINTER_ALIGN);
        __bss_end = .;
@@ -356,6 +340,25 @@ SECTIONS
     *(.reloc)
     __base_relocs_end = .;
   }
+
+  /*
+   * When efi/relocs-dummy.o is linked into the first-pass binary, the two
+   * symbols supplied by it (for ./Makefile to use) may appear in the symbol
+   * table (GNU ld 2.37 and newer strip them, for not being properly
+   * representable).  No such symbols would appear during subsequent passes.
+   * At least some of those older ld versions emit VIRT_START as absolute, but
+   * ALT_START as if it was part of .text.  The symbols tool generating our
+   * own symbol table would hence not ignore it when passed --all-symbols,
+   * leading to the 2nd pass binary having one more symbol than the final (3rd
+   * pass) one.
+   *
+   * Arrange for both (just in case) symbols to always be there, and to always
+   * be absolute (zero).
+   */
+  PROVIDE(VIRT_START = 0);
+  PROVIDE(ALT_START = 0);
+  VIRT_START &= 0;
+  ALT_START &= 0;
 #elif defined(XEN_BUILD_EFI)
   /*
    * Due to the way EFI support is currently implemented, these two symbols
@@ -371,14 +374,6 @@ SECTIONS
 #endif
 
   DWARF2_DEBUG_SECTIONS
-
-#ifdef EFI
-  /* Trick the linker into setting the image size to no less than 16Mb. */
-  __image_end__ = .;
-  .pad ALIGN(__section_alignment__) : {
-    . = __image_end__ < __image_base__ + MB(16) ? ALIGN(MB(16)) : .;
-  }
-#endif
 
 #ifdef CONFIG_HYPERV_GUEST
   hv_hcall_page = ABSOLUTE(HV_HCALL_PAGE - XEN_VIRT_START + __XEN_VIRT_START);
@@ -438,10 +433,15 @@ ASSERT(!SIZEOF(.plt),      ".plt non-empty")
 ASSERT(!SIZEOF(.rela),     "leftover relocations")
 #endif
 
-ASSERT((trampoline_end - trampoline_start) < TRAMPOLINE_SPACE - MBI_SPACE_MIN,
-    "not enough room for trampoline and mbi data")
-ASSERT((wakeup_stack - wakeup_stack_start) >= WAKEUP_STACK_MIN,
-    "wakeup stack too small")
+/*
+ * The permanent trampoline resides in a single 4k page.  Placement logic
+ * takes care to ensure that trampoline_phys is page aligned.
+ *
+ * The wakeup stack wants to reside in the same page and wants to be at least
+ * 3k in size, so make sure the text/data fits in 1k.
+ */
+ASSERT((trampoline_perm_end - trampoline_start) <= 1024,
+       "Permentant trampoline too large")
 
-/* Plenty of boot code assumes that Xen isn't larger than 16M. */
-ASSERT(_end - _start <= MB(16), "Xen too large for early-boot assumptions")
+ASSERT((trampoline_end - trampoline_start) < TRAMPOLINE_HEAP_END - MBI_SPACE_MIN,
+    "not enough room for trampoline and mbi data")

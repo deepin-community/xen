@@ -1,4 +1,6 @@
+#include <xen/acpi.h>
 #include <xen/cpu.h>
+#include <xen/device_tree.h>
 #include <xen/lib.h>
 #include <xen/init.h>
 #include <xen/errno.h>
@@ -7,10 +9,9 @@
 #include <xen/vmap.h>
 #include <asm/io.h>
 #include <asm/psci.h>
-#include <asm/acpi.h>
 
 struct smp_enable_ops {
-        int             (*prepare_cpu)(int);
+        int             (*prepare_cpu)(int cpu);
 };
 
 static paddr_t cpu_release_addr[NR_CPUS];
@@ -106,10 +107,23 @@ int __init arch_cpu_init(int cpu, struct dt_device_node *dn)
 
 int arch_cpu_up(int cpu)
 {
+    int rc;
+
     if ( !smp_enable_ops[cpu].prepare_cpu )
         return -ENODEV;
 
-    return smp_enable_ops[cpu].prepare_cpu(cpu);
+    update_boot_mapping(true);
+
+    rc = smp_enable_ops[cpu].prepare_cpu(cpu);
+    if ( rc )
+        update_boot_mapping(false);
+
+    return rc;
+}
+
+void arch_cpu_up_finish(void)
+{
+    update_boot_mapping(false);
 }
 
 /*

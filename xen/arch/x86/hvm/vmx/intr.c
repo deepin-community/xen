@@ -1,19 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * intr.c: handling I/O, interrupts related VMX entry/exit
  * Copyright (c) 2004, Intel Corporation.
  * Copyright (c) 2004-2007, XenSource Inc.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <xen/init.h>
@@ -29,14 +18,12 @@
 #include <asm/msr.h>
 #include <asm/hvm/hvm.h>
 #include <asm/hvm/io.h>
-#include <asm/hvm/support.h>
 #include <asm/hvm/vmx/vmx.h>
 #include <asm/hvm/vmx/vmcs.h>
 #include <asm/hvm/vpic.h>
 #include <asm/hvm/vlapic.h>
 #include <asm/hvm/nestedhvm.h>
 #include <public/hvm/ioreq.h>
-#include <asm/hvm/trace.h>
 #include <asm/vm_event.h>
 
 /*
@@ -79,8 +66,8 @@ static void vmx_enable_intr_window(struct vcpu *v, struct hvm_intack intack)
         unsigned long intr;
 
         __vmread(VM_ENTRY_INTR_INFO, &intr);
-        HVMTRACE_3D(INTR_WINDOW, intack.vector, intack.source,
-                    (intr & INTR_INFO_VALID_MASK) ? intr & 0xff : -1);
+        TRACE(TRC_HVM_INTR_WINDOW, intack.vector, intack.source,
+              (intr & INTR_INFO_VALID_MASK) ? intr & 0xff : -1);
     }
 
     if ( (intack.source == hvm_intsrc_nmi) && cpu_has_vmx_vnmi )
@@ -236,7 +223,7 @@ void vmx_sync_exit_bitmap(struct vcpu *v)
     }
 }
 
-void vmx_intr_assist(void)
+void asmlinkage vmx_intr_assist(void)
 {
     struct hvm_intack intack;
     struct vcpu *v = current;
@@ -329,7 +316,7 @@ void vmx_intr_assist(void)
     }
     else if ( intack.source == hvm_intsrc_mce )
     {
-        hvm_inject_hw_exception(TRAP_machine_check, X86_EVENT_NO_EC);
+        hvm_inject_hw_exception(X86_EXC_MC, X86_EVENT_NO_EC);
     }
     else if ( cpu_has_vmx_virtual_intr_delivery &&
               intack.source != hvm_intsrc_pic &&
@@ -402,7 +389,7 @@ void vmx_intr_assist(void)
     }
     else
     {
-        HVMTRACE_2D(INJ_VIRQ, intack.vector, /*fake=*/ 0);
+        TRACE(TRC_HVM_INJ_VIRQ, intack.vector, /*fake=*/ 0);
         vmx_inject_extint(intack.vector, intack.source);
         pt_intr_post(v, intack);
     }

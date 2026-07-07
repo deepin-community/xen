@@ -3,9 +3,9 @@ include $(XEN_ROOT)/Config.mk
 -include $(XEN_ROOT)/config/Docs.mk
 
 VERSION		:= $(shell $(MAKE) -C $(XEN_ROOT)/xen --no-print-directory xenversion)
-DATE		:= $(shell date +%Y-%m-%d)
+DATE		:= $(call date,"+%Y-%m-%d")
 
-DOC_ARCHES      := arm x86_32 x86_64
+DOC_ARCHES      := arm ppc riscv x86_32 x86_64
 MAN_SECTIONS    := 1 5 7 8
 
 # Documentation sources to build
@@ -151,7 +151,7 @@ man$(1)-pages: $$(DOC_MAN$(1))
 .PHONY: install-man$(1)-pages
 install-man$(1)-pages: man$(1)-pages
 	$(INSTALL_DIR) $(DESTDIR)$(mandir)
-	cp -r man$(1) $(DESTDIR)$(mandir)
+	[ ! -d man$(1) ] || cp -r man$(1) $(DESTDIR)$(mandir)
 
 # Clean
 .PHONY: clean-man$(1)-pages
@@ -178,6 +178,7 @@ $(foreach i,$(MAN_SECTIONS),$(eval $(call GENERATE_MANPAGE_RULES,$(i))))
 install-html: html txt figs
 	$(INSTALL_DIR) $(DESTDIR)$(docdir)
 	[ ! -d html ] || cp -R html $(DESTDIR)$(docdir)
+	rm -f $(DESTDIR)$(docdir)/html/hypercall/*/.deps
 
 .PHONY: install
 install: install-man-pages install-html

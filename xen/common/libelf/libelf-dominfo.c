@@ -17,6 +17,14 @@
 
 #include "libelf-private.h"
 
+#if defined(__i386__) || defined(__x86_64__)
+#define ARCH_PHYS_MIN_DEFAULT   0
+#define ARCH_PHYS_MAX_DEFAULT   (GB(4) - 1)
+#else
+#define ARCH_PHYS_MIN_DEFAULT   0
+#define ARCH_PHYS_MAX_DEFAULT   0
+#endif
+
 /* ------------------------------------------------------------------------ */
 /* xen features                                                             */
 
@@ -100,26 +108,32 @@ elf_errorstatus elf_xen_parse_note(struct elf_binary *elf,
 {
 /* *INDENT-OFF* */
     static const struct {
-        char *name;
-        bool str;
+        const char *name;
+        enum {
+            ELFNOTE_INT,
+            ELFNOTE_STRING,
+            ELFNOTE_NAME,
+        } type;
     } note_desc[] = {
-        [XEN_ELFNOTE_ENTRY] = { "ENTRY", 0},
-        [XEN_ELFNOTE_HYPERCALL_PAGE] = { "HYPERCALL_PAGE", 0},
-        [XEN_ELFNOTE_VIRT_BASE] = { "VIRT_BASE", 0},
-        [XEN_ELFNOTE_INIT_P2M] = { "INIT_P2M", 0},
-        [XEN_ELFNOTE_PADDR_OFFSET] = { "PADDR_OFFSET", 0},
-        [XEN_ELFNOTE_HV_START_LOW] = { "HV_START_LOW", 0},
-        [XEN_ELFNOTE_XEN_VERSION] = { "XEN_VERSION", 1},
-        [XEN_ELFNOTE_GUEST_OS] = { "GUEST_OS", 1},
-        [XEN_ELFNOTE_GUEST_VERSION] = { "GUEST_VERSION", 1},
-        [XEN_ELFNOTE_LOADER] = { "LOADER", 1},
-        [XEN_ELFNOTE_PAE_MODE] = { "PAE_MODE", 1},
-        [XEN_ELFNOTE_FEATURES] = { "FEATURES", 1},
-        [XEN_ELFNOTE_SUPPORTED_FEATURES] = { "SUPPORTED_FEATURES", 0},
-        [XEN_ELFNOTE_BSD_SYMTAB] = { "BSD_SYMTAB", 1},
-        [XEN_ELFNOTE_SUSPEND_CANCEL] = { "SUSPEND_CANCEL", 0 },
-        [XEN_ELFNOTE_MOD_START_PFN] = { "MOD_START_PFN", 0 },
-        [XEN_ELFNOTE_PHYS32_ENTRY] = { "PHYS32_ENTRY", 0 },
+        [XEN_ELFNOTE_ENTRY] = { "ENTRY", ELFNOTE_INT },
+        [XEN_ELFNOTE_HYPERCALL_PAGE] = { "HYPERCALL_PAGE", ELFNOTE_INT },
+        [XEN_ELFNOTE_VIRT_BASE] = { "VIRT_BASE", ELFNOTE_INT },
+        [XEN_ELFNOTE_INIT_P2M] = { "INIT_P2M", ELFNOTE_INT },
+        [XEN_ELFNOTE_PADDR_OFFSET] = { "PADDR_OFFSET", ELFNOTE_INT },
+        [XEN_ELFNOTE_HV_START_LOW] = { "HV_START_LOW", ELFNOTE_INT },
+        [XEN_ELFNOTE_XEN_VERSION] = { "XEN_VERSION", ELFNOTE_STRING },
+        [XEN_ELFNOTE_GUEST_OS] = { "GUEST_OS", ELFNOTE_STRING },
+        [XEN_ELFNOTE_GUEST_VERSION] = { "GUEST_VERSION", ELFNOTE_STRING },
+        [XEN_ELFNOTE_LOADER] = { "LOADER", ELFNOTE_STRING },
+        [XEN_ELFNOTE_PAE_MODE] = { "PAE_MODE", ELFNOTE_STRING },
+        [XEN_ELFNOTE_FEATURES] = { "FEATURES", ELFNOTE_STRING },
+        [XEN_ELFNOTE_SUPPORTED_FEATURES] = { "SUPPORTED_FEATURES", ELFNOTE_INT },
+        [XEN_ELFNOTE_BSD_SYMTAB] = { "BSD_SYMTAB", ELFNOTE_STRING },
+        [XEN_ELFNOTE_L1_MFN_VALID] = { "L1_MFN_VALID", ELFNOTE_NAME },
+        [XEN_ELFNOTE_SUSPEND_CANCEL] = { "SUSPEND_CANCEL", ELFNOTE_INT },
+        [XEN_ELFNOTE_MOD_START_PFN] = { "MOD_START_PFN", ELFNOTE_INT },
+        [XEN_ELFNOTE_PHYS32_ENTRY] = { "PHYS32_ENTRY", ELFNOTE_INT },
+        [XEN_ELFNOTE_PHYS32_RELOC] = { "PHYS32_RELOC", ELFNOTE_NAME },
     };
 /* *INDENT-ON* */
 
@@ -127,6 +141,7 @@ elf_errorstatus elf_xen_parse_note(struct elf_binary *elf,
     uint64_t val = 0;
     unsigned int i;
     unsigned type = elf_uval(elf, note, type);
+    unsigned descsz = elf_uval(elf, note, descsz);
 
     if ( (type >= sizeof(note_desc) / sizeof(note_desc[0])) ||
          (note_desc[type].name == NULL) )
@@ -135,8 +150,9 @@ elf_errorstatus elf_xen_parse_note(struct elf_binary *elf,
         return 0;
     }
 
-    if ( note_desc[type].str )
+    switch ( note_desc[type].type )
     {
+    case ELFNOTE_STRING :
         str = elf_strval(elf, elf_note_desc(elf, note));
         if (str == NULL)
             /* elf_strval will mark elf broken if it fails so no need to log */
@@ -144,13 +160,19 @@ elf_errorstatus elf_xen_parse_note(struct elf_binary *elf,
         elf_msg(elf, "ELF: note: %s = \"%s\"\n", note_desc[type].name, str);
         parms->elf_notes[type].type = XEN_ENT_STR;
         parms->elf_notes[type].data.str = str;
-    }
-    else
-    {
+        break;
+
+    case ELFNOTE_INT:
         val = elf_note_numeric(elf, note);
         elf_msg(elf, "ELF: note: %s = %#" PRIx64 "\n", note_desc[type].name, val);
         parms->elf_notes[type].type = XEN_ENT_LONG;
         parms->elf_notes[type].data.num = val;
+        break;
+
+    case ELFNOTE_NAME:
+        /* NB: Newline emitted further down. */
+        elf_msg(elf, "ELF: note: %s", note_desc[type].name);
+        break;
     }
     parms->elf_notes[type].name = note_desc[type].name;
 
@@ -216,7 +238,32 @@ elf_errorstatus elf_xen_parse_note(struct elf_binary *elf,
     case XEN_ELFNOTE_PHYS32_ENTRY:
         parms->phys_entry = val;
         break;
+
+    case XEN_ELFNOTE_PHYS32_RELOC:
+        parms->phys_reloc = true;
+
+        if ( descsz >= 4 )
+        {
+            parms->phys_align = elf_note_numeric_array(elf, note, 4, 0);
+            elf_msg(elf, " align: %#"PRIx32, parms->phys_align);
+        }
+        if ( descsz >= 8 )
+        {
+            parms->phys_min = elf_note_numeric_array(elf, note, 4, 1);
+            elf_msg(elf, " min: %#"PRIx32, parms->phys_min);
+        }
+        if ( descsz >= 12 )
+        {
+            parms->phys_max = elf_note_numeric_array(elf, note, 4, 2);
+            elf_msg(elf, " max: %#"PRIx32, parms->phys_max);
+        }
+
+        break;
     }
+
+    if ( note_desc[type].type == ELFNOTE_NAME)
+        elf_msg(elf, "\n");
+
     return 0;
 }
 
@@ -419,7 +466,8 @@ static elf_errorstatus elf_xen_addr_calc_check(struct elf_binary *elf,
     uint64_t virt_offset;
 
     if ( (parms->elf_paddr_offset != UNSET_ADDR) &&
-         (parms->virt_base == UNSET_ADDR) )
+         (parms->virt_base == UNSET_ADDR) &&
+         !hvm )
     {
         elf_err(elf, "ERROR: ELF_PADDR_OFFSET set, VIRT_BASE unset\n");
         return -1;
@@ -526,6 +574,10 @@ elf_errorstatus elf_xen_parse(struct elf_binary *elf,
     parms->p2m_base = UNSET_ADDR;
     parms->elf_paddr_offset = UNSET_ADDR;
     parms->phys_entry = UNSET_ADDR32;
+    parms->phys_align = UNSET_ADDR32;
+    parms->phys_min = ARCH_PHYS_MIN_DEFAULT;
+    parms->phys_max = ARCH_PHYS_MAX_DEFAULT;
+    parms->phys_reloc = false;
 
     /* Find and parse elf notes. */
     count = elf_phdr_count(elf);

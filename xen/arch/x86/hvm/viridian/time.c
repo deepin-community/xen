@@ -15,7 +15,6 @@
 #include <asm/event.h>
 #include <asm/guest/hyperv.h>
 #include <asm/guest/hyperv-tlfs.h>
-#include <asm/hvm/support.h>
 
 #include "private.h"
 
@@ -26,6 +25,10 @@ static void update_reference_tsc(const struct domain *d, bool initialize)
     const struct viridian_page *rt = &vd->reference_tsc;
     HV_REFERENCE_TSC_PAGE *p = rt->ptr;
     uint32_t seq;
+
+    /* Reference TSC page might not be mapped even if the MSR is enabled. */
+    if ( !p )
+        return;
 
     if ( initialize )
         clear_page(p);
@@ -67,7 +70,7 @@ static void update_reference_tsc(const struct domain *d, bool initialize)
      * The offset value is calculated on restore after migration and
      * ensures that Windows will not see a large jump in ReferenceTime.
      */
-    p->tsc_scale = ((10000ul << 32) / d->arch.tsc_khz) << 32;
+    p->tsc_scale = ((10000UL << 32) / d->arch.tsc_khz) << 32;
     p->tsc_offset = trc->off;
     smp_wmb();
 
@@ -80,7 +83,7 @@ static uint64_t trc_val(const struct domain *d, int64_t offset)
     uint64_t tsc, scale;
 
     tsc = hvm_get_guest_tsc(pt_global_vcpu_target(d));
-    scale = ((10000ul << 32) / d->arch.tsc_khz) << 32;
+    scale = ((10000UL << 32) / d->arch.tsc_khz) << 32;
 
     return hv_scale_tsc(tsc, scale, offset);
 }
@@ -105,8 +108,10 @@ static void time_ref_count_thaw(const struct domain *d)
 
     trc->off = (int64_t)trc->val - trc_val(d, 0);
 
+    spin_lock(&vd->lock);
     if ( vd->reference_tsc.msr.enabled )
         update_reference_tsc(d, false);
+    spin_unlock(&vd->lock);
 }
 
 static uint64_t time_ref_count(const struct domain *d)
@@ -202,7 +207,7 @@ static void start_stimer(struct viridian_stimer *vs)
     ASSERT(expiration - now > 0);
 
     vs->expiration = expiration;
-    timeout = (expiration - now) * 100ull;
+    timeout = (expiration - now) * 100ULL;
 
     vs->started = true;
     clear_bit(stimerx, &vv->stimer_pending);
@@ -328,6 +333,7 @@ int viridian_time_wrmsr(struct vcpu *v, uint32_t idx, uint64_t val)
         if ( !(viridian_feature_mask(d) & HVMPV_reference_tsc) )
             return X86EMUL_EXCEPTION;
 
+        spin_lock(&vd->lock);
         viridian_unmap_guest_page(&vd->reference_tsc);
         vd->reference_tsc.msr.raw = val;
         viridian_dump_guest_page(v, "REFERENCE_TSC", &vd->reference_tsc);
@@ -336,6 +342,7 @@ int viridian_time_wrmsr(struct vcpu *v, uint32_t idx, uint64_t val)
             viridian_map_guest_page(d, &vd->reference_tsc);
             update_reference_tsc(d, true);
         }
+        spin_unlock(&vd->lock);
         break;
 
     case HV_X64_MSR_TIME_REF_COUNT:
@@ -414,14 +421,14 @@ int viridian_time_rdmsr(const struct vcpu *v, uint32_t idx, uint64_t *val)
         if ( viridian_feature_mask(d) & HVMPV_no_freq )
             return X86EMUL_EXCEPTION;
 
-        *val = (uint64_t)d->arch.tsc_khz * 1000ull;
+        *val = (uint64_t)d->arch.tsc_khz * 1000ULL;
         break;
 
     case HV_X64_MSR_APIC_FREQUENCY:
         if ( viridian_feature_mask(d) & HVMPV_no_freq )
             return X86EMUL_EXCEPTION;
 
-        *val = 1000000000ull / APIC_BUS_CYCLE_NS;
+        *val = 1000000000ULL / APIC_BUS_CYCLE_NS;
         break;
 
     case HV_X64_MSR_REFERENCE_TSC:

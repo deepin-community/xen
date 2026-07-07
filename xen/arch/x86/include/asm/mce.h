@@ -37,11 +37,10 @@ struct domain;
 struct vcpu;
 
 /* Guest vMCE MSRs virtualization */
-extern void vmce_init_vcpu(struct vcpu *);
-extern int vmce_restore_vcpu(struct vcpu *, const struct hvm_vmce_vcpu *);
+extern void vmce_init_vcpu(struct vcpu *v);
+extern int vmce_restore_vcpu(struct vcpu *v, const struct hvm_vmce_vcpu *ctxt);
 extern int vmce_wrmsr(uint32_t msr, uint64_t val);
 extern int vmce_rdmsr(uint32_t msr, uint64_t *val);
-extern bool vmce_has_lmce(const struct vcpu *v);
 extern int vmce_enable_mca_cap(struct domain *d, uint64_t cap);
 
 DECLARE_PER_CPU(unsigned int, nr_mce_banks);

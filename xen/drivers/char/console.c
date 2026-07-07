@@ -15,7 +15,6 @@
 #include <xen/init.h>
 #include <xen/event.h>
 #include <xen/console.h>
-#include <xen/debugger.h>
 #include <xen/param.h>
 #include <xen/serial.h>
 #include <xen/softirq.h>
@@ -33,6 +32,7 @@
 #include <xen/warning.h>
 #include <xen/pv_console.h>
 #include <asm/setup.h>
+#include <xen/sections.h>
 
 #ifdef CONFIG_X86
 #include <xen/consoled.h>
@@ -50,11 +50,11 @@ string_param("console", opt_console);
 /* Char 1: CTRL+<char1> is used to switch console input between Xen and DOM0 */
 /* Char 2: If this character is 'x', then do not auto-switch to DOM0 when it */
 /*         boots. Any other value, or omitting the char, enables auto-switch */
-static unsigned char __read_mostly opt_conswitch[3] = "a";
+static char __read_mostly opt_conswitch[3] = "a";
 string_runtime_param("conswitch", opt_conswitch);
 
 /* sync_console: force synchronous console output (useful for debugging). */
-static bool_t __initdata opt_sync_console;
+static bool __initdata opt_sync_console;
 boolean_param("sync_console", opt_sync_console);
 static const char __initconst warning_sync_console[] =
     "WARNING: CONSOLE OUTPUT IS SYNCHRONOUS\n"
@@ -64,7 +64,7 @@ static const char __initconst warning_sync_console[] =
     "timekeeping. It is NOT recommended for production use!\n";
 
 /* console_to_ring: send guest (incl. dom 0) console data to console ring. */
-static bool_t __read_mostly opt_console_to_ring;
+static bool __read_mostly opt_console_to_ring;
 boolean_param("console_to_ring", opt_console_to_ring);
 
 /* console_timestamps: include a timestamp prefix on every Xen console line. */
@@ -120,7 +120,7 @@ static int __read_mostly sercon_handle = -1;
 int8_t __read_mostly opt_console_xen; /* console=xen */
 #endif
 
-static DEFINE_SPINLOCK(console_lock);
+static DEFINE_RSPINLOCK(console_lock);
 
 /*
  * To control the amount of printing, thresholds are added.
@@ -136,8 +136,8 @@ static DEFINE_SPINLOCK(console_lock);
  * the lower threshold equal to the upper.
  */
 #ifdef NDEBUG
-#define XENLOG_UPPER_THRESHOLD       2 /* Do not print INFO and DEBUG  */
-#define XENLOG_LOWER_THRESHOLD       2 /* Always print ERR and WARNING */
+#define XENLOG_UPPER_THRESHOLD       3 /* Do not print DEBUG  */
+#define XENLOG_LOWER_THRESHOLD       3 /* Always print INFO, ERR and WARNING */
 #define XENLOG_GUEST_UPPER_THRESHOLD 2 /* Do not print INFO and DEBUG  */
 #define XENLOG_GUEST_LOWER_THRESHOLD 0 /* Rate-limit ERR and WARNING   */
 #else
@@ -150,7 +150,7 @@ static DEFINE_SPINLOCK(console_lock);
  * The XENLOG_DEFAULT is the default given to printks that
  * do not have any print level associated with them.
  */
-#define XENLOG_DEFAULT       1 /* XENLOG_WARNING */
+#define XENLOG_DEFAULT       2 /* XENLOG_INFO */
 #define XENLOG_GUEST_DEFAULT 1 /* XENLOG_WARNING */
 
 static int __read_mostly xenlog_upper_thresh = XENLOG_UPPER_THRESHOLD;
@@ -280,7 +280,7 @@ static int *__read_mostly upper_thresh_adj = &xenlog_upper_thresh;
 static int *__read_mostly lower_thresh_adj = &xenlog_lower_thresh;
 static const char *__read_mostly thresh_adj = "standard";
 
-static void cf_check do_toggle_guest(unsigned char key, struct cpu_user_regs *regs)
+static void cf_check do_toggle_guest(unsigned char key, bool unused)
 {
     if ( upper_thresh_adj == &xenlog_upper_thresh )
     {
@@ -307,13 +307,13 @@ static void do_adj_thresh(unsigned char key)
            loglvl_str(*upper_thresh_adj));
 }
 
-static void cf_check do_inc_thresh(unsigned char key, struct cpu_user_regs *regs)
+static void cf_check do_inc_thresh(unsigned char key, bool unused)
 {
     ++*lower_thresh_adj;
     do_adj_thresh(key);
 }
 
-static void cf_check do_dec_thresh(unsigned char key, struct cpu_user_regs *regs)
+static void cf_check do_dec_thresh(unsigned char key, bool unused)
 {
     if ( *lower_thresh_adj )
         --*lower_thresh_adj;
@@ -328,7 +328,7 @@ static void cf_check do_dec_thresh(unsigned char key, struct cpu_user_regs *regs
 
 static void conring_puts(const char *str, size_t len)
 {
-    ASSERT(spin_is_locked(&console_lock));
+    ASSERT(rspin_is_locked(&console_lock));
 
     while ( len-- )
         conring[CONRING_IDX_MASK(conringp++)] = *str++;
@@ -369,9 +369,9 @@ long read_console_ring(struct xen_sysctl_readconsole *op)
 
     if ( op->clear )
     {
-        spin_lock_irq(&console_lock);
+        nrspin_lock_irq(&console_lock);
         conringc = p - c > conring_size ? p - conring_size : c;
-        spin_unlock_irq(&console_lock);
+        nrspin_unlock_irq(&console_lock);
     }
 
     op->count = sofar;
@@ -393,9 +393,9 @@ long read_console_ring(struct xen_sysctl_readconsole *op)
 static char serial_rx_ring[SERIAL_RX_SIZE];
 static unsigned int serial_rx_cons, serial_rx_prod;
 
-static void (*serial_steal_fn)(const char *, size_t nr) = early_puts;
+static void (*serial_steal_fn)(const char *str, size_t nr) = early_puts;
 
-int console_steal(int handle, void (*fn)(const char *, size_t nr))
+int console_steal(int handle, void (*fn)(const char *str, size_t nr))
 {
     if ( (handle == -1) || (handle != sercon_handle) )
         return 0;
@@ -468,11 +468,14 @@ static void cf_check dump_console_ring_key(unsigned char key)
 #define switch_code (opt_conswitch[0]-'a'+1)
 /*
  * console_rx=0 => input to xen
- * console_rx=1 => input to dom0
+ * console_rx=1 => input to dom0 (or the sole shim domain)
  * console_rx=N => input to dom(N-1)
  */
 static unsigned int __read_mostly console_rx = 0;
 
+#define max_console_rx (max_init_domid + 1)
+
+#ifdef CONFIG_SBSA_VUART_CONSOLE
 /* Make sure to rcu_unlock_domain after use */
 struct domain *console_input_domain(void)
 {
@@ -480,18 +483,42 @@ struct domain *console_input_domain(void)
             return NULL;
     return rcu_lock_domain_by_id(console_rx - 1);
 }
+#endif
 
 static void switch_serial_input(void)
 {
-    if ( console_rx == max_init_domid + 1 )
+    unsigned int next_rx = console_rx;
+
+    /*
+     * Rotate among Xen, dom0 and boot-time created domUs while skipping
+     * switching serial input to non existing domains.
+     */
+    for ( ; ; )
     {
-        console_rx = 0;
-        printk("*** Serial input to Xen");
-    }
-    else
-    {
-        console_rx++;
-        printk("*** Serial input to DOM%d", console_rx - 1);
+        domid_t domid;
+        struct domain *d;
+
+        if ( next_rx++ >= max_console_rx )
+        {
+            console_rx = 0;
+            printk("*** Serial input to Xen");
+            break;
+        }
+
+#ifdef CONFIG_PV_SHIM
+        if ( next_rx == 1 )
+            domid = get_initial_domain_id();
+        else
+#endif
+            domid = next_rx - 1;
+        d = rcu_lock_domain_by_id(domid);
+        if ( d )
+        {
+            rcu_unlock_domain(d);
+            console_rx = next_rx;
+            printk("*** Serial input to DOM%u", domid);
+            break;
+        }
     }
 
     if ( switch_code )
@@ -500,12 +527,12 @@ static void switch_serial_input(void)
     printk("\n");
 }
 
-static void __serial_rx(char c, struct cpu_user_regs *regs)
+static void __serial_rx(char c)
 {
     switch ( console_rx )
     {
     case 0:
-        return handle_keypress(c, regs);
+        return handle_keypress(c, false);
 
     case 1:
         /*
@@ -525,7 +552,7 @@ static void __serial_rx(char c, struct cpu_user_regs *regs)
 #ifdef CONFIG_SBSA_VUART_CONSOLE
     default:
     {
-        struct domain *d = rcu_lock_domain_by_any_id(console_rx - 1);
+        struct domain *d = rcu_lock_domain_by_id(console_rx - 1);
 
         /*
          * If we have a properly initialized vpl011 console for the
@@ -542,6 +569,8 @@ static void __serial_rx(char c, struct cpu_user_regs *regs)
 
         if ( d != NULL )
             rcu_unlock_domain(d);
+
+        break;
     }
 #endif
     }
@@ -552,7 +581,7 @@ static void __serial_rx(char c, struct cpu_user_regs *regs)
 #endif
 }
 
-static void cf_check serial_rx(char c, struct cpu_user_regs *regs)
+static void cf_check serial_rx(char c)
 {
     static int switch_code_count = 0;
 
@@ -568,10 +597,10 @@ static void cf_check serial_rx(char c, struct cpu_user_regs *regs)
     }
 
     for ( ; switch_code_count != 0; switch_code_count-- )
-        __serial_rx(switch_code, regs);
+        __serial_rx(switch_code);
 
     /* Finally process the just-received character. */
-    __serial_rx(c, regs);
+    __serial_rx(c);
 }
 
 static void cf_check notify_dom0_con_ring(void *unused)
@@ -612,7 +641,7 @@ static long guest_console_write(XEN_GUEST_HANDLE_PARAM(char) buffer,
         if ( is_hardware_domain(cd) )
         {
             /* Use direct console output as it could be interactive */
-            spin_lock_irq(&console_lock);
+            nrspin_lock_irq(&console_lock);
 
             console_serial_puts(kbuf, kcount);
             video_puts(kbuf, kcount);
@@ -633,7 +662,7 @@ static long guest_console_write(XEN_GUEST_HANDLE_PARAM(char) buffer,
                 tasklet_schedule(&notify_dom0_con_ring_tasklet);
             }
 
-            spin_unlock_irq(&console_lock);
+            nrspin_unlock_irq(&console_lock);
         }
         else
         {
@@ -733,13 +762,13 @@ long do_console_io(
  * *****************************************************
  */
 
-static bool_t console_locks_busted;
+static bool console_locks_busted;
 
 static void __putstr(const char *str)
 {
     size_t len = strlen(str);
 
-    ASSERT(spin_is_locked(&console_lock));
+    ASSERT(rspin_is_locked(&console_lock));
 
     console_serial_puts(str, len);
     video_puts(str, len);
@@ -884,7 +913,7 @@ static void printk_start_of_line(const char *prefix)
 static void vprintk_common(const char *prefix, const char *fmt, va_list args)
 {
     struct vps {
-        bool_t continued, do_print;
+        bool continued, do_print;
     }            *state;
     static DEFINE_PER_CPU(struct vps, state);
     static char   buf[1024];
@@ -893,7 +922,7 @@ static void vprintk_common(const char *prefix, const char *fmt, va_list args)
 
     /* console_lock can be acquired recursively from __printk_ratelimit(). */
     local_irq_save(flags);
-    spin_lock_recursive(&console_lock);
+    rspin_lock(&console_lock);
     state = &this_cpu(state);
 
     (void)vsnprintf(buf, sizeof(buf), fmt, args);
@@ -929,15 +958,21 @@ static void vprintk_common(const char *prefix, const char *fmt, va_list args)
         state->continued = 1;
     }
 
-    spin_unlock_recursive(&console_lock);
+    rspin_unlock(&console_lock);
     local_irq_restore(flags);
+}
+
+void vprintk(const char *fmt, va_list args)
+{
+    vprintk_common("(XEN) ", fmt, args);
 }
 
 void printk(const char *fmt, ...)
 {
     va_list args;
+
     va_start(args, fmt);
-    vprintk_common("(XEN) ", fmt, args);
+    vprintk(fmt, args);
     va_end(args);
 }
 
@@ -1000,9 +1035,9 @@ void __init console_init_preirq(void)
     pv_console_set_rx_handler(serial_rx);
 
     /* HELLO WORLD --- start-of-day banner text. */
-    spin_lock(&console_lock);
+    nrspin_lock(&console_lock);
     __putstr(xen_banner());
-    spin_unlock(&console_lock);
+    nrspin_unlock(&console_lock);
     printk("Xen version %d.%d%s (%s@%s) (%s) %s %s\n",
            xen_major_version(), xen_minor_version(), xen_extra_version(),
            xen_compile_by(), xen_compile_domain(), xen_compiler(),
@@ -1039,13 +1074,13 @@ void __init console_init_ring(void)
     }
     opt_conring_size = PAGE_SIZE << order;
 
-    spin_lock_irqsave(&console_lock, flags);
+    nrspin_lock_irqsave(&console_lock, flags);
     for ( i = conringc ; i != conringp; i++ )
         ring[i & (opt_conring_size - 1)] = conring[i & (conring_size - 1)];
     conring = ring;
     smp_wmb(); /* Allow users of console_force_unlock() to see larger buffer. */
     conring_size = opt_conring_size;
-    spin_unlock_irqrestore(&console_lock, flags);
+    nrspin_unlock_irqrestore(&console_lock, flags);
 
     printk("Allocated console ring of %u KiB.\n", opt_conring_size >> 10);
 }
@@ -1089,7 +1124,7 @@ void __init console_endboot(void)
      * a useful 'how to switch' message.
      */
     if ( opt_conswitch[1] == 'x' )
-        console_rx = max_init_domid + 1;
+        console_rx = max_console_rx;
 
     register_keyhandler('w', dump_console_ring_key,
                         "synchronously dump console ring buffer (dmesg)", 0);
@@ -1135,23 +1170,21 @@ unsigned long console_lock_recursive_irqsave(void)
 {
     unsigned long flags;
 
-    local_irq_save(flags);
-    spin_lock_recursive(&console_lock);
+    rspin_lock_irqsave(&console_lock, flags);
 
     return flags;
 }
 
 void console_unlock_recursive_irqrestore(unsigned long flags)
 {
-    spin_unlock_recursive(&console_lock);
-    local_irq_restore(flags);
+    rspin_unlock_irqrestore(&console_lock, flags);
 }
 
 void console_force_unlock(void)
 {
     watchdog_disable();
     spin_debug_disable();
-    spin_lock_init(&console_lock);
+    rspin_lock_init(&console_lock);
     serial_force_unlock(sercon_handle);
     console_locks_busted = 1;
     console_start_sync();
@@ -1204,12 +1237,12 @@ int __printk_ratelimit(int ratelimit_ms, int ratelimit_burst)
             char lost_str[8];
             snprintf(lost_str, sizeof(lost_str), "%d", lost);
             /* console_lock may already be acquired by printk(). */
-            spin_lock_recursive(&console_lock);
+            rspin_lock(&console_lock);
             printk_start_of_line("(XEN) ");
             __putstr("printk: ");
             __putstr(lost_str);
             __putstr(" messages suppressed.\n");
-            spin_unlock_recursive(&console_lock);
+            rspin_unlock(&console_lock);
         }
         local_irq_restore(flags);
         return 1;
@@ -1241,23 +1274,22 @@ void panic(const char *fmt, ...)
     va_list args;
     unsigned long flags;
     static DEFINE_SPINLOCK(lock);
-    static char buf[128];
 
     spin_debug_disable();
     spinlock_profile_printall('\0');
     debugtrace_dump();
 
-    /* Protects buf[] and ensure multi-line message prints atomically. */
+    /* Ensure multi-line message prints atomically. */
     spin_lock_irqsave(&lock, flags);
-
-    va_start(args, fmt);
-    (void)vsnprintf(buf, sizeof(buf), fmt, args);
-    va_end(args);
 
     console_start_sync();
     printk("\n****************************************\n");
     printk("Panic on CPU %d:\n", smp_processor_id());
-    printk("%s", buf);
+
+    va_start(args, fmt);
+    vprintk(fmt, args);
+    va_end(args);
+
     printk("****************************************\n\n");
     if ( opt_noreboot )
         printk("Manual reset required ('noreboot' specified)\n");
@@ -1269,8 +1301,6 @@ void panic(const char *fmt, ...)
 #endif
 
     spin_unlock_irqrestore(&lock, flags);
-
-    debugger_trap_immediate();
 
     kexec_crash(CRASHREASON_PANIC);
 

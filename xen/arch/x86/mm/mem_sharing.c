@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /******************************************************************************
  * arch/x86/mm/mem_sharing.c
  *
@@ -5,19 +6,6 @@
  *
  * Copyright (c) 2011 GridCentric, Inc. (Adin Scannell & Andres Lagar-Cavilla)
  * Copyright (c) 2009 Citrix Systems, Inc. (Grzegorz Milos)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <xen/types.h>
@@ -191,13 +179,7 @@ static void mem_sharing_page_unlock(struct page_info *pg)
 
 static shr_handle_t get_next_handle(void)
 {
-    /* Get the next handle get_page style */
-    uint64_t x, y = next_handle;
-    do {
-        x = y;
-    }
-    while ( (y = cmpxchg(&next_handle, x, x + 1)) != x );
-    return x + 1;
+    return arch_fetch_and_add(&next_handle, 1) + 1;
 }
 
 static atomic_t nr_saved_mfns   = ATOMIC_INIT(0);
@@ -700,7 +682,7 @@ static int page_make_sharable(struct domain *d,
     int rc = 0;
     bool drop_dom_ref = false;
 
-    spin_lock_recursive(&d->page_alloc_lock);
+    rspin_lock(&d->page_alloc_lock);
 
     if ( d->is_dying )
     {
@@ -743,7 +725,7 @@ static int page_make_sharable(struct domain *d,
     }
 
 out:
-    spin_unlock_recursive(&d->page_alloc_lock);
+    rspin_unlock(&d->page_alloc_lock);
 
     if ( drop_dom_ref )
         put_domain(d);
@@ -758,11 +740,11 @@ static int page_make_private(struct domain *d, struct page_info *page)
     if ( !get_page(page, dom_cow) )
         return -EINVAL;
 
-    spin_lock(&d->page_alloc_lock);
+    nrspin_lock(&d->page_alloc_lock);
 
     if ( d->is_dying )
     {
-        spin_unlock(&d->page_alloc_lock);
+        nrspin_unlock(&d->page_alloc_lock);
         put_page(page);
         return -EBUSY;
     }
@@ -770,7 +752,7 @@ static int page_make_private(struct domain *d, struct page_info *page)
     expected_type = (PGT_shared_page | PGT_validated | PGT_locked | 2);
     if ( page->u.inuse.type_info != expected_type )
     {
-        spin_unlock(&d->page_alloc_lock);
+        nrspin_unlock(&d->page_alloc_lock);
         put_page(page);
         return -EEXIST;
     }
@@ -787,7 +769,7 @@ static int page_make_private(struct domain *d, struct page_info *page)
     if ( domain_adjust_tot_pages(d, 1) == 1 )
         get_knownalive_domain(d);
     page_list_add_tail(page, &d->page_list);
-    spin_unlock(&d->page_alloc_lock);
+    nrspin_unlock(&d->page_alloc_lock);
 
     put_page(page);
 
@@ -1135,7 +1117,7 @@ err_out:
 /*
  * This function is intended to be used for plugging a "hole" in the client's
  * physmap with a shared memory entry. Unfortunately the definition of a "hole"
- * is currently ambigious. There are two cases one can run into a "hole":
+ * is currently ambiguous. There are two cases one can run into a "hole":
  *  1) there is no pagetable entry at all
  *  2) there is a pagetable entry with a type that passes p2m_is_hole
  *
@@ -1653,6 +1635,24 @@ static void copy_vcpu_nonreg_state(struct vcpu *d_vcpu, struct vcpu *cd_vcpu)
     hvm_set_nonreg_state(cd_vcpu, &nrs);
 }
 
+static int copy_guest_area(struct guest_area *cd_area,
+                           const struct guest_area *d_area,
+                           struct vcpu *cd_vcpu,
+                           const struct domain *d)
+{
+    unsigned int offset;
+
+    /* Check if no area to map, or already mapped. */
+    if ( !d_area->pg || cd_area->pg )
+        return 0;
+
+    offset = PAGE_OFFSET(d_area->map);
+    return map_guest_area(cd_vcpu, gfn_to_gaddr(
+                                       mfn_to_gfn(d, page_to_mfn(d_area->pg))) +
+                                   offset,
+                          PAGE_SIZE - offset, cd_area, NULL);
+}
+
 static int copy_vpmu(struct vcpu *d_vcpu, struct vcpu *cd_vcpu)
 {
     struct vpmu_struct *d_vpmu = vcpu_vpmu(d_vcpu);
@@ -1699,51 +1699,32 @@ static int copy_vpmu(struct vcpu *d_vcpu, struct vcpu *cd_vcpu)
 static int copy_vcpu_settings(struct domain *cd, const struct domain *d)
 {
     unsigned int i;
-    struct p2m_domain *p2m = p2m_get_hostp2m(cd);
     int ret = -EINVAL;
 
     for ( i = 0; i < cd->max_vcpus; i++ )
     {
         struct vcpu *d_vcpu = d->vcpu[i];
         struct vcpu *cd_vcpu = cd->vcpu[i];
-        mfn_t vcpu_info_mfn;
 
         if ( !d_vcpu || !cd_vcpu )
             continue;
 
-        /* Copy & map in the vcpu_info page if the guest uses one */
-        vcpu_info_mfn = d_vcpu->vcpu_info_mfn;
-        if ( !mfn_eq(vcpu_info_mfn, INVALID_MFN) )
-        {
-            mfn_t new_vcpu_info_mfn = cd_vcpu->vcpu_info_mfn;
-
-            /* Allocate & map the page for it if it hasn't been already */
-            if ( mfn_eq(new_vcpu_info_mfn, INVALID_MFN) )
-            {
-                gfn_t gfn = mfn_to_gfn(d, vcpu_info_mfn);
-                unsigned long gfn_l = gfn_x(gfn);
-                struct page_info *page;
-
-                if ( !(page = alloc_domheap_page(cd, 0)) )
-                    return -ENOMEM;
-
-                new_vcpu_info_mfn = page_to_mfn(page);
-                set_gpfn_from_mfn(mfn_x(new_vcpu_info_mfn), gfn_l);
-
-                ret = p2m->set_entry(p2m, gfn, new_vcpu_info_mfn,
-                                     PAGE_ORDER_4K, p2m_ram_rw,
-                                     p2m->default_access, -1);
-                if ( ret )
-                    return ret;
-
-                ret = map_vcpu_info(cd_vcpu, gfn_l,
-                                    PAGE_OFFSET(d_vcpu->vcpu_info));
-                if ( ret )
-                    return ret;
-            }
-
-            copy_domain_page(new_vcpu_info_mfn, vcpu_info_mfn);
-        }
+        /*
+         * Map the vcpu_info page and the (physically registered) runstate and
+         * time info areas.
+         */
+        ret = copy_guest_area(&cd_vcpu->vcpu_info_area,
+                              &d_vcpu->vcpu_info_area, cd_vcpu, d);
+        if ( ret )
+            return ret;
+        ret = copy_guest_area(&cd_vcpu->runstate_guest_area,
+                              &d_vcpu->runstate_guest_area, cd_vcpu, d);
+        if ( ret )
+            return ret;
+        ret = copy_guest_area(&cd_vcpu->arch.time_guest_area,
+                              &d_vcpu->arch.time_guest_area, cd_vcpu, d);
+        if ( ret )
+            return ret;
 
         ret = copy_vpmu(d_vcpu, cd_vcpu);
         if ( ret )
@@ -1955,7 +1936,7 @@ int mem_sharing_fork_reset(struct domain *d, bool reset_state,
         goto state;
 
     /* need recursive lock because we will free pages */
-    spin_lock_recursive(&d->page_alloc_lock);
+    rspin_lock(&d->page_alloc_lock);
     page_list_for_each_safe(page, tmp, &d->page_list)
     {
         shr_handle_t sh;
@@ -1984,11 +1965,19 @@ int mem_sharing_fork_reset(struct domain *d, bool reset_state,
         put_page_alloc_ref(page);
         put_page_and_type(page);
     }
-    spin_unlock_recursive(&d->page_alloc_lock);
+    rspin_unlock(&d->page_alloc_lock);
 
  state:
     if ( reset_state )
+    {
         rc = copy_settings(d, pd);
+        if ( rc == -ERESTART )
+            /*
+             * Translate to -EAGAIN, see TODO comment at top of function about
+             * hypercall continuations.
+             */
+            rc = -EAGAIN;
+    }
 
     domain_unpause(d);
 
@@ -2342,4 +2331,11 @@ int mem_sharing_domctl(struct domain *d, struct xen_domctl_mem_sharing_op *mec)
     }
 
     return rc;
+}
+
+void arch_dump_shared_mem_info(void)
+{
+    printk("Shared frames %u -- Saved frames %u\n",
+            mem_sharing_get_nr_shared_mfns(),
+            mem_sharing_get_nr_saved_mfns());
 }

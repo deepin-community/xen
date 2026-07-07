@@ -54,6 +54,3 @@ $(OBJS-y) $(PIC_OBJS): libxlu_cfg_l.c libxlu_cfg_y.c libxlu_disk_l.c
 %.c %.h:: %.l
 	@rm -f $*.[ch]
 	$(FLEX) --header-file=$*.h --outfile=$*.c $<
-
-clean::
-	$(RM) libxenutil.map

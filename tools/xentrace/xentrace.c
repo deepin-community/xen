@@ -668,7 +668,7 @@ static void wait_for_event_or_timeout(unsigned long milliseconds)
  * monitor_tbufs - monitor the contents of tbufs and output to a file
  * @logfile:       the FILE * representing the file to log to
  */
-static int monitor_tbufs(void)
+static void monitor_tbufs(void)
 {
     int i;
 
@@ -794,9 +794,6 @@ static int monitor_tbufs(void)
     free(meta);
     free(data);
     /* don't need to munmap - cleanup is automatic */
-    close(outfd);
-
-    return 0;
 }
 
 
@@ -810,7 +807,7 @@ static int monitor_tbufs(void)
 const char *program_version     = "xentrace v1.2";
 const char *program_bug_address = "<mark.a.williamson@intel.com>";
 
-static void usage(void)
+static void usage(int status)
 {
 #define USAGE_STR \
 "Usage: xentrace [OPTION...] [output file]\n" \
@@ -851,13 +848,13 @@ static void usage(void)
 "\n" \
 "  CPU(uint) TSC(uint64_t) EVENT(uint32_t) D1 D2 D3 D4 D5 (all uint32_t)\n" \
 "\n" \
-"The output should be parsed using the tool xentrace_format,\n" \
+"The output should be parsed using the tool xenalyze,\n" \
 "which can produce human-readable output in ASCII format.\n" 
 
     printf(USAGE_STR);
     printf("\nReport bugs to %s\n", program_bug_address);
 
-    exit(EXIT_FAILURE);
+    exit(status);
 }
 
 /* convert the argument string pointed to by arg to a long int representation,
@@ -876,7 +873,7 @@ long sargtol(const char *restrict arg, int base)
     {
         fprintf(stderr, "Invalid option argument: %s\n", arg);
         fprintf(stderr, "Error: %s\n\n", strerror(errno));
-        usage();
+        usage(EXIT_FAILURE);
     }
     else if (endp == arg)
     {
@@ -904,7 +901,7 @@ long sargtol(const char *restrict arg, int base)
 
 invalid:
     fprintf(stderr, "Invalid option argument: %s\n\n", arg);
-    usage();
+    usage(EXIT_FAILURE);
     return 0; /* not actually reached */
 }
 
@@ -920,10 +917,10 @@ static long argtol(const char *restrict arg, int base)
     if (errno != 0) {
         fprintf(stderr, "Invalid option argument: %s\n", arg);
         fprintf(stderr, "Error: %s\n\n", strerror(errno));
-        usage();
+        usage(EXIT_FAILURE);
     } else if (endp == arg || *endp != '\0') {
         fprintf(stderr, "Invalid option argument: %s\n\n", arg);
-        usage();
+        usage(EXIT_FAILURE);
     }
 
     return val;
@@ -1093,7 +1090,7 @@ static void parse_args(int argc, char **argv)
         { "discard-buffers", no_argument,      0, 'D' },
         { "dont-disable-tracing", no_argument, 0, 'x' },
         { "start-disabled", no_argument,       0, 'X' },
-        { "help",           no_argument,       0, '?' },
+        { "help",           no_argument,       0, 'h' },
         { "version",        no_argument,       0, 'V' },
         { 0, 0, 0, 0 }
     };
@@ -1108,8 +1105,10 @@ static void parse_args(int argc, char **argv)
             break;
 
         case 'c': /* set new cpu mask for filtering (when xch is set). */
+            free(opts.cpu_mask_str);
             opts.cpu_mask_str = strdup(optarg);
             break;
+
         case 'e': /* set new event mask for filtering*/
             parse_evtmask(optarg);
             break;
@@ -1147,16 +1146,18 @@ static void parse_args(int argc, char **argv)
             opts.memory_buffer = sargtol(optarg, 0);
             break;
 
+        case 'h':
+            usage(EXIT_SUCCESS);
+            break;
+
         default:
-            usage();
+            usage(EXIT_FAILURE);
         }
     }
 
-    /* get outfile (required last argument) */
-    if (optind != (argc-1))
-        usage();
-
-    opts.outfile = argv[optind];
+    /* get outfile (optional last argument) */
+    if (argc > optind)
+        opts.outfile = argv[optind];
 }
 
 /* *BSD has no O_LARGEFILE */
@@ -1166,7 +1167,6 @@ static void parse_args(int argc, char **argv)
 
 int main(int argc, char **argv)
 {
-    int ret;
     struct sigaction act;
 
     opts.outfile = 0;
@@ -1228,9 +1228,10 @@ int main(int argc, char **argv)
     sigaction(SIGINT,  &act, NULL);
     sigaction(SIGALRM, &act, NULL);
 
-    ret = monitor_tbufs();
+    monitor_tbufs();
 
-    return ret;
+    close(outfd);
+    return 0;
 }
 
 /*

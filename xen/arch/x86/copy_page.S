@@ -1,5 +1,8 @@
         .file __FILE__
 
+#include <xen/linkage.h>
+
+#include <asm/asm_defns.h>
 #include <asm/page.h>
 
 #define src_reg %rsi
@@ -10,7 +13,7 @@
 #define tmp3_reg %r10
 #define tmp4_reg %r11
 
-ENTRY(copy_page_sse2)
+FUNC(copy_page_sse2)
         mov     $PAGE_SIZE/(4*WORD_SIZE)-3, %ecx
 
         prefetchnta 2*4*WORD_SIZE(src_reg)
@@ -40,4 +43,5 @@ ENTRY(copy_page_sse2)
         movnti  tmp4_reg, 3*WORD_SIZE(dst_reg)
 
         sfence
-        ret
+        RET
+END(copy_page_sse2)

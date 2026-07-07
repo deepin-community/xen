@@ -7,7 +7,7 @@
         .text
         .code64
 
-ENTRY(do_suspend_lowlevel)
+FUNC(do_suspend_lowlevel)
         push    %rbp
         push    %rbx
         push    %r12
@@ -43,7 +43,7 @@ ENTRY(do_suspend_lowlevel)
          *
          * Everything else, including the stack, needs restoring.
          */
-ENTRY(s3_resume)
+LABEL(s3_resume)
         lgdt    boot_gdtr(%rip)
 
         mov     saved_cr0(%rip), %rax
@@ -124,6 +124,8 @@ ENTRY(s3_resume)
         mov     STACK_CPUINFO_FIELD(cr4)(%rbx), %rax
         mov     %rax, %cr4
 
+        call    mtrr_bp_restore
+
 .Lsuspend_err:
         pop     %r15
         pop     %r14
@@ -131,7 +133,8 @@ ENTRY(s3_resume)
         pop     %r12
         pop     %rbx
         pop     %rbp
-        ret
+        RET
+END(do_suspend_lowlevel)
 
 .data
         .align 16
@@ -142,5 +145,4 @@ saved_cr0:      .quad   0
 saved_ssp:      .quad   0
 #endif
 
-GLOBAL(saved_magic)
-        .long   0x9abcdef0
+ASM_INT(saved_magic, 0x9abcdef0)

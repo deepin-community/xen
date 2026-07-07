@@ -14,6 +14,12 @@
 # error "unknown ARM variant"
 #endif
 
+#if defined(CONFIG_MMU)
+# include <asm/mmu/mm.h>
+#elif !defined(CONFIG_MPU)
+# error "Unknown memory management layout"
+#endif
+
 /* Align Xen to a 2 MiB boundary. */
 #define XEN_PADDR_ALIGN (1 << 21)
 
@@ -25,6 +31,17 @@
  *  2. Provide a PFN_ORDER() macro for accessing the order of a free page.
  */
 #define PFN_ORDER(_pfn) ((_pfn)->v.free.order)
+
+/*
+ * The size of struct page_info impacts the number of entries that can fit
+ * into the frametable area and thus it affects the amount of physical memory
+ * we claim to support. Define PAGE_INFO_SIZE to be used for sanity checking.
+*/
+#ifdef CONFIG_ARM_64
+#define PAGE_INFO_SIZE 56
+#else
+#define PAGE_INFO_SIZE 32
+#endif
 
 struct page_info
 {
@@ -128,6 +145,14 @@ struct page_info
 #else
 #define PGC_static     0
 #endif
+#ifdef CONFIG_LLC_COLORING
+/* Page is cache colored */
+#define _PGC_colored      PG_shift(4)
+#define PGC_colored       PG_mask(1, 4)
+#endif
+/* Page needs to be scrubbed. */
+#define _PGC_need_scrub   PG_shift(5)
+#define PGC_need_scrub    PG_mask(1, 5)
 /* ... */
 /* Page is broken? */
 #define _PGC_broken       PG_shift(7)
@@ -146,20 +171,6 @@ struct page_info
 /* Count of references to this frame. */
 #define PGC_count_width   PG_shift(10)
 #define PGC_count_mask    ((1UL<<PGC_count_width)-1)
-
-/*
- * Page needs to be scrubbed. Since this bit can only be set on a page that is
- * free (i.e. in PGC_state_free) we can reuse PGC_allocated bit.
- */
-#define _PGC_need_scrub   _PGC_allocated
-#define PGC_need_scrub    PGC_allocated
-
-extern mfn_t directmap_mfn_start, directmap_mfn_end;
-extern vaddr_t directmap_virt_end;
-#ifdef CONFIG_ARM_64
-extern vaddr_t directmap_virt_start;
-extern unsigned long directmap_base_pdx;
-#endif
 
 #ifdef CONFIG_ARM_32
 #define is_xen_heap_page(page) is_xen_heap_mfn(page_to_mfn(page))
@@ -183,32 +194,19 @@ extern unsigned long directmap_base_pdx;
 
 #define maddr_get_owner(ma)   (page_get_owner(maddr_to_page((ma))))
 
-#define frame_table ((struct page_info *)FRAMETABLE_VIRT_START)
 /* PDX of the first page in the frame table. */
 extern unsigned long frametable_base_pdx;
-
-extern unsigned long max_page;
-extern unsigned long total_pages;
 
 #define PDX_GROUP_SHIFT SECOND_SHIFT
 
 /* Boot-time pagetable setup */
-extern void setup_pagetables(unsigned long boot_phys_offset);
+extern void setup_pagetables(void);
 /* Map FDT in boot pagetable */
 extern void *early_fdt_map(paddr_t fdt_paddr);
 /* Remove early mappings */
 extern void remove_early_mappings(void);
-/* Allocate and initialise pagetables for a secondary CPU. Sets init_ttbr to the
- * new page table */
-extern int init_secondary_pagetables(int cpu);
-/* Switch secondary CPUS to its own pagetables and finalise MMU setup */
-extern void mmu_init_secondary_cpu(void);
-/*
- * For Arm32, set up the direct-mapped xenheap: up to 1GB of contiguous,
- * always-mapped memory. Base must be 32MB aligned and size a multiple of 32MB.
- * For Arm64, map the region in the directmap area.
- */
-extern void setup_directmap_mappings(unsigned long base_mfn, unsigned long nr_mfns);
+/* Prepare the memory subystem to bring-up the given secondary CPU */
+extern int prepare_secondary_mm(int cpu);
 /* Map a frame table to cover physical addresses ps through pe */
 extern void setup_frametable_mappings(paddr_t ps, paddr_t pe);
 /* map a physical range in virtual memory */
@@ -253,20 +251,31 @@ static inline void __iomem *ioremap_wc(paddr_t start, size_t len)
 #define gaddr_to_gfn(ga)    _gfn(paddr_to_pfn(ga))
 #define mfn_to_maddr(mfn)   pfn_to_paddr(mfn_x(mfn))
 #define maddr_to_mfn(ma)    _mfn(paddr_to_pfn(ma))
-#define vmap_to_mfn(va)     maddr_to_mfn(virt_to_maddr((vaddr_t)va))
+#define vmap_to_mfn(va)     maddr_to_mfn(virt_to_maddr((vaddr_t)(va)))
 #define vmap_to_page(va)    mfn_to_page(vmap_to_mfn(va))
 
 /* Page-align address and convert to frame number format */
 #define paddr_to_pfn_aligned(paddr)    paddr_to_pfn(PAGE_ALIGN(paddr))
 
-static inline paddr_t __virt_to_maddr(vaddr_t va)
-{
-    uint64_t par = va_to_par(va);
-    return (par & PADDR_MASK & PAGE_MASK) | (va & ~PAGE_MASK);
-}
-#define virt_to_maddr(va)   __virt_to_maddr((vaddr_t)(va))
+#define virt_to_maddr(va) ({                                        \
+    vaddr_t va_ = (vaddr_t)(va);                                    \
+    (paddr_t)((va_to_par(va_) & PADDR_MASK & PAGE_MASK) | (va_ & ~PAGE_MASK)); \
+})
 
 #ifdef CONFIG_ARM_32
+/**
+ * Find the virtual address corresponding to a machine address
+ *
+ * Only memory backing the XENHEAP has a corresponding virtual address to
+ * be found. This is so we can save precious virtual space, as it's in
+ * short supply on arm32. This mapping is not subject to PDX compression
+ * because XENHEAP is known to be physically contiguous and can't hence
+ * jump over the PDX hole. This means we can avoid the roundtrips
+ * converting to/from pdx.
+ *
+ * @param ma Machine address
+ * @return Virtual address mapped to `ma`
+ */
 static inline void *maddr_to_virt(paddr_t ma)
 {
     ASSERT(is_xen_heap_mfn(maddr_to_mfn(ma)));
@@ -274,14 +283,26 @@ static inline void *maddr_to_virt(paddr_t ma)
     return (void *)(unsigned long) ma + XENHEAP_VIRT_START;
 }
 #else
+/**
+ * Find the virtual address corresponding to a machine address
+ *
+ * The directmap covers all conventional memory accesible by the
+ * hypervisor. This means it's subject to PDX compression.
+ *
+ * Note there's an extra offset applied (directmap_base_pdx) on top of the
+ * regular PDX compression logic. Its purpose is to skip over the initial
+ * range of non-existing memory, should there be one.
+ *
+ * @param ma Machine address
+ * @return Virtual address mapped to `ma`
+ */
 static inline void *maddr_to_virt(paddr_t ma)
 {
     ASSERT((mfn_to_pdx(maddr_to_mfn(ma)) - directmap_base_pdx) <
            (DIRECTMAP_SIZE >> PAGE_SHIFT));
     return (void *)(XENHEAP_VIRT_START -
                     (directmap_base_pdx << PAGE_SHIFT) +
-                    ((ma & ma_va_bottom_mask) |
-                     ((ma & ma_top_mask) >> pfn_pdx_hole_shift)));
+                    maddr_to_directmapoff(ma));
 }
 #endif
 

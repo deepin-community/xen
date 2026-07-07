@@ -1,21 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * xen/arch/arm/gic-v3-lpi.c
  *
  * ARM GICv3 Locality-specific Peripheral Interrupts (LPI) support
  *
  * Copyright (C) 2016,2017 - ARM Ltd
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; under version 2 of the License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <xen/cpu.h>
@@ -402,7 +391,7 @@ static int cpu_callback(struct notifier_block *nfb, unsigned long action,
         break;
     }
 
-    return !rc ? NOTIFY_DONE : notifier_from_errno(rc);
+    return notifier_from_errno(rc);
 }
 
 static struct notifier_block cpu_nfb = {

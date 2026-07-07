@@ -52,6 +52,14 @@ int tee_domain_init(struct domain *d, uint16_t tee_type)
     return cur_mediator->ops->domain_init(d);
 }
 
+int tee_domain_teardown(struct domain *d)
+{
+    if ( !cur_mediator )
+        return 0;
+
+    return cur_mediator->ops->domain_teardown(d);
+}
+
 int tee_relinquish_resources(struct domain *d)
 {
     if ( !cur_mediator )
@@ -86,7 +94,19 @@ static int __init tee_init(void)
     return 0;
 }
 
-__initcall(tee_init);
+presmp_initcall(tee_init);
+
+void __init init_tee_secondary(void)
+{
+    if ( cur_mediator && cur_mediator->ops->init_secondary )
+        cur_mediator->ops->init_secondary();
+}
+
+void tee_free_domain_ctx(struct domain *d)
+{
+    if ( cur_mediator && cur_mediator->ops->free_domain_ctx)
+        cur_mediator->ops->free_domain_ctx(d);
+}
 
 /*
  * Local variables:

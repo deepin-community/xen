@@ -1,7 +1,9 @@
 #ifndef __ASM_ARM64_CMPXCHG_H
 #define __ASM_ARM64_CMPXCHG_H
 
-extern void __bad_xchg(volatile void *, int);
+#include <xen/bug.h>
+
+extern void __bad_xchg(volatile void *ptr, int size);
 
 static inline unsigned long __xchg(unsigned long x, volatile void *ptr, int size)
 {
@@ -13,7 +15,7 @@ static inline unsigned long __xchg(unsigned long x, volatile void *ptr, int size
 		"1:	ldxrb	%w0, %2\n"
 		"	stlxrb	%w1, %w3, %2\n"
 		"	cbnz	%w1, 1b\n"
-			: "=&r" (ret), "=&r" (tmp), "+Q" (*(u8 *)ptr)
+			: "=&r" (ret), "=&r" (tmp), "+Q" (*(volatile u8 *)ptr)
 			: "r" (x)
 			: "memory");
 		break;
@@ -22,7 +24,7 @@ static inline unsigned long __xchg(unsigned long x, volatile void *ptr, int size
 		"1:	ldxrh	%w0, %2\n"
 		"	stlxrh	%w1, %w3, %2\n"
 		"	cbnz	%w1, 1b\n"
-			: "=&r" (ret), "=&r" (tmp), "+Q" (*(u16 *)ptr)
+			: "=&r" (ret), "=&r" (tmp), "+Q" (*(volatile u16 *)ptr)
 			: "r" (x)
 			: "memory");
 		break;
@@ -31,7 +33,7 @@ static inline unsigned long __xchg(unsigned long x, volatile void *ptr, int size
 		"1:	ldxr	%w0, %2\n"
 		"	stlxr	%w1, %w3, %2\n"
 		"	cbnz	%w1, 1b\n"
-			: "=&r" (ret), "=&r" (tmp), "+Q" (*(u32 *)ptr)
+			: "=&r" (ret), "=&r" (tmp), "+Q" (*(volatile u32 *)ptr)
 			: "r" (x)
 			: "memory");
 		break;
@@ -40,7 +42,7 @@ static inline unsigned long __xchg(unsigned long x, volatile void *ptr, int size
 		"1:	ldxr	%0, %2\n"
 		"	stlxr	%w1, %3, %2\n"
 		"	cbnz	%w1, 1b\n"
-			: "=&r" (ret), "=&r" (tmp), "+Q" (*(u64 *)ptr)
+			: "=&r" (ret), "=&r" (tmp), "+Q" (*(volatile u64 *)ptr)
 			: "r" (x)
 			: "memory");
 		break;
@@ -82,7 +84,7 @@ static inline bool __cmpxchg_case_##name(volatile void *ptr,		\
 		"	stxr" #sz "	%w0, %" #w "4, %2\n"		\
 		"1:\n"							\
 		: "=&r" (res), "=&r" (oldval),				\
-		  "+Q" (*(unsigned long *)ptr)				\
+		  "+Q" (*(volatile unsigned long *)ptr)	\
 		: "Ir" (*old), "r" (new)				\
 		: "cc");						\
 									\

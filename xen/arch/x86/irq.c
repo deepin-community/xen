@@ -21,11 +21,15 @@
 #include <xen/trace.h>
 #include <xen/softirq.h>
 #include <xsm/xsm.h>
+
+#include <asm/apic.h>
+#include <asm/genapic.h>
+#include <asm/io_apic.h>
+#include <asm/irq-vectors.h>
 #include <asm/msi.h>
 #include <asm/current.h>
 #include <asm/flushtlb.h>
-#include <asm/mach-generic/mach_apic.h>
-#include <irq_vectors.h>
+
 #include <public/physdev.h>
 
 /* opt_noirqbalance: If true, software IRQ balancing/affinity is disabled. */
@@ -43,7 +47,7 @@ int __read_mostly opt_irq_vector_map = OPT_IRQ_VECTOR_MAP_DEFAULT;
 static unsigned char __read_mostly irq_max_guests;
 integer_param("irq-max-guests", irq_max_guests);
 
-vmask_t global_used_vector_map;
+static vmask_t global_used_vector_map;
 
 struct irq_desc __read_mostly *irq_desc = NULL;
 
@@ -52,8 +56,6 @@ static DECLARE_BITMAP(used_vectors, X86_NR_VECTORS);
 static DEFINE_SPINLOCK(vector_lock);
 
 DEFINE_PER_CPU(vector_irq_t, vector_irq);
-
-DEFINE_PER_CPU(struct cpu_user_regs *, __irq_regs);
 
 static LIST_HEAD(irq_ratelimit_list);
 static DEFINE_SPINLOCK(irq_ratelimit_lock);
@@ -137,7 +139,7 @@ static void _trace_irq_mask(uint32_t event, int irq, int vector,
 
     memcpy(d.mask, mask,
            min(sizeof(d.mask), BITS_TO_LONGS(nr_cpu_ids) * sizeof(long)));
-    trace_var(event, 1, sizeof(d), &d);
+    trace_time(event, sizeof(d), &d);
 }
 
 static void trace_irq_mask(uint32_t event, int irq, int vector,
@@ -177,7 +179,7 @@ static int __init _bind_irq_vector(struct irq_desc *desc, int vector,
     return 0;
 }
 
-int __init bind_irq_vector(int irq, int vector, const cpumask_t *cpu_mask)
+int __init bind_irq_vector(int irq, int vector, const cpumask_t *mask)
 {
     struct irq_desc *desc = irq_to_desc(irq);
     unsigned long flags;
@@ -187,7 +189,7 @@ int __init bind_irq_vector(int irq, int vector, const cpumask_t *cpu_mask)
 
     spin_lock_irqsave(&desc->lock, flags);
     spin_lock(&vector_lock);
-    ret = _bind_irq_vector(desc, vector, cpu_mask);
+    ret = _bind_irq_vector(desc, vector, mask);
     spin_unlock(&vector_lock);
     spin_unlock_irqrestore(&desc->lock, flags);
 
@@ -231,7 +233,7 @@ static void _clear_irq_vector(struct irq_desc *desc)
         for_each_cpu(cpu, tmp_mask)
         {
             ASSERT(per_cpu(vector_irq, cpu)[old_vector] == irq);
-            TRACE_3D(TRC_HW_IRQ_MOVE_FINISH, irq, old_vector, cpu);
+            TRACE_TIME(TRC_HW_IRQ_MOVE_FINISH, irq, old_vector, cpu);
             per_cpu(vector_irq, cpu)[old_vector] = ~irq;
         }
 
@@ -263,7 +265,7 @@ void __init clear_irq_vector(int irq)
 int create_irq(nodeid_t node, bool grant_access)
 {
     int irq, ret;
-    struct irq_desc *desc;
+    struct irq_desc *desc = NULL ; /* gcc14 -Og or -fcondition-coverage */
 
     for (irq = nr_irqs_gsi; irq < nr_irqs; irq++)
     {
@@ -287,9 +289,9 @@ int create_irq(nodeid_t node, bool grant_access)
                 mask = NULL;
         }
         ret = assign_irq_vector(irq, mask);
-    }
 
-    ASSERT(desc->arch.creator_domid == DOMID_INVALID);
+        ASSERT(desc->arch.creator_domid == DOMID_INVALID);
+    }
 
     if (ret < 0)
     {
@@ -466,22 +468,19 @@ int __init init_irq_data(void)
           vector++ )
         __set_bit(vector, used_vectors);
 
+    /*
+     * Prevent the HPET broadcast vector from being used, until it is known
+     * whether it's actually needed.
+     */
+    __set_bit(HPET_BROADCAST_VECTOR, used_vectors);
+
     return 0;
 }
 
-static void cf_check ack_none(struct irq_desc *desc)
+void cf_check irq_ack_none(struct irq_desc *desc)
 {
     ack_bad_irq(desc->irq);
 }
-
-hw_irq_controller no_irq_type = {
-    "none",
-    irq_startup_none,
-    irq_shutdown_none,
-    irq_enable_none,
-    irq_disable_none,
-    ack_none,
-};
 
 static vmask_t *irq_get_used_vector_mask(int irq)
 {
@@ -555,7 +554,58 @@ static int _assign_irq_vector(struct irq_desc *desc, const cpumask_t *mask)
     }
 
     if ( desc->arch.move_in_progress || desc->arch.move_cleanup_count )
-        return -EAGAIN;
+    {
+        /*
+         * If the current destination is online refuse to shuffle.  Retry after
+         * the in-progress movement has finished.
+         */
+        if ( cpumask_intersects(desc->arch.cpu_mask, &cpu_online_map) )
+            return -EAGAIN;
+
+        /*
+         * Due to the logic in fixup_irqs() that clears offlined CPUs from
+         * ->arch.old_cpu_mask it shouldn't be possible to get here with
+         * ->arch.move_{in_progress,cleanup_count} set and no online CPUs in
+         * ->arch.old_cpu_mask.
+         */
+        ASSERT(valid_irq_vector(desc->arch.old_vector));
+        ASSERT(cpumask_intersects(desc->arch.old_cpu_mask, &cpu_online_map));
+
+        if ( cpumask_intersects(desc->arch.old_cpu_mask, mask) )
+        {
+            /*
+             * Fallback to the old destination if moving is in progress and the
+             * current destination is to be offlined.  This is only possible if
+             * the CPUs in old_cpu_mask intersect with the affinity mask passed
+             * in the 'mask' parameter.
+             */
+            desc->arch.vector = desc->arch.old_vector;
+            cpumask_and(desc->arch.cpu_mask, desc->arch.old_cpu_mask, mask);
+
+            /* Undo any possibly done cleanup. */
+            for_each_cpu(cpu, desc->arch.cpu_mask)
+                per_cpu(vector_irq, cpu)[desc->arch.vector] = irq;
+
+            /* Cancel the pending move and release the current vector. */
+            desc->arch.old_vector = IRQ_VECTOR_UNASSIGNED;
+            cpumask_clear(desc->arch.old_cpu_mask);
+            desc->arch.move_in_progress = 0;
+            desc->arch.move_cleanup_count = 0;
+            if ( desc->arch.used_vectors )
+            {
+                ASSERT(test_bit(old_vector, desc->arch.used_vectors));
+                clear_bit(old_vector, desc->arch.used_vectors);
+            }
+
+            return 0;
+        }
+
+        /*
+         * There's an interrupt movement in progress but the destination(s) in
+         * ->arch.old_cpu_mask are not suitable given the 'mask' parameter, go
+         * through the full logic to find a new vector in a suitable CPU.
+         */
+    }
 
     err = -ENOSPC;
 
@@ -611,7 +661,22 @@ next:
         current_vector = vector;
         current_offset = offset;
 
-        if ( valid_irq_vector(old_vector) )
+        if ( desc->arch.move_in_progress || desc->arch.move_cleanup_count )
+        {
+            ASSERT(!cpumask_intersects(desc->arch.cpu_mask, &cpu_online_map));
+            /*
+             * Special case when evacuating an interrupt from a CPU to be
+             * offlined and the interrupt was already in the process of being
+             * moved.  Leave ->arch.old_{vector,cpu_mask} as-is and just
+             * replace ->arch.{cpu_mask,vector} with the new destination.
+             * Cleanup will be done normally for the old fields, just release
+             * the current vector here.
+             */
+            if ( desc->arch.used_vectors &&
+                 !test_and_clear_bit(old_vector, desc->arch.used_vectors) )
+                ASSERT_UNREACHABLE();
+        }
+        else if ( valid_irq_vector(old_vector) )
         {
             cpumask_and(desc->arch.old_cpu_mask, desc->arch.cpu_mask,
                         &cpu_online_map);
@@ -745,7 +810,7 @@ void move_native_irq(struct irq_desc *desc)
     desc->handler->enable(desc);
 }
 
-void cf_check irq_move_cleanup_interrupt(struct cpu_user_regs *regs)
+void cf_check irq_move_cleanup_interrupt(void)
 {
     unsigned vector, me;
 
@@ -798,13 +863,11 @@ void cf_check irq_move_cleanup_interrupt(struct cpu_user_regs *regs)
                 goto unlock;
             }
             send_IPI_self(IRQ_MOVE_CLEANUP_VECTOR);
-            TRACE_3D(TRC_HW_IRQ_MOVE_CLEANUP_DELAY,
-                     irq, vector, smp_processor_id());
+            TRACE_TIME(TRC_HW_IRQ_MOVE_CLEANUP_DELAY, irq, vector, me);
             goto unlock;
         }
 
-        TRACE_3D(TRC_HW_IRQ_MOVE_CLEANUP,
-                 irq, vector, smp_processor_id());
+        TRACE_TIME(TRC_HW_IRQ_MOVE_CLEANUP, irq, vector, me);
 
         per_cpu(vector_irq, me)[vector] = ~irq;
         desc->arch.move_cleanup_count--;
@@ -915,16 +978,14 @@ uint8_t alloc_hipriority_vector(void)
     return next++;
 }
 
-static void (*direct_apic_vector[X86_NR_VECTORS])(struct cpu_user_regs *);
-void set_direct_apic_vector(
-    uint8_t vector, void (*handler)(struct cpu_user_regs *))
+static void (*direct_apic_vector[X86_NR_VECTORS])(void);
+void set_direct_apic_vector(uint8_t vector, void (*handler)(void))
 {
     BUG_ON(direct_apic_vector[vector] != NULL);
     direct_apic_vector[vector] = handler;
 }
 
-void alloc_direct_apic_vector(
-    uint8_t *vector, void (*handler)(struct cpu_user_regs *))
+void alloc_direct_apic_vector(uint8_t *vector, void (*handler)(void))
 {
     static DEFINE_SPINLOCK(lock);
 
@@ -934,6 +995,13 @@ void alloc_direct_apic_vector(
         set_direct_apic_vector(*vector, handler);
     }
     spin_unlock(&lock);
+}
+
+/* This could free any vectors, but is needed only for low-prio ones. */
+void __init free_lopriority_vector(uint8_t vector)
+{
+    ASSERT(vector < FIRST_HIPRIORITY_VECTOR);
+    clear_bit(vector, used_vectors);
 }
 
 static void cf_check irq_ratelimit_timer_fn(void *data)
@@ -964,7 +1032,7 @@ static int __init cf_check irq_ratelimit_init(void)
 __initcall(irq_ratelimit_init);
 
 int __init request_irq(unsigned int irq, unsigned int irqflags,
-        void (*handler)(int, void *, struct cpu_user_regs *),
+        void (*handler)(int irq, void *dev_id),
         const char * devname, void *dev_id)
 {
     struct irqaction * action;
@@ -1153,9 +1221,9 @@ static void cf_check irq_guest_eoi_timer_fn(void *data)
     for ( i = 0; i < action->nr_guests; i++ )
     {
         struct domain *d = action->guest[i];
-        unsigned int pirq = domain_irq_to_pirq(d, irq);
+        struct pirq *pirq = pirq_info(d, domain_irq_to_pirq(d, irq));
 
-        if ( test_and_clear_bool(pirq_info(d, pirq)->masked) )
+        if ( test_and_clear_bool(pirq->masked) )
             action->in_flight--;
     }
 
@@ -1349,6 +1417,7 @@ void (pirq_cleanup_check)(struct pirq *pirq, struct domain *d)
 
     if ( radix_tree_delete(&d->pirq_tree, pirq->pirq) != pirq )
         BUG();
+    free_pirq_struct(pirq);
 }
 
 /* Flush all ready EOIs from the top of this CPU's pending-EOI stack. */
@@ -1900,7 +1969,7 @@ void do_IRQ(struct cpu_user_regs *regs)
     struct irq_desc  *desc;
     unsigned int      vector = (uint8_t)regs->entry_vector;
     int               irq = this_cpu(vector_irq)[vector];
-    struct cpu_user_regs *old_regs = set_irq_regs(regs);
+    const struct cpu_user_regs *old_regs = set_irq_regs(regs);
 
     perfc_incr(irqs);
     this_cpu(irq_count)++;
@@ -1909,7 +1978,7 @@ void do_IRQ(struct cpu_user_regs *regs)
     if ( irq < 0 )
     {
         if ( direct_apic_vector[vector] )
-            direct_apic_vector[vector](regs);
+            direct_apic_vector[vector]();
         else
         {
             const char *kind = ", LAPIC";
@@ -1938,16 +2007,16 @@ void do_IRQ(struct cpu_user_regs *regs)
                 if ( ~irq < nr_irqs && irq_desc_initialized(desc) )
                 {
                     spin_lock(&desc->lock);
-                    printk("IRQ%d a=%04lx[%04lx,%04lx] v=%02x[%02x] t=%s s=%08x\n",
-                           ~irq, *cpumask_bits(desc->affinity),
-                           *cpumask_bits(desc->arch.cpu_mask),
-                           *cpumask_bits(desc->arch.old_cpu_mask),
+                    printk("IRQ%d a={%*pbl}[{%*pbl},{%*pbl}] v=%02x[%02x] t=%s s=%08x\n",
+                           ~irq, CPUMASK_PR(desc->affinity),
+                           CPUMASK_PR(desc->arch.cpu_mask),
+                           CPUMASK_PR(desc->arch.old_cpu_mask),
                            desc->arch.vector, desc->arch.old_vector,
                            desc->handler->typename, desc->status);
                     spin_unlock(&desc->lock);
                 }
             }
-            TRACE_1D(TRC_HW_IRQ_UNMAPPED_VECTOR, vector);
+            TRACE_TIME(TRC_HW_IRQ_UNMAPPED_VECTOR, vector);
         }
         goto out_no_unlock;
     }
@@ -1988,7 +2057,7 @@ void do_IRQ(struct cpu_user_regs *regs)
 
         tsc_in = tb_init_done ? get_cycles() : 0;
         do_IRQ_guest(desc, vector);
-        TRACE_3D(TRC_HW_IRQ_HANDLED, irq, tsc_in, get_cycles());
+        TRACE_TIME(TRC_HW_IRQ_HANDLED, irq, tsc_in, get_cycles());
         goto out_no_end;
     }
 
@@ -2011,8 +2080,8 @@ void do_IRQ(struct cpu_user_regs *regs)
         spin_unlock_irq(&desc->lock);
 
         tsc_in = tb_init_done ? get_cycles() : 0;
-        action->handler(irq, action->dev_id, regs);
-        TRACE_3D(TRC_HW_IRQ_HANDLED, irq, tsc_in, get_cycles());
+        action->handler(irq, action->dev_id);
+        TRACE_TIME(TRC_HW_IRQ_HANDLED, irq, tsc_in, get_cycles());
 
         spin_lock_irq(&desc->lock);
     }
@@ -2166,7 +2235,7 @@ int map_domain_pirq(
         struct pci_dev *pdev;
         unsigned int nr = 0;
 
-        ASSERT(pcidevs_locked());
+        ASSERT_PDEV_LIST_IS_READ_LOCKED(d);
 
         ret = -ENODEV;
         if ( !cpu_has_apic )
@@ -2176,7 +2245,7 @@ int map_domain_pirq(
         if ( !pdev )
             goto done;
 
-        ret = pci_enable_msi(msi, &msi_desc);
+        ret = pci_enable_msi(pdev, msi, &msi_desc);
         if ( ret )
         {
             if ( ret > 0 )
@@ -2222,6 +2291,7 @@ int map_domain_pirq(
 
             set_domain_irq_pirq(d, irq, info);
             spin_unlock_irqrestore(&desc->lock, flags);
+            desc = NULL;
 
             info = NULL;
             irq = create_irq(NUMA_NO_NODE, true);
@@ -2257,7 +2327,9 @@ int map_domain_pirq(
 
         if ( ret )
         {
-            spin_unlock_irqrestore(&desc->lock, flags);
+            if ( desc )
+                spin_unlock_irqrestore(&desc->lock, flags);
+
             pci_disable_msi(msi_desc);
             if ( nr )
             {
@@ -2323,7 +2395,7 @@ int unmap_domain_pirq(struct domain *d, int pirq)
     if ( (pirq < 0) || (pirq >= d->nr_pirqs) )
         return -EINVAL;
 
-    ASSERT(pcidevs_locked());
+    ASSERT_PDEV_LIST_IS_READ_LOCKED(d);
     ASSERT(rw_is_write_locked(&d->event_lock));
 
     info = pirq_info(d, pirq);
@@ -2531,16 +2603,20 @@ static int __init cf_check setup_dump_irqs(void)
 }
 __initcall(setup_dump_irqs);
 
-/* Reset irq affinities to match the given CPU mask. */
-void fixup_irqs(const cpumask_t *mask, bool verbose)
+/* Evacuate interrupts assigned to CPUs not present in the CPU online map. */
+void fixup_irqs(void)
 {
+    const unsigned int cpu = smp_processor_id();
     unsigned int irq;
     static int warned;
     struct irq_desc *desc;
 
+    /* Only to be called from the context of a CPU going offline. */
+    ASSERT(!cpu_online(cpu));
+
     for ( irq = 0; irq < nr_irqs; irq++ )
     {
-        bool break_affinity = false, set_affinity = true;
+        bool break_affinity = false, set_affinity = true, check_irr = false;
         unsigned int vector;
         cpumask_t *affinity = this_cpu(scratch_cpumask);
 
@@ -2555,19 +2631,15 @@ void fixup_irqs(const cpumask_t *mask, bool verbose)
 
         vector = irq_to_vector(irq);
         if ( vector >= FIRST_HIPRIORITY_VECTOR &&
-             vector <= LAST_HIPRIORITY_VECTOR )
+             vector <= LAST_HIPRIORITY_VECTOR &&
+             desc->handler == &no_irq_type )
         {
-            cpumask_and(desc->arch.cpu_mask, desc->arch.cpu_mask, mask);
-
             /*
              * This can in particular happen when parking secondary threads
              * during boot and when the serial console wants to use a PCI IRQ.
              */
-            if ( desc->handler == &no_irq_type )
-            {
-                spin_unlock(&desc->lock);
-                continue;
-            }
+            spin_unlock(&desc->lock);
+            continue;
         }
 
         if ( desc->arch.move_cleanup_count )
@@ -2578,42 +2650,69 @@ void fixup_irqs(const cpumask_t *mask, bool verbose)
             desc->arch.move_cleanup_count -= cpumask_weight(affinity);
             if ( !desc->arch.move_cleanup_count )
                 release_old_vec(desc);
+            else
+                /*
+                 * Adjust old_cpu_mask to account for the offline CPUs,
+                 * otherwise further calls to fixup_irqs() could subtract those
+                 * again and possibly underflow the counter.
+                 */
+                cpumask_andnot(desc->arch.old_cpu_mask, desc->arch.old_cpu_mask,
+                               affinity);
         }
 
-        if ( !desc->action || cpumask_subset(desc->affinity, mask) )
+        if ( desc->arch.move_in_progress &&
+             cpumask_test_cpu(cpu, desc->arch.old_cpu_mask) )
+        {
+            /*
+             * This to be offlined CPU was the target of an interrupt that's
+             * been moved, and the new destination target hasn't yet
+             * acknowledged any interrupt from it.
+             *
+             * We know the interrupt is configured to target the new CPU at
+             * this point, so we can check IRR for any pending vectors and
+             * forward them to the new destination.
+             *
+             * Note that for the other case of an interrupt movement being in
+             * progress (move_cleanup_count being non-zero) we know the new
+             * destination has already acked at least one interrupt from this
+             * source, and hence there's no need to forward any stale
+             * interrupts.
+             */
+            if ( apic_irr_read(desc->arch.old_vector) )
+                send_IPI_mask(cpumask_of(cpumask_any(desc->arch.cpu_mask)),
+                              desc->arch.vector);
+
+            /*
+             * This CPU is going offline, remove it from ->arch.old_cpu_mask
+             * and possibly release the old vector if the old mask becomes
+             * empty.
+             *
+             * Note cleaning ->arch.old_cpu_mask is required if the CPU is
+             * brought offline and then online again, as when re-onlined the
+             * per-cpu vector table will no longer have ->arch.old_vector
+             * setup, and hence ->arch.old_cpu_mask would be stale.
+             */
+            cpumask_clear_cpu(cpu, desc->arch.old_cpu_mask);
+            if ( cpumask_empty(desc->arch.old_cpu_mask) )
+            {
+                desc->arch.move_in_progress = 0;
+                release_old_vec(desc);
+            }
+        }
+
+        /*
+         * Avoid shuffling the interrupt around as long as current target CPUs
+         * are a subset of the online mask.  What fixup_irqs() cares about is
+         * evacuating interrupts from CPUs not in the online mask.
+         */
+        if ( !desc->action || cpumask_subset(desc->arch.cpu_mask,
+                                             &cpu_online_map) )
         {
             spin_unlock(&desc->lock);
             continue;
         }
 
-        /*
-         * In order for the affinity adjustment below to be successful, we
-         * need _assign_irq_vector() to succeed. This in particular means
-         * clearing desc->arch.move_in_progress if this would otherwise
-         * prevent the function from succeeding. Since there's no way for the
-         * flag to get cleared anymore when there's no possible destination
-         * left (the only possibility then would be the IRQs enabled window
-         * after this loop), there's then also no race with us doing it here.
-         *
-         * Therefore the logic here and there need to remain in sync.
-         */
-        if ( desc->arch.move_in_progress &&
-             !cpumask_intersects(mask, desc->arch.cpu_mask) )
-        {
-            unsigned int cpu;
-
-            cpumask_and(affinity, desc->arch.old_cpu_mask, &cpu_online_map);
-
-            spin_lock(&vector_lock);
-            for_each_cpu(cpu, affinity)
-                per_cpu(vector_irq, cpu)[desc->arch.old_vector] = ~irq;
-            spin_unlock(&vector_lock);
-
-            release_old_vec(desc);
-            desc->arch.move_in_progress = 0;
-        }
-
-        if ( !cpumask_intersects(mask, desc->affinity) )
+        if ( !cpumask_intersects(&cpu_online_map, desc->affinity) )
         {
             break_affinity = true;
             cpumask_setall(affinity);
@@ -2623,6 +2722,14 @@ void fixup_irqs(const cpumask_t *mask, bool verbose)
 
         if ( desc->handler->disable )
             desc->handler->disable(desc);
+
+        /*
+         * If the current CPU is going offline and is (one of) the target(s) of
+         * the interrupt, signal to check whether there are any pending vectors
+         * to be handled in the local APIC after the interrupt has been moved.
+         */
+        if ( cpumask_test_cpu(cpu, desc->arch.cpu_mask) )
+            check_irr = true;
 
         if ( desc->handler->set_affinity )
             desc->handler->set_affinity(desc, affinity);
@@ -2634,22 +2741,26 @@ void fixup_irqs(const cpumask_t *mask, bool verbose)
 
         cpumask_copy(affinity, desc->affinity);
 
-        spin_unlock(&desc->lock);
+        if ( check_irr && apic_irr_read(vector) )
+            /*
+             * Forward pending interrupt to the new destination, this CPU is
+             * going offline and otherwise the interrupt would be lost.
+             *
+             * Do the IRR check as late as possible before releasing the irq
+             * desc in order for any in-flight interrupts to be delivered to
+             * the lapic.
+             */
+            send_IPI_mask(cpumask_of(cpumask_any(desc->arch.cpu_mask)),
+                          desc->arch.vector);
 
-        if ( !verbose )
-            continue;
+        spin_unlock(&desc->lock);
 
         if ( !set_affinity )
             printk("Cannot set affinity for IRQ%u\n", irq);
         else if ( break_affinity )
-            printk("Broke affinity for IRQ%u, new: %*pb\n",
+            printk("Broke affinity for IRQ%u, new: {%*pbl}\n",
                    irq, CPUMASK_PR(affinity));
     }
-
-    /* That doesn't seem sufficient.  Give it 1ms. */
-    local_irq_enable();
-    mdelay(1);
-    local_irq_disable();
 }
 
 void fixup_eoi(void)
@@ -2803,6 +2914,7 @@ static int allocate_pirq(struct domain *d, int index, int pirq, int irq,
                     d->domain_id, index, pirq, current_pirq);
             if ( current_pirq < 0 )
                 return -EBUSY;
+            pirq = current_pirq;
         }
         else if ( type == MAP_PIRQ_TYPE_MULTI_MSI )
         {
@@ -2886,7 +2998,9 @@ int allocate_and_map_gsi_pirq(struct domain *d, int index, int *pirq_p)
 int allocate_and_map_msi_pirq(struct domain *d, int index, int *pirq_p,
                               int type, struct msi_info *msi)
 {
-    int irq, pirq, ret;
+    int irq = -1, pirq, ret;
+
+    ASSERT_PDEV_LIST_IS_READ_LOCKED(d);
 
     switch ( type )
     {
@@ -2894,11 +3008,10 @@ int allocate_and_map_msi_pirq(struct domain *d, int index, int *pirq_p,
         if ( !msi->table_base )
             msi->entry_nr = 1;
         irq = index;
-        if ( irq == -1 )
-        {
+        fallthrough;
     case MAP_PIRQ_TYPE_MULTI_MSI:
+        if( irq == -1 )
             irq = create_irq(NUMA_NO_NODE, true);
-        }
 
         if ( irq < nr_irqs_gsi || irq >= nr_irqs )
         {
@@ -2917,7 +3030,6 @@ int allocate_and_map_msi_pirq(struct domain *d, int index, int *pirq_p,
 
     msi->irq = irq;
 
-    pcidevs_lock();
     /* Verify or get pirq. */
     write_lock(&d->event_lock);
     pirq = allocate_pirq(d, index, *pirq_p, irq, type, &msi->entry_nr);
@@ -2933,7 +3045,6 @@ int allocate_and_map_msi_pirq(struct domain *d, int index, int *pirq_p,
 
  done:
     write_unlock(&d->event_lock);
-    pcidevs_unlock();
     if ( ret )
     {
         switch ( type )

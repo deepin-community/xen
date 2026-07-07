@@ -1,22 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * x86 SMP booting functions
  *
  * This inherits a great deal from Linux's SMP boot code:
  *  (c) 1995 Alan Cox, Building #3 <alan@redhat.com>
  *  (c) 1998, 1999, 2000 Ingo Molnar <mingo@redhat.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <xen/init.h>
@@ -32,6 +20,9 @@
 #include <xen/serial.h>
 #include <xen/numa.h>
 #include <xen/cpu.h>
+
+#include <asm/apic.h>
+#include <asm/io_apic.h>
 #include <asm/cpuidle.h>
 #include <asm/current.h>
 #include <asm/mc146818rtc.h>
@@ -42,14 +33,15 @@
 #include <asm/microcode.h>
 #include <asm/msr.h>
 #include <asm/mtrr.h>
+#include <asm/prot-key.h>
 #include <asm/setup.h>
 #include <asm/spec_ctrl.h>
 #include <asm/time.h>
 #include <asm/tboot.h>
-#include <irq_vectors.h>
-#include <mach_apic.h>
+#include <asm/trampoline.h>
+#include <asm/irq-vectors.h>
 
-unsigned long __read_mostly trampoline_phys;
+uint32_t __ro_after_init trampoline_phys;
 enum ap_boot_method __read_mostly ap_boot_method = AP_BOOT_NORMAL;
 
 /* representing HT siblings of each logical CPU */
@@ -59,6 +51,9 @@ DEFINE_PER_CPU_READ_MOSTLY(cpumask_var_t, cpu_core_mask);
 
 DEFINE_PER_CPU_READ_MOSTLY(cpumask_var_t, scratch_cpumask);
 static cpumask_t scratch_cpu0mask;
+
+DEFINE_PER_CPU_READ_MOSTLY(cpumask_var_t, hpet_scratch_cpumask);
+static cpumask_t hpet_scratch_cpu0mask;
 
 DEFINE_PER_CPU_READ_MOSTLY(cpumask_var_t, send_ipi_cpumask);
 static cpumask_t send_ipi_cpu0mask;
@@ -237,7 +232,7 @@ static int booting_cpu;
 /* CPUs for which sibling maps can be computed. */
 static cpumask_t cpu_sibling_setup_map;
 
-static void link_thread_siblings(int cpu1, int cpu2)
+static void link_thread_siblings(unsigned int cpu1, unsigned int cpu2)
 {
     cpumask_set_cpu(cpu1, per_cpu(cpu_sibling_mask, cpu2));
     cpumask_set_cpu(cpu2, per_cpu(cpu_sibling_mask, cpu1));
@@ -321,7 +316,7 @@ static void set_cpu_sibling_map(unsigned int cpu)
     }
 }
 
-void start_secondary(void *unused)
+void asmlinkage start_secondary(void *unused)
 {
     struct cpu_info *info = get_cpu_info();
 
@@ -364,6 +359,9 @@ void start_secondary(void *unused)
 
     /* Full exception support from here on in. */
 
+    if ( cpu_has_pks )
+        wrpkrs_and_cache(0); /* Must be before setting CR4.PKS */
+
     /* Safe to enable feature such as CR4.MCE with the IDT set up now. */
     write_cr4(mmu_cr4_features);
 
@@ -371,7 +369,9 @@ void start_secondary(void *unused)
 
     cpu_init();
 
-    initialize_cpu_data(cpu);
+    /* During resume, must not clear previously collected data. */
+    if ( system_state != SYS_STATE_resume )
+        initialize_cpu_data(cpu);
 
     microcode_update_one();
 
@@ -386,6 +386,7 @@ void start_secondary(void *unused)
         info->last_spec_ctrl = default_xen_spec_ctrl;
     }
     update_mcu_opt_ctrl();
+    update_pb_opt_ctrl();
 
     tsx_init(); /* Needs microcode.  May change HLE/RTM feature bits. */
 
@@ -964,7 +965,13 @@ static void cpu_smpboot_free(unsigned int cpu, bool remove)
     unsigned int socket = cpu_to_socket(cpu);
     struct cpuinfo_x86 *c = cpu_data;
 
-    if ( cpumask_empty(socket_cpumask[socket]) )
+    /*
+     * We may come here without the CPU having run through CPU identification.
+     * In that case the socket number cannot be relied upon, but the respective
+     * socket_cpumask[] slot also wouldn't have been set.
+     */
+    if ( c[cpu].apicid != boot_cpu_data.apicid &&
+         cpumask_empty(socket_cpumask[socket]) )
     {
         xfree(socket_cpumask[socket]);
         socket_cpumask[socket] = NULL;
@@ -974,14 +981,19 @@ static void cpu_smpboot_free(unsigned int cpu, bool remove)
 
     if ( remove )
     {
-        c[cpu].phys_proc_id = XEN_INVALID_SOCKET_ID;
-        c[cpu].cpu_core_id = XEN_INVALID_CORE_ID;
-        c[cpu].compute_unit_id = INVALID_CUID;
+        if ( system_state != SYS_STATE_suspend )
+        {
+            c[cpu].phys_proc_id = XEN_INVALID_SOCKET_ID;
+            c[cpu].cpu_core_id = XEN_INVALID_CORE_ID;
+            c[cpu].compute_unit_id = INVALID_CUID;
+        }
 
         FREE_CPUMASK_VAR(per_cpu(cpu_sibling_mask, cpu));
         FREE_CPUMASK_VAR(per_cpu(cpu_core_mask, cpu));
         if ( per_cpu(scratch_cpumask, cpu) != &scratch_cpu0mask )
             FREE_CPUMASK_VAR(per_cpu(scratch_cpumask, cpu));
+        if ( per_cpu(hpet_scratch_cpumask, cpu) != &hpet_scratch_cpu0mask )
+            FREE_CPUMASK_VAR(per_cpu(hpet_scratch_cpumask, cpu));
         if ( per_cpu(send_ipi_cpumask, cpu) != &send_ipi_cpu0mask )
             FREE_CPUMASK_VAR(per_cpu(send_ipi_cpumask, cpu));
     }
@@ -1112,6 +1124,7 @@ static int cpu_smpboot_alloc(unsigned int cpu)
     if ( !(cond_zalloc_cpumask_var(&per_cpu(cpu_sibling_mask, cpu)) &&
            cond_zalloc_cpumask_var(&per_cpu(cpu_core_mask, cpu)) &&
            cond_alloc_cpumask_var(&per_cpu(scratch_cpumask, cpu)) &&
+           cond_alloc_cpumask_var(&per_cpu(hpet_scratch_cpumask, cpu)) &&
            cond_alloc_cpumask_var(&per_cpu(send_ipi_cpumask, cpu))) )
         goto out;
 
@@ -1144,7 +1157,7 @@ static int cf_check cpu_smpboot_callback(
         break;
     }
 
-    return !rc ? NOTIFY_DONE : notifier_from_errno(rc);
+    return notifier_from_errno(rc);
 }
 
 static struct notifier_block cpu_smpboot_nfb = {
@@ -1200,7 +1213,7 @@ void __init smp_prepare_cpus(void)
      * CPU too, but we do it for the sake of robustness anyway.
      * Makes no sense to do this check in clustered apic mode, so skip it
      */
-    if ( !check_apicid_present(boot_cpu_physical_apicid) )
+    if ( !physid_isset(boot_cpu_physical_apicid, phys_cpu_present_map) )
     {
         printk("weird, boot CPU (#%d) not listed by the BIOS.\n",
                boot_cpu_physical_apicid);
@@ -1239,6 +1252,7 @@ void __init smp_prepare_boot_cpu(void)
     cpumask_set_cpu(cpu, &cpu_present_map);
 #if NR_CPUS > 2 * BITS_PER_LONG
     per_cpu(scratch_cpumask, cpu) = &scratch_cpu0mask;
+    per_cpu(hpet_scratch_cpumask, cpu) = &hpet_scratch_cpu0mask;
     per_cpu(send_ipi_cpumask, cpu) = &send_ipi_cpu0mask;
 #endif
 
@@ -1287,7 +1301,7 @@ void __cpu_disable(void)
 
     /* It's now safe to remove this processor from the online map */
     cpumask_clear_cpu(cpu, &cpu_online_map);
-    fixup_irqs(&cpu_online_map, 1);
+    fixup_irqs();
     fixup_eoi();
 }
 
@@ -1341,7 +1355,7 @@ int cpu_add(uint32_t apic_id, uint32_t acpi_id, uint32_t pxm)
 
     x86_acpiid_to_apicid[acpi_id] = apic_id;
 
-    if ( !srat_disabled() )
+    if ( !numa_disabled() )
     {
         nodeid_t node = setup_node(pxm);
 

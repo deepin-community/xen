@@ -24,6 +24,7 @@
 #define ICH_EISR_EL2              S3_4_C12_C11_3
 #define ICH_ELSR_EL2              S3_4_C12_C11_5
 #define ICH_VMCR_EL2              S3_4_C12_C11_7
+#define ZCR_EL2                   S3_4_C1_C2_0
 
 #define __LR0_EL2(x)              S3_4_C12_C12_ ## x
 #define __LR8_EL2(x)              S3_4_C12_C13_ ## x
@@ -86,6 +87,9 @@
 #endif
 #ifndef ID_AA64ISAR2_EL1
 #define ID_AA64ISAR2_EL1            S3_0_C0_C6_2
+#endif
+#ifndef ZCR_EL1
+#define ZCR_EL1                     S3_0_C1_C2_0
 #endif
 
 /* ID registers (imported from arm64/include/asm/sysreg.h in Linux) */
@@ -461,7 +465,7 @@
 /* Access to system registers */
 
 #define WRITE_SYSREG64(v, name) do {                    \
-    uint64_t _r = v;                                    \
+    uint64_t _r = (v);                                  \
     asm volatile("msr "__stringify(name)", %0" : : "r" (_r));       \
 } while (0)
 #define READ_SYSREG64(name) ({                          \
@@ -471,6 +475,11 @@
 
 #define READ_SYSREG(name)     READ_SYSREG64(name)
 #define WRITE_SYSREG(v, name) WRITE_SYSREG64(v, name)
+
+/* Wrappers for accessing interrupt controller list registers. */
+#define ICH_LR_REG(index)          ICH_LR ## index ## _EL2
+#define WRITE_SYSREG_LR(v, index)  WRITE_SYSREG(v, ICH_LR_REG(index))
+#define READ_SYSREG_LR(index)      READ_SYSREG(ICH_LR_REG(index))
 
 #endif /* _ASM_ARM_ARM64_SYSREGS_H */
 

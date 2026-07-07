@@ -1,17 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /******************************************************************************
  * asm-x86/guest/hypervisor.h
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms and conditions of the GNU General Public
- * License, version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public
- * License along with this program; If not, see <http://www.gnu.org/licenses/>.
  *
  * Copyright (c) 2019 Microsoft.
  */
@@ -33,7 +22,7 @@ struct hypervisor_ops {
     /* Resume from suspension */
     void (*resume)(void);
     /* Fix up e820 map */
-    void (*e820_fixup)(struct e820map *e820);
+    void (*e820_fixup)(void);
     /* L0 assisted TLB flush */
     int (*flush_tlb)(const cpumask_t *mask, const void *va, unsigned int flags);
 };
@@ -44,7 +33,7 @@ const char *hypervisor_probe(void);
 void hypervisor_setup(void);
 int hypervisor_ap_setup(void);
 void hypervisor_resume(void);
-void hypervisor_e820_fixup(struct e820map *e820);
+void hypervisor_e820_fixup(void);
 /*
  * L0 assisted TLB flush.
  * mask: cpumask of the dirty vCPUs that should be flushed.
@@ -63,7 +52,7 @@ static inline const char *hypervisor_probe(void) { return NULL; }
 static inline void hypervisor_setup(void) { ASSERT_UNREACHABLE(); }
 static inline int hypervisor_ap_setup(void) { return 0; }
 static inline void hypervisor_resume(void) { ASSERT_UNREACHABLE(); }
-static inline void hypervisor_e820_fixup(struct e820map *e820) {}
+static inline void hypervisor_e820_fixup(void) {}
 static inline int hypervisor_flush_tlb(const cpumask_t *mask, const void *va,
                                        unsigned int flags)
 {

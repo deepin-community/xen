@@ -72,12 +72,14 @@
  */
 
 #include <xen/acpi.h>
+#include <xen/bitops.h>
 #include <xen/config.h>
 #include <xen/delay.h>
 #include <xen/errno.h>
 #include <xen/err.h>
 #include <xen/irq.h>
 #include <xen/lib.h>
+#include <xen/linux-compat.h>
 #include <xen/list.h>
 #include <xen/mm.h>
 #include <xen/rbtree.h>
@@ -111,7 +113,7 @@
 #define GFP_KERNEL		0
 
 /* Device logger functions */
-#define dev_name(dev)	dt_node_full_name(dev->of_node)
+#define dev_name(dev)	dt_node_full_name((dev)->of_node)
 #define dev_dbg(dev, fmt, ...)			\
 	printk(XENLOG_DEBUG "SMMUv3: %s: " fmt, dev_name(dev), ## __VA_ARGS__)
 #define dev_notice(dev, fmt, ...)		\
@@ -198,30 +200,6 @@ static inline void dev_iommu_priv_set(struct device *dev, void *priv)
 	struct iommu_fwspec *fwspec = dev_iommu_fwspec_get(dev);
 
 	fwspec->iommu_priv = priv;
-}
-
-static int platform_get_irq_byname_optional(struct device *dev,
-				const char *name)
-{
-	int index, ret;
-	struct dt_device_node *np  = dev_to_dt(dev);
-
-	if (unlikely(!name))
-		return -EINVAL;
-
-	index = dt_property_match_string(np, "interrupt-names", name);
-	if (index < 0) {
-		dev_info(dev, "IRQ %s not found\n", name);
-		return index;
-	}
-
-	ret = platform_get_irq(np, index);
-	if (ret < 0) {
-		dev_err(dev, "failed to get irq index %d\n", index);
-		return -ENODEV;
-	}
-
-	return ret;
 }
 
 /* Start of Linux SMMUv3 code */
@@ -904,8 +882,7 @@ static void arm_smmu_priq_tasklet(void *dev)
 
 static int arm_smmu_device_disable(struct arm_smmu_device *smmu);
 
-static void arm_smmu_gerror_handler(int irq, void *dev,
-				struct cpu_user_regs *regs)
+static void arm_smmu_gerror_handler(int irq, void *dev)
 {
 	u32 gerror, gerrorn, active;
 	struct arm_smmu_device *smmu = dev;
@@ -950,12 +927,11 @@ static void arm_smmu_gerror_handler(int irq, void *dev,
 	writel(gerror, smmu->base + ARM_SMMU_GERRORN);
 }
 
-static void arm_smmu_combined_irq_handler(int irq, void *dev,
-				struct cpu_user_regs *regs)
+static void arm_smmu_combined_irq_handler(int irq, void *dev)
 {
 	struct arm_smmu_device *smmu = dev;
 
-	arm_smmu_gerror_handler(irq, dev, regs);
+	arm_smmu_gerror_handler(irq, dev);
 
 	tasklet_schedule(&(smmu->combined_irq_tasklet));
 }
@@ -969,16 +945,14 @@ static void arm_smmu_combined_irq_tasklet(void *dev)
 		arm_smmu_priq_tasklet(dev);
 }
 
-static void arm_smmu_evtq_irq_tasklet(int irq, void *dev,
-				struct cpu_user_regs *regs)
+static void arm_smmu_evtq_irq_tasklet(int irq, void *dev)
 {
 	struct arm_smmu_device *smmu = dev;
 
 	tasklet_schedule(&(smmu->evtq_irq_tasklet));
 }
 
-static void arm_smmu_priq_irq_tasklet(int irq, void *dev,
-				struct cpu_user_regs *regs)
+static void arm_smmu_priq_irq_tasklet(int irq, void *dev)
 {
 	struct arm_smmu_device *smmu = dev;
 
@@ -1071,10 +1045,10 @@ static int arm_smmu_atc_inv_domain(struct arm_smmu_domain *smmu_domain,
 	 * before we read 'nr_ats_masters' in case of a concurrent call to
 	 * arm_smmu_enable_ats():
 	 *
-	 *	// unmap()			// arm_smmu_enable_ats()
-	 *	TLBI+SYNC			atomic_inc(&nr_ats_masters);
-	 *	smp_mb();			[...]
-	 *	atomic_read(&nr_ats_masters);	pci_enable_ats() // writel()
+	 *	--- unmap() ---                 --- arm_smmu_enable_ats() ---
+	 *	TLBI+SYNC                       atomic_inc(&nr_ats_masters);
+	 *	smp_mb();                       [...]
+	 *	atomic_read(&nr_ats_masters);   pci_enable_ats() (see writel())
 	 *
 	 * Ensures that we always see the incremented 'nr_ats_masters' count if
 	 * ATS was enabled at the PCI device before completion of the TLBI.
@@ -1376,7 +1350,8 @@ static int arm_smmu_enable_pasid(struct arm_smmu_master *master)
 	return 0;
 }
 
-static void arm_smmu_disable_pasid(struct arm_smmu_master *master)
+static void __maybe_unused
+arm_smmu_disable_pasid(struct arm_smmu_master *master)
 {
 	struct pci_dev *pdev;
 
@@ -1405,7 +1380,8 @@ static inline int arm_smmu_enable_pasid(struct arm_smmu_master *master)
 	return 0;
 }
 
-static inline void arm_smmu_disable_pasid(struct arm_smmu_master *master) { }
+static inline void __maybe_unused
+arm_smmu_disable_pasid(struct arm_smmu_master *master) { }
 #endif /* CONFIG_PCI_ATS */
 
 static void arm_smmu_detach_dev(struct arm_smmu_master *master)
@@ -1490,7 +1466,7 @@ static bool arm_smmu_sid_in_range(struct arm_smmu_device *smmu, u32 sid)
 	return sid < limit;
 }
 /* Forward declaration */
-static struct arm_smmu_device *arm_smmu_get_by_dev(struct device *dev);
+static struct arm_smmu_device *arm_smmu_get_by_dev(const struct device *dev);
 
 static int arm_smmu_add_device(u8 devfn, struct device *dev)
 {
@@ -1569,7 +1545,7 @@ static int arm_smmu_dt_xlate(struct device *dev,
 }
 
 /* Probing and initialisation functions */
-static int arm_smmu_init_one_queue(struct arm_smmu_device *smmu,
+static int __init arm_smmu_init_one_queue(struct arm_smmu_device *smmu,
 				   struct arm_smmu_queue *q,
 				   void __iomem *page,
 				   unsigned long prod_off,
@@ -1612,7 +1588,7 @@ static int arm_smmu_init_one_queue(struct arm_smmu_device *smmu,
 	return 0;
 }
 
-static int arm_smmu_init_queues(struct arm_smmu_device *smmu)
+static int __init arm_smmu_init_queues(struct arm_smmu_device *smmu)
 {
 	int ret;
 
@@ -1748,7 +1724,7 @@ static int arm_smmu_init_strtab(struct arm_smmu_device *smmu)
 	return 0;
 }
 
-static int arm_smmu_init_structures(struct arm_smmu_device *smmu)
+static int __init arm_smmu_init_structures(struct arm_smmu_device *smmu)
 {
 	int ret;
 
@@ -1770,7 +1746,8 @@ static int arm_smmu_write_reg_sync(struct arm_smmu_device *smmu, u32 val,
 }
 
 /* GBPA is "special" */
-static int arm_smmu_update_gbpa(struct arm_smmu_device *smmu, u32 set, u32 clr)
+static int __init arm_smmu_update_gbpa(struct arm_smmu_device *smmu,
+                                       u32 set, u32 clr)
 {
 	int ret;
 	u32 reg, __iomem *gbpa = smmu->base + ARM_SMMU_GBPA;
@@ -1866,7 +1843,7 @@ static void arm_smmu_setup_msis(struct arm_smmu_device *smmu)
 static inline void arm_smmu_setup_msis(struct arm_smmu_device *smmu) { }
 #endif /* CONFIG_MSI */
 
-static void arm_smmu_free_irqs(struct arm_smmu_device *smmu)
+static void __init arm_smmu_free_irqs(struct arm_smmu_device *smmu)
 {
 	int irq;
 
@@ -1950,7 +1927,7 @@ err_free_evtq_irq:
 	return ret;
 }
 
-static int arm_smmu_setup_irqs(struct arm_smmu_device *smmu)
+static int __init arm_smmu_setup_irqs(struct arm_smmu_device *smmu)
 {
 	int ret, irq;
 	u32 irqen_flags = IRQ_CTRL_EVTQ_IRQEN | IRQ_CTRL_GERROR_IRQEN;
@@ -2012,7 +1989,7 @@ static int arm_smmu_device_disable(struct arm_smmu_device *smmu)
 	return ret;
 }
 
-static int arm_smmu_device_reset(struct arm_smmu_device *smmu)
+static int __init arm_smmu_device_reset(struct arm_smmu_device *smmu)
 {
 	int ret;
 	u32 reg, enables;
@@ -2222,6 +2199,7 @@ static int arm_smmu_device_hw_probe(struct arm_smmu_device *smmu)
 		fallthrough;
 	case IDR0_STALL_MODEL_STALL:
 		smmu->features |= ARM_SMMU_FEAT_STALLS;
+		break;
 	}
 
 	if (reg & IDR0_S2P)
@@ -2323,6 +2301,7 @@ static int arm_smmu_device_hw_probe(struct arm_smmu_device *smmu)
 		fallthrough;
 	case IDR5_OAS_48_BIT:
 		smmu->oas = 48;
+		break;
 	}
 
 	smmu->oas = min_t(unsigned long, PADDR_BITS, smmu->oas);
@@ -2427,11 +2406,12 @@ static void arm_smmu_free_structures(struct arm_smmu_device *smmu)
 		xfree(smmu->strtab_cfg.l1_desc);
 }
 
-static int arm_smmu_device_probe(struct platform_device *pdev)
+static int __init arm_smmu_device_probe(struct platform_device *pdev)
 {
 	int irq, ret;
 	paddr_t ioaddr, iosize;
 	struct arm_smmu_device *smmu;
+	struct dt_device_node *np = dev_to_dt(pdev);
 
 	smmu = xzalloc(struct arm_smmu_device);
 	if (!smmu)
@@ -2449,7 +2429,7 @@ static int arm_smmu_device_probe(struct platform_device *pdev)
 	}
 
 	/* Base address */
-	ret = dt_device_get_address(dev_to_dt(pdev), 0, &ioaddr, &iosize);
+	ret = dt_device_get_paddr(np, 0, &ioaddr, &iosize);
 	if (ret)
 		goto out_free_smmu;
 
@@ -2482,19 +2462,19 @@ static int arm_smmu_device_probe(struct platform_device *pdev)
 
 	/* Interrupt lines */
 
-	irq = platform_get_irq_byname_optional(pdev, "combined");
+	irq = platform_get_irq_byname(np, "combined");
 	if (irq > 0)
 		smmu->combined_irq = irq;
 	else {
-		irq = platform_get_irq_byname_optional(pdev, "eventq");
+		irq = platform_get_irq_byname(np, "eventq");
 		if (irq > 0)
 			smmu->evtq.q.irq = irq;
 
-		irq = platform_get_irq_byname_optional(pdev, "priq");
+		irq = platform_get_irq_byname(np, "priq");
 		if (irq > 0)
 			smmu->priq.q.irq = irq;
 
-		irq = platform_get_irq_byname_optional(pdev, "gerror");
+		irq = platform_get_irq_byname(np, "gerror");
 		if (irq > 0)
 			smmu->gerr_irq = irq;
 	}
@@ -2547,6 +2527,15 @@ static const struct dt_device_match arm_smmu_of_match[] = {
 };
 
 /* Start of Xen specific code. */
+
+/*
+ * Platform features. It indicates the list of features supported by all
+ * SMMUs. Actually we only care about coherent table walk, which in case of
+ * SMMUv3 is implied by the overall coherency feature (refer ARM IHI 0070 E.A,
+ * section 3.15 and SMMU_IDR0.COHACC bit description).
+ */
+static uint32_t __ro_after_init platform_features = ARM_SMMU_FEAT_COHERENCY;
+
 static int __must_check arm_smmu_iotlb_flush_all(struct domain *d)
 {
 	struct arm_smmu_xen_domain *xen_domain = dom_iommu(d)->arch.priv;
@@ -2577,7 +2566,7 @@ static int __must_check arm_smmu_iotlb_flush(struct domain *d, dfn_t dfn,
 	return arm_smmu_iotlb_flush_all(d);
 }
 
-static struct arm_smmu_device *arm_smmu_get_by_dev(struct device *dev)
+static struct arm_smmu_device *arm_smmu_get_by_dev(const struct device *dev)
 {
 	struct arm_smmu_device *smmu = NULL;
 
@@ -2729,8 +2718,12 @@ static int arm_smmu_iommu_xen_domain_init(struct domain *d)
 	INIT_LIST_HEAD(&xen_domain->contexts);
 
 	dom_iommu(d)->arch.priv = xen_domain;
-	return 0;
 
+	/* Coherent walk can be enabled only when all SMMUs support it. */
+	if (platform_features & ARM_SMMU_FEAT_COHERENCY)
+		iommu_set_feature(d, IOMMU_FEAT_COHERENT_WALK);
+
+	return 0;
 }
 
 static void arm_smmu_iommu_xen_domain_teardown(struct domain *d)
@@ -2759,6 +2752,7 @@ static __init int arm_smmu_dt_init(struct dt_device_node *dev,
 				const void *data)
 {
 	int rc;
+	const struct arm_smmu_device *smmu;
 
 	/*
 	 * Even if the device can't be initialized, we don't want to
@@ -2771,6 +2765,14 @@ static __init int arm_smmu_dt_init(struct dt_device_node *dev,
 		return rc;
 
 	iommu_set_ops(&arm_smmu_iommu_ops);
+
+	/* Find the just added SMMU and retrieve its features. */
+	smmu = arm_smmu_get_by_dev(dt_to_dev(dev));
+
+	/* It would be a bug not to find the SMMU we just added. */
+	BUG_ON(!smmu);
+
+	platform_features &= smmu->features;
 
 	return 0;
 }

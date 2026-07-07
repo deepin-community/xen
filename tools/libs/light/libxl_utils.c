@@ -45,7 +45,7 @@ unsigned long libxl_get_required_shadow_memory(unsigned long maxmem_kb, unsigned
 char *libxl_domid_to_name(libxl_ctx *ctx, uint32_t domid)
 {
     unsigned int len;
-    char path[strlen("/local/domain") + 12];
+    char path[sizeof("/local/domain") + 11];
     char *s;
 
     snprintf(path, sizeof(path), "/local/domain/%d/name", domid);
@@ -141,7 +141,7 @@ int libxl_cpupool_qualifier_to_cpupoolid(libxl_ctx *ctx, const char *p,
 char *libxl_cpupoolid_to_name(libxl_ctx *ctx, uint32_t poolid)
 {
     unsigned int len;
-    char path[strlen("/local/pool") + 12];
+    char path[sizeof("/local/pool") + 11];
     char *s;
 
     snprintf(path, sizeof(path), "/local/pool/%d/name", poolid);
@@ -294,6 +294,8 @@ int libxl_string_to_backend(libxl_ctx *ctx, char *s, libxl_disk_backend *backend
     if (!strcmp(s, "phy")) {
         *backend = LIBXL_DISK_BACKEND_PHY;
     } else if (!strcmp(s, "file")) {
+        *backend = LIBXL_DISK_BACKEND_TAP;
+    } else if (!strcmp(s, "vbd3")) {
         *backend = LIBXL_DISK_BACKEND_TAP;
     } else if (!strcmp(s, "qdisk")) {
         *backend = LIBXL_DISK_BACKEND_QDISK;
@@ -575,6 +577,7 @@ int libxl__remove_directory(libxl__gc *gc, const char *dirpath)
         if (errno == EINTR) continue;
         LOGE(ERROR, "failed to remove emptied directory %s", dirpath);
         rc = ERROR_FAIL;
+        break;
     }
 
  out:

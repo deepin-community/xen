@@ -16,14 +16,14 @@ Signed-off-by: Hans van Kranenburg <hans@knorrie.org>
  1 file changed, 1 deletion(-)
 
 diff --git a/tools/Makefile b/tools/Makefile
-index 4906fdb..6bfe198 100644
+index e9e1cda..4cc6a4b 100644
 --- a/tools/Makefile
 +++ b/tools/Makefile
-@@ -16,7 +16,6 @@ SUBDIRS-y += xentrace
+@@ -17,7 +17,6 @@ SUBDIRS-y += xentrace
  SUBDIRS-$(CONFIG_XCUTILS) += xcutils
  SUBDIRS-$(CONFIG_X86) += firmware
  SUBDIRS-y += console
 -SUBDIRS-y += xenmon
  SUBDIRS-$(XENSTAT_XENTOP) += xentop
- SUBDIRS-y += libfsimage
+ SUBDIRS-$(CONFIG_LIBFSIMAGE) += libfsimage
  SUBDIRS-$(CONFIG_Linux) += vchan

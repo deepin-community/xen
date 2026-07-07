@@ -198,7 +198,7 @@ static DEFINE_SPINLOCK(ipmmu_devices_lock);
 #define IMTTBCR_TSZ0_SHIFT             0
 
 #define IMTTLBR0              0x0010
-#define IMTTLBR0_TTBR_MASK    (0xfffff << 12)
+#define IMTTLBR0_TTBR_MASK    (0xfffffU << 12)
 #define IMTTUBR0              0x0014
 #define IMTTUBR0_TTBR_MASK    (0xff << 0)
 
@@ -642,7 +642,7 @@ static void ipmmu_domain_irq(struct ipmmu_vmsa_domain *domain)
                         domain->d, status, iova);
 }
 
-static void ipmmu_irq(int irq, void *dev, struct cpu_user_regs *regs)
+static void ipmmu_irq(int irq, void *dev)
 {
     struct ipmmu_vmsa_device *mmu = dev;
     unsigned int i;
@@ -788,13 +788,14 @@ static void ipmmu_device_reset(struct ipmmu_vmsa_device *mmu)
 #define RCAR_PRODUCT_M3W     0x00005200
 #define RCAR_PRODUCT_M3N     0x00005500
 #define RCAR_PRODUCT_S4      0x00005A00
+#define RCAR_PRODUCT_V4H     0x00005C00
 #define RCAR_CUT_MASK        0x000000FF
 #define RCAR_CUT_VER30       0x00000020
 
 static __init bool ipmmu_stage2_supported(void)
 {
     struct dt_device_node *np;
-    uint64_t addr, size;
+    paddr_t addr, size;
     void __iomem *base;
     uint32_t product, cut;
     bool stage2_supported = false;
@@ -806,7 +807,7 @@ static __init bool ipmmu_stage2_supported(void)
         return false;
     }
 
-    if ( dt_device_get_address(np, 0, &addr, &size) )
+    if ( dt_device_get_paddr(np, 0, &addr, &size) )
     {
         printk(XENLOG_ERR "ipmmu: Failed to get PRR MMIO\n");
         return false;
@@ -836,6 +837,7 @@ static __init bool ipmmu_stage2_supported(void)
         break;
 
     case RCAR_PRODUCT_S4:
+    case RCAR_PRODUCT_V4H:
         stage2_supported = true;
         break;
 
@@ -871,6 +873,10 @@ static const struct dt_device_match ipmmu_dt_match[] __initconst =
         .compatible = "renesas,ipmmu-r8a779f0",
         .data = &ipmmu_features_rcar_gen4,
     },
+    {
+        .compatible = "renesas,ipmmu-r8a779g0",
+        .data = &ipmmu_features_rcar_gen4,
+    },
     { /* sentinel */ },
 };
 
@@ -884,7 +890,7 @@ static int ipmmu_probe(struct dt_device_node *node)
 {
     const struct dt_device_match *match;
     struct ipmmu_vmsa_device *mmu;
-    uint64_t addr, size;
+    paddr_t addr, size;
     uint32_t reg;
     int irq, ret;
 
@@ -905,7 +911,7 @@ static int ipmmu_probe(struct dt_device_node *node)
     bitmap_zero(mmu->ctx, IPMMU_CTX_MAX);
 
     /* Map I/O memory and request IRQ. */
-    ret = dt_device_get_address(node, 0, &addr, &size);
+    ret = dt_device_get_paddr(node, 0, &addr, &size);
     if ( ret )
     {
         dev_err(&node->dev, "Failed to get MMIO\n");

@@ -5,6 +5,22 @@
  * Common macros to be used in architecture specific linker scripts.
  */
 
+#ifdef DECL_SECTION_WITH_LADDR
+
+/*
+ * Declare a section whose load address is based at PA 0 rather than
+ * Xen's virtual base address.
+ */
+#ifdef CONFIG_LD_IS_GNU
+# define DECL_SECTION(x) x : AT(ADDR(#x) - __XEN_VIRT_START)
+#else
+# define DECL_SECTION(x) x : AT(ADDR(x) - __XEN_VIRT_START)
+#endif
+
+#else /* !DECL_SECTION_WITH_LADDR */
+#define DECL_SECTION(x) x :
+#endif
+
 /*
  * To avoid any confusion, please note that the EFI macro does not correspond
  * to EFI support and is used when linking a native EFI (i.e. PE/COFF) binary,
@@ -40,6 +56,7 @@
   DECL_DEBUG2(.debug_info, .gnu.linkonce.wi.*, 1) \
   DECL_DEBUG(.debug_types, 1)                     \
   DECL_DEBUG(.debug_str, 1)                       \
+  DECL_DEBUG(.debug_str_offsets, 4)               \
   DECL_DEBUG2(.debug_line, .debug_line.*, 1)      \
   DECL_DEBUG(.debug_line_str, 1)                  \
   DECL_DEBUG(.debug_names, 4)                     \
@@ -104,6 +121,39 @@
 
 /* List of constructs other than *_SECTIONS in alphabetical order. */
 
+#define ACPI_DEV_INFO        \
+  . = ALIGN(POINTER_ALIGN);  \
+  DECL_SECTION(.adev.info) { \
+      _asdevice = .;         \
+      *(.adev.info)          \
+      _aedevice = .;         \
+  } :text
+
+#define BUGFRAMES                               \
+    __start_bug_frames_0 = .;                   \
+    *(.bug_frames.0)                            \
+    __stop_bug_frames_0 = .;                    \
+                                                \
+    __start_bug_frames_1 = .;                   \
+    *(.bug_frames.1)                            \
+    __stop_bug_frames_1 = .;                    \
+                                                \
+    __start_bug_frames_2 = .;                   \
+    *(.bug_frames.2)                            \
+    __stop_bug_frames_2 = .;                    \
+                                                \
+    __start_bug_frames_3 = .;                   \
+    *(.bug_frames.3)                            \
+    __stop_bug_frames_3 = .;
+
+#define DT_DEV_INFO         \
+  . = ALIGN(POINTER_ALIGN); \
+  DECL_SECTION(.dev.info) { \
+       _sdevice = .;        \
+       *(.dev.info)         \
+       _edevice = .;        \
+  } :text
+
 #ifdef CONFIG_HYPFS
 #define HYPFS_PARAM              \
        . = ALIGN(POINTER_ALIGN); \
@@ -123,6 +173,16 @@
 #else
 #define LOCK_PROFILE_DATA
 #endif
+
+#define PERCPU_BSS                 \
+       . = ALIGN(PAGE_SIZE);       \
+       __per_cpu_start = .;        \
+       *(.bss.percpu.page_aligned) \
+       *(.bss.percpu)              \
+       . = ALIGN(SMP_CACHE_BYTES); \
+       *(.bss.percpu.read_mostly)  \
+       . = ALIGN(SMP_CACHE_BYTES); \
+       __per_cpu_data_end = .;     \
 
 #ifdef CONFIG_HAS_VPCI
 #define VPCI_ARRAY               \

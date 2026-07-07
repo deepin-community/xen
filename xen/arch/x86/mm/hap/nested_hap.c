@@ -1,21 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /******************************************************************************
  * arch/x86/mm/hap/nested_hap.c
  *
  * Code for Nested Virtualization
  * Copyright (c) 2011 Advanced Micro Devices
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <xen/vm_event.h>
@@ -27,7 +15,6 @@
 #include <asm/p2m.h>
 #include <asm/mem_sharing.h>
 #include <asm/hap.h>
-#include <asm/hvm/support.h>
 
 #include <asm/hvm/nestedhvm.h>
 
@@ -147,7 +134,7 @@ static int nestedhap_walk_L0_p2m(
 
     rc = NESTEDHVM_PAGEFAULT_DONE;
 direct_mmio_out:
-    *L0_gpa = (mfn_x(mfn) << PAGE_SHIFT) + (L1_gpa & ~PAGE_MASK);
+    *L0_gpa = mfn_to_maddr(mfn) + (L1_gpa & ~PAGE_MASK);
 out:
     p2m_put_gfn(p2m, gaddr_to_gfn(L1_gpa));
     return rc;
@@ -226,10 +213,14 @@ int nestedhvm_hap_nested_page_fault(
     case p2m_access_n2rwx:
         p2ma_10 = p2m_access_n;
         break;
+    case p2m_access_r_pw:
+        p2ma_10 = p2m_access_r;
+        break;
     default:
         p2ma_10 = p2m_access_n;
         /* For safety, remove all permissions. */
         gdprintk(XENLOG_ERR, "Unhandled p2m access type:%d\n", p2ma_10);
+        break;
     }
     /* Use minimal permission for nested p2m. */
     p2ma_10 &= (p2m_access_t)p2ma_21;

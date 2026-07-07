@@ -1,17 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /******************************************************************************
  * asm-x86/guest/shim.h
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms and conditions of the GNU General Public
- * License, version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public
- * License along with this program; If not, see <http://www.gnu.org/licenses/>.
  *
  * Copyright (c) 2017 Citrix Systems Ltd.
  */
@@ -44,7 +33,7 @@ void pv_shim_online_memory(unsigned int nr, unsigned int order);
 void pv_shim_offline_memory(unsigned int nr, unsigned int order);
 domid_t get_initial_domain_id(void);
 uint64_t pv_shim_mem(uint64_t avail);
-void pv_shim_fixup_e820(struct e820map *e820);
+void pv_shim_fixup_e820(void);
 const struct platform_bad_page *pv_shim_reserved_pages(unsigned int *size);
 typeof(do_event_channel_op) pv_shim_event_channel_op;
 typeof(do_grant_table_op) pv_shim_grant_table_op;
@@ -96,7 +85,7 @@ static inline uint64_t pv_shim_mem(uint64_t avail)
     ASSERT_UNREACHABLE();
     return 0;
 }
-static inline void pv_shim_fixup_e820(struct e820map *e820)
+static inline void pv_shim_fixup_e820(void)
 {
     ASSERT_UNREACHABLE();
 }

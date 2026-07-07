@@ -85,6 +85,7 @@ static void set_delay(const char *value);
 static void set_prompt(const char *new_prompt, void (*func)(const char *));
 static int handle_key(int);
 static int compare(unsigned long long, unsigned long long);
+static int compare_dbl(double, double);
 static int compare_domains(xenstat_domain **, xenstat_domain **);
 static unsigned long long tot_net_bytes( xenstat_domain *, int);
 static bool tot_vbd_reqs(xenstat_domain *, int, unsigned long long *);
@@ -211,6 +212,7 @@ int show_networks = 0;
 int show_vbds = 0;
 int repeat_header = 0;
 int show_full_name = 0;
+int dom0_first = 0;
 #define PROMPT_VAL_LEN 80
 const char *prompt = NULL;
 char prompt_val[PROMPT_VAL_LEN];
@@ -240,6 +242,7 @@ static void usage(const char *program)
 	       "-b, --batch	     output in batch mode, no user input accepted\n"
 	       "-i, --iterations     number of iterations before exiting\n"
 	       "-f, --full-name      output the full domain name (not truncated)\n"
+	       "-z, --dom0-first     display dom0 first (ignore sorting)\n"
 	       "\n" XENTOP_BUGSTO,
 	       program);
 	return;
@@ -422,6 +425,16 @@ static int compare(unsigned long long i1, unsigned long long i2)
 	return 0;
 }
 
+/* Compares two double precision numbers, returning -1,0,1 for <,=,> */
+static int compare_dbl(double d1, double d2)
+{
+	if (d1 < d2)
+		return -1;
+	if (d1 > d2)
+		return 1;
+	return 0;
+}
+
 /* Comparison function for use with qsort.  Compares two domains using the
  * current sort field. */
 static int compare_domains(xenstat_domain **domain1, xenstat_domain **domain2)
@@ -523,7 +536,7 @@ static double get_cpu_pct(xenstat_domain *domain)
 
 static int compare_cpu_pct(xenstat_domain *domain1, xenstat_domain *domain2)
 {
-	return -compare(get_cpu_pct(domain1), get_cpu_pct(domain2));
+	return -compare_dbl(get_cpu_pct(domain1), get_cpu_pct(domain2));
 }
 
 /* Prints cpu percentage statistic */
@@ -684,7 +697,7 @@ static int compare_vbd_oo(xenstat_domain *domain1, xenstat_domain *domain2)
 	unsigned long long dom1_vbd_oo = 0, dom2_vbd_oo = 0;
 
 	tot_vbd_reqs(domain1, FIELD_VBD_OO, &dom1_vbd_oo);
-	tot_vbd_reqs(domain1, FIELD_VBD_OO, &dom2_vbd_oo);
+	tot_vbd_reqs(domain2, FIELD_VBD_OO, &dom2_vbd_oo);
 
 	return -compare(dom1_vbd_oo, dom2_vbd_oo);
 }
@@ -711,9 +724,9 @@ static int compare_vbd_rd(xenstat_domain *domain1, xenstat_domain *domain2)
 	unsigned long long dom1_vbd_rd = 0, dom2_vbd_rd = 0;
 
 	tot_vbd_reqs(domain1, FIELD_VBD_RD, &dom1_vbd_rd);
-	tot_vbd_reqs(domain1, FIELD_VBD_RD, &dom2_vbd_rd);
+	tot_vbd_reqs(domain2, FIELD_VBD_RD, &dom2_vbd_rd);
 
-	return -compare(dom1_vbd_rd, dom1_vbd_rd);
+	return -compare(dom1_vbd_rd, dom2_vbd_rd);
 }
 
 /* Prints number of total VBD READ requests statistic */
@@ -738,7 +751,7 @@ static int compare_vbd_wr(xenstat_domain *domain1, xenstat_domain *domain2)
 	unsigned long long dom1_vbd_wr = 0, dom2_vbd_wr = 0;
 
 	tot_vbd_reqs(domain1, FIELD_VBD_WR, &dom1_vbd_wr);
-	tot_vbd_reqs(domain1, FIELD_VBD_WR, &dom2_vbd_wr);
+	tot_vbd_reqs(domain2, FIELD_VBD_WR, &dom2_vbd_wr);
 
 	return -compare(dom1_vbd_wr, dom2_vbd_wr);
 }
@@ -765,7 +778,7 @@ static int compare_vbd_rsect(xenstat_domain *domain1, xenstat_domain *domain2)
 	unsigned long long dom1_vbd_rsect = 0, dom2_vbd_rsect = 0;
 
 	tot_vbd_reqs(domain1, FIELD_VBD_RSECT, &dom1_vbd_rsect);
-	tot_vbd_reqs(domain1, FIELD_VBD_RSECT, &dom2_vbd_rsect);
+	tot_vbd_reqs(domain2, FIELD_VBD_RSECT, &dom2_vbd_rsect);
 
 	return -compare(dom1_vbd_rsect, dom2_vbd_rsect);
 }
@@ -1122,6 +1135,7 @@ void do_vbd(xenstat_domain *domain)
 		"Unidentified",           /* number 0 */
 		"BlkBack",           /* number 1 */
 		"BlkTap",            /* number 2 */
+		"Tapdisk3"           /* number 3 */
 	};
 
 	num_vbds = xenstat_domain_num_vbds(domain);
@@ -1163,6 +1177,8 @@ static void top(void)
 {
 	xenstat_domain **domains;
 	unsigned int i, num_domains = 0;
+	int dom0_index = -1;
+	int sort_start = 0, sort_count = 0;
 
 	/* Now get the node information */
 	if (prev_node != NULL)
@@ -1183,11 +1199,27 @@ static void top(void)
 	if(domains == NULL)
 		fail("Failed to allocate memory\n");
 
-	for (i=0; i < num_domains; i++)
+	for (i=0; i < num_domains; i++) {
 		domains[i] = xenstat_node_domain_by_index(cur_node, i);
+		if ( strcmp(xenstat_domain_name(domains[i]), "Domain-0") == 0 )
+			dom0_index = i;
+	}
+
+	/* Handle dom0 position, not for dom0-less */
+	if ( dom0_first == 1 && dom0_index != -1 ){
+		/* if dom0 is not first in domains, swap it there */
+		if ( dom0_index != 0 ){
+			xenstat_domain *tmp;
+			tmp = domains[0];
+			domains[0] = domains[dom0_index];
+			domains[dom0_index] = tmp;
+		}
+		sort_start = 1;
+		sort_count = 1;
+	}
 
 	/* Sort */
-	qsort(domains, num_domains, sizeof(xenstat_domain *),
+	qsort((domains+sort_start), (num_domains-sort_count), sizeof(xenstat_domain *),
 	      (int(*)(const void *, const void *))compare_domains);
 
 	if(first_domain_index >= num_domains)
@@ -1242,9 +1274,10 @@ int main(int argc, char **argv)
 		{ "batch",	   no_argument,	      NULL, 'b' },
 		{ "iterations",	   required_argument, NULL, 'i' },
 		{ "full-name",     no_argument,       NULL, 'f' },
+		{ "dom0-first",    no_argument,       NULL, 'z' },
 		{ 0, 0, 0, 0 },
 	};
-	const char *sopts = "hVnxrvd:bi:f";
+	const char *sopts = "hVnxrvd:bi:fz";
 
 	if (atexit(cleanup) != 0)
 		fail("Failed to install cleanup handler.\n");
@@ -1285,6 +1318,9 @@ int main(int argc, char **argv)
 			break;
 		case 'f':
 			show_full_name = 1;
+			break;
+		case 'z':
+			dom0_first = 1;
 			break;
 		}
 	}

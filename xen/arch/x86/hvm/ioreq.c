@@ -1,19 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * hvm/io.c: hardware virtual machine I/O emulation
  *
  * Copyright (c) 2016 Citrix Systems Inc.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <xen/domain.h>
@@ -40,6 +29,7 @@ bool arch_ioreq_complete_mmio(void)
     return handle_mmio();
 }
 
+#ifdef CONFIG_ARCH_VCPU_IOREQ_COMPLETION
 bool arch_vcpu_ioreq_completion(enum vio_completion completion)
 {
     switch ( completion )
@@ -62,6 +52,7 @@ bool arch_vcpu_ioreq_completion(enum vio_completion completion)
 
     return true;
 }
+#endif
 
 static gfn_t hvm_alloc_legacy_ioreq_gfn(struct ioreq_server *s)
 {
@@ -72,7 +63,7 @@ static gfn_t hvm_alloc_legacy_ioreq_gfn(struct ioreq_server *s)
 
     for ( i = HVM_PARAM_IOREQ_PFN; i <= HVM_PARAM_BUFIOREQ_PFN; i++ )
     {
-        if ( !test_and_clear_bit(i, &d->arch.hvm.ioreq_gfn.legacy_mask) )
+        if ( test_and_clear_bit(i, &d->arch.hvm.ioreq_gfn.legacy_mask) )
             return _gfn(d->arch.hvm.params[i]);
     }
 
@@ -180,7 +171,6 @@ static int hvm_map_ioreq_gfn(struct ioreq_server *s, bool buf)
 }
 
 static void hvm_remove_ioreq_gfn(struct ioreq_server *s, bool buf)
-
 {
     struct domain *d = s->target;
     struct ioreq_page *iorp = buf ? &s->bufioreq : &s->ioreq;

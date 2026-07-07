@@ -60,7 +60,7 @@ struct ioreq_server {
 static inline paddr_t ioreq_mmio_first_byte(const ioreq_t *p)
 {
     return unlikely(p->df) ?
-           p->addr - (p->count - 1ul) * p->size :
+           p->addr - (p->count - 1UL) * p->size :
            p->addr;
 }
 
@@ -111,7 +111,17 @@ void ioreq_domain_init(struct domain *d);
 int ioreq_server_dm_op(struct xen_dm_op *op, struct domain *d, bool *const_op);
 
 bool arch_ioreq_complete_mmio(void);
+
+#ifdef CONFIG_ARCH_VCPU_IOREQ_COMPLETION
 bool arch_vcpu_ioreq_completion(enum vio_completion completion);
+#else
+static inline bool arch_vcpu_ioreq_completion(enum vio_completion completion)
+{
+    ASSERT_UNREACHABLE();
+    return true;
+}
+#endif
+
 int arch_ioreq_server_map_pages(struct ioreq_server *s);
 void arch_ioreq_server_unmap_pages(struct ioreq_server *s);
 void arch_ioreq_server_enable(struct ioreq_server *s);

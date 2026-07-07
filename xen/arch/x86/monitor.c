@@ -48,17 +48,17 @@ static unsigned long *monitor_bitmap_for_msr(const struct domain *d, u32 *msr)
 
     switch ( *msr )
     {
-    case 0 ... 0x1fff:
+    case 0 ... 0x1fffU:
         BUILD_BUG_ON(sizeof(d->arch.monitor.msr_bitmap->low) * 8 <= 0x1fff);
         return d->arch.monitor.msr_bitmap->low;
 
-    case 0x40000000 ... 0x40001fff:
+    case 0x40000000U ... 0x40001fffU:
         BUILD_BUG_ON(
             sizeof(d->arch.monitor.msr_bitmap->hypervisor) * 8 <= 0x1fff);
         *msr &= 0x1fff;
         return d->arch.monitor.msr_bitmap->hypervisor;
 
-    case 0xc0000000 ... 0xc0001fff:
+    case 0xc0000000U ... 0xc0001fffU:
         BUILD_BUG_ON(sizeof(d->arch.monitor.msr_bitmap->high) * 8 <= 0x1fff);
         *msr &= 0x1fff;
         return d->arch.monitor.msr_bitmap->high;
@@ -342,6 +342,19 @@ int arch_monitor_domctl_event(struct domain *d,
         domain_pause(d);
         ad->monitor.vmexit_enabled = requested_status;
         ad->monitor.vmexit_sync = mop->u.vmexit.sync;
+        domain_unpause(d);
+        break;
+    }
+
+    case XEN_DOMCTL_MONITOR_EVENT_IO:
+    {
+        bool old_status = ad->monitor.io_enabled;
+
+        if ( unlikely(old_status == requested_status) )
+            return -EEXIST;
+
+        domain_pause(d);
+        ad->monitor.io_enabled = requested_status;
         domain_unpause(d);
         break;
     }

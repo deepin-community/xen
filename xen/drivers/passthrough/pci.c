@@ -50,31 +50,37 @@ struct pci_seg {
     } bus2bridge[MAX_BUSES];
 };
 
-static spinlock_t _pcidevs_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_RSPINLOCK(_pcidevs_lock);
 
-void pcidevs_lock(void)
+/* Do not use, as it has no speculation barrier, use pcidevs_lock() instead. */
+void pcidevs_lock_unsafe(void)
 {
-    spin_lock_recursive(&_pcidevs_lock);
+    _rspin_lock(&_pcidevs_lock);
 }
 
 void pcidevs_unlock(void)
 {
-    spin_unlock_recursive(&_pcidevs_lock);
+    rspin_unlock(&_pcidevs_lock);
 }
 
-bool_t pcidevs_locked(void)
+bool pcidevs_locked(void)
 {
-    return !!spin_is_locked(&_pcidevs_lock);
+    return rspin_is_locked(&_pcidevs_lock);
 }
 
-static struct radix_tree_root pci_segments;
+bool pcidevs_trylock_unsafe(void)
+{
+    return _rspin_trylock(&_pcidevs_lock);
+}
+
+static RADIX_TREE(pci_segments);
 
 static inline struct pci_seg *get_pseg(u16 seg)
 {
     return radix_tree_lookup(&pci_segments, seg);
 }
 
-bool_t pci_known_segment(u16 seg)
+bool pci_known_segment(u16 seg)
 {
     return get_pseg(seg) != NULL;
 }
@@ -104,9 +110,9 @@ static struct pci_seg *alloc_pseg(u16 seg)
 }
 
 static int pci_segments_iterate(
-    int (*handler)(struct pci_seg *, void *), void *arg)
+    int (*handler)(struct pci_seg *pseg, void *arg), void *arg)
 {
-    u16 seg = 0;
+    uint16_t seg = 0;
     int rc = 0;
 
     do {
@@ -123,7 +129,6 @@ static int pci_segments_iterate(
 
 void __init pci_segments_init(void)
 {
-    radix_tree_init(&pci_segments);
     if ( !alloc_pseg(0) )
         panic("Could not initialize PCI segment 0\n");
 }
@@ -169,8 +174,11 @@ static int __init cf_check parse_phantom_dev(const char *str)
     {
     case 1: case 2: case 4:
         if ( *s )
-    default:
             return -EINVAL;
+        break;
+
+    default:
+        return -EINVAL;
     }
 
     phantom_devs[nr_phantom_devs++] = phantom;
@@ -329,6 +337,8 @@ static struct pci_dev *alloc_pdev(struct pci_seg *pseg, u8 bus, u8 devfn)
     *((u8*) &pdev->devfn) = devfn;
     pdev->domain = NULL;
 
+    INIT_LIST_HEAD(&pdev->vf_list);
+
     arch_pci_init_pdev(pdev);
 
     rc = pdev_msi_init(pdev);
@@ -344,25 +354,26 @@ static struct pci_dev *alloc_pdev(struct pci_seg *pseg, u8 bus, u8 devfn)
     switch ( pdev->type = pdev_type(pseg->nr, bus, devfn) )
     {
         unsigned int cap, sec_bus, sub_bus;
+        unsigned long flags;
 
         case DEV_TYPE_PCIe2PCI_BRIDGE:
+        case DEV_TYPE_PCI2PCIe_BRIDGE:
         case DEV_TYPE_LEGACY_PCI_BRIDGE:
             sec_bus = pci_conf_read8(pdev->sbdf, PCI_SECONDARY_BUS);
             sub_bus = pci_conf_read8(pdev->sbdf, PCI_SUBORDINATE_BUS);
 
-            spin_lock(&pseg->bus2bridge_lock);
+            spin_lock_irqsave(&pseg->bus2bridge_lock, flags);
             for ( ; sec_bus <= sub_bus; sec_bus++ )
             {
                 pseg->bus2bridge[sec_bus].map = 1;
                 pseg->bus2bridge[sec_bus].bus = bus;
                 pseg->bus2bridge[sec_bus].devfn = devfn;
             }
-            spin_unlock(&pseg->bus2bridge_lock);
+            spin_unlock_irqrestore(&pseg->bus2bridge_lock, flags);
             break;
 
         case DEV_TYPE_PCIe_ENDPOINT:
-            pos = pci_find_cap_offset(pseg->nr, bus, PCI_SLOT(devfn),
-                                      PCI_FUNC(devfn), PCI_CAP_ID_EXP);
+            pos = pci_find_cap_offset(pdev->sbdf, PCI_CAP_ID_EXP);
             BUG_ON(!pos);
             cap = pci_conf_read16(pdev->sbdf, pos + PCI_EXP_DEVCAP);
             if ( cap & PCI_EXP_DEVCAP_PHANTOM )
@@ -428,16 +439,18 @@ static void free_pdev(struct pci_seg *pseg, struct pci_dev *pdev)
     switch ( pdev->type )
     {
         unsigned int sec_bus, sub_bus;
+        unsigned long flags;
 
         case DEV_TYPE_PCIe2PCI_BRIDGE:
+        case DEV_TYPE_PCI2PCIe_BRIDGE:
         case DEV_TYPE_LEGACY_PCI_BRIDGE:
             sec_bus = pci_conf_read8(pdev->sbdf, PCI_SECONDARY_BUS);
             sub_bus = pci_conf_read8(pdev->sbdf, PCI_SUBORDINATE_BUS);
 
-            spin_lock(&pseg->bus2bridge_lock);
+            spin_lock_irqsave(&pseg->bus2bridge_lock, flags);
             for ( ; sec_bus <= sub_bus; sec_bus++ )
                 pseg->bus2bridge[sec_bus] = pseg->bus2bridge[pdev->bus];
-            spin_unlock(&pseg->bus2bridge_lock);
+            spin_unlock_irqrestore(&pseg->bus2bridge_lock, flags);
             break;
 
         default:
@@ -446,6 +459,10 @@ static void free_pdev(struct pci_seg *pseg, struct pci_dev *pdev)
 
     list_del(&pdev->alldevs_list);
     pdev_msi_deinit(pdev);
+
+    if ( pdev->info.is_virtfn )
+        list_del(&pdev->vf_list);
+
     xfree(pdev);
 }
 
@@ -454,7 +471,9 @@ static void __init _pci_hide_device(struct pci_dev *pdev)
     if ( pdev->domain )
         return;
     pdev->domain = dom_xen;
+    write_lock(&dom_xen->pci_lock);
     list_add(&pdev->domain_list, &dom_xen->pdev_list);
+    write_unlock(&dom_xen->pci_lock);
 }
 
 int __init pci_hide_device(unsigned int seg, unsigned int bus,
@@ -565,13 +584,12 @@ struct pci_dev *pci_get_pdev(const struct domain *d, pci_sbdf_t sbdf)
 static void pci_enable_acs(struct pci_dev *pdev)
 {
     int pos;
-    u16 cap, ctrl, seg = pdev->seg;
-    u8 bus = pdev->bus;
+    uint16_t cap, ctrl;
 
     if ( !is_iommu_enabled(pdev->domain) )
         return;
 
-    pos = pci_find_ext_capability(seg, bus, pdev->devfn, PCI_EXT_CAP_ID_ACS);
+    pos = pci_find_ext_capability(pdev->sbdf, PCI_EXT_CAP_ID_ACS);
     if (!pos)
         return;
 
@@ -650,30 +668,17 @@ int pci_add_device(u16 seg, u8 bus, u8 devfn,
     struct pci_seg *pseg;
     struct pci_dev *pdev;
     unsigned int slot = PCI_SLOT(devfn), func = PCI_FUNC(devfn);
-    const char *pdev_type;
+    const char *type;
     int ret;
-    bool pf_is_extfn = false;
 
     if ( !info )
-        pdev_type = "device";
+        type = "device";
     else if ( info->is_virtfn )
-    {
-        pcidevs_lock();
-        pdev = pci_get_pdev(NULL,
-                            PCI_SBDF(seg, info->physfn.bus,
-                                     info->physfn.devfn));
-        if ( pdev )
-            pf_is_extfn = pdev->info.is_extfn;
-        pcidevs_unlock();
-        if ( !pdev )
-            pci_add_device(seg, info->physfn.bus, info->physfn.devfn,
-                           NULL, node);
-        pdev_type = "virtual function";
-    }
+        type = "virtual function";
     else if ( info->is_extfn )
-        pdev_type = "extended function";
+        type = "extended function";
     else
-        pdev_type = "device";
+        type = "device";
 
     ret = xsm_resource_plug_pci(XSM_PRIV, (seg << 16) | (bus << 8) | devfn);
     if ( ret )
@@ -694,17 +699,38 @@ int pci_add_device(u16 seg, u8 bus, u8 devfn,
     if ( info )
     {
         pdev->info = *info;
-        /*
-         * VF's 'is_extfn' field is used to indicate whether its PF is an
-         * extended function.
-         */
         if ( pdev->info.is_virtfn )
-            pdev->info.is_extfn = pf_is_extfn;
+        {
+            struct pci_dev *pf_pdev =
+                pci_get_pdev(NULL, PCI_SBDF(seg, info->physfn.bus,
+                                            info->physfn.devfn));
+
+            if ( !pf_pdev )
+            {
+                printk(XENLOG_WARNING
+                       "Attempted to add SR-IOV VF %pp without PF %pp\n",
+                       &pdev->sbdf,
+                       &PCI_SBDF(seg, info->physfn.bus, info->physfn.devfn));
+                free_pdev(pseg, pdev);
+                ret = -ENODEV;
+                goto out;
+            }
+
+            if ( !pdev->pf_pdev )
+            {
+                pdev->pf_pdev = pf_pdev;
+
+                /* VF inherits its 'is_extfn' from PF */
+                pdev->info.is_extfn = pf_pdev->info.is_extfn;
+
+                list_add(&pdev->vf_list, &pf_pdev->vf_list);
+            }
+        }
     }
 
-    if ( !pdev->info.is_virtfn && !pdev->vf_rlen[0] )
+    if ( !pdev->info.is_virtfn && !pdev->physfn.vf_rlen[0] )
     {
-        unsigned int pos = pci_find_ext_capability(seg, bus, devfn,
+        unsigned int pos = pci_find_ext_capability(pdev->sbdf,
                                                    PCI_EXT_CAP_ID_SRIOV);
         uint16_t ctrl = pci_conf_read16(pdev->sbdf, pos + PCI_SRIOV_CTRL);
 
@@ -714,7 +740,9 @@ int pci_add_device(u16 seg, u8 bus, u8 devfn,
         {
             unsigned int i;
 
-            BUILD_BUG_ON(ARRAY_SIZE(pdev->vf_rlen) != PCI_SRIOV_NUM_BARS);
+            BUILD_BUG_ON(ARRAY_SIZE(pdev->physfn.vf_rlen) !=
+                                    PCI_SRIOV_NUM_BARS);
+
             for ( i = 0; i < PCI_SRIOV_NUM_BARS; )
             {
                 unsigned int idx = pos + PCI_SRIOV_BAR + i * 4;
@@ -726,10 +754,11 @@ int pci_add_device(u16 seg, u8 bus, u8 devfn,
                     printk(XENLOG_WARNING
                            "SR-IOV device %pp with vf BAR%u in IO space\n",
                            &pdev->sbdf, i);
+                    ++i;
                     continue;
                 }
                 ret = pci_size_mem_bar(pdev->sbdf, idx, NULL,
-                                       &pdev->vf_rlen[i],
+                                       &pdev->physfn.vf_rlen[i],
                                        PCI_BAR_VF |
                                        ((i == PCI_SRIOV_NUM_BARS - 1) ?
                                         PCI_BAR_LAST : 0));
@@ -748,25 +777,30 @@ int pci_add_device(u16 seg, u8 bus, u8 devfn,
     if ( !pdev->domain )
     {
         pdev->domain = hardware_domain;
+        write_lock(&hardware_domain->pci_lock);
         list_add(&pdev->domain_list, &hardware_domain->pdev_list);
 
         /*
          * For devices not discovered by Xen during boot, add vPCI handlers
          * when Dom0 first informs Xen about such devices.
          */
-        ret = vpci_add_handlers(pdev);
+        ret = vpci_assign_device(pdev);
         if ( ret )
         {
-            printk(XENLOG_ERR "Setup of vPCI failed: %d\n", ret);
             list_del(&pdev->domain_list);
+            write_unlock(&hardware_domain->pci_lock);
             pdev->domain = NULL;
+            printk(XENLOG_ERR "Setup of vPCI failed: %d\n", ret);
             goto out;
         }
+        write_unlock(&hardware_domain->pci_lock);
         ret = iommu_add_device(pdev);
         if ( ret )
         {
-            vpci_remove_device(pdev);
+            write_lock(&hardware_domain->pci_lock);
+            vpci_deassign_device(pdev);
             list_del(&pdev->domain_list);
+            write_unlock(&hardware_domain->pci_lock);
             pdev->domain = NULL;
             goto out;
         }
@@ -780,7 +814,7 @@ out:
     pcidevs_unlock();
     if ( !ret )
     {
-        printk(XENLOG_DEBUG "PCI add %s %pp\n", pdev_type,  &pdev->sbdf);
+        printk(XENLOG_DEBUG "PCI add %s %pp\n", type, &pdev->sbdf);
         while ( pdev->phantom_stride )
         {
             func += pdev->phantom_stride;
@@ -812,11 +846,37 @@ int pci_remove_device(u16 seg, u8 bus, u8 devfn)
     list_for_each_entry ( pdev, &pseg->alldevs_list, alldevs_list )
         if ( pdev->bus == bus && pdev->devfn == devfn )
         {
-            vpci_remove_device(pdev);
+            if ( !pdev->info.is_virtfn && !list_empty(&pdev->vf_list) )
+            {
+                struct pci_dev *vf_pdev;
+
+                /*
+                 * Linux Dom0 has been observed to not respect an error code
+                 * returned from PHYSDEVOP_pci_device_remove. Mark VFs and PF
+                 * broken.
+                 */
+                list_for_each_entry(vf_pdev, &pdev->vf_list, vf_list)
+                    vf_pdev->broken = true;
+
+                pdev->broken = true;
+
+                printk(XENLOG_WARNING
+                       "Attempted to remove PCI SR-IOV PF %pp with VFs still present\n",
+                       &pdev->sbdf);
+
+                ret = -EBUSY;
+                break;
+            }
+
+            if ( pdev->domain )
+            {
+                write_lock(&pdev->domain->pci_lock);
+                vpci_deassign_device(pdev);
+                list_del(&pdev->domain_list);
+                write_unlock(&pdev->domain->pci_lock);
+            }
             pci_cleanup_msi(pdev);
             ret = iommu_remove_device(pdev);
-            if ( pdev->domain )
-                list_del(&pdev->domain_list);
             printk(XENLOG_DEBUG "PCI remove device %pp\n", &pdev->sbdf);
             free_pdev(pseg, pdev);
             break;
@@ -866,6 +926,10 @@ static int deassign_device(struct domain *d, uint16_t seg, uint8_t bus,
             goto out;
     }
 
+    write_lock(&d->pci_lock);
+    vpci_deassign_device(pdev);
+    write_unlock(&d->pci_lock);
+
     devfn = pdev->devfn;
     ret = iommu_call(hd->platform_ops, reassign_device, d, target, devfn,
                      pci_to_dev(pdev));
@@ -877,6 +941,11 @@ static int deassign_device(struct domain *d, uint16_t seg, uint8_t bus,
 
     pdev->fault.count = 0;
 
+    write_lock(&target->pci_lock);
+    /* Re-assign back to hardware_domain */
+    ret = vpci_assign_device(pdev);
+    write_unlock(&target->pci_lock);
+
  out:
     if ( ret )
         printk(XENLOG_G_ERR "%pd: deassign (%pp) failed (%d)\n",
@@ -887,26 +956,61 @@ static int deassign_device(struct domain *d, uint16_t seg, uint8_t bus,
 
 int pci_release_devices(struct domain *d)
 {
-    struct pci_dev *pdev, *tmp;
-    u8 bus, devfn;
-    int ret;
+    int combined_ret;
+    LIST_HEAD(failed_pdevs);
 
     pcidevs_lock();
-    ret = arch_pci_clean_pirqs(d);
-    if ( ret )
+
+    combined_ret = arch_pci_clean_pirqs(d);
+    if ( combined_ret )
     {
         pcidevs_unlock();
-        return ret;
+        return combined_ret;
     }
-    list_for_each_entry_safe ( pdev, tmp, &d->pdev_list, domain_list )
+
+    write_lock(&d->pci_lock);
+
+    while ( !list_empty(&d->pdev_list) )
     {
-        bus = pdev->bus;
-        devfn = pdev->devfn;
-        ret = deassign_device(d, pdev->seg, bus, devfn) ?: ret;
+        struct pci_dev *pdev = list_first_entry(&d->pdev_list,
+                                                struct pci_dev,
+                                                domain_list);
+        uint16_t seg = pdev->seg;
+        uint8_t bus = pdev->bus;
+        uint8_t devfn = pdev->devfn;
+        int ret;
+
+        write_unlock(&d->pci_lock);
+        ret = deassign_device(d, seg, bus, devfn);
+        write_lock(&d->pci_lock);
+        if ( ret )
+        {
+            const struct pci_dev *tmp;
+
+            /*
+             * We need to check if deassign_device() left our pdev in
+             * domain's list. As we dropped the lock, we can't be sure
+             * that list wasn't permutated in some random way, so we
+             * need to traverse the whole list.
+             */
+            for_each_pdev ( d, tmp )
+            {
+                if ( tmp == pdev )
+                {
+                    list_move_tail(&pdev->domain_list, &failed_pdevs);
+                    break;
+                }
+            }
+
+            combined_ret = combined_ret ?: ret;
+        }
     }
+
+    list_splice(&failed_pdevs, &d->pdev_list);
+    write_unlock(&d->pci_lock);
     pcidevs_unlock();
 
-    return ret;
+    return combined_ret;
 }
 
 #define PCI_CLASS_BRIDGE_HOST    0x0600
@@ -916,7 +1020,8 @@ enum pdev_type pdev_type(u16 seg, u8 bus, u8 devfn)
 {
     u16 class_device, creg;
     u8 d = PCI_SLOT(devfn), f = PCI_FUNC(devfn);
-    int pos = pci_find_cap_offset(seg, bus, d, f, PCI_CAP_ID_EXP);
+    unsigned int pos = pci_find_cap_offset(PCI_SBDF(seg, bus, devfn),
+                                           PCI_CAP_ID_EXP);
 
     class_device = pci_conf_read16(PCI_SBDF(seg, bus, d, f), PCI_CLASS_DEVICE);
     switch ( class_device )
@@ -953,8 +1058,9 @@ enum pdev_type pdev_type(u16 seg, u8 bus, u8 devfn)
 int find_upstream_bridge(u16 seg, u8 *bus, u8 *devfn, u8 *secbus)
 {
     struct pci_seg *pseg = get_pseg(seg);
-    int ret = 0;
-    int cnt = 0;
+    int ret = 1;
+    unsigned long flags;
+    unsigned int cnt = 0;
 
     if ( *bus == 0 )
         return 0;
@@ -965,8 +1071,7 @@ int find_upstream_bridge(u16 seg, u8 *bus, u8 *devfn, u8 *secbus)
     if ( !pseg->bus2bridge[*bus].map )
         return 0;
 
-    ret = 1;
-    spin_lock(&pseg->bus2bridge_lock);
+    spin_lock_irqsave(&pseg->bus2bridge_lock, flags);
     while ( pseg->bus2bridge[*bus].map )
     {
         *secbus = *bus;
@@ -980,18 +1085,18 @@ int find_upstream_bridge(u16 seg, u8 *bus, u8 *devfn, u8 *secbus)
     }
 
 out:
-    spin_unlock(&pseg->bus2bridge_lock);
+    spin_unlock_irqrestore(&pseg->bus2bridge_lock, flags);
     return ret;
 }
 
-bool_t __init pci_device_detect(u16 seg, u8 bus, u8 dev, u8 func)
+bool __init pci_device_detect(u16 seg, u8 bus, u8 dev, u8 func)
 {
     u32 vendor;
 
     vendor = pci_conf_read32(PCI_SBDF(seg, bus, dev, func), PCI_VENDOR_ID);
     /* some broken boards return 0 or ~0 if a slot is empty: */
-    if ( (vendor == 0xffffffff) || (vendor == 0x00000000) ||
-         (vendor == 0x0000ffff) || (vendor == 0xffff0000) )
+    if ( (vendor == 0xffffffffU) || (vendor == 0x00000000U) ||
+         (vendor == 0x0000ffffU) || (vendor == 0xffff0000U) )
         return 0;
     return 1;
 }
@@ -1078,7 +1183,7 @@ int __init scan_pci_devices(void)
 
 struct setup_hwdom {
     struct domain *d;
-    int (*handler)(u8 devfn, struct pci_dev *);
+    int (*handler)(uint8_t devfn, struct pci_dev *pdev);
 };
 
 static void __hwdom_init setup_one_hwdom_device(const struct setup_hwdom *ctxt,
@@ -1100,7 +1205,9 @@ static void __hwdom_init setup_one_hwdom_device(const struct setup_hwdom *ctxt,
     } while ( devfn != pdev->devfn &&
               PCI_SLOT(devfn) == PCI_SLOT(pdev->devfn) );
 
-    err = vpci_add_handlers(pdev);
+    write_lock(&ctxt->d->pci_lock);
+    err = vpci_assign_device(pdev);
+    write_unlock(&ctxt->d->pci_lock);
     if ( err )
         printk(XENLOG_ERR "setup of vPCI for d%d failed: %d\n",
                ctxt->d->domain_id, err);
@@ -1125,7 +1232,9 @@ static int __hwdom_init cf_check _setup_hwdom_pci_devices(
             if ( !pdev->domain )
             {
                 pdev->domain = ctxt->d;
+                write_lock(&ctxt->d->pci_lock);
                 list_add(&pdev->domain_list, &ctxt->d->pdev_list);
+                write_unlock(&ctxt->d->pci_lock);
                 setup_one_hwdom_device(ctxt, pdev);
             }
             else if ( pdev->domain == dom_xen )
@@ -1158,7 +1267,7 @@ static int __hwdom_init cf_check _setup_hwdom_pci_devices(
 }
 
 void __hwdom_init setup_hwdom_pci_devices(
-    struct domain *d, int (*handler)(u8 devfn, struct pci_dev *))
+    struct domain *d, int (*handler)(uint8_t devfn, struct pci_dev *pdev))
 {
     struct setup_hwdom ctxt = { .d = d, .handler = handler };
 
@@ -1181,13 +1290,10 @@ static int hest_match_pci(const struct acpi_hest_aer_common *p,
            p->function               == PCI_FUNC(pdev->devfn);
 }
 
-static bool_t hest_match_type(const struct acpi_hest_header *hest_hdr,
+static bool hest_match_type(const struct acpi_hest_header *hest_hdr,
                               const struct pci_dev *pdev)
 {
-    unsigned int pos = pci_find_cap_offset(pdev->seg, pdev->bus,
-                                           PCI_SLOT(pdev->devfn),
-                                           PCI_FUNC(pdev->devfn),
-                                           PCI_CAP_ID_EXP);
+    unsigned int pos = pci_find_cap_offset(pdev->sbdf, PCI_CAP_ID_EXP);
     u8 pcie = MASK_EXTR(pci_conf_read16(pdev->sbdf, pos + PCI_EXP_FLAGS),
                         PCI_EXP_FLAGS_TYPE);
 
@@ -1207,10 +1313,10 @@ static bool_t hest_match_type(const struct acpi_hest_header *hest_hdr,
 
 struct aer_hest_parse_info {
     const struct pci_dev *pdev;
-    bool_t firmware_first;
+    bool firmware_first;
 };
 
-static bool_t hest_source_is_pcie_aer(const struct acpi_hest_header *hest_hdr)
+static bool hest_source_is_pcie_aer(const struct acpi_hest_header *hest_hdr)
 {
     if ( hest_hdr->type == ACPI_HEST_TYPE_AER_ROOT_PORT ||
          hest_hdr->type == ACPI_HEST_TYPE_AER_ENDPOINT ||
@@ -1224,7 +1330,7 @@ static int cf_check aer_hest_parse(
 {
     struct aer_hest_parse_info *info = data;
     const struct acpi_hest_aer_common *p;
-    bool_t ff;
+    bool ff;
 
     if ( !hest_source_is_pcie_aer(hest_hdr) )
         return 0;
@@ -1254,12 +1360,11 @@ static int cf_check aer_hest_parse(
     return 0;
 }
 
-bool_t pcie_aer_get_firmware_first(const struct pci_dev *pdev)
+bool pcie_aer_get_firmware_first(const struct pci_dev *pdev)
 {
     struct aer_hest_parse_info info = { .pdev = pdev };
 
-    return pci_find_cap_offset(pdev->seg, pdev->bus, PCI_SLOT(pdev->devfn),
-                               PCI_FUNC(pdev->devfn), PCI_CAP_ID_EXP) &&
+    return pci_find_cap_offset(pdev->sbdf, PCI_CAP_ID_EXP) &&
            apei_hest_parse(aer_hest_parse, &info) >= 0 &&
            info.firmware_first;
 }
@@ -1431,6 +1536,10 @@ static int assign_device(struct domain *d, u16 seg, u8 bus, u8 devfn, u32 flag)
     if ( pdev->broken && d != hardware_domain && d != dom_io )
         goto done;
 
+    write_lock(&pdev->domain->pci_lock);
+    vpci_deassign_device(pdev);
+    write_unlock(&pdev->domain->pci_lock);
+
     rc = pdev_msix_assign(d, pdev);
     if ( rc )
         goto done;
@@ -1455,6 +1564,13 @@ static int assign_device(struct domain *d, u16 seg, u8 bus, u8 devfn, u32 flag)
         rc = iommu_call(hd->platform_ops, assign_device, d, devfn,
                         pci_to_dev(pdev), flag);
     }
+
+    if ( rc )
+        goto done;
+
+    write_lock(&d->pci_lock);
+    rc = vpci_assign_device(pdev);
+    write_unlock(&d->pci_lock);
 
  done:
     if ( rc )
@@ -1694,6 +1810,43 @@ int iommu_do_pci_domctl(
     }
 
     return ret;
+}
+
+struct segment_iter {
+    int (*handler)(struct pci_dev *pdev, void *arg);
+    void *arg;
+    int rc;
+};
+
+static int cf_check iterate_all(struct pci_seg *pseg, void *arg)
+{
+    struct segment_iter *iter = arg;
+    struct pci_dev *pdev;
+
+    list_for_each_entry ( pdev, &pseg->alldevs_list, alldevs_list )
+    {
+        int rc = iter->handler(pdev, iter->arg);
+
+        if ( !iter->rc )
+            iter->rc = rc;
+    }
+
+    return 0;
+}
+
+/*
+ * Iterate without locking or preemption over all PCI devices known by Xen.
+ * Can be called with interrupts disabled.
+ */
+int pci_iterate_devices(int (*handler)(struct pci_dev *pdev, void *arg),
+                        void *arg)
+{
+    struct segment_iter iter = {
+        .handler = handler,
+        .arg = arg,
+    };
+
+    return pci_segments_iterate(iterate_all, &iter) ?: iter.rc;
 }
 
 /*

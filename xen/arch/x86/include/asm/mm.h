@@ -70,9 +70,9 @@
  /* Page is Xen heap? */
 #define _PGC_xen_heap     PG_shift(2)
 #define PGC_xen_heap      PG_mask(1, 2)
- /* Set when is using a page as a page table */
-#define _PGC_page_table   PG_shift(3)
-#define PGC_page_table    PG_mask(1, 3)
+ /* Page is not reference counted */
+#define _PGC_extra        PG_shift(3)
+#define PGC_extra         PG_mask(1, 3)
  /* Page is broken? */
 #define _PGC_broken       PG_shift(4)
 #define PGC_broken        PG_mask(1, 4)
@@ -83,20 +83,24 @@
 #define PGC_state_offlined  PG_mask(2, 6)
 #define PGC_state_free      PG_mask(3, 6)
 #define page_state_is(pg, st) (((pg)->count_info&PGC_state) == PGC_state_##st)
-/* Page is not reference counted */
-#define _PGC_extra        PG_shift(7)
-#define PGC_extra         PG_mask(1, 7)
+/* Page needs to be scrubbed. */
+#define _PGC_need_scrub   PG_shift(7)
+#define PGC_need_scrub    PG_mask(1, 7)
+#ifdef CONFIG_SHADOW_PAGING
+ /* Set when a page table page has been shadowed. */
+#define _PGC_shadowed_pt  PG_shift(8)
+#define PGC_shadowed_pt   PG_mask(1, 8)
+#else
+#define PGC_shadowed_pt   0
+#endif
 
 /* Count of references to this frame. */
+#if PGC_shadowed_pt
+#define PGC_count_width   PG_shift(8)
+#else
 #define PGC_count_width   PG_shift(7)
+#endif
 #define PGC_count_mask    ((1UL<<PGC_count_width)-1)
-
-/*
- * Page needs to be scrubbed. Since this bit can only be set on a page that is
- * free (i.e. in PGC_state_free) we can reuse PGC_allocated bit.
- */
-#define _PGC_need_scrub   _PGC_allocated
-#define PGC_need_scrub    PGC_allocated
 
 #ifndef CONFIG_BIGMEM
 /*
@@ -222,7 +226,7 @@ struct page_info
          * Only valid for: a) free pages, and b) pages with zero type count
          * (except page table pages when the guest is in shadow mode).
          */
-        u32 tlbflush_timestamp;
+        uint32_t tlbflush_timestamp;
 
         /*
          * When PGT_partial is true then the first two fields are valid and
@@ -276,10 +280,10 @@ struct page_info
          *   in use.
          */
         struct {
-            u16 nr_validated_ptes:PAGETABLE_ORDER + 1;
-            u16 :16 - PAGETABLE_ORDER - 1 - 1;
-            u16 partial_flags:1;
-            s16 linear_pt_count;
+            uint16_t nr_validated_ptes:PAGETABLE_ORDER + 1;
+            uint16_t :16 - PAGETABLE_ORDER - 1 - 1;
+            uint16_t partial_flags:1;
+            int16_t linear_pt_count;
         };
 
         /*
@@ -329,8 +333,6 @@ struct page_info
 #define maddr_get_owner(ma)   (page_get_owner(maddr_to_page((ma))))
 
 #define frame_table ((struct page_info *)FRAMETABLE_VIRT_START)
-extern unsigned long max_page;
-extern unsigned long total_pages;
 void init_frametable(void);
 
 #define PDX_GROUP_SHIFT L2_PAGETABLE_SHIFT
@@ -393,14 +395,16 @@ const struct platform_bad_page *get_platform_badpages(unsigned int *array_size);
  * The use of PGT_locked in mem_sharing does not collide, since mem_sharing is
  * only supported for hvm guests, which do not have PV PTEs updated.
  */
-int page_lock(struct page_info *page);
+int page_lock_unsafe(struct page_info *page);
+#define page_lock(pg)   lock_evaluate_nospec(page_lock_unsafe(pg))
+
 void page_unlock(struct page_info *page);
 
 void put_page_type(struct page_info *page);
 int  get_page_type(struct page_info *page, unsigned long type);
 int  put_page_type_preemptible(struct page_info *page);
 int  get_page_type_preemptible(struct page_info *page, unsigned long type);
-int  put_old_guest_table(struct vcpu *);
+int  put_old_guest_table(struct vcpu *v);
 int  get_page_from_l1e(
     l1_pgentry_t l1e, struct domain *l1e_owner, struct domain *pg_owner);
 void put_page_from_l1e(l1_pgentry_t l1e, struct domain *l1e_owner);
@@ -455,8 +459,6 @@ static inline int get_page_and_type(struct page_info *page,
 #define ASSERT_PAGE_IS_DOMAIN(_p, _d)                          \
     ASSERT(((_p)->count_info & PGC_count_mask) != 0);          \
     ASSERT(page_get_owner(_p) == (_d))
-
-extern paddr_t mem_hotplug;
 
 /******************************************************************************
  * With shadow pagetables, the different kinds of address start
@@ -516,9 +518,32 @@ extern struct rangeset *mmio_ro_ranges;
 void memguard_guard_stack(void *p);
 void memguard_unguard_stack(void *p);
 
+/*
+ * Add more precise r/o marking for a MMIO page. Range specified here
+ * will still be R/O, but the rest of the page (not marked as R/O via another
+ * call) will have writes passed through.
+ * The start address and the size must be aligned to MMIO_RO_SUBPAGE_GRAN.
+ *
+ * This API cannot be used for overlapping ranges, nor for pages already added
+ * to mmio_ro_ranges separately.
+ *
+ * Since there is currently no subpage_mmio_ro_remove(), relevant device should
+ * not be hot-unplugged.
+ *
+ * Return values:
+ *  - negative: error
+ *  - 0: success
+ */
+#define MMIO_RO_SUBPAGE_GRAN 8
+int subpage_mmio_ro_add(paddr_t start, size_t size);
+bool subpage_mmio_write_accept(mfn_t mfn, unsigned long gla);
+
 struct mmio_ro_emulate_ctxt {
         unsigned long cr2;
+        /* Used only for mmcfg case */
         unsigned int seg, bdf;
+        /* Used only for non-mmcfg case */
+        mfn_t mfn;
 };
 
 int cf_check mmio_ro_emulated_write(
@@ -553,7 +578,7 @@ void audit_domains(void);
 
 void make_cr3(struct vcpu *v, mfn_t mfn);
 pagetable_t update_cr3(struct vcpu *v);
-int vcpu_destroy_pagetables(struct vcpu *);
+int vcpu_destroy_pagetables(struct vcpu *v);
 void *do_page_walk(struct vcpu *v, unsigned long addr);
 
 /* Allocator functions for Xen pagetables. */
@@ -561,27 +586,24 @@ mfn_t alloc_xen_pagetable(void);
 void free_xen_pagetable(mfn_t mfn);
 void *alloc_mapped_pagetable(mfn_t *pmfn);
 
-l1_pgentry_t *virt_to_xen_l1e(unsigned long v);
-
 int __sync_local_execstate(void);
 
 /* Arch-specific portion of memory_op hypercall. */
 long arch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg);
 long subarch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg);
-int compat_arch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void));
-int compat_subarch_memory_op(int op, XEN_GUEST_HANDLE_PARAM(void));
+int compat_arch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg);
 
 #define NIL(type) ((type *)-sizeof(type))
 #define IS_NIL(ptr) (!((uintptr_t)(ptr) + sizeof(*(ptr))))
 
-int create_perdomain_mapping(struct domain *, unsigned long va,
-                             unsigned int nr, l1_pgentry_t **,
-                             struct page_info **);
-void destroy_perdomain_mapping(struct domain *, unsigned long va,
+int create_perdomain_mapping(struct domain *d, unsigned long va,
+                             unsigned int nr, l1_pgentry_t **pl1tab,
+                             struct page_info **ppg);
+void destroy_perdomain_mapping(struct domain *d, unsigned long va,
                                unsigned int nr);
-void free_perdomain_mappings(struct domain *);
+void free_perdomain_mappings(struct domain *d);
 
-void __iomem *ioremap_wc(paddr_t, size_t);
+void __iomem *ioremap_wc(paddr_t pa, size_t len);
 
 extern int memory_add(unsigned long spfn, unsigned long epfn, unsigned int pxm);
 
@@ -592,7 +614,7 @@ unsigned long domain_get_maximum_gpfn(struct domain *d);
 
 /* Definition of an mm lock: spinlock with extra fields for debugging */
 typedef struct mm_lock {
-    spinlock_t         lock;
+    rspinlock_t        lock;
     int                unlock_level;
     int                locker;          /* processor which holds the lock */
     const char        *locker_function; /* func that took it */

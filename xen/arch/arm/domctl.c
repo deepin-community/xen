@@ -1,9 +1,11 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /******************************************************************************
  * Arch-specific domctl.c
  *
  * Copyright (c) 2012, Citrix Systems
  */
 
+#include <xen/dt-overlay.h>
 #include <xen/errno.h>
 #include <xen/guest_access.h>
 #include <xen/hypercall.h>
@@ -170,11 +172,13 @@ long arch_do_domctl(struct xen_domctl *domctl, struct domain *d,
             break;
         }
 
-        if ( !rc )
-            rc = copy_to_guest(u_domctl, domctl, 1);
+        if ( !rc && copy_to_guest(u_domctl, domctl, 1) )
+            rc = -EFAULT;
 
         return rc;
     }
+    case XEN_DOMCTL_dt_overlay:
+        return dt_overlay_domctl(d, &domctl->u.dt_overlay);
     default:
         return subarch_do_domctl(domctl, d, u_domctl);
     }

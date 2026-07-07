@@ -62,6 +62,17 @@ done
 linux/arch/arm64/lib/clear_page.S       xen/arch/arm/arm64/lib/clear_page.S
 linux/arch/arm64/lib/copy_page.S        unused in Xen
 
+---------------------------------------------------------------------
+
+SVE assembly macro: last sync @ v6.3.0 (last commit: 457391b03803)
+
+linux/arch/arm64/include/asm/fpsimdmacros.h   xen/arch/arm/include/asm/arm64/sve-asm.S
+
+The following macros were taken from Linux:
+    _check_general_reg, _check_num, _sve_rdvl, __for, _for, _sve_check_zreg,
+    _sve_check_preg, _sve_str_v, _sve_ldr_v, _sve_str_p, _sve_ldr_p, _sve_rdffr,
+    _sve_wrffr
+
 =====================================================================
 arm32
 =====================================================================
@@ -97,10 +108,8 @@ linux/arch/arm/lib/memchr.S             xen/arch/arm/arm32/lib/memchr.S
 linux/arch/arm/lib/memcpy.S             xen/arch/arm/arm32/lib/memcpy.S
 linux/arch/arm/lib/memmove.S            xen/arch/arm/arm32/lib/memmove.S
 linux/arch/arm/lib/memset.S             xen/arch/arm/arm32/lib/memset.S
-linux/arch/arm/lib/memzero.S            xen/arch/arm/arm32/lib/memzero.S
 
-for i in copy_template.S memchr.S memcpy.S memmove.S memset.S \
-         memzero.S ; do
+for i in copy_template.S memchr.S memcpy.S memmove.S memset.S; do
     diff -u linux/arch/arm/lib/$i xen/arch/arm/arm32/lib/$i
 done
 

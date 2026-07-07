@@ -1,20 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * intercept.c: Handle performance critical I/O packets in hypervisor space
  *
  * Copyright (c) 2004, Intel Corporation.
  * Copyright (c) 2008, Citrix Systems, Inc.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <xen/ioreq.h>
@@ -28,7 +17,6 @@
 #include <xen/lib.h>
 #include <xen/sched.h>
 #include <asm/current.h>
-#include <io_ports.h>
 #include <xen/event.h>
 #include <xen/iommu.h>
 
@@ -251,21 +239,13 @@ static const struct hvm_io_handler *hvm_find_io_handler(const ioreq_t *p)
 int hvm_io_intercept(ioreq_t *p)
 {
     const struct hvm_io_handler *handler;
-    const struct hvm_io_ops *ops;
-    int rc;
 
     handler = hvm_find_io_handler(p);
 
     if ( handler == NULL )
         return X86EMUL_UNHANDLEABLE;
 
-    rc = hvm_process_io_intercept(handler, p);
-
-    ops = handler->ops;
-    if ( ops->complete != NULL )
-        ops->complete(handler);
-
-    return rc;
+    return hvm_process_io_intercept(handler, p);
 }
 
 struct hvm_io_handler *hvm_next_io_handler(struct domain *d)
@@ -335,27 +315,17 @@ bool relocate_portio_handler(struct domain *d, unsigned int old_port,
     return false;
 }
 
-bool_t hvm_mmio_internal(paddr_t gpa)
+bool hvm_mmio_internal(paddr_t gpa)
 {
-    const struct hvm_io_handler *handler;
-    const struct hvm_io_ops *ops;
     ioreq_t p = {
         .type = IOREQ_TYPE_COPY,
         .addr = gpa,
         .count = 1,
         .size = 1,
+        .dir = IOREQ_WRITE, /* for stdvga */
     };
 
-    handler = hvm_find_io_handler(&p);
-
-    if ( handler == NULL )
-        return 0;
-
-    ops = handler->ops;
-    if ( ops->complete != NULL )
-        ops->complete(handler);
-
-    return 1;
+    return hvm_find_io_handler(&p);
 }
 
 /*

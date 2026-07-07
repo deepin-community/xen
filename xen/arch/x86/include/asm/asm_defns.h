@@ -6,13 +6,14 @@
 /* NB. Auto-generated from arch/.../asm-offsets.c */
 #include <asm/asm-offsets.h>
 #endif
-#include <asm/bug.h>
 #include <asm/x86-defns.h>
+#include <xen/bug.h>
 #include <xen/stringify.h>
 #include <asm/cpufeature.h>
 #include <asm/alternative.h>
 
 #ifdef __ASSEMBLY__
+#include <xen/linkage.h>
 #include <asm/asm-defns.h>
 #ifndef CONFIG_INDIRECT_THUNK
 .equ CONFIG_INDIRECT_THUNK, 0
@@ -81,6 +82,14 @@ register unsigned long current_stack_pointer asm("rsp");
 
 #ifdef __ASSEMBLY__
 
+.macro BUILD_BUG_ON condstr, cond:vararg
+        .if \cond
+        .error "Condition \"\condstr\" not satisfied"
+        .endif
+.endm
+/* preprocessor macro to make error message more user friendly */
+#define BUILD_BUG_ON(cond) BUILD_BUG_ON #cond, cond
+
 #ifdef HAVE_AS_QUOTED_SYM
 #define SUBSECTION_LBL(tag)                        \
         .ifndef .L.tag;                            \
@@ -135,7 +144,7 @@ register unsigned long current_stack_pointer asm("rsp");
 #define STACK_CPUINFO_FIELD(field) (1 - CPUINFO_sizeof + CPUINFO_##field)
 #define GET_STACK_END(reg)                        \
         .if .Lr##reg >= 8;                        \
-        movq $STACK_SIZE-1, %r##reg;              \
+        movl $STACK_SIZE-1, %r##reg##d;           \
         .else;                                    \
         movl $STACK_SIZE-1, %e##reg;              \
         .endif;                                   \
@@ -272,7 +281,7 @@ static always_inline void stac(void)
  * @compat: R8-R15 don't need reloading, but they are clobbered for added
  *          safety against information leaks.
  */
-.macro RESTORE_ALL adj=0 compat=0
+.macro RESTORE_ALL adj=0, compat=0
 .if !\compat
         movq  UREGS_r15(%rsp), %r15
         movq  UREGS_r14(%rsp), %r14
@@ -322,14 +331,6 @@ static always_inline void stac(void)
 #define safe_swapgs                             \
         "mfence; swapgs;"
 
-#ifdef __sun__
-#define REX64_PREFIX "rex64\\"
-#elif defined(__clang__)
-#define REX64_PREFIX ".byte 0x48; "
-#else
-#define REX64_PREFIX "rex64/"
-#endif
-
 #define ELFNOTE(name, type, desc)           \
     .pushsection .note.name, "a", @note   ; \
     .p2align 2                            ; \
@@ -341,12 +342,6 @@ static always_inline void stac(void)
 3:  desc                /* desc   */      ; \
 4:  .p2align 2                            ; \
     .popsection
-
-#define ASM_INT(label, val)                 \
-    .p2align 2;                             \
-label: .long (val);                         \
-    .size label, . - label;                 \
-    .type label, @object
 
 #define ASM_CONSTANT(name, value)                \
     asm ( ".equ " #name ", %P0; .global " #name  \

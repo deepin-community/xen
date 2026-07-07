@@ -45,7 +45,7 @@ static struct exynos4210_uart {
 #define exynos4210_read(uart, off)          readl((uart)->regs + off)
 #define exynos4210_write(uart, off, val)    writel(val, (uart->regs) + off)
 
-static void exynos4210_uart_interrupt(int irq, void *data, struct cpu_user_regs *regs)
+static void exynos4210_uart_interrupt(int irq, void *data)
 {
     struct serial_port *port = data;
     struct exynos4210_uart *uart = port->uart;
@@ -81,7 +81,7 @@ static void exynos4210_uart_interrupt(int irq, void *data, struct cpu_user_regs 
         if ( status & (UINTM_RXD | UINTM_ERROR) )
         {
             /* uart->regs[UINTM] |= RXD|ERROR; */
-            serial_rx_interrupt(port, regs);
+            serial_rx_interrupt(port);
             /* uart->regs[UINTM] &= ~(RXD|ERROR); */
             exynos4210_write(uart, UINTP, UINTM_RXD | UINTM_ERROR);
         }
@@ -89,7 +89,7 @@ static void exynos4210_uart_interrupt(int irq, void *data, struct cpu_user_regs 
         if ( status & (UINTM_TXD | UINTM_MODEM) )
         {
             /* uart->regs[UINTM] |= TXD|MODEM; */
-            serial_tx_interrupt(port, regs);
+            serial_tx_interrupt(port);
             /* uart->regs[UINTM] &= ~(TXD|MODEM); */
             exynos4210_write(uart, UINTP, UINTM_TXD | UINTM_MODEM);
         }
@@ -212,16 +212,6 @@ static void __init exynos4210_uart_init_postirq(struct serial_port *port)
     exynos4210_write(uart, UMCON, exynos4210_read(uart, UMCON) | UMCON_INT_EN);
 }
 
-static void exynos4210_uart_suspend(struct serial_port *port)
-{
-    BUG(); // XXX
-}
-
-static void exynos4210_uart_resume(struct serial_port *port)
-{
-    BUG(); // XXX
-}
-
 static int exynos4210_uart_tx_ready(struct serial_port *port)
 {
     struct exynos4210_uart *uart = port->uart;
@@ -286,9 +276,6 @@ static const struct vuart_info *exynos4210_vuart_info(struct serial_port *port)
 static struct uart_driver __read_mostly exynos4210_uart_driver = {
     .init_preirq  = exynos4210_uart_init_preirq,
     .init_postirq = exynos4210_uart_init_postirq,
-    .endboot      = NULL,
-    .suspend      = exynos4210_uart_suspend,
-    .resume       = exynos4210_uart_resume,
     .tx_ready     = exynos4210_uart_tx_ready,
     .putc         = exynos4210_uart_putc,
     .getc         = exynos4210_uart_getc,
@@ -303,7 +290,7 @@ static int __init exynos4210_uart_init(struct dt_device_node *dev,
     const char *config = data;
     struct exynos4210_uart *uart;
     int res;
-    u64 addr, size;
+    paddr_t addr, size;
 
     if ( strcmp(config, "") )
         printk("WARNING: UART configuration is not supported\n");
@@ -316,7 +303,7 @@ static int __init exynos4210_uart_init(struct dt_device_node *dev,
     uart->parity    = PARITY_NONE;
     uart->stop_bits = 1;
 
-    res = dt_device_get_address(dev, 0, &addr, &size);
+    res = dt_device_get_paddr(dev, 0, &addr, &size);
     if ( res )
     {
         printk("exynos4210: Unable to retrieve the base"

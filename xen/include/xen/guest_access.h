@@ -15,8 +15,10 @@
 #define guest_handle_is_null(hnd)        ((hnd).p == NULL)
 
 /* Offset the given guest handle into the array it refers to. */
-#define guest_handle_add_offset(hnd, nr) ((hnd).p += (nr))
-#define guest_handle_subtract_offset(hnd, nr) ((hnd).p -= (nr))
+#define guest_handle_add_offset(hnd, nr) ((hnd).p = \
+    (typeof((hnd).p))((unsigned long)(hnd).p + (nr) * sizeof(*(hnd).p)))
+#define guest_handle_subtract_offset(hnd, nr) ((hnd).p = \
+    (typeof((hnd).p))((unsigned long)(hnd).p - (nr) * sizeof(*(hnd).p)))
 
 /*
  * Cast a guest handle (either XEN_GUEST_HANDLE or XEN_GUEST_HANDLE_PARAM)
@@ -49,9 +51,9 @@
     ((XEN_GUEST_HANDLE(type)) { &(hnd).p->fld })
 
 #define guest_handle_from_ptr(ptr, type)        \
-    ((XEN_GUEST_HANDLE_PARAM(type)) { (type *)ptr })
+    ((XEN_GUEST_HANDLE_PARAM(type)) { (type *)(ptr) })
 #define const_guest_handle_from_ptr(ptr, type)  \
-    ((XEN_GUEST_HANDLE_PARAM(const_##type)) { (const type *)ptr })
+    ((XEN_GUEST_HANDLE_PARAM(const_##type)) { (const type *)(ptr) })
 
 /*
  * Copy an array of objects to guest context via a guest handle,
@@ -59,20 +61,22 @@
  */
 #define copy_to_guest_offset(hnd, off, ptr, nr) ({      \
     const typeof(*(ptr)) *_s = (ptr);                   \
-    char (*_d)[sizeof(*_s)] = (void *)(hnd).p;          \
+    unsigned long d_ = (unsigned long)(hnd).p;          \
     /* Check that the handle is not for a const type */ \
     void *__maybe_unused _t = (hnd).p;                  \
     (void)((hnd).p == _s);                              \
-    raw_copy_to_guest(_d+(off), _s, sizeof(*_s)*(nr));  \
+    raw_copy_to_guest((void *)(d_ + (off) * sizeof(*_s)), \
+                      _s, (nr) * sizeof(*_s));          \
 })
 
 /*
  * Clear an array of objects in guest context via a guest handle,
  * specifying an offset into the guest array.
  */
-#define clear_guest_offset(hnd, off, nr) ({    \
-    void *_d = (hnd).p;                        \
-    raw_clear_guest(_d+(off), nr);             \
+#define clear_guest_offset(hnd, off, nr) ({             \
+    unsigned long d_ = (unsigned long)(hnd).p;          \
+    raw_clear_guest((void *)(d_ + (off) * sizeof(*(hnd).p)), \
+                    (nr) * sizeof(*(hnd).p));           \
 })
 
 /*
@@ -80,24 +84,34 @@
  * specifying an offset into the guest array.
  */
 #define copy_from_guest_offset(ptr, hnd, off, nr) ({    \
-    const typeof(*(ptr)) *_s = (hnd).p;                 \
+    unsigned long s_ = (unsigned long)(hnd).p;          \
     typeof(*(ptr)) *_d = (ptr);                         \
-    raw_copy_from_guest(_d, _s+(off), sizeof(*_d)*(nr));\
+    (void)((hnd).p == _d);                              \
+    raw_copy_from_guest(_d,                             \
+                        (const void *)(s_ + (off) * sizeof(*_d)), \
+                        (nr) * sizeof(*_d));            \
 })
 
 /* Copy sub-field of a structure to guest context via a guest handle. */
 #define copy_field_to_guest(hnd, ptr, field) ({         \
     const typeof(&(ptr)->field) _s = &(ptr)->field;     \
-    void *_d = &(hnd).p->field;                         \
-    (void)(&(hnd).p->field == _s);                      \
-    raw_copy_to_guest(_d, _s, sizeof(*_s));             \
+    unsigned long d_ = (unsigned long)(hnd).p;          \
+    /* Check that the handle is not for a const type */ \
+    void *__maybe_unused _t = (hnd).p;                  \
+    (void)((typeof_field(typeof(*(hnd).p), field) *)NULL == _s); \
+    raw_copy_to_guest((void *)(d_ + offsetof(typeof(*(hnd).p), field)), \
+                      _s, sizeof(*_s));                 \
 })
 
 /* Copy sub-field of a structure from guest context via a guest handle. */
 #define copy_field_from_guest(ptr, hnd, field) ({       \
-    const typeof(&(ptr)->field) _s = &(hnd).p->field;   \
+    unsigned long s_ = (unsigned long)(hnd).p;          \
     typeof(&(ptr)->field) _d = &(ptr)->field;           \
-    raw_copy_from_guest(_d, _s, sizeof(*_d));           \
+    (void)((typeof_field(typeof(*(hnd).p), field) *)NULL == _d); \
+    raw_copy_from_guest(_d,                             \
+                        (const void *)(s_ +             \
+                            offsetof(typeof(*(hnd).p), field)), \
+                        sizeof(*_d));                   \
 })
 
 #define copy_to_guest(hnd, ptr, nr)                     \
@@ -117,35 +131,47 @@
 
 #define __copy_to_guest_offset(hnd, off, ptr, nr) ({        \
     const typeof(*(ptr)) *_s = (ptr);                       \
-    char (*_d)[sizeof(*_s)] = (void *)(hnd).p;              \
+    unsigned long d_ = (unsigned long)(hnd).p;              \
     /* Check that the handle is not for a const type */     \
     void *__maybe_unused _t = (hnd).p;                      \
     (void)((hnd).p == _s);                                  \
-    __raw_copy_to_guest(_d + (off), _s, sizeof(*_s) * (nr));\
+    __raw_copy_to_guest((void *)(d_ + (off) * sizeof(*_s)), \
+                      _s, (nr) * sizeof(*_s));              \
 })
 
-#define __clear_guest_offset(hnd, off, nr) ({    \
-    void *_d = (hnd).p;                          \
-    __raw_clear_guest(_d + (off), nr);           \
+#define __clear_guest_offset(hnd, off, nr) ({               \
+    unsigned long d_ = (unsigned long)(hnd).p;              \
+    __raw_clear_guest((void *)(d_ + (off) * sizeof(*(hnd).p)), \
+                      (nr) * sizeof(*(hnd).p));             \
 })
 
 #define __copy_from_guest_offset(ptr, hnd, off, nr) ({          \
-    const typeof(*(ptr)) *_s = (hnd).p;                         \
+    unsigned long s_ = (unsigned long)(hnd).p;                  \
     typeof(*(ptr)) *_d = (ptr);                                 \
-    __raw_copy_from_guest(_d, _s + (off), sizeof (*_d) * (nr)); \
+    (void)((hnd).p == _d);                                      \
+    __raw_copy_from_guest(_d,                                   \
+                          (const void *)(s_ + (off) * sizeof(*_d)), \
+                          (nr) * sizeof(*_d));                  \
 })
 
 #define __copy_field_to_guest(hnd, ptr, field) ({       \
     const typeof(&(ptr)->field) _s = &(ptr)->field;     \
-    void *_d = &(hnd).p->field;                         \
-    (void)(&(hnd).p->field == _s);                      \
-    __raw_copy_to_guest(_d, _s, sizeof(*_s));           \
+    unsigned long d_ = (unsigned long)(hnd).p;          \
+    /* Check that the handle is not for a const type */ \
+    void *__maybe_unused _t = (hnd).p;                  \
+    (void)((typeof_field(typeof(*(hnd).p), field) *)NULL == _s); \
+    __raw_copy_to_guest((void *)(d_ + offsetof(typeof(*(hnd).p), field)), \
+                        _s, sizeof(*_s));               \
 })
 
 #define __copy_field_from_guest(ptr, hnd, field) ({     \
-    const typeof(&(ptr)->field) _s = &(hnd).p->field;   \
+    unsigned long s_ = (unsigned long)(hnd).p;          \
     typeof(&(ptr)->field) _d = &(ptr)->field;           \
-    __raw_copy_from_guest(_d, _s, sizeof(*_d));         \
+    (void)((typeof_field(typeof(*(hnd).p), field) *)NULL == _d); \
+    __raw_copy_from_guest(_d,                           \
+                          (const void *)(s_ +           \
+                              offsetof(typeof(*(hnd).p), field)), \
+                          sizeof(*_d));                 \
 })
 
 #define __copy_to_guest(hnd, ptr, nr)                   \

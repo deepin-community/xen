@@ -24,11 +24,10 @@
 #include <asm/asm_defns.h>
 #include <asm/page.h>
 
-ENTRY(svm_asm_do_resume)
+FUNC(svm_asm_do_resume)
         GET_CURRENT(bx)
 .Lsvm_do_resume:
         call svm_intr_assist
-        mov  %rsp,%rdi
         call nsvm_vcpu_switch
         ASSERT_NOT_IN_ATOMIC
 
@@ -54,7 +53,6 @@ UNLIKELY_START(ne, nsvm_hap)
         jmp  .Lsvm_do_resume
 __UNLIKELY_END(nsvm_hap)
 
-        mov  %rsp, %rdi
         call svm_vmenter_helper
 
         clgi
@@ -63,18 +61,26 @@ __UNLIKELY_END(nsvm_hap)
         /* SPEC_CTRL_EXIT_TO_SVM       Req: b=curr %rsp=regs/cpuinfo, Clob: acd */
         .macro svm_vmentry_spec_ctrl
             mov    VCPU_arch_msrs(%rbx), %rax
-            movzbl CPUINFO_last_spec_ctrl(%rsp), %edx
+            mov    CPUINFO_last_spec_ctrl(%rsp), %edx
             mov    VCPUMSR_spec_ctrl_raw(%rax), %eax
             cmp    %edx, %eax
             je     1f /* Skip write if value is correct. */
             mov    $MSR_SPEC_CTRL, %ecx
             xor    %edx, %edx
             wrmsr
-            mov    %al, CPUINFO_last_spec_ctrl(%rsp)
+            mov    %eax, CPUINFO_last_spec_ctrl(%rsp)
 1:          /* No Spectre v1 concerns.  Execution will hit VMRUN imminently. */
         .endm
         ALTERNATIVE "", svm_vmentry_spec_ctrl, X86_FEATURE_SC_MSR_HVM
         ALTERNATIVE "", DO_SPEC_CTRL_DIV, X86_FEATURE_SC_DIV
+
+        /*
+         * Set EFLAGS.IF after CLGI covers us from real interrupts, but not
+         * immediately prior to VMRUN.  The VMRUN instruction leaks it's
+         * INTR_SHADOW into guest state if a VMExit occurs before VMRUN
+         * completes (e.g. taking #NPF during event injecting.)
+         */
+        sti
 
         pop  %r15
         pop  %r14
@@ -93,7 +99,8 @@ __UNLIKELY_END(nsvm_hap)
         pop  %rsi
         pop  %rdi
 
-        sti
+        SPEC_CTRL_COND_VERW     /* Req: %rsp=eframe                    Clob: efl */
+
         vmrun
 
         SAVE_ALL
@@ -102,8 +109,13 @@ __UNLIKELY_END(nsvm_hap)
 
         /* SPEC_CTRL_ENTRY_FROM_SVM    Req: %rsp=regs/cpuinfo, %rdx=0 Clob: acd */
 
+        /*
+         * IBPB is to mitigate BTC/SRSO on AMD/Hygon parts, in particular
+         * making type-confused RETs safe to use.  This is not needed on Zen5
+         * and later parts when SRSO_MSR_FIX (BP-SPEC-REDUCE) is in use.
+         */
         .macro svm_vmexit_cond_ibpb
-            testb  $SCF_entry_ibpb, CPUINFO_xen_spec_ctrl(%rsp)
+            testb  $SCF_entry_ibpb, CPUINFO_scf(%rsp)
             jz     .L_skip_ibpb
 
             mov    $MSR_PRED_CMD, %ecx
@@ -113,17 +125,26 @@ __UNLIKELY_END(nsvm_hap)
 	.endm
         ALTERNATIVE "", svm_vmexit_cond_ibpb, X86_FEATURE_IBPB_ENTRY_HVM
 
+        /*
+         * RSB (RAS/RAP) stuffing is to prevents RET predictions following guest
+         * entries.  This is not needed on Zen4 and later, when AutoIBRS is in
+         * use.
+         */
         ALTERNATIVE "", DO_OVERWRITE_RSB, X86_FEATURE_SC_RSB_HVM
 
+        /*
+         * Restore Xen's MSR_SPEC_CTRL setting, making indirect CALLs/JMPs
+         * safe to use.  The guest's setting resides in the VMCB.
+         */
         .macro svm_vmexit_spec_ctrl
-            movzbl CPUINFO_xen_spec_ctrl(%rsp), %eax
-            movzbl CPUINFO_last_spec_ctrl(%rsp), %edx
+            mov    CPUINFO_xen_spec_ctrl(%rsp), %eax
+            mov    CPUINFO_last_spec_ctrl(%rsp), %edx
             cmp    %edx, %eax
             je     1f /* Skip write if value is correct. */
             mov    $MSR_SPEC_CTRL, %ecx
             xor    %edx, %edx
             wrmsr
-            mov    %al, CPUINFO_last_spec_ctrl(%rsp)
+            mov    %eax, CPUINFO_last_spec_ctrl(%rsp)
 1:
         .endm
         ALTERNATIVE "", svm_vmexit_spec_ctrl, X86_FEATURE_SC_MSR_HVM
@@ -134,8 +155,7 @@ __UNLIKELY_END(nsvm_hap)
          * to safely resolve any Spectre-v1 concerns in the above logic.
          */
         stgi
-GLOBAL(svm_stgi_label)
-        mov  %rsp,%rdi
+LABEL(svm_stgi_label, 0)
         call svm_vmexit_handler
         jmp  .Lsvm_do_resume
 
@@ -143,3 +163,4 @@ GLOBAL(svm_stgi_label)
         sti
         call do_softirq
         jmp  .Lsvm_do_resume
+END(svm_asm_do_resume)

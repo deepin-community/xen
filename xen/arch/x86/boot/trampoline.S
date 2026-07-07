@@ -147,7 +147,8 @@ GLOBAL(trampoline_misc_enable_off)
 
 /* EFER OR-mask for boot paths.  SCE conditional on PV support, NX added when available. */
 GLOBAL(trampoline_efer)
-        .long   EFER_LME | (EFER_SCE * IS_ENABLED(CONFIG_PV))
+        .long   EFER_LME | (EFER_SCE * IS_ENABLED(CONFIG_PV)) | \
+                (EFER_NXE * IS_ENABLED(CONFIG_REQUIRE_NX))
 
 GLOBAL(trampoline_xen_phys_start)
         .long   0
@@ -155,15 +156,15 @@ GLOBAL(trampoline_xen_phys_start)
 GLOBAL(trampoline_cpu_started)
         .byte   0
 
-/* The first page of trampoline is permanent, the rest boot-time only. */
-/* Reuse the boot trampoline on the 1st trampoline page as stack for wakeup. */
-        .equ    wakeup_stack, trampoline_start + PAGE_SIZE
-        .global wakeup_stack
+LABEL(trampoline_perm_end, 0)
 
 /* From here on early boot only. */
 
         .code32
 trampoline_boot_cpu_entry:
+        /* Switch to relocated trampoline GDT. */
+        lgdt    bootsym_rel(gdt_48, 4)
+
         cmpb    $0,bootsym_rel(skip_realmode,5)
         jnz     .Lskip_realmode
 

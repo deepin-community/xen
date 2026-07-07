@@ -5,21 +5,20 @@
 #include <public/sysctl.h>
 #include <xen/acpi.h>
 
-#define XEN_PX_INIT 0x80000000
+#define XEN_PX_INIT 0x80000000U
 
-int powernow_cpufreq_init(void);
 unsigned int powernow_register_driver(void);
 unsigned int get_measured_perf(unsigned int cpu, unsigned int flag);
-void cpufreq_residency_update(unsigned int, uint8_t);
-void cpufreq_statistic_update(unsigned int, uint8_t, uint8_t);
-int  cpufreq_statistic_init(unsigned int);
-void cpufreq_statistic_exit(unsigned int);
-void cpufreq_statistic_reset(unsigned int);
+void cpufreq_residency_update(unsigned int cpu, uint8_t state);
+void cpufreq_statistic_update(unsigned int cpu, uint8_t from, uint8_t to);
+int  cpufreq_statistic_init(unsigned int cpu);
+void cpufreq_statistic_exit(unsigned int cpu);
+void cpufreq_statistic_reset(unsigned int cpu);
 
-int  cpufreq_limit_change(unsigned int);
+int  cpufreq_limit_change(unsigned int cpu);
 
-int  cpufreq_add_cpu(unsigned int);
-int  cpufreq_del_cpu(unsigned int);
+int  cpufreq_add_cpu(unsigned int cpu);
+int  cpufreq_del_cpu(unsigned int cpu);
 
 struct processor_performance {
     uint32_t state;
@@ -59,5 +58,5 @@ struct pm_px {
 
 DECLARE_PER_CPU(struct pm_px *, cpufreq_statistic_data);
 
-int cpufreq_cpu_init(unsigned int cpuid);
+int cpufreq_cpu_init(unsigned int cpu);
 #endif /* __XEN_PROCESSOR_PM_H__ */

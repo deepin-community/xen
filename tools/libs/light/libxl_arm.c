@@ -3,6 +3,8 @@
 #include "libxl_libfdt_compat.h"
 #include "libxl_arm.h"
 
+#include <xen-tools/arm-arch-capabilities.h>
+
 #include <stdbool.h>
 #include <libfdt.h>
 #include <assert.h>
@@ -48,6 +50,24 @@ static uint32_t alloc_virtio_mmio_irq(libxl__gc *gc, uint32_t *virtio_mmio_irq)
     return irq;
 }
 
+static int alloc_virtio_mmio_params(libxl__gc *gc, uint64_t *base,
+                                    uint32_t *irq, uint64_t *virtio_mmio_base,
+                                    uint32_t *virtio_mmio_irq)
+{
+    *base = alloc_virtio_mmio_base(gc, virtio_mmio_base);
+    if (!*base)
+        return ERROR_FAIL;
+
+    *irq = alloc_virtio_mmio_irq(gc, virtio_mmio_irq);
+    if (!*irq)
+        return ERROR_FAIL;
+
+    LOG(DEBUG, "Allocate Virtio MMIO params: IRQ %u BASE 0x%"PRIx64, *irq,
+        *base);
+
+    return 0;
+}
+
 static const char *gicv_to_string(libxl_gic_version gic_version)
 {
     switch (gic_version) {
@@ -70,6 +90,7 @@ int libxl__arch_domain_prepare_config(libxl__gc *gc,
     bool vuart_enabled = false, virtio_enabled = false;
     uint64_t virtio_mmio_base = GUEST_VIRTIO_MMIO_BASE;
     uint32_t virtio_mmio_irq = GUEST_VIRTIO_MMIO_SPI_FIRST;
+    int rc;
 
     /*
      * If pl011 vuart is enabled then increment the nr_spis to allow allocation
@@ -85,21 +106,26 @@ int libxl__arch_domain_prepare_config(libxl__gc *gc,
         libxl_device_disk *disk = &d_config->disks[i];
 
         if (disk->specification == LIBXL_DISK_SPECIFICATION_VIRTIO) {
-            disk->base = alloc_virtio_mmio_base(gc, &virtio_mmio_base);
-            if (!disk->base)
-                return ERROR_FAIL;
+            rc = alloc_virtio_mmio_params(gc, &disk->base, &disk->irq,
+                                          &virtio_mmio_base,
+                                          &virtio_mmio_irq);
 
-            disk->irq = alloc_virtio_mmio_irq(gc, &virtio_mmio_irq);
-            if (!disk->irq)
-                return ERROR_FAIL;
-
-            if (virtio_irq < disk->irq)
-                virtio_irq = disk->irq;
-            virtio_enabled = true;
-
-            LOG(DEBUG, "Allocate Virtio MMIO params for Vdev %s: IRQ %u BASE 0x%"PRIx64,
-                disk->vdev, disk->irq, disk->base);
+            if (rc)
+                return rc;
         }
+    }
+
+    for (i = 0; i < d_config->num_virtios; i++) {
+        libxl_device_virtio *virtio = &d_config->virtios[i];
+
+        if (virtio->transport != LIBXL_VIRTIO_TRANSPORT_MMIO)
+            continue;
+
+        rc = alloc_virtio_mmio_params(gc, &virtio->base, &virtio->irq,
+                                      &virtio_mmio_base, &virtio_mmio_irq);
+
+        if (rc)
+            return rc;
     }
 
     /*
@@ -107,8 +133,16 @@ int libxl__arch_domain_prepare_config(libxl__gc *gc,
      * present, make sure that we allocate enough SPIs for them.
      * The resulting "nr_spis" needs to cover the highest possible SPI.
      */
-    if (virtio_enabled)
+    if (virtio_mmio_irq != GUEST_VIRTIO_MMIO_SPI_FIRST) {
+        virtio_enabled = true;
+
+        /*
+         * Assumes that "virtio_mmio_irq" is the highest allocated irq, which is
+         * updated from alloc_virtio_mmio_irq() currently.
+         */
+        virtio_irq = virtio_mmio_irq - 1;
         nr_spis = max(nr_spis, virtio_irq - 32 + 1);
+    }
 
     for (i = 0; i < d_config->b_info.num_irqs; i++) {
         uint32_t irq = d_config->b_info.irqs[i];
@@ -147,8 +181,8 @@ int libxl__arch_domain_prepare_config(libxl__gc *gc,
 
     LOG(DEBUG, "Configure the domain");
 
-    config->arch.nr_spis = nr_spis;
-    LOG(DEBUG, " - Allocate %u SPIs", nr_spis);
+    config->arch.nr_spis = max(nr_spis, d_config->b_info.arch_arm.nr_spis);
+    LOG(DEBUG, " - Allocate %u SPIs", config->arch.nr_spis);
 
     switch (d_config->b_info.arch_arm.gic_version) {
     case LIBXL_GIC_VERSION_DEFAULT:
@@ -173,10 +207,19 @@ int libxl__arch_domain_prepare_config(libxl__gc *gc,
     case LIBXL_TEE_TYPE_OPTEE:
         config->arch.tee_type = XEN_DOMCTL_CONFIG_TEE_OPTEE;
         break;
+    case LIBXL_TEE_TYPE_FFA:
+        config->arch.tee_type = XEN_DOMCTL_CONFIG_TEE_FFA;
+        break;
     default:
         LOG(ERROR, "Unknown TEE type %d",
             d_config->b_info.tee);
         return ERROR_FAIL;
+    }
+
+    /* Parameter is sanitised in libxl__arch_domain_build_info_setdefault */
+    if (d_config->b_info.arch_arm.sve_vl) {
+        /* Vector length is divided by 128 in struct xen_domctl_createdomain */
+        config->arch.sve_vl = d_config->b_info.arch_arm.sve_vl / 128U;
     }
 
     return 0;
@@ -888,9 +931,10 @@ static int make_xen_iommu_node(libxl__gc *gc, void *fdt)
     return 0;
 }
 
-static int make_virtio_mmio_node(libxl__gc *gc, void *fdt,
-                                 uint64_t base, uint32_t irq,
-                                 uint32_t backend_domid)
+/* The caller is responsible to complete / close the fdt node */
+static int make_virtio_mmio_node_common(libxl__gc *gc, void *fdt, uint64_t base,
+                                        uint32_t irq, uint32_t backend_domid,
+                                        bool grant_usage)
 {
     int res;
     gic_interrupt intr;
@@ -913,7 +957,7 @@ static int make_virtio_mmio_node(libxl__gc *gc, void *fdt,
     res = fdt_property(fdt, "dma-coherent", NULL, 0);
     if (res) return res;
 
-    if (backend_domid != LIBXL_TOOLSTACK_DOMID) {
+    if (grant_usage) {
         uint32_t iommus_prop[2];
 
         iommus_prop[0] = cpu_to_fdt32(GUEST_PHANDLE_IOMMU);
@@ -923,10 +967,96 @@ static int make_virtio_mmio_node(libxl__gc *gc, void *fdt,
         if (res) return res;
     }
 
-    res = fdt_end_node(fdt);
+    return res;
+}
+
+static int make_virtio_mmio_node(libxl__gc *gc, void *fdt, uint64_t base,
+                                 uint32_t irq, uint32_t backend_domid,
+                                 bool grant_usage)
+{
+    int res;
+
+    res = make_virtio_mmio_node_common(gc, fdt, base, irq, backend_domid, grant_usage);
     if (res) return res;
 
-    return 0;
+    return fdt_end_node(fdt);
+}
+
+/*
+ * The DT bindings for I2C device are present here:
+ *
+ * https://www.kernel.org/doc/Documentation/devicetree/bindings/i2c/i2c-virtio.yaml
+ */
+static int make_virtio_mmio_node_i2c(libxl__gc *gc, void *fdt)
+{
+    int res;
+
+    res = fdt_begin_node(fdt, "i2c");
+    if (res) return res;
+
+    res = fdt_property_compat(gc, fdt, 1, VIRTIO_DEVICE_TYPE_I2C);
+    if (res) return res;
+
+    return fdt_end_node(fdt);
+}
+
+/*
+ * The DT bindings for GPIO device are present here:
+ *
+ * https://www.kernel.org/doc/Documentation/devicetree/bindings/gpio/gpio-virtio.yaml
+ */
+static int make_virtio_mmio_node_gpio(libxl__gc *gc, void *fdt)
+{
+    int res;
+
+    res = fdt_begin_node(fdt, "gpio");
+    if (res) return res;
+
+    res = fdt_property_compat(gc, fdt, 1, VIRTIO_DEVICE_TYPE_GPIO);
+    if (res) return res;
+
+    res = fdt_property(fdt, "gpio-controller", NULL, 0);
+    if (res) return res;
+
+    res = fdt_property_cell(fdt, "#gpio-cells", 2);
+    if (res) return res;
+
+    res = fdt_property(fdt, "interrupt-controller", NULL, 0);
+    if (res) return res;
+
+    res = fdt_property_cell(fdt, "#interrupt-cells", 2);
+    if (res) return res;
+
+    return fdt_end_node(fdt);
+}
+
+static int make_virtio_mmio_node_device(libxl__gc *gc, void *fdt, uint64_t base,
+                                        uint32_t irq, const char *type,
+                                        uint32_t backend_domid, bool grant_usage)
+{
+    int res;
+
+    res = make_virtio_mmio_node_common(gc, fdt, base, irq, backend_domid, grant_usage);
+    if (res) return res;
+
+    /* Add device specific nodes */
+    if (!strcmp(type, VIRTIO_DEVICE_TYPE_I2C)) {
+        res = make_virtio_mmio_node_i2c(gc, fdt);
+        if (res) return res;
+    } else if (!strcmp(type, VIRTIO_DEVICE_TYPE_GPIO)) {
+        res = make_virtio_mmio_node_gpio(gc, fdt);
+        if (res) return res;
+    } else {
+        int len = sizeof(VIRTIO_DEVICE_TYPE_GENERIC) - 1;
+
+        if (strncmp(type, VIRTIO_DEVICE_TYPE_GENERIC, len)) {
+            /* Doesn't match generic virtio device */
+            LOG(ERROR, "Invalid type for virtio device: %s", type);
+            return -EINVAL;
+        }
+    }
+
+    return fdt_end_node(fdt);
 }
 
 static const struct arch_info *get_arch_info(libxl__gc *gc,
@@ -1130,7 +1260,7 @@ static int libxl__prepare_dtb(libxl__gc *gc, libxl_domain_config *d_config,
     size_t fdt_size = 0;
     int pfdt_size = 0;
     libxl_domain_build_info *const info = &d_config->b_info;
-    bool iommu_created;
+    bool iommu_needed = false;
     unsigned int i;
 
     const libxl_version_info *vers;
@@ -1238,21 +1368,40 @@ next_resize:
         if (d_config->num_pcidevs)
             FDT( make_vpci_node(gc, fdt, ainfo, dom) );
 
-        iommu_created = false;
         for (i = 0; i < d_config->num_disks; i++) {
             libxl_device_disk *disk = &d_config->disks[i];
 
             if (disk->specification == LIBXL_DISK_SPECIFICATION_VIRTIO) {
-                if (disk->backend_domid != LIBXL_TOOLSTACK_DOMID &&
-                    !iommu_created) {
-                    FDT( make_xen_iommu_node(gc, fdt) );
-                    iommu_created = true;
-                }
+                if (libxl_defbool_val(disk->grant_usage))
+                    iommu_needed = true;
 
                 FDT( make_virtio_mmio_node(gc, fdt, disk->base, disk->irq,
-                                           disk->backend_domid) );
+                                           disk->backend_domid,
+                                           libxl_defbool_val(disk->grant_usage)) );
             }
         }
+
+        for (i = 0; i < d_config->num_virtios; i++) {
+            libxl_device_virtio *virtio = &d_config->virtios[i];
+
+            if (virtio->transport != LIBXL_VIRTIO_TRANSPORT_MMIO)
+                continue;
+
+            if (libxl_defbool_val(virtio->grant_usage))
+                iommu_needed = true;
+
+            FDT( make_virtio_mmio_node_device(gc, fdt, virtio->base,
+                                              virtio->irq, virtio->type,
+                                              virtio->backend_domid,
+                                              libxl_defbool_val(virtio->grant_usage)) );
+        }
+
+        /*
+         * The iommu node should be created only once for all virtio-mmio
+         * devices.
+         */
+        if (iommu_needed)
+            FDT( make_xen_iommu_node(gc, fdt) );
 
         if (pfdt)
             FDT( copy_partial_fdt(gc, fdt, pfdt) );
@@ -1551,6 +1700,31 @@ int libxl__arch_domain_build_info_setdefault(libxl__gc *gc,
     /* ACPI is disabled by default */
     libxl_defbool_setdefault(&b_info->acpi, false);
 
+    /* Sanitise SVE parameter */
+    if (b_info->arch_arm.sve_vl) {
+        unsigned int max_sve_vl =
+            arch_capabilities_arm_sve(physinfo->arch_capabilities);
+
+        if (!max_sve_vl) {
+            LOG(ERROR, "SVE is unsupported on this machine.");
+            return ERROR_FAIL;
+        }
+
+        if (LIBXL_SVE_TYPE_HW == b_info->arch_arm.sve_vl) {
+            b_info->arch_arm.sve_vl = max_sve_vl;
+        } else if (b_info->arch_arm.sve_vl > max_sve_vl) {
+            LOG(ERROR,
+                "Invalid sve value: %d. Platform supports up to %u bits",
+                b_info->arch_arm.sve_vl, max_sve_vl);
+            return ERROR_FAIL;
+        } else if (b_info->arch_arm.sve_vl % 128) {
+            LOG(ERROR,
+                "Invalid sve value: %d. It must be multiple of 128",
+                b_info->arch_arm.sve_vl);
+            return ERROR_FAIL;
+        }
+    }
+
     if (b_info->type != LIBXL_DOMAIN_TYPE_PV)
         return 0;
 
@@ -1598,6 +1772,21 @@ void libxl__arch_update_domain_config(libxl__gc *gc,
                                       libxl_domain_config *dst,
                                       const libxl_domain_config *src)
 {
+}
+
+int libxl__arch_hvm_map_gsi(libxl__gc *gc, uint32_t sbdf, uint32_t domid)
+{
+    return ERROR_INVAL;
+}
+
+int libxl__arch_hvm_unmap_gsi(libxl__gc *gc, uint32_t sbdf, uint32_t domid)
+{
+    return ERROR_INVAL;
+}
+
+bool libxl__arch_local_domain_has_pirq_notion(libxl__gc *gc)
+{
+    return true;
 }
 
 /*

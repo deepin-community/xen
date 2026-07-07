@@ -16,6 +16,7 @@
 #include <xen/iocap.h>
 #include <xen/ioreq.h>
 #include <xen/lib.h>
+#include <xen/llc-coloring.h>
 #include <xen/mem_access.h>
 #include <xen/mm.h>
 #include <xen/numa.h>
@@ -23,11 +24,13 @@
 #include <xen/param.h>
 #include <xen/perfc.h>
 #include <xen/sched.h>
+#include <xen/sections.h>
 #include <xen/trace.h>
 #include <xen/types.h>
 #include <asm/current.h>
 #include <asm/hardirq.h>
 #include <asm/p2m.h>
+#include <asm/page.h>
 #include <public/memory.h>
 #include <xsm/xsm.h>
 
@@ -154,6 +157,73 @@ static void increase_reservation(struct memop_args *a)
     a->nr_done = i;
 }
 
+/*
+ * Temporary storage for a domain assigned page that's not been fully scrubbed.
+ * Stored pages must be domheap ones.
+ *
+ * The stashed page can be freed at any time by Xen, the caller must pass the
+ * order and NUMA node requirement to the fetch function to ensure the
+ * currently stashed page matches it's requirements.
+ */
+static void stash_allocation(struct domain *d, struct page_info *page,
+                             unsigned int order, unsigned int scrub_index)
+{
+    rspin_lock(&d->page_alloc_lock);
+
+    /*
+     * Drop the passed page in preference for the already stashed one.  This
+     * interface is designed to be used for single-threaded domain creation.
+     */
+    if ( d->pending_scrub || d->is_dying )
+        free_domheap_pages(page, order);
+    else
+    {
+        d->pending_scrub_index = scrub_index;
+        d->pending_scrub_order = order;
+        d->pending_scrub = page;
+    }
+
+    rspin_unlock(&d->page_alloc_lock);
+}
+
+static struct page_info *get_stashed_allocation(struct domain *d,
+                                                unsigned int order,
+                                                nodeid_t node,
+                                                unsigned int *scrub_index)
+{
+    struct page_info *page = NULL;
+
+    rspin_lock(&d->page_alloc_lock);
+
+    /*
+     * If there's a pending page to scrub check if it satisfies the current
+     * request.  If it doesn't free it and return NULL.
+     */
+    if ( d->pending_scrub )
+    {
+        if ( d->pending_scrub_order == order &&
+             (node == NUMA_NO_NODE || node == page_to_nid(d->pending_scrub)) )
+        {
+            page = d->pending_scrub;
+            *scrub_index = d->pending_scrub_index;
+        }
+        else
+            free_domheap_pages(d->pending_scrub, d->pending_scrub_order);
+
+        /*
+         * The caller now owns the page or it has been freed, clear stashed
+         * information.  Prevent concurrent usages of get_stashed_allocation()
+         * from returning the same page to different contexts.
+         */
+        d->pending_scrub_index = 0;
+        d->pending_scrub_order = 0;
+        d->pending_scrub = NULL;
+    }
+
+    rspin_unlock(&d->page_alloc_lock);
+    return page;
+}
+
 static void populate_physmap(struct memop_args *a)
 {
     struct page_info *page;
@@ -270,7 +340,19 @@ static void populate_physmap(struct memop_args *a)
             }
             else
             {
-                page = alloc_domheap_pages(d, a->extent_order, a->memflags);
+                unsigned int scrub_start = 0;
+                unsigned int memflags =
+                    a->memflags | (d->creation_finished ? 0
+                                                        : MEMF_no_scrub);
+                nodeid_t node =
+                    (a->memflags & MEMF_exact_node) ? MEMF_get_node(a->memflags)
+                                                    : NUMA_NO_NODE;
+
+                page = get_stashed_allocation(d, a->extent_order, node,
+                                              &scrub_start);
+
+                if ( !page )
+                    page = alloc_domheap_pages(d, a->extent_order, memflags);
 
                 if ( unlikely(!page) )
                 {
@@ -279,6 +361,30 @@ static void populate_physmap(struct memop_args *a)
                              a->extent_order, d->domain_id, a->memflags,
                              i, a->nr_extents);
                     goto out;
+                }
+
+                if ( memflags & MEMF_no_scrub )
+                {
+                    unsigned int dirty_cnt = 0;
+
+                    /* Check if there's anything to scrub. */
+                    for ( j = scrub_start; j < (1U << a->extent_order); j++ )
+                    {
+                        if ( !test_and_clear_bit(_PGC_need_scrub,
+                                                 &page[j].count_info) )
+                            continue;
+
+                        scrub_one_page(&page[j]);
+
+                        if ( (j + 1) != (1U << a->extent_order) &&
+                             !(++dirty_cnt & 0xff) &&
+                             hypercall_preempt_check() )
+                        {
+                            a->preempted = 1;
+                            stash_allocation(d, page, a->extent_order, j + 1);
+                            goto out;
+                        }
+                    }
                 }
 
                 if ( unlikely(a->memflags & MEMF_no_tlbflush) )
@@ -474,15 +580,15 @@ static void decrease_reservation(struct memop_args *a)
         if ( tb_init_done )
         {
             struct {
-                u64 gfn;
-                int d:16,order:16;
+                uint64_t gfn;
+                uint32_t d, order;
             } t;
 
             t.gfn = gmfn;
             t.d = a->domain->domain_id;
             t.order = a->extent_order;
         
-            __trace_var(TRC_MEM_DECREASE_RESERVATION, 0, sizeof(t), &t);
+            trace(TRC_MEM_DECREASE_RESERVATION, sizeof(t), &t);
         }
 
         /* See if populate-on-demand wants to handle this */
@@ -756,7 +862,7 @@ static long memory_exchange(XEN_GUEST_HANDLE_PARAM(xen_memory_exchange_t) arg)
                              MEMF_no_refcount) )
             {
                 unsigned long dec_count;
-                bool_t drop_dom_ref;
+                bool drop_dom_ref;
 
                 /*
                  * Pages in in_chunk_list is stolen without
@@ -769,10 +875,10 @@ static long memory_exchange(XEN_GUEST_HANDLE_PARAM(xen_memory_exchange_t) arg)
                               (1UL << in_chunk_order)) -
                              (j * (1UL << exch.out.extent_order)));
 
-                spin_lock(&d->page_alloc_lock);
+                nrspin_lock(&d->page_alloc_lock);
                 drop_dom_ref = (dec_count &&
                                 !domain_adjust_tot_pages(d, -dec_count));
-                spin_unlock(&d->page_alloc_lock);
+                nrspin_unlock(&d->page_alloc_lock);
 
                 if ( drop_dom_ref )
                     put_domain(d);
@@ -1120,7 +1226,7 @@ static long xatp_permission_check(struct domain *d, unsigned int space)
     return xsm_add_to_physmap(XSM_TARGET, current->domain, d);
 }
 
-unsigned int ioreq_server_max_frames(const struct domain *d)
+static unsigned int ioreq_server_max_frames(const struct domain *d)
 {
     unsigned int nr = 0;
 
@@ -1155,7 +1261,7 @@ static unsigned int resource_max_frames(const struct domain *d,
         return d->vmtrace_size >> PAGE_SHIFT;
 
     default:
-        return -EOPNOTSUPP;
+        return 0;
     }
 }
 
@@ -1238,6 +1344,7 @@ static int _acquire_resource(
         return acquire_vmtrace_buf(d, id, frame, nr_frames, mfn_list);
 
     default:
+        ASSERT_UNREACHABLE();
         return -EOPNOTSUPP;
     }
 }
@@ -1655,6 +1762,9 @@ long do_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
         break;
 
     case XENMEM_claim_pages:
+        if ( llc_coloring_enabled )
+            return -EOPNOTSUPP;
+
         if ( unlikely(start_extent) )
             return -EINVAL;
 
@@ -1675,6 +1785,9 @@ long do_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
             return -EINVAL;
 
         rc = xsm_claim_pages(XSM_PRIV, d);
+
+        if ( !rc && d->is_dying )
+            rc = -EINVAL;
 
         if ( !rc )
             rc = domain_set_outstanding_pages(d, reservation.nr_extents);

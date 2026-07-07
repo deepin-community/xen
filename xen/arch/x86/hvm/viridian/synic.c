@@ -13,13 +13,12 @@
 
 #include <asm/apic.h>
 #include <asm/guest/hyperv-tlfs.h>
-#include <asm/hvm/support.h>
 #include <asm/hvm/vlapic.h>
 
 #include "private.h"
 
 
-void __init __maybe_unused build_assertions(void)
+static void __init __maybe_unused build_assertions(void)
 {
     BUILD_BUG_ON(sizeof(struct hv_message) != HV_MESSAGE_SIZE);
 }
@@ -173,7 +172,7 @@ int viridian_synic_wrmsr(struct vcpu *v, uint32_t idx, uint64_t val)
         vector = new.vector;
         vv->vector_to_sintx[vector] = sintx;
 
-        printk(XENLOG_G_INFO "%pv: VIRIDIAN SINT%u: vector: %x\n", v, sintx,
+        printk(XENLOG_G_INFO "%pv: VIRIDIAN SINT%u: vector: %#x\n", v, sintx,
                vector);
 
         *vs = new;
@@ -234,7 +233,7 @@ int viridian_synic_rdmsr(const struct vcpu *v, uint32_t idx, uint64_t *val)
          * should be set to. Assume everything but the bottom bit
          * should be zero.
          */
-        *val = 1ul;
+        *val = 1UL;
         break;
 
     case HV_X64_MSR_SIEFP:
@@ -338,6 +337,10 @@ bool viridian_synic_deliver_timer_msg(struct vcpu *v, unsigned int sintx,
         .ExpirationTime = expiration,
         .DeliveryTime = delivery,
     };
+
+    /* Don't assume SIM page to be mapped. */
+    if ( !msg )
+        return false;
 
     /*
      * To avoid using an atomic test-and-set, and barrier before calling

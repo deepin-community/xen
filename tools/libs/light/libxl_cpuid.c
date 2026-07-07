@@ -260,7 +260,6 @@ int libxl_cpuid_parse_config(libxl_cpuid_policy_list *policy, const char* str)
         {"clfsh",        0x00000001, NA, CPUID_REG_EDX, 19,  1},
         {"tm",           0x00000001, NA, CPUID_REG_EDX, 29,  1},
         {"ia64",         0x00000001, NA, CPUID_REG_EDX, 30,  1},
-        {"pbe",          0x00000001, NA, CPUID_REG_EDX, 31,  1},
 
         {"arat",         0x00000006, NA, CPUID_REG_EAX,  2,  1},
 
@@ -279,7 +278,6 @@ int libxl_cpuid_parse_config(libxl_cpuid_policy_list *policy, const char* str)
         {"invtsc",       0x80000007, NA, CPUID_REG_EDX,  8,  1},
 
         {"ppin",         0x80000008, NA, CPUID_REG_EBX, 23,  1},
-        {"btc-no",       0x80000008, NA, CPUID_REG_EBX, 29,  1},
 
         {"nc",           0x80000008, NA, CPUID_REG_ECX,  0,  8},
         {"apicidsize",   0x80000008, NA, CPUID_REG_ECX, 12,  4},
@@ -298,7 +296,7 @@ int libxl_cpuid_parse_config(libxl_cpuid_policy_list *policy, const char* str)
 
         {NULL, 0, NA, CPUID_REG_INV, 0, 0}
     };
-    static const struct feature_name features[] = INIT_FEATURE_NAMES;
+    static const struct feature_name features[] = INIT_FEATURE_NAME_TO_VAL;
     /*
      * NB: if we switch to using a cpu_policy derived object instead of a
      * libxl_cpuid_policy_list we could get rid of the featureset -> cpuid leaf
@@ -344,6 +342,7 @@ int libxl_cpuid_parse_config(libxl_cpuid_policy_list *policy, const char* str)
         CPUID_ENTRY(0x00000007,  1, CPUID_REG_EDX),
         MSR_ENTRY(0x10a, CPUID_REG_EAX),
         MSR_ENTRY(0x10a, CPUID_REG_EDX),
+        CPUID_ENTRY(0x80000021, NA, CPUID_REG_ECX),
 #undef MSR_ENTRY
 #undef CPUID_ENTRY
     };

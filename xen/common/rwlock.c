@@ -34,8 +34,11 @@ void queue_read_lock_slowpath(rwlock_t *lock)
 
     /*
      * Put the reader into the wait queue.
+     *
+     * Use the speculation unsafe helper, as it's the caller responsibility to
+     * issue a speculation barrier if required.
      */
-    spin_lock(&lock->lock);
+    _spin_lock(&lock->lock);
 
     /*
      * At the head of the wait queue now, wait until the writer state
@@ -54,6 +57,8 @@ void queue_read_lock_slowpath(rwlock_t *lock)
      * Signal the next one in queue to become queue head.
      */
     spin_unlock(&lock->lock);
+
+    lock_enter(&lock->lock.debug);
 }
 
 /*
@@ -64,8 +69,13 @@ void queue_write_lock_slowpath(rwlock_t *lock)
 {
     u32 cnts;
 
-    /* Put the writer into the wait queue. */
-    spin_lock(&lock->lock);
+    /*
+     * Put the writer into the wait queue.
+     *
+     * Use the speculation unsafe helper, as it's the caller responsibility to
+     * issue a speculation barrier if required.
+     */
+    _spin_lock(&lock->lock);
 
     /* Try to acquire the lock directly if no reader is present. */
     if ( !atomic_read(&lock->cnts) &&
@@ -100,6 +110,8 @@ void queue_write_lock_slowpath(rwlock_t *lock)
     }
  unlock:
     spin_unlock(&lock->lock);
+
+    lock_enter(&lock->lock.debug);
 }
 
 
@@ -117,8 +129,12 @@ void _percpu_write_lock(percpu_rwlock_t **per_cpudata,
     /*
      * First take the write lock to protect against other writers or slow
      * path readers.
+     *
+     * Note we use the speculation unsafe variant of write_lock(), as the
+     * calling wrapper already adds a speculation barrier after the lock has
+     * been taken.
      */
-    write_lock(&percpu_rwlock->rwlock);
+    _write_lock(&percpu_rwlock->rwlock);
 
     /* Now set the global variable so that readers start using read_lock. */
     percpu_rwlock->writer_activating = 1;
@@ -146,4 +162,6 @@ void _percpu_write_lock(percpu_rwlock_t **per_cpudata,
         /* Give the coherency fabric a break. */
         cpu_relax();
     };
+
+    lock_enter(&percpu_rwlock->rwlock.lock.debug);
 }

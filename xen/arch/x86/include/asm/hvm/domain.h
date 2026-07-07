@@ -1,20 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * domain.h: HVM per domain definitions
  *
  * Copyright (c) 2004, Intel Corporation.
  * Copyright (c) 2005, International Business Machines Corporation
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef __ASM_X86_HVM_DOMAIN_H__
@@ -58,7 +47,7 @@ struct hvm_pi_ops {
      * Hook into arch_vcpu_block(), which is called
      * from vcpu_block() and vcpu_do_poll().
      */
-    void (*vcpu_block)(struct vcpu *);
+    void (*vcpu_block)(struct vcpu *v);
 };
 
 struct hvm_domain {
@@ -83,7 +72,6 @@ struct hvm_domain {
     struct hvm_hw_vpic     vpic[2]; /* 0=master; 1=slave */
     struct hvm_vioapic    **vioapic;
     unsigned int           nr_vioapics;
-    struct hvm_hw_stdvga   stdvga;
 
     /*
      * hvm_hw_pmtimer is a publicly-visible name. We will defer renaming

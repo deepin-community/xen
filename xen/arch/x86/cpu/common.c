@@ -4,6 +4,7 @@
 #include <xen/param.h>
 #include <xen/smp.h>
 
+#include <asm/amd.h>
 #include <asm/cpu-policy.h>
 #include <asm/current.h>
 #include <asm/debugreg.h>
@@ -13,10 +14,10 @@
 #include <asm/io.h>
 #include <asm/mpspec.h>
 #include <asm/apic.h>
+#include <asm/prot-key.h>
 #include <asm/random.h>
 #include <asm/setup.h>
 #include <asm/shstk.h>
-#include <mach_apic.h>
 #include <public/sysctl.h> /* for XEN_INVALID_{SOCKET,CORE}_ID */
 
 #include "cpu.h"
@@ -24,12 +25,8 @@
 
 bool __read_mostly opt_dom0_cpuid_faulting = true;
 
-bool_t opt_arat = 1;
+bool opt_arat = true;
 boolean_param("arat", opt_arat);
-
-/* pku: Flag to enable Memory Protection Keys (default on). */
-static bool_t opt_pku = 1;
-boolean_param("pku", opt_pku);
 
 unsigned int opt_cpuid_mask_ecx = ~0u;
 integer_param("cpuid_mask_ecx", opt_cpuid_mask_ecx);
@@ -58,6 +55,8 @@ static unsigned int cleared_caps[NCAPINTS];
 static unsigned int forced_caps[NCAPINTS];
 
 DEFINE_PER_CPU(bool, full_gdt_loaded);
+
+DEFINE_PER_CPU(uint32_t, pkrs);
 
 void __init setup_clear_cpu_cap(unsigned int cap)
 {
@@ -104,40 +103,27 @@ void __init setup_force_cpu_cap(unsigned int cap)
 
 bool __init is_forced_cpu_cap(unsigned int cap)
 {
-	return test_bit(cap, forced_caps);
+	return test_bit(cap, forced_caps) || test_bit(cap, cleared_caps);
 }
 
 static void cf_check default_init(struct cpuinfo_x86 * c)
 {
 	/* Not much we can do here... */
-	/* Check if at least it has cpuid */
-	BUG_ON(c->cpuid_level == -1);
 	__clear_bit(X86_FEATURE_SEP, c->x86_capability);
 }
 
-static const struct cpu_dev default_cpu = {
+static const struct cpu_dev __initconst_cf_clobber __used default_cpu = {
 	.c_init	= default_init,
 };
-static const struct cpu_dev *this_cpu = &default_cpu;
+static struct cpu_dev __ro_after_init actual_cpu;
 
 static DEFINE_PER_CPU(uint64_t, msr_misc_features);
-void (* __read_mostly ctxt_switch_masking)(const struct vcpu *next);
+void (* __ro_after_init ctxt_switch_masking)(const struct vcpu *next);
 
 bool __init probe_cpuid_faulting(void)
 {
 	uint64_t val;
 	int rc;
-
-	/*
-	 * Don't bother looking for CPUID faulting if we aren't virtualised on
-	 * AMD or Hygon hardware - it won't be present.  Likewise for Fam0F
-	 * Intel hardware.
-	 */
-	if (((boot_cpu_data.x86_vendor & (X86_VENDOR_AMD | X86_VENDOR_HYGON)) ||
-	     ((boot_cpu_data.x86_vendor == X86_VENDOR_INTEL) &&
-	      boot_cpu_data.x86 == 0xf)) &&
-	    !cpu_has_hypervisor)
-		return false;
 
 	if ((rc = rdmsr_safe(MSR_INTEL_PLATFORM_INFO, val)) == 0)
 		raw_cpu_policy.platform_info.cpuid_faulting =
@@ -152,8 +138,6 @@ bool __init probe_cpuid_faulting(void)
 		return false;
 	}
 
-	expected_levelling_cap |= LCAP_faulting;
-	levelling_caps |=  LCAP_faulting;
 	setup_force_cpu_cap(X86_FEATURE_CPUID_FAULTING);
 
 	return true;
@@ -176,8 +160,10 @@ static void set_cpuid_faulting(bool enable)
 void ctxt_switch_levelling(const struct vcpu *next)
 {
 	const struct domain *nextd = next ? next->domain : NULL;
+	bool enable_cpuid_faulting;
 
-	if (cpu_has_cpuid_faulting) {
+	if (cpu_has_cpuid_faulting ||
+	    boot_cpu_has(X86_FEATURE_CPUID_USER_DIS)) {
 		/*
 		 * No need to alter the faulting setting if we are switching
 		 * to idle; it won't affect any code running in idle context.
@@ -198,12 +184,18 @@ void ctxt_switch_levelling(const struct vcpu *next)
 		 * an interim escape hatch in the form of
 		 * `dom0=no-cpuid-faulting` to restore the older behaviour.
 		 */
-		set_cpuid_faulting(nextd && (opt_dom0_cpuid_faulting ||
-					     !is_control_domain(nextd) ||
-					     !is_pv_domain(nextd)) &&
-				   (is_pv_domain(nextd) ||
-				    next->arch.msrs->
-				    misc_features_enables.cpuid_faulting));
+		enable_cpuid_faulting = nextd && (opt_dom0_cpuid_faulting ||
+		                                  !is_control_domain(nextd) ||
+		                                  !is_pv_domain(nextd)) &&
+		                        (is_pv_domain(nextd) ||
+		                         next->arch.msrs->
+		                         misc_features_enables.cpuid_faulting);
+
+		if (cpu_has_cpuid_faulting)
+			set_cpuid_faulting(enable_cpuid_faulting);
+		else
+			amd_set_cpuid_user_dis(enable_cpuid_faulting);
+
 		return;
 	}
 
@@ -233,7 +225,7 @@ static void setup_doitm(void)
     wrmsrl(MSR_UARCH_MISC_CTRL, msr);
 }
 
-bool_t opt_cpu_info;
+bool opt_cpu_info;
 boolean_param("cpuinfo", opt_cpu_info);
 
 int get_model_name(struct cpuinfo_x86 *c)
@@ -328,7 +320,7 @@ static inline u32 phys_pkg_id(u32 cpuid_apic, int index_msb)
 
    WARNING: this function is only called on the BP.  Don't add code here
    that is supposed to run on all CPUs. */
-void __init early_cpu_init(void)
+void __init early_cpu_init(bool verbose)
 {
 	struct cpuinfo_x86 *c = &boot_cpu_data;
 	u32 eax, ebx, ecx, edx;
@@ -343,12 +335,16 @@ void __init early_cpu_init(void)
 
 	c->x86_vendor = x86_cpuid_lookup_vendor(ebx, ecx, edx);
 	switch (c->x86_vendor) {
-	case X86_VENDOR_INTEL:	  this_cpu = &intel_cpu_dev;    break;
-	case X86_VENDOR_AMD:	  this_cpu = &amd_cpu_dev;      break;
-	case X86_VENDOR_CENTAUR:  this_cpu = &centaur_cpu_dev;  break;
-	case X86_VENDOR_SHANGHAI: this_cpu = &shanghai_cpu_dev; break;
-	case X86_VENDOR_HYGON:    this_cpu = &hygon_cpu_dev;    break;
+	case X86_VENDOR_INTEL:    intel_unlock_cpuid_leaves(c);
+				  actual_cpu = intel_cpu_dev;    break;
+	case X86_VENDOR_AMD:      actual_cpu = amd_cpu_dev;      break;
+	case X86_VENDOR_CENTAUR:  actual_cpu = centaur_cpu_dev;  break;
+	case X86_VENDOR_SHANGHAI: actual_cpu = shanghai_cpu_dev; break;
+	case X86_VENDOR_HYGON:    actual_cpu = hygon_cpu_dev;    break;
 	default:
+		actual_cpu = default_cpu;
+		if (!verbose)
+			break;
 		printk(XENLOG_ERR
 		       "Unrecognised or unsupported CPU vendor '%.12s'\n",
 		       c->x86_vendor_id);
@@ -365,10 +361,13 @@ void __init early_cpu_init(void)
 	c->x86_capability[FEATURESET_1d] = edx;
 	c->x86_capability[FEATURESET_1c] = ecx;
 
-	printk(XENLOG_INFO
-	       "CPU Vendor: %s, Family %u (%#x), Model %u (%#x), Stepping %u (raw %08x)\n",
-	       x86_cpuid_vendor_to_str(c->x86_vendor), c->x86, c->x86,
-	       c->x86_model, c->x86_model, c->x86_mask, eax);
+	if (verbose)
+		printk(XENLOG_INFO
+		       "CPU Vendor: %s, Family %u (%#x), "
+		       "Model %u (%#x), Stepping %u (raw %08x)\n",
+		       x86_cpuid_vendor_to_str(c->x86_vendor), c->x86,
+		       c->x86, c->x86_model, c->x86_model, c->x86_mask,
+		       eax);
 
 	if (c->cpuid_level >= 7) {
 		uint32_t max_subleaf;
@@ -376,6 +375,11 @@ void __init early_cpu_init(void)
 		cpuid_count(7, 0, &max_subleaf, &ebx,
 			    &c->x86_capability[FEATURESET_7c0],
 			    &c->x86_capability[FEATURESET_7d0]);
+
+		if (test_bit(X86_FEATURE_ARCH_CAPS, c->x86_capability))
+			rdmsr(MSR_ARCH_CAPABILITIES,
+			      c->x86_capability[FEATURESET_m10Al],
+			      c->x86_capability[FEATURESET_m10Ah]);
 
 		if (max_subleaf >= 1)
 			cpuid_count(7, 1, &eax, &ebx, &ecx,
@@ -434,8 +438,26 @@ static void generic_identify(struct cpuinfo_x86 *c)
 	c->apicid = phys_pkg_id((ebx >> 24) & 0xFF, 0);
 	c->phys_proc_id = c->apicid;
 
-	if (this_cpu->c_early_init)
-		this_cpu->c_early_init(c);
+	/*
+	 * Early init of Self Snoop support requires 0x1.edx, while there also
+	 * set 0x1.ecx as the value is in context.
+	 */
+	c->x86_capability[FEATURESET_1c] = ecx;
+	c->x86_capability[FEATURESET_1d] = edx;
+
+	eax = cpuid_eax(0x80000000);
+	if ((eax >> 16) == 0x8000)
+		c->extended_cpuid_level = eax;
+
+	/*
+	 * These AMD-defined flags are out of place, but we need
+	 * them early for the CPUID faulting probe code
+	 */
+	if (c->extended_cpuid_level >= 0x80000021)
+		c->x86_capability[FEATURESET_e21a] = cpuid_eax(0x80000021);
+
+	if (actual_cpu.c_early_init)
+		alternative_vcall(actual_cpu.c_early_init, c);
 
 	/* c_early_init() may have adjusted cpuid levels/features.  Reread. */
 	c->cpuid_level = cpuid_eax(0);
@@ -450,10 +472,6 @@ static void generic_identify(struct cpuinfo_x86 *c)
 	     (cpuid_ecx(CPUID_PM_LEAF) & CPUID6_ECX_APERFMPERF_CAPABILITY) )
 		__set_bit(X86_FEATURE_APERFMPERF, c->x86_capability);
 
-	eax = cpuid_eax(0x80000000);
-	if ((eax >> 16) == 0x8000)
-		c->extended_cpuid_level = eax;
-
 	/* AMD-defined flags: level 0x80000001 */
 	if (c->extended_cpuid_level >= 0x80000001)
 		cpuid(0x80000001, &tmp, &tmp,
@@ -467,7 +485,9 @@ static void generic_identify(struct cpuinfo_x86 *c)
 	if (c->extended_cpuid_level >= 0x80000008)
 		c->x86_capability[FEATURESET_e8b] = cpuid_ebx(0x80000008);
 	if (c->extended_cpuid_level >= 0x80000021)
-		c->x86_capability[FEATURESET_e21a] = cpuid_eax(0x80000021);
+		cpuid(0x80000021,
+		      &c->x86_capability[FEATURESET_e21a], &tmp,
+		      &c->x86_capability[FEATURESET_e21c], &tmp);
 
 	/* Intel-defined flags: level 0x00000007 */
 	if (c->cpuid_level >= 7) {
@@ -508,15 +528,11 @@ void identify_cpu(struct cpuinfo_x86 *c)
 	int i;
 
 	c->x86_cache_size = -1;
-	c->x86_vendor = X86_VENDOR_UNKNOWN;
-	c->cpuid_level = -1;	/* CPUID not detected */
 	c->x86_model = c->x86_mask = 0;	/* So far unknown... */
-	c->x86_vendor_id[0] = '\0'; /* Unset */
 	c->x86_model_id[0] = '\0';  /* Unset */
 	c->x86_max_cores = 1;
 	c->x86_num_siblings = 1;
 	c->x86_clflush_size = 0;
-	c->phys_proc_id = XEN_INVALID_SOCKET_ID;
 	c->cpu_core_id = XEN_INVALID_CORE_ID;
 	c->compute_unit_id = INVALID_CUID;
 	memset(&c->x86_capability, 0, sizeof c->x86_capability);
@@ -540,12 +556,8 @@ void identify_cpu(struct cpuinfo_x86 *c)
 	 * At the end of this section, c->x86_capability better
 	 * indicate the features this CPU genuinely supports!
 	 */
-	if (this_cpu->c_init)
-		this_cpu->c_init(c);
-
-
-   	if (c == &boot_cpu_data && !opt_pku)
-		setup_clear_cpu_cap(X86_FEATURE_PKU);
+	if (actual_cpu.c_init)
+		alternative_vcall(actual_cpu.c_init, c);
 
 	/*
 	 * The vendor-specific functions might have changed features.  Now
@@ -974,6 +986,9 @@ void cpu_init(void)
 	write_debugreg(3, 0);
 	write_debugreg(6, X86_DR6_DEFAULT);
 	write_debugreg(7, X86_DR7_DEFAULT);
+
+	if (cpu_has_pku)
+		wrpkru(0);
 
 	/*
 	 * If the platform is performing a Secure Launch via SKINIT, GIF is

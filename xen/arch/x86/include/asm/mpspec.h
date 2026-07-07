@@ -3,7 +3,12 @@
 
 #include <xen/cpumask.h>
 #include <asm/mpspec_def.h>
-#include <mach_mpspec.h>
+
+#define MAX_IRQ_SOURCES 256
+
+/* Generic (i.e. installer) kernels need lots of bus entries. */
+/* Maximum 256 PCI busses, plus 1 ISA bus in each of 4 cabinets. */
+#define MAX_MP_BUSSES 260
 
 extern unsigned char mp_bus_id_to_type[MAX_MP_BUSSES];
 
@@ -15,7 +20,6 @@ extern void get_smp_config (void);
 extern unsigned char apic_version [MAX_APICS];
 extern int mp_irq_entries;
 extern struct mpc_config_intsrc mp_irqs [MAX_IRQ_SOURCES];
-extern int mpc_default_type;
 extern unsigned long mp_lapic_addr;
 extern bool pic_mode;
 

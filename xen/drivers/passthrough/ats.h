@@ -12,8 +12,8 @@
  * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef _ATS_H_
-#define _ATS_H_
+#ifndef DRIVERS__PASSTHROUGH__ATS_H
+#define DRIVERS__PASSTHROUGH__ATS_H
 
 #include <xen/pci_regs.h>
 
@@ -22,7 +22,7 @@
 #define ATS_QUEUE_DEPTH_MASK     0x1f
 #define ATS_ENABLE               (1<<15)
 
-extern bool_t ats_enabled;
+extern bool ats_enabled;
 
 int enable_ats_device(struct pci_dev *pdev, struct list_head *ats_list);
 void disable_ats_device(struct pci_dev *pdev);
@@ -32,7 +32,8 @@ static inline int pci_ats_enabled(int seg, int bus, int devfn)
     u32 value;
     int pos;
 
-    pos = pci_find_ext_capability(seg, bus, devfn, PCI_EXT_CAP_ID_ATS);
+    pos = pci_find_ext_capability(PCI_SBDF(seg, bus, devfn),
+                                  PCI_EXT_CAP_ID_ATS);
     BUG_ON(!pos);
 
     value = pci_conf_read16(PCI_SBDF(seg, bus, devfn), pos + ATS_REG_CTL);
@@ -45,8 +46,9 @@ static inline int pci_ats_device(int seg, int bus, int devfn)
     if ( !ats_enabled )
         return 0;
 
-    return pci_find_ext_capability(seg, bus, devfn, PCI_EXT_CAP_ID_ATS);
+    return pci_find_ext_capability(PCI_SBDF(seg, bus, devfn),
+                                   PCI_EXT_CAP_ID_ATS);
 }
 
-#endif /* _ATS_H_ */
+#endif /* DRIVERS__PASSTHROUGH__ATS_H */
 

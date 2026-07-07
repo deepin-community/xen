@@ -122,6 +122,13 @@ NicTypeVifIoemu NicType = 1
 NicTypeVif NicType = 2
 )
 
+type P9Type int
+const(
+P9TypeUnknown P9Type = 0
+P9TypeQemu P9Type = 1
+P9TypeXen9Pfsd P9Type = 2
+)
+
 type ActionOnShutdown int
 const(
 ActionOnShutdownDestroy ActionOnShutdown = 1
@@ -255,6 +262,12 @@ VkbBackendQemu VkbBackend = 1
 VkbBackendLinux VkbBackend = 2
 )
 
+type VirtioTransport int
+const(
+VirtioTransportUnknown VirtioTransport = 0
+VirtioTransportMmio VirtioTransport = 1
+)
+
 type Passthrough int
 const(
 PassthroughDefault Passthrough = 0
@@ -386,6 +399,33 @@ Commandline string
 BuildId string
 }
 
+type SmbiosType int
+const(
+SmbiosTypeBiosVendor SmbiosType = 1
+SmbiosTypeBiosVersion SmbiosType = 2
+SmbiosTypeSystemManufacturer SmbiosType = 3
+SmbiosTypeSystemProductName SmbiosType = 4
+SmbiosTypeSystemVersion SmbiosType = 5
+SmbiosTypeSystemSerialNumber SmbiosType = 6
+SmbiosTypeBaseboardManufacturer SmbiosType = 7
+SmbiosTypeBaseboardProductName SmbiosType = 8
+SmbiosTypeBaseboardVersion SmbiosType = 9
+SmbiosTypeBaseboardSerialNumber SmbiosType = 10
+SmbiosTypeBaseboardAssetTag SmbiosType = 11
+SmbiosTypeBaseboardLocationInChassis SmbiosType = 12
+SmbiosTypeEnclosureManufacturer SmbiosType = 13
+SmbiosTypeEnclosureSerialNumber SmbiosType = 14
+SmbiosTypeEnclosureAssetTag SmbiosType = 15
+SmbiosTypeBatteryManufacturer SmbiosType = 16
+SmbiosTypeBatteryDeviceName SmbiosType = 17
+SmbiosTypeOem SmbiosType = 18
+)
+
+type Smbios struct {
+Key SmbiosType
+Value string
+}
+
 type DomainCreateInfo struct {
 Type DomainType
 Hap Defbool
@@ -455,6 +495,29 @@ type TeeType int
 const(
 TeeTypeNone TeeType = 0
 TeeTypeOptee TeeType = 1
+TeeTypeFfa TeeType = 2
+)
+
+type SveType int
+const(
+SveTypeHw SveType = -1
+SveTypeDisabled SveType = 0
+SveType128 SveType = 128
+SveType256 SveType = 256
+SveType384 SveType = 384
+SveType512 SveType = 512
+SveType640 SveType = 640
+SveType768 SveType = 768
+SveType896 SveType = 896
+SveType1024 SveType = 1024
+SveType1152 SveType = 1152
+SveType1280 SveType = 1280
+SveType1408 SveType = 1408
+SveType1536 SveType = 1536
+SveType1664 SveType = 1664
+SveType1792 SveType = 1792
+SveType1920 SveType = 1920
+SveType2048 SveType = 2048
 )
 
 type RdmReserve struct {
@@ -512,6 +575,7 @@ SchedParams DomainSchedParams
 Ioports []IoportRange
 Irqs []uint32
 Iomem []IomemRange
+LlcColors []uint32
 ClaimMode Defbool
 EventChannels uint32
 Kernel string
@@ -521,6 +585,8 @@ DeviceTree string
 Acpi Defbool
 Bootloader string
 BootloaderArgs StringList
+BootloaderRestrict Defbool
+BootloaderUser string
 TimerMode TimerMode
 NestedHvm Defbool
 Apic Defbool
@@ -531,6 +597,8 @@ TypeUnion DomainBuildInfoTypeUnion
 ArchArm struct {
 GicVersion GicVersion
 Vuart VuartType
+SveVl SveType
+NrSpis uint32
 }
 ArchX86 struct {
 MsrRelaxed Defbool
@@ -566,6 +634,7 @@ NestedHvm Defbool
 Altp2M Defbool
 SystemFirmware string
 SmbiosFirmware string
+Smbios []Smbios
 AcpiFirmware string
 Hdtype Hdtype
 Nographic Defbool
@@ -591,6 +660,7 @@ SerialList StringList
 Rdm RdmReserve
 RdmMemBoundaryMemkb uint64
 McaCaps uint64
+Pirq Defbool
 }
 
 func (x DomainBuildInfoTypeUnionHvm) isDomainBuildInfoTypeUnion(){}
@@ -644,6 +714,17 @@ MultiTouchHeight uint32
 MultiTouchNumContacts uint32
 }
 
+type DeviceVirtio struct {
+BackendDomid Domid
+BackendDomname string
+Type string
+Transport VirtioTransport
+GrantUsage Defbool
+Devid Devid
+Irq uint32
+Base uint64
+}
+
 type DeviceDisk struct {
 BackendDomid Domid
 BackendDomname string
@@ -669,6 +750,7 @@ ColoExport string
 ActiveDisk string
 HiddenDisk string
 Trusted Defbool
+GrantUsage Defbool
 }
 
 type DeviceNic struct {
@@ -676,6 +758,7 @@ BackendDomid Domid
 BackendDomname string
 Devid Devid
 Mtu int
+Vlan string
 Model string
 Mac Mac
 Ip string
@@ -817,6 +900,11 @@ Tag string
 Path string
 SecurityModel string
 Devid Devid
+Type P9Type
+MaxSpace int
+MaxFiles int
+MaxOpenFiles int
+AutoDelete bool
 }
 
 type DevicePvcallsif struct {
@@ -933,6 +1021,7 @@ Rdms []DeviceRdm
 Dtdevs []DeviceDtdev
 Vfbs []DeviceVfb
 Vkbs []DeviceVkb
+Virtios []DeviceVirtio
 Vtpms []DeviceVtpm
 P9S []DeviceP9
 Pvcallsifs []DevicePvcallsif
@@ -1034,6 +1123,7 @@ CapVmtrace bool
 CapVpmu bool
 CapGnttabV1 bool
 CapGnttabV2 bool
+ArchCapabilities uint32
 }
 
 type Connectorinfo struct {

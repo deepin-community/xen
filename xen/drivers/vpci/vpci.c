@@ -29,6 +29,10 @@ struct vpci_register {
     unsigned int offset;
     void *private;
     struct list_head node;
+    uint32_t ro_mask;
+    uint32_t rw1c_mask;
+    uint32_t rsvdp_mask;
+    uint32_t rsvdz_mask;
 };
 
 #ifdef __XEN__
@@ -36,10 +40,63 @@ extern vpci_register_init_t *const __start_vpci_array[];
 extern vpci_register_init_t *const __end_vpci_array[];
 #define NUM_VPCI_INIT (__end_vpci_array - __start_vpci_array)
 
-void vpci_remove_device(struct pci_dev *pdev)
+#ifdef CONFIG_HAS_VPCI_GUEST_SUPPORT
+static int assign_virtual_sbdf(struct pci_dev *pdev)
 {
+    struct domain *d = pdev->domain;
+    unsigned int new_dev_number;
+
+    ASSERT(rw_is_write_locked(&pdev->domain->pci_lock));
+
+    if ( is_hardware_domain(d) )
+        return 0;
+
+    /*
+     * Each PCI bus supports 32 devices/slots at max or up to 256 when
+     * there are multi-function ones which are not yet supported.
+     */
+    if ( pdev->sbdf.fn )
+    {
+        gdprintk(XENLOG_ERR, "%pp: only function 0 passthrough supported\n",
+                 &pdev->sbdf);
+        return -EOPNOTSUPP;
+    }
+    new_dev_number = find_first_zero_bit(d->vpci_dev_assigned_map,
+                                         VPCI_MAX_VIRT_DEV);
+    if ( new_dev_number == VPCI_MAX_VIRT_DEV )
+        return -ENOSPC;
+
+    __set_bit(new_dev_number, &d->vpci_dev_assigned_map);
+
+    /*
+     * Both segment and bus number are 0:
+     *  - we emulate a single host bridge for the guest, e.g. segment 0
+     *  - with bus 0 the virtual devices are seen as embedded
+     *    endpoints behind the root complex
+     *
+     * TODO: add support for multi-function devices.
+     */
+    pdev->vpci->guest_sbdf = PCI_SBDF(0, 0, new_dev_number, 0);
+
+    return 0;
+}
+
+#endif /* CONFIG_HAS_VPCI_GUEST_SUPPORT */
+
+void vpci_deassign_device(struct pci_dev *pdev)
+{
+    unsigned int i;
+
+    ASSERT(rw_is_write_locked(&pdev->domain->pci_lock));
+
     if ( !has_vpci(pdev->domain) || !pdev->vpci )
         return;
+
+#ifdef CONFIG_HAS_VPCI_GUEST_SUPPORT
+    if ( pdev->vpci->guest_sbdf.sbdf != ~0 )
+        __clear_bit(pdev->vpci->guest_sbdf.dev,
+                    &pdev->domain->vpci_dev_assigned_map);
+#endif
 
     spin_lock(&pdev->vpci->lock);
     while ( !list_empty(&pdev->vpci->handlers) )
@@ -54,29 +111,39 @@ void vpci_remove_device(struct pci_dev *pdev)
     spin_unlock(&pdev->vpci->lock);
     if ( pdev->vpci->msix )
     {
-        unsigned int i;
-
         list_del(&pdev->vpci->msix->next);
         for ( i = 0; i < ARRAY_SIZE(pdev->vpci->msix->table); i++ )
             if ( pdev->vpci->msix->table[i] )
                 iounmap(pdev->vpci->msix->table[i]);
     }
+
+    for ( i = 0; i < ARRAY_SIZE(pdev->vpci->header.bars); i++ )
+        rangeset_destroy(pdev->vpci->header.bars[i].mem);
+
     xfree(pdev->vpci->msix);
     xfree(pdev->vpci->msi);
     xfree(pdev->vpci);
     pdev->vpci = NULL;
 }
 
-int vpci_add_handlers(struct pci_dev *pdev)
+int vpci_assign_device(struct pci_dev *pdev)
 {
     unsigned int i;
+    const unsigned long *ro_map;
     int rc = 0;
+
+    ASSERT(rw_is_write_locked(&pdev->domain->pci_lock));
 
     if ( !has_vpci(pdev->domain) )
         return 0;
 
     /* We should not get here twice for the same device. */
     ASSERT(!pdev->vpci);
+
+    /* No vPCI for r/o devices. */
+    ro_map = pci_get_ro_map(pdev->sbdf.seg);
+    if ( ro_map && test_bit(pdev->sbdf.bdf, ro_map) )
+        return 0;
 
     pdev->vpci = xzalloc(struct vpci);
     if ( !pdev->vpci )
@@ -85,6 +152,13 @@ int vpci_add_handlers(struct pci_dev *pdev)
     INIT_LIST_HEAD(&pdev->vpci->handlers);
     spin_lock_init(&pdev->vpci->lock);
 
+#ifdef CONFIG_HAS_VPCI_GUEST_SUPPORT
+    pdev->vpci->guest_sbdf = INVALID_GUEST_SBDF;
+    rc = assign_virtual_sbdf(pdev);
+    if ( rc )
+        goto out;
+#endif
+
     for ( i = 0; i < NUM_VPCI_INIT; i++ )
     {
         rc = __start_vpci_array[i](pdev);
@@ -92,8 +166,9 @@ int vpci_add_handlers(struct pci_dev *pdev)
             break;
     }
 
+ out: __maybe_unused;
     if ( rc )
-        vpci_remove_device(pdev);
+        vpci_deassign_device(pdev);
 
     return rc;
 }
@@ -127,6 +202,18 @@ static void cf_check vpci_ignored_write(
 {
 }
 
+uint32_t cf_check vpci_read_val(
+    const struct pci_dev *pdev, unsigned int reg, void *data)
+{
+    return (uintptr_t)data;
+}
+
+uint32_t cf_check vpci_hw_read8(
+    const struct pci_dev *pdev, unsigned int reg, void *data)
+{
+    return pci_conf_read8(pdev->sbdf, reg);
+}
+
 uint32_t cf_check vpci_hw_read16(
     const struct pci_dev *pdev, unsigned int reg, void *data)
 {
@@ -139,9 +226,17 @@ uint32_t cf_check vpci_hw_read32(
     return pci_conf_read32(pdev->sbdf, reg);
 }
 
-int vpci_add_register(struct vpci *vpci, vpci_read_t *read_handler,
-                      vpci_write_t *write_handler, unsigned int offset,
-                      unsigned int size, void *data)
+void cf_check vpci_hw_write16(
+    const struct pci_dev *pdev, unsigned int reg, uint32_t val, void *data)
+{
+    pci_conf_write16(pdev->sbdf, reg, val);
+}
+
+int vpci_add_register_mask(struct vpci *vpci, vpci_read_t *read_handler,
+                           vpci_write_t *write_handler, unsigned int offset,
+                           unsigned int size, void *data, uint32_t ro_mask,
+                           uint32_t rw1c_mask, uint32_t rsvdp_mask,
+                           uint32_t rsvdz_mask)
 {
     struct list_head *prev;
     struct vpci_register *r;
@@ -149,7 +244,14 @@ int vpci_add_register(struct vpci *vpci, vpci_read_t *read_handler,
     /* Some sanity checks. */
     if ( (size != 1 && size != 2 && size != 4) ||
          offset >= PCI_CFG_SPACE_EXP_SIZE || (offset & (size - 1)) ||
-         (!read_handler && !write_handler) )
+         (!read_handler && !write_handler) || (ro_mask & rw1c_mask) ||
+         (ro_mask & rsvdp_mask) || (ro_mask & rsvdz_mask) ||
+         (rw1c_mask & rsvdp_mask) || (rw1c_mask & rsvdz_mask) ||
+         (rsvdp_mask & rsvdz_mask) )
+        return -EINVAL;
+
+    if ( size != 4 &&
+         ((ro_mask | rw1c_mask | rsvdp_mask | rsvdz_mask) >> (8 * size)) )
         return -EINVAL;
 
     r = xmalloc(struct vpci_register);
@@ -161,6 +263,10 @@ int vpci_add_register(struct vpci *vpci, vpci_read_t *read_handler,
     r->size = size;
     r->offset = offset;
     r->private = data;
+    r->ro_mask = ro_mask;
+    r->rw1c_mask = rw1c_mask;
+    r->rsvdp_mask = rsvdp_mask;
+    r->rsvdz_mask = rsvdz_mask;
 
     spin_lock(&vpci->lock);
 
@@ -223,6 +329,10 @@ static uint32_t vpci_read_hw(pci_sbdf_t sbdf, unsigned int reg,
 {
     uint32_t data;
 
+    /* Guest domains are not allowed to read real hardware. */
+    if ( !is_hardware_domain(current->domain) )
+        return ~(uint32_t)0;
+
     switch ( size )
     {
     case 4:
@@ -266,6 +376,10 @@ static uint32_t vpci_read_hw(pci_sbdf_t sbdf, unsigned int reg,
 static void vpci_write_hw(pci_sbdf_t sbdf, unsigned int reg, unsigned int size,
                           uint32_t data)
 {
+    /* Guest domains are not allowed to write real hardware. */
+    if ( !is_hardware_domain(current->domain) )
+        return;
+
     switch ( size )
     {
     case 4:
@@ -313,14 +427,14 @@ static void vpci_write_hw(pci_sbdf_t sbdf, unsigned int reg, unsigned int size,
 static uint32_t merge_result(uint32_t data, uint32_t new, unsigned int size,
                              unsigned int offset)
 {
-    uint32_t mask = 0xffffffff >> (32 - 8 * size);
+    uint32_t mask = 0xffffffffU >> (32 - 8 * size);
 
     return (data & ~(mask << (offset * 8))) | ((new & mask) << (offset * 8));
 }
 
 uint32_t vpci_read(pci_sbdf_t sbdf, unsigned int reg, unsigned int size)
 {
-    const struct domain *d = current->domain;
+    struct domain *d = current->domain;
     const struct pci_dev *pdev;
     const struct vpci_register *r;
     unsigned int data_offset = 0;
@@ -332,10 +446,21 @@ uint32_t vpci_read(pci_sbdf_t sbdf, unsigned int reg, unsigned int size)
         return data;
     }
 
-    /* Find the PCI dev matching the address. */
+    /*
+     * Find the PCI dev matching the address, which for hwdom also requires
+     * consulting DomXEN.  Passthrough everything that's not trapped.
+     * If this is hwdom and the device is assigned to DomXEN, acquiring hwdom's
+     * pci_lock is sufficient.
+     */
+    read_lock(&d->pci_lock);
     pdev = pci_get_pdev(d, sbdf);
+    if ( !pdev && is_hardware_domain(d) )
+        pdev = pci_get_pdev(dom_xen, sbdf);
     if ( !pdev || !pdev->vpci )
+    {
+        read_unlock(&d->pci_lock);
         return vpci_read_hw(sbdf, reg, size);
+    }
 
     spin_lock(&pdev->vpci->lock);
 
@@ -365,6 +490,7 @@ uint32_t vpci_read(pci_sbdf_t sbdf, unsigned int reg, unsigned int size)
         }
 
         val = r->read(pdev, r->offset, r->private);
+        val &= ~(r->rsvdp_mask | r->rsvdz_mask);
 
         /* Check if the read is in the middle of a register. */
         if ( r->offset < emu.offset )
@@ -381,6 +507,7 @@ uint32_t vpci_read(pci_sbdf_t sbdf, unsigned int reg, unsigned int size)
         ASSERT(data_offset < size);
     }
     spin_unlock(&pdev->vpci->lock);
+    read_unlock(&d->pci_lock);
 
     if ( data_offset < size )
     {
@@ -391,43 +518,42 @@ uint32_t vpci_read(pci_sbdf_t sbdf, unsigned int reg, unsigned int size)
         data = merge_result(data, tmp_data, size - data_offset, data_offset);
     }
 
-    return data & (0xffffffff >> (32 - 8 * size));
+    return data & (0xffffffffU >> (32 - 8 * size));
 }
 
 /*
  * Perform a maybe partial write to a register.
- *
- * Note that this will only work for simple registers, if Xen needs to
- * trap accesses to rw1c registers (like the status PCI header register)
- * the logic in vpci_write will have to be expanded in order to correctly
- * deal with them.
  */
 static void vpci_write_helper(const struct pci_dev *pdev,
                               const struct vpci_register *r, unsigned int size,
                               unsigned int offset, uint32_t data)
 {
+    uint32_t curval = 0;
+    uint32_t preserved_mask = r->ro_mask | r->rsvdp_mask;
+
     ASSERT(size <= r->size);
 
-    if ( size != r->size )
+    if ( (size != r->size) || preserved_mask )
     {
-        uint32_t val;
-
-        val = r->read(pdev, r->offset, r->private);
-        data = merge_result(val, data, size, offset);
+        curval = r->read(pdev, r->offset, r->private);
+        curval &= ~r->rw1c_mask;
+        data = merge_result(curval, data, size, offset);
     }
 
-    r->write(pdev, r->offset, data & (0xffffffff >> (32 - 8 * r->size)),
+    data &= ~(preserved_mask | r->rsvdz_mask);
+    data |= curval & preserved_mask;
+
+    r->write(pdev, r->offset, data & (0xffffffffU >> (32 - 8 * r->size)),
              r->private);
 }
 
 void vpci_write(pci_sbdf_t sbdf, unsigned int reg, unsigned int size,
                 uint32_t data)
 {
-    const struct domain *d = current->domain;
+    struct domain *d = current->domain;
     const struct pci_dev *pdev;
     const struct vpci_register *r;
     unsigned int data_offset = 0;
-    const unsigned long *ro_map = pci_get_ro_map(sbdf.seg);
 
     if ( !size )
     {
@@ -435,18 +561,28 @@ void vpci_write(pci_sbdf_t sbdf, unsigned int reg, unsigned int size,
         return;
     }
 
-    if ( ro_map && test_bit(sbdf.bdf, ro_map) )
-        /* Ignore writes to read-only devices. */
-        return;
-
     /*
-     * Find the PCI dev matching the address.
-     * Passthrough everything that's not trapped.
+     * Find the PCI dev matching the address, which for hwdom also requires
+     * consulting DomXEN.  Passthrough everything that's not trapped.
+     * If this is hwdom and the device is assigned to DomXEN, acquiring hwdom's
+     * pci_lock is sufficient.
+     *
+     * TODO: We need to take pci_locks in exclusive mode only if we
+     * are modifying BARs, so there is a room for improvement.
      */
+    write_lock(&d->pci_lock);
     pdev = pci_get_pdev(d, sbdf);
+    if ( !pdev && is_hardware_domain(d) )
+        pdev = pci_get_pdev(dom_xen, sbdf);
     if ( !pdev || !pdev->vpci )
     {
-        vpci_write_hw(sbdf, reg, size, data);
+        /* Ignore writes to read-only devices, which have no ->vpci. */
+        const unsigned long *ro_map = pci_get_ro_map(sbdf.seg);
+
+        write_unlock(&d->pci_lock);
+
+        if ( !ro_map || !test_bit(sbdf.bdf, ro_map) )
+            vpci_write_hw(sbdf, reg, size, data);
         return;
     }
 
@@ -486,6 +622,7 @@ void vpci_write(pci_sbdf_t sbdf, unsigned int reg, unsigned int size,
         ASSERT(data_offset < size);
     }
     spin_unlock(&pdev->vpci->lock);
+    write_unlock(&d->pci_lock);
 
     if ( data_offset < size )
         /* Tailing gap, write the remaining. */

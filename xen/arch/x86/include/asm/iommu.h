@@ -1,16 +1,4 @@
-/*
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
-*/
+/* SPDX-License-Identifier: GPL-2.0-only */
 #ifndef __ARCH_X86_IOMMU_H__
 #define __ARCH_X86_IOMMU_H__
 
@@ -21,7 +9,6 @@
 #include <asm/apicdef.h>
 #include <asm/cache.h>
 #include <asm/processor.h>
-#include <asm/hvm/vmx/vmcs.h>
 
 #define DEFAULT_DOMAIN_ADDRESS_WIDTH 48
 
@@ -65,7 +52,6 @@ struct arch_iommu
         struct {
             unsigned int paging_mode;
             struct page_info *root_table;
-            struct guest_iommu *g_iommu;
         } amd;
     };
 };
@@ -100,7 +86,7 @@ extern const struct iommu_init_ops *iommu_init_ops;
 void iommu_update_ire_from_apic(unsigned int apic, unsigned int pin,
                                 uint64_t rte);
 unsigned int iommu_read_apic_from_ire(unsigned int apic, unsigned int reg);
-int iommu_setup_hpet_msi(struct msi_desc *);
+int iommu_setup_hpet_msi(struct msi_desc *msi);
 
 static inline void iommu_adjust_irq_affinities(void)
 {
@@ -130,9 +116,6 @@ void iommu_identity_map_teardown(struct domain *d);
 
 extern bool untrusted_msi;
 
-int pi_update_irte(const struct pi_desc *pi_desc, const struct pirq *pirq,
-                   const uint8_t gvec);
-
 extern bool iommu_non_coherent, iommu_superpages;
 
 static inline void iommu_sync_cache(const void *addr, unsigned int size)
@@ -150,6 +133,9 @@ struct domain_iommu;
 struct page_info *__must_check iommu_alloc_pgtable(struct domain_iommu *hd,
                                                    uint64_t contig_mask);
 void iommu_queue_free_pgtable(struct domain_iommu *hd, struct page_info *pg);
+
+/* Check [start, end] unity map range for correctness. */
+bool iommu_unity_region_ok(const char *prefix, mfn_t start, mfn_t end);
 
 #endif /* !__ARCH_X86_IOMMU_H__ */
 /*

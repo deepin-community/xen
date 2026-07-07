@@ -29,7 +29,7 @@ static void __do_softirq(unsigned long ignore_mask)
 {
     unsigned int i, cpu;
     unsigned long pending;
-    bool rcu_allowed = !(ignore_mask & (1ul << RCU_SOFTIRQ));
+    bool rcu_allowed = !(ignore_mask & (1UL << RCU_SOFTIRQ));
 
     ASSERT(!rcu_allowed || rcu_quiesce_allowed());
 
@@ -48,7 +48,7 @@ static void __do_softirq(unsigned long ignore_mask)
              || cpu_is_offline(cpu) )
             break;
 
-        i = find_first_set_bit(pending);
+        i = ffsl(pending) - 1;
         clear_bit(i, &softirq_pending(cpu));
         (*softirq_handlers[i])();
     }
@@ -57,12 +57,12 @@ static void __do_softirq(unsigned long ignore_mask)
 void process_pending_softirqs(void)
 {
     /* Do not enter scheduler as it can preempt the calling context. */
-    unsigned long ignore_mask = (1ul << SCHEDULE_SOFTIRQ) |
-                                (1ul << SCHED_SLAVE_SOFTIRQ);
+    unsigned long ignore_mask = (1UL << SCHEDULE_SOFTIRQ) |
+                                (1UL << SCHED_SLAVE_SOFTIRQ);
 
     /* Block RCU processing in case of rcu_read_lock() held. */
     if ( !rcu_quiesce_allowed() )
-        ignore_mask |= 1ul << RCU_SOFTIRQ;
+        ignore_mask |= 1UL << RCU_SOFTIRQ;
 
     ASSERT(!in_irq() && local_irq_is_enabled());
     __do_softirq(ignore_mask);
@@ -94,9 +94,7 @@ void cpumask_raise_softirq(const cpumask_t *mask, unsigned int nr)
         raise_mask = &per_cpu(batch_mask, this_cpu);
 
     for_each_cpu(cpu, mask)
-        if ( !test_and_set_bit(nr, &softirq_pending(cpu)) &&
-             cpu != this_cpu &&
-             !arch_skip_send_event_check(cpu) )
+        if ( !arch_set_softirq(nr, cpu) && cpu != this_cpu )
             __cpumask_set_cpu(cpu, raise_mask);
 
     if ( raise_mask == &send_mask )
@@ -107,9 +105,7 @@ void cpu_raise_softirq(unsigned int cpu, unsigned int nr)
 {
     unsigned int this_cpu = smp_processor_id();
 
-    if ( test_and_set_bit(nr, &softirq_pending(cpu))
-         || (cpu == this_cpu)
-         || arch_skip_send_event_check(cpu) )
+    if ( arch_set_softirq(nr, cpu) || cpu == this_cpu )
         return;
 
     if ( !per_cpu(batching, this_cpu) || in_irq() )
@@ -139,7 +135,9 @@ void cpu_raise_softirq_batch_finish(void)
 
 void raise_softirq(unsigned int nr)
 {
-    set_bit(nr, &softirq_pending(smp_processor_id()));
+    unsigned int cpu = smp_processor_id();
+
+    set_bit(nr, &softirq_pending(cpu));
 }
 
 /*

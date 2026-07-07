@@ -62,7 +62,6 @@ struct payload {
     unsigned int nsyms;                  /* Nr of entries in .strtab and symbols. */
     struct livepatch_build_id id;        /* ELFNOTE_DESC(.note.gnu.build-id) of the payload. */
     struct livepatch_build_id dep;       /* ELFNOTE_DESC(.livepatch.depends). */
-    struct livepatch_build_id xen_dep;   /* ELFNOTE_DESC(.livepatch.xen_depends). */
     livepatch_loadcall_t *const *load_funcs;   /* The array of funcs to call after */
     livepatch_unloadcall_t *const *unload_funcs;/* load and unload of the payload. */
     struct livepatch_hooks hooks;        /* Pre and post hooks for apply and revert */
@@ -82,6 +81,8 @@ struct payload {
  * collision.  Since multiple hooks can be registered, the
  * .livepatch.hook.load section is a table of functions that will be
  * executed in series by the livepatch infrastructure at patch load time.
+ *
+ * Note the load hook is executed in quiesced context.
  */
 #define LIVEPATCH_LOAD_HOOK(_fn) \
     livepatch_loadcall_t *__weak \
@@ -96,13 +97,19 @@ struct payload {
      livepatch_unloadcall_t *__weak \
         const livepatch_unload_data_##_fn __section(".livepatch.hooks.unload") = _fn;
 
+/*
+ * Pre/Post action hooks.
+ *
+ * This hooks are executed before or after the livepatch application. Pre hooks
+ * can veto the application/revert of the livepatch.  They are not executed in
+ * quiesced context.  All of pre and post hooks are considered vetoing, and
+ * hence filling any of those will block the usage of the REPLACE action.
+ *
+ * Each of the hooks below can only be set once per livepatch payload.
+ */
 #define LIVEPATCH_PREAPPLY_HOOK(_fn) \
     livepatch_precall_t *__attribute__((weak, used)) \
         const livepatch_preapply_data_##_fn __section(".livepatch.hooks.preapply") = _fn;
-
-#define LIVEPATCH_APPLY_HOOK(_fn) \
-    livepatch_actioncall_t *__attribute__((weak, used)) \
-        const livepatch_apply_data_##_fn __section(".livepatch.hooks.apply") = _fn;
 
 #define LIVEPATCH_POSTAPPLY_HOOK(_fn) \
     livepatch_postcall_t *__attribute__((weak, used)) \
@@ -112,13 +119,26 @@ struct payload {
     livepatch_precall_t *__attribute__((weak, used)) \
         const livepatch_prerevert_data_##_fn __section(".livepatch.hooks.prerevert") = _fn;
 
-#define LIVEPATCH_REVERT_HOOK(_fn) \
-    livepatch_actioncall_t *__attribute__((weak, used)) \
-        const livepatch_revert_data_##_fn __section(".livepatch.hooks.revert") = _fn;
-
 #define LIVEPATCH_POSTREVERT_HOOK(_fn) \
     livepatch_postcall_t *__attribute__((weak, used)) \
         const livepatch_postrevert_data_##_fn __section(".livepatch.hooks.postrevert") = _fn;
+
+/*
+ * Action replacement hooks.
+ *
+ * The following hooks replace the hypervisor implementation for the livepatch
+ * application and revert routines.  When filling the hooks below the native
+ * apply and revert routines will not be executed, so the provided hooks need
+ * to make sure the state of the payload after apply or revert is as expected
+ * by the livepatch logic.
+ */
+#define LIVEPATCH_APPLY_HOOK(_fn) \
+    livepatch_actioncall_t *__attribute__((weak, used)) \
+        const livepatch_apply_data_##_fn __section(".livepatch.hooks.apply") = _fn;
+
+#define LIVEPATCH_REVERT_HOOK(_fn) \
+    livepatch_actioncall_t *__attribute__((weak, used)) \
+        const livepatch_revert_data_##_fn __section(".livepatch.hooks.revert") = _fn;
 
 #endif /* __XEN_LIVEPATCH_PAYLOAD_H__ */
 

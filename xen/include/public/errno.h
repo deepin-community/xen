@@ -17,6 +17,7 @@
  * will unilaterally #undef XEN_ERRNO().
  */
 
+/* SAF-8-safe inclusion procedure left to caller */
 #ifndef XEN_ERRNO
 
 /*
@@ -31,7 +32,7 @@
 
 #ifndef __ASSEMBLY__
 
-#define XEN_ERRNO(name, value) XEN_##name = value,
+#define XEN_ERRNO(name, value) XEN_##name = (value),
 enum xen_errno {
 
 #elif __XEN_INTERFACE_VERSION__ < 0x00040700

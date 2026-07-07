@@ -2,40 +2,36 @@
 include:
   - https://salsa.debian.org/salsa-ci-team/pipeline/raw/master/recipes/debian.yml
 
-extract-source:
-  before_script:
-    # convert into a gbp patches-unapplied branch using git-debrebase
-    - apt-get update
-    - apt-get --yes install git-debrebase
-    # git-debrebase needs git user setup
-    - git config user.email "salsa-ci@invalid.invalid"
-    - git config user.name "salsa-ci"
-    - git debrebase --force
-    - git debrebase convert-to-gbp
-    # work around gbp export-orig replacing variables in .gitarchive-info
-    - test -d .git/info || mkdir .git/info
-    - echo ".gitarchive-info -export-subst" >> .git/info/attributes
+# for documentation about the templating magic (yaml anchors) see here:
+# https://docs.gitlab.com/ci/yaml/yaml_optimization/
+
+# run git-debrebase make-patches
+.git-debrebase-prepare: &git-debrebase-prepare
+  - apt-get update
+  - apt-get --yes install git-debrebase
+  # git-debrebase needs git user setup
+  - git config user.email "salsa-ci@invalid.invalid"
+  - git config user.name "salsa-ci"
+  - git debrebase --force
+  - git debrebase make-patches
+
+.build-definition: &build-definition
+  extends: .build-definition-common
+  before_script: *git-debrebase-prepare
+
+build source:
+  extends: .build-source-only
+  before_script: *git-debrebase-prepare
 
 variables:
   # disable shallow cloning of git repository. This is needed for git-debrebase
   GIT_DEPTH: 0
 
-  RELEASE: 'unstable'
+  RELEASE: 'trixie'
 
   # xen currently does not enable hardening when building the hypervisor so
   # disable blhc.
   SALSA_CI_DISABLE_BLHC: 1
 
-  SALSA_CI_REPROTEST_ENABLE_DIFFOSCOPE: 1
-
   # We do not provide packages for i386
   SALSA_CI_DISABLE_BUILD_PACKAGE_I386: 1
-
-  # cross building xen currently fails for the following reason:
-  #  The following packages have unmet dependencies:
-  #  ocaml:arm64 : Depends: gcc:arm64 but it is not installable
-  #                Depends: binutils:arm64 but it is not installable
-  #
-  # It can be tried again when there are better chances of it building
-  # successfully.
-  SALSA_CI_DISABLE_CROSSBUILD_ARM64: 1

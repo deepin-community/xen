@@ -1,19 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * vmcb.h: VMCB related definitions
  * Copyright (c) 2005-2007, Advanced Micro Devices, Inc
  * Copyright (c) 2004, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  *
  */
 #ifndef __ASM_X86_HVM_SVM_VMCB_H__
@@ -394,9 +383,9 @@ typedef union
         bool intercepts:1; /* 0:  cr/dr/exception/general intercepts,
                             *     pause_filter_count, tsc_offset */
         bool iopm:1;       /* 1:  iopm_base_pa, msrpm_base_pa */
-        bool asid:1;       /* 2:  guest_asid */
+        bool asid:1;       /* 2:  asid */
         bool tpr:1;        /* 3:  vintr */
-        bool np:1;         /* 4:  np_enable, h_cr3, g_pat */
+        bool np:1;         /* 4:  np, h_cr3, g_pat */
         bool cr:1;         /* 5:  cr0, cr3, cr4, efer */
         bool dr:1;         /* 6:  dr6, dr7 */
         bool dt:1;         /* 7:  gdtr, idtr */
@@ -424,7 +413,7 @@ struct vmcb_struct {
     u64 _iopm_base_pa;          /* offset 0x40 - cleanbit 1 */
     u64 _msrpm_base_pa;         /* offset 0x48 - cleanbit 1 */
     u64 _tsc_offset;            /* offset 0x50 - cleanbit 0 */
-    u32 _guest_asid;            /* offset 0x58 - cleanbit 2 */
+    u32 _asid;                  /* offset 0x58 - cleanbit 2 */
     u8  tlb_control;            /* offset 0x5C - TLB_CTRL_* */
     u8  res07[3];
     vintr_t _vintr;             /* offset 0x60 - cleanbit 3 */
@@ -436,6 +425,35 @@ struct vmcb_struct {
             uint64_t exitinfo2; /* offset 0x80 */
         };
         union {
+            struct {
+                uint32_t ec; /* #NP, #SS, #GP, #PF, #AC */
+                uint32_t :32;
+
+                uint64_t cr2; /* #PF */
+            } exc;
+            struct {
+                bool     in:1;
+                bool     :1;
+                bool     str:1;
+                bool     rep:1;
+                uint16_t bytes:3;
+                uint16_t /* asz */:3;
+                uint16_t seg:3;
+                uint16_t :3;
+                uint16_t port;
+                uint32_t :32;
+
+                uint64_t nrip;
+            } io;
+            struct {
+                uint64_t gpr:4;
+                uint64_t :59;
+                bool     mov_insn:1; /* MOV, as opposed to LMSW, CLTS, etc */
+            } mov_cr;
+            struct {
+                uint64_t ec;
+                uint64_t gpa;
+            } npf;
             struct {
                 uint16_t sel;
                 uint64_t :48;
@@ -455,12 +473,12 @@ struct vmcb_struct {
     intinfo_t exit_int_info;    /* offset 0x88 */
     union {                     /* offset 0x90 - cleanbit 4 */
         struct {
-            bool _np_enable     :1;
-            bool _sev_enable    :1;
-            bool _sev_es_enable :1;
-            bool _gmet          :1;
-            bool _np_sss        :1;
-            bool _vte           :1;
+            bool _np        :1;
+            bool _sev       :1;
+            bool _sev_es    :1;
+            bool _gmet      :1;
+            bool _np_sss    :1;
+            bool _vte       :1;
         };
         uint64_t _np_ctrl;
     };
@@ -589,7 +607,7 @@ void setup_vmcb_dump(void);
 #define MSR_INTERCEPT_READ    1
 #define MSR_INTERCEPT_WRITE   2
 #define MSR_INTERCEPT_RW      (MSR_INTERCEPT_WRITE | MSR_INTERCEPT_READ)
-void svm_intercept_msr(struct vcpu *v, uint32_t msr, int enable);
+void svm_intercept_msr(struct vcpu *v, uint32_t msr, int flags);
 #define svm_disable_intercept_for_msr(v, msr) svm_intercept_msr((v), (msr), MSR_INTERCEPT_NONE)
 #define svm_enable_intercept_for_msr(v, msr) svm_intercept_msr((v), (msr), MSR_INTERCEPT_RW)
 
@@ -612,7 +630,7 @@ vmcb_get_ ## name(const struct vmcb_struct *vmcb) \
 }
 
 #define VMCB_ACCESSORS(name, cleanbit) \
-        VMCB_ACCESSORS_(name, typeof(alloc_vmcb()->_ ## name), cleanbit)
+    VMCB_ACCESSORS_(name, typeof(((struct vmcb_struct){})._ ## name), cleanbit)
 
 VMCB_ACCESSORS(cr_intercepts, intercepts)
 VMCB_ACCESSORS(dr_intercepts, intercepts)
@@ -624,12 +642,12 @@ VMCB_ACCESSORS(pause_filter_thresh, intercepts)
 VMCB_ACCESSORS(tsc_offset, intercepts)
 VMCB_ACCESSORS(iopm_base_pa, iopm)
 VMCB_ACCESSORS(msrpm_base_pa, iopm)
-VMCB_ACCESSORS(guest_asid, asid)
+VMCB_ACCESSORS(asid, asid)
 VMCB_ACCESSORS(vintr, tpr)
 VMCB_ACCESSORS(np_ctrl, np)
-VMCB_ACCESSORS_(np_enable, bool, np)
-VMCB_ACCESSORS_(sev_enable, bool, np)
-VMCB_ACCESSORS_(sev_es_enable, bool, np)
+VMCB_ACCESSORS_(np, bool, np)
+VMCB_ACCESSORS_(sev, bool, np)
+VMCB_ACCESSORS_(sev_es, bool, np)
 VMCB_ACCESSORS_(gmet, bool, np)
 VMCB_ACCESSORS_(vte, bool, np)
 VMCB_ACCESSORS(h_cr3, np)

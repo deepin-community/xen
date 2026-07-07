@@ -1,18 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * emulate.c: handling SVM emulate instructions help.
  * Copyright (c) 2005 AMD Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <xen/err.h>
@@ -22,10 +11,10 @@
 #include <asm/msr.h>
 #include <asm/hvm/emulate.h>
 #include <asm/hvm/hvm.h>
-#include <asm/hvm/support.h>
 #include <asm/hvm/svm/svm.h>
 #include <asm/hvm/svm/vmcb.h>
-#include <asm/hvm/svm/emulate.h>
+
+#include "svm.h"
 
 static unsigned long svm_nextrip_insn_length(struct vcpu *v)
 {
@@ -101,9 +90,9 @@ unsigned int svm_get_insn_len(struct vcpu *v, unsigned int instr_enc)
         if ( !instr_modrm )
             return emul_len;
 
-        if ( modrm_mod       == MASK_EXTR(instr_modrm, 0300) &&
-             (modrm_reg & 7) == MASK_EXTR(instr_modrm, 0070) &&
-             (modrm_rm  & 7) == MASK_EXTR(instr_modrm, 0007) )
+        if ( modrm_mod       == MASK_EXTR(instr_modrm, 0300) && /* octal-ok */
+             (modrm_reg & 7) == MASK_EXTR(instr_modrm, 0070) && /* octal-ok */
+             (modrm_rm  & 7) == MASK_EXTR(instr_modrm, 0007) )  /* octal-ok */
             return emul_len;
     }
 
@@ -113,7 +102,7 @@ unsigned int svm_get_insn_len(struct vcpu *v, unsigned int instr_enc)
     hvm_dump_emulation_state(XENLOG_G_WARNING, "SVM Insn len",
                              &ctxt, X86EMUL_UNHANDLEABLE);
 
-    hvm_inject_hw_exception(TRAP_gp_fault, 0);
+    hvm_inject_hw_exception(X86_EXC_GP, 0);
     return 0;
 }
 

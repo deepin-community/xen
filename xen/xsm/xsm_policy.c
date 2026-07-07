@@ -20,7 +20,7 @@
 
 #include <xsm/xsm.h>
 #ifdef CONFIG_MULTIBOOT
-#include <xen/multiboot.h>
+#include <asm/bootinfo.h>
 #include <asm/setup.h>
 #endif
 #include <xen/bitops.h>
@@ -31,26 +31,19 @@
 
 #ifdef CONFIG_MULTIBOOT
 int __init xsm_multiboot_policy_init(
-    unsigned long *module_map, const multiboot_info_t *mbi,
-    void **policy_buffer, size_t *policy_size)
+    struct boot_info *bi, void **policy_buffer, size_t *policy_size)
 {
-    int i;
-    module_t *mod = (module_t *)__va(mbi->mods_addr);
+    unsigned int i;
     int rc = 0;
     u32 *_policy_start;
     unsigned long _policy_len;
 
-    /*
-     * Try all modules and see whichever could be the binary policy.
-     * Adjust module_map for the module that is the binary policy.
-     */
-    for ( i = mbi->mods_count-1; i >= 1; i-- )
+    for_each_boot_module_by_type ( i, bi, BOOTMOD_UNKNOWN )
     {
-        if ( !test_bit(i, module_map) )
-            continue;
+        struct boot_module *bm = &bi->mods[i];
 
-        _policy_start = bootstrap_map(mod + i);
-        _policy_len   = mod[i].mod_end;
+        _policy_start = bootstrap_map_bm(bm);
+        _policy_len   = bm->size;
 
         if ( (xsm_magic_t)(*_policy_start) == XSM_MAGIC )
         {
@@ -60,12 +53,12 @@ int __init xsm_multiboot_policy_init(
             printk("Policy len %#lx, start at %p.\n",
                    _policy_len,_policy_start);
 
-            __clear_bit(i, module_map);
+            bm->type = BOOTMOD_XSM_POLICY;
             break;
 
         }
 
-        bootstrap_map(NULL);
+        bootstrap_unmap();
     }
 
     return rc;

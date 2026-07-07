@@ -55,9 +55,9 @@ struct cpu_info {
 
     /* See asm/spec_ctrl_asm.h for usage. */
     unsigned int shadow_spec_ctrl;
-    uint8_t      xen_spec_ctrl;
-    uint8_t      last_spec_ctrl;
-    uint8_t      spec_ctrl_flags;
+    unsigned int xen_spec_ctrl;
+    unsigned int last_spec_ctrl;
+    uint8_t      scf; /* SCF_* */
 
     /*
      * The following field controls copying of the L4 page table of 64-bit
@@ -99,8 +99,10 @@ static inline struct cpu_info *get_cpu_info(void)
 #define set_current(vcpu)     (get_cpu_info()->current_vcpu = (vcpu))
 #define current               (get_current())
 
-#define get_processor_id()    (get_cpu_info()->processor_id)
+#define smp_processor_id()    (get_cpu_info()->processor_id)
 #define guest_cpu_user_regs() (&get_cpu_info()->guest_cpu_user_regs)
+
+#define get_per_cpu_offset()  (get_cpu_info()->per_cpu_offset)
 
 /*
  * Get the bottom-of-stack, as stored in the per-CPU TSS. This actually points
@@ -196,10 +198,10 @@ unsigned long get_stack_dump_bottom (unsigned long sp);
     switch_stack_and_jump(fn, "jmp %c", "i")
 
 /* The constraint may only specify non-call-clobbered registers. */
-#define reset_stack_and_jump_ind(fn)                                    \
+#define reset_stack_and_call_ind(fn)                                    \
     ({                                                                  \
         (void)((fn) == (void (*)(void))NULL);                           \
-        switch_stack_and_jump(fn, "INDIRECT_JMP %", "b");               \
+        switch_stack_and_jump(fn, "INDIRECT_CALL %", "b");              \
     })
 
 /*

@@ -28,12 +28,17 @@ struct tee_mediator_ops {
      */
     bool (*probe)(void);
 
+    /* Initialize secondary CPUs */
+    void (*init_secondary)(void);
+
     /*
      * Called during domain construction if toolstack requests to enable
      * TEE support so mediator can inform TEE about new
      * guest and create own structures for the new domain.
      */
     int (*domain_init)(struct domain *d);
+    int (*domain_teardown)(struct domain *d);
+    void (*free_domain_ctx)(struct domain *d);
 
     /*
      * Called during domain destruction to relinquish resources used
@@ -62,8 +67,11 @@ struct tee_mediator_desc {
 
 bool tee_handle_call(struct cpu_user_regs *regs);
 int tee_domain_init(struct domain *d, uint16_t tee_type);
+int tee_domain_teardown(struct domain *d);
 int tee_relinquish_resources(struct domain *d);
 uint16_t tee_get_type(void);
+void init_tee_secondary(void);
+void tee_free_domain_ctx(struct domain *d);
 
 #define REGISTER_TEE_MEDIATOR(_name, _namestr, _type, _ops)         \
 static const struct tee_mediator_desc __tee_desc_##_name __used     \
@@ -93,9 +101,22 @@ static inline int tee_relinquish_resources(struct domain *d)
     return 0;
 }
 
+static inline int tee_domain_teardown(struct domain *d)
+{
+    return 0;
+}
+
 static inline uint16_t tee_get_type(void)
 {
     return XEN_DOMCTL_CONFIG_TEE_NONE;
+}
+
+static inline void init_tee_secondary(void)
+{
+}
+
+static inline void tee_free_domain_ctx(struct domain *d)
+{
 }
 
 #endif  /* CONFIG_TEE */

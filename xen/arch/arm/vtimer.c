@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * xen/arch/arm/vtimer.c
  *
@@ -5,18 +6,9 @@
  *
  * Ian Campbell <ian.campbell@citrix.com>
  * Copyright (c) 2011 Citrix Systems.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
+#include <xen/acpi.h>
 #include <xen/lib.h>
 #include <xen/perfc.h>
 #include <xen/sched.h>
@@ -70,10 +62,22 @@ int domain_vtimer_init(struct domain *d, struct xen_arch_domainconfig *config)
 
     config->clock_frequency = timer_dt_clock_frequency;
 
-    /* At this stage vgic_reserve_virq can't fail */
+    /*
+     * Per the ACPI specification, providing a secure EL1 timer
+     * interrupt is optional and will be ignored by non-secure OS.
+     * Therefore don't reserve the interrupt number for the HW domain
+     * and ACPI.
+     *
+     * Note that we should still reserve it when using the Device-Tree
+     * because the interrupt is not optional. That said, we are not
+     * expecting any OS to use it when running on top of Xen.
+     *
+     * At this stage vgic_reserve_virq() is not meant to fail.
+     */
     if ( is_hardware_domain(d) )
     {
-        if ( !vgic_reserve_virq(d, timer_get_irq(TIMER_PHYS_SECURE_PPI)) )
+        if ( acpi_disabled &&
+             !vgic_reserve_virq(d, timer_get_irq(TIMER_PHYS_SECURE_PPI)) )
             BUG();
 
         if ( !vgic_reserve_virq(d, timer_get_irq(TIMER_PHYS_NONSECURE_PPI)) )
@@ -215,7 +219,7 @@ static bool vtimer_cntp_tval(struct cpu_user_regs *regs, register_t *r,
 
     if ( read )
     {
-        *r = (uint32_t)((v->arch.phys_timer.cval - cntpct) & 0xffffffffull);
+        *r = (uint32_t)((v->arch.phys_timer.cval - cntpct) & 0xffffffffULL);
     }
     else
     {

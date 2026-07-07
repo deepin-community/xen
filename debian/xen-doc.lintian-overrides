@@ -1,3 +1,0 @@
-# Indeed not.  It is arch-specific because the Xen upstream HTML
-# documentation contains arch-specific hypercall API information.
-documentation-package-not-architecture-independent

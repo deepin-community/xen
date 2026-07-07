@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /******************************************************************************
  * arch/x86/mm/mem_access.c
  *
@@ -6,19 +7,6 @@
  * Parts of this code are Copyright (c) 2006-2007 by XenSource Inc.
  * Parts of this code are Copyright (c) 2006 by Michael A Fetterman
  * Parts based on earlier work by Michael A Fetterman, Ian Pratt et al.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <xen/guest_access.h> /* copy_from_guest() */
@@ -57,6 +45,7 @@ static int _p2m_get_mem_access(struct p2m_domain *p2m, gfn_t gfn,
             ACCESS(rwx),
             ACCESS(rx2rw),
             ACCESS(n2rwx),
+            ACCESS(r_pw),
 #undef ACCESS
     };
 
@@ -82,7 +71,7 @@ static int _p2m_get_mem_access(struct p2m_domain *p2m, gfn_t gfn,
 }
 
 bool p2m_mem_access_emulate_check(struct vcpu *v,
-                                  const vm_event_response_t *rsp)
+                                  const struct vm_event_st *rsp)
 {
     xenmem_access_t access;
     bool violation = true;
@@ -106,6 +95,7 @@ bool p2m_mem_access_emulate_check(struct vcpu *v,
             break;
 
         case XENMEM_access_r:
+        case XENMEM_access_r_pw:
             violation = data->flags & MEM_ACCESS_WX;
             break;
 
@@ -141,7 +131,7 @@ bool p2m_mem_access_emulate_check(struct vcpu *v,
 
 bool p2m_mem_access_check(paddr_t gpa, unsigned long gla,
                           struct npfec npfec,
-                          vm_event_request_t **req_ptr)
+                          struct vm_event_st **req_ptr)
 {
     struct vcpu *v = current;
     gfn_t gfn = gaddr_to_gfn(gpa);
@@ -219,7 +209,7 @@ bool p2m_mem_access_check(paddr_t gpa, unsigned long gla,
          npfec.kind == npfec_kind_in_gpt )
     {
         v->arch.vm_event->send_event = true;
-        hvm_emulate_one_vm_event(EMUL_KIND_NORMAL, TRAP_invalid_op, X86_EVENT_NO_EC);
+        hvm_emulate_one_vm_event(EMUL_KIND_NORMAL, X86_EXC_UD, X86_EVENT_NO_EC);
         v->arch.vm_event->send_event = false;
 
         return true;
@@ -261,9 +251,9 @@ bool p2m_mem_access_check(paddr_t gpa, unsigned long gla,
     return (p2ma != p2m_access_n2rwx);
 }
 
-int p2m_set_altp2m_mem_access(struct domain *d, struct p2m_domain *hp2m,
-                              struct p2m_domain *ap2m, p2m_access_t a,
-                              gfn_t gfn)
+static int p2m_set_altp2m_mem_access(struct domain *d, struct p2m_domain *hp2m,
+                                     struct p2m_domain *ap2m, p2m_access_t a,
+                                     gfn_t gfn)
 {
     mfn_t mfn;
     p2m_type_t t;
@@ -324,6 +314,7 @@ bool xenmem_access_to_p2m_access(const struct p2m_domain *p2m,
         ACCESS(rwx),
         ACCESS(rx2rw),
         ACCESS(n2rwx),
+        ACCESS(r_pw),
 #undef ACCESS
     };
 

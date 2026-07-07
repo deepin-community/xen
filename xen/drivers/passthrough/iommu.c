@@ -22,14 +22,18 @@
 #include <xen/keyhandler.h>
 #include <xsm/xsm.h>
 
+#ifdef CONFIG_X86
+#include <asm/e820.h>
+#endif
+
 unsigned int __read_mostly iommu_dev_iotlb_timeout = 1000;
 integer_param("iommu_dev_iotlb_timeout", iommu_dev_iotlb_timeout);
 
-bool_t __initdata iommu_enable = 1;
-bool_t __read_mostly iommu_enabled;
-bool_t __read_mostly force_iommu;
-bool_t __read_mostly iommu_verbose;
-static bool_t __read_mostly iommu_crash_disable;
+bool __initdata iommu_enable = 1;
+bool __read_mostly iommu_enabled;
+bool __read_mostly force_iommu;
+bool __read_mostly iommu_verbose;
+static bool __read_mostly iommu_crash_disable;
 
 #define IOMMU_quarantine_none         0 /* aka false */
 #define IOMMU_quarantine_basic        1 /* aka true */
@@ -57,10 +61,9 @@ int8_t __hwdom_initdata iommu_hwdom_reserved = -1;
 bool __read_mostly iommu_hap_pt_share = true;
 #endif
 
-bool_t __read_mostly iommu_debug;
-bool_t __read_mostly amd_iommu_perdev_intremap = 1;
+bool __read_mostly iommu_debug;
 
-DEFINE_PER_CPU(bool_t, iommu_dont_flush_iotlb);
+DEFINE_PER_CPU(bool, iommu_dont_flush_iotlb);
 
 static int __init cf_check parse_iommu_param(const char *s)
 {
@@ -83,11 +86,19 @@ static int __init cf_check parse_iommu_param(const char *s)
         else if ( ss == s + 23 && !strncmp(s, "quarantine=scratch-page", 23) )
             iommu_quarantine = IOMMU_quarantine_scratch_page;
 #endif
-#ifdef CONFIG_X86
         else if ( (val = parse_boolean("igfx", s, ss)) >= 0 )
+#ifdef CONFIG_INTEL_IOMMU
             iommu_igfx = val;
+#else
+            no_config_param("INTEL_IOMMU", "iommu", s, ss);
+#endif
         else if ( (val = parse_boolean("qinval", s, ss)) >= 0 )
+#ifdef CONFIG_INTEL_IOMMU
             iommu_qinval = val;
+#else
+            no_config_param("INTEL_IOMMU", "iommu", s, ss);
+#endif
+#ifdef CONFIG_X86
         else if ( (val = parse_boolean("superpages", s, ss)) >= 0 )
             iommu_superpages = val;
 #endif
@@ -116,7 +127,11 @@ static int __init cf_check parse_iommu_param(const char *s)
                 iommu_verbose = 1;
         }
         else if ( (val = parse_boolean("amd-iommu-perdev-intremap", s, ss)) >= 0 )
+#ifdef CONFIG_AMD_IOMMU
             amd_iommu_perdev_intremap = val;
+#else
+            no_config_param("AMD_IOMMU", "iommu", s, ss);
+#endif
         else if ( (val = parse_boolean("dom0-passthrough", s, ss)) >= 0 )
             iommu_hwdom_passthrough = val;
         else if ( (val = parse_boolean("dom0-strict", s, ss)) >= 0 )
@@ -256,8 +271,6 @@ void __hwdom_init iommu_hwdom_init(struct domain *d)
     if ( !is_iommu_enabled(d) )
         return;
 
-    register_keyhandler('o', &iommu_dump_page_tables, "dump iommu page tables", 0);
-
     iommu_vcall(hd->platform_ops, hwdom_init, d);
 }
 
@@ -290,7 +303,7 @@ static unsigned int mapping_order(const struct domain_iommu *hd,
 {
     unsigned long res = dfn_x(dfn) | mfn_x(mfn);
     unsigned long sizes = hd->platform_ops->page_sizes;
-    unsigned int bit = find_first_set_bit(sizes), order = 0;
+    unsigned int bit = ffsl(sizes) - 1, order = 0;
 
     ASSERT(bit == PAGE_SHIFT);
 
@@ -298,7 +311,7 @@ static unsigned int mapping_order(const struct domain_iommu *hd,
     {
         unsigned long mask;
 
-        bit = find_first_set_bit(sizes);
+        bit = ffsl(sizes) - 1;
         mask = (1UL << bit) - 1;
         if ( nr <= mask || (res & mask) )
             break;
@@ -537,7 +550,7 @@ static int __init iommu_quarantine_init(void)
 int __init iommu_setup(void)
 {
     int rc = -ENODEV;
-    bool_t force_intremap = force_iommu && iommu_intremap;
+    bool force_intremap = force_iommu && iommu_intremap;
 
     if ( iommu_hwdom_strict )
         iommu_hwdom_passthrough = false;
@@ -549,7 +562,7 @@ int __init iommu_setup(void)
         rc = iommu_hardware_setup();
         if ( !rc )
             ops = iommu_get_ops();
-        if ( ops && (ops->page_sizes & -ops->page_sizes) != PAGE_SIZE )
+        if ( ops && (ISOLATE_LSB(ops->page_sizes)) != PAGE_SIZE )
         {
             printk(XENLOG_ERR "IOMMU: page size mask %lx unsupported\n",
                    ops->page_sizes);
@@ -576,9 +589,6 @@ int __init iommu_setup(void)
     printk("I/O virtualisation %sabled\n", iommu_enabled ? "en" : "dis");
     if ( !iommu_enabled )
     {
-#ifndef iommu_snoop
-        iommu_snoop = false;
-#endif
         iommu_hwdom_passthrough = false;
         iommu_hwdom_strict = false;
     }
@@ -593,6 +603,9 @@ int __init iommu_setup(void)
 #ifndef iommu_intremap
         printk("Interrupt remapping %sabled\n", iommu_intremap ? "en" : "dis");
 #endif
+
+        register_keyhandler('o', &iommu_dump_page_tables,
+                            "dump iommu page tables", 0);
     }
 
     return rc;
@@ -650,6 +663,18 @@ void iommu_crash_shutdown(void)
 #endif
 }
 
+void iommu_quiesce(void)
+{
+    const struct iommu_ops *ops;
+
+    if ( !iommu_enabled )
+        return;
+
+    ops = iommu_get_ops();
+    if ( ops->quiesce )
+        iommu_vcall(ops, quiesce);
+}
+
 int iommu_get_reserved_device_memory(iommu_grdm_t *func, void *ctxt)
 {
     const struct iommu_ops *ops;
@@ -664,7 +689,7 @@ int iommu_get_reserved_device_memory(iommu_grdm_t *func, void *ctxt)
     return iommu_call(ops, get_reserved_device_memory, func, ctxt);
 }
 
-bool_t iommu_has_feature(struct domain *d, enum iommu_feature feature)
+bool iommu_has_feature(struct domain *d, enum iommu_feature feature)
 {
     return is_iommu_enabled(d) && test_bit(feature, dom_iommu(d)->features);
 }
@@ -674,6 +699,7 @@ struct extra_reserved_range {
     unsigned long start;
     unsigned long nr;
     pci_sbdf_t sbdf;
+    const char *name;
 };
 static unsigned int __initdata nr_extra_reserved_ranges;
 static struct extra_reserved_range __initdata
@@ -681,7 +707,8 @@ static struct extra_reserved_range __initdata
 
 int __init iommu_add_extra_reserved_device_memory(unsigned long start,
                                                   unsigned long nr,
-                                                  pci_sbdf_t sbdf)
+                                                  pci_sbdf_t sbdf,
+                                                  const char *name)
 {
     unsigned int idx;
 
@@ -692,6 +719,7 @@ int __init iommu_add_extra_reserved_device_memory(unsigned long start,
     extra_reserved_ranges[idx].start = start;
     extra_reserved_ranges[idx].nr = nr;
     extra_reserved_ranges[idx].sbdf = sbdf;
+    extra_reserved_ranges[idx].name = name;
 
     return 0;
 }
@@ -704,6 +732,19 @@ int __init iommu_get_extra_reserved_device_memory(iommu_grdm_t *func,
 
     for ( idx = 0; idx < nr_extra_reserved_ranges; idx++ )
     {
+#ifdef CONFIG_X86
+        paddr_t start = pfn_to_paddr(extra_reserved_ranges[idx].start);
+        paddr_t end = pfn_to_paddr(extra_reserved_ranges[idx].start +
+                                   extra_reserved_ranges[idx].nr);
+
+        if ( !reserve_e820_ram(&e820, start, end) )
+        {
+            printk(XENLOG_ERR "Failed to reserve [%"PRIx64"-%"PRIx64") for %s, "
+                   "skipping IOMMU mapping for it, some functionality may be broken\n",
+                   start, end, extra_reserved_ranges[idx].name);
+            continue;
+        }
+#endif
         ret = func(extra_reserved_ranges[idx].start,
                    extra_reserved_ranges[idx].nr,
                    extra_reserved_ranges[idx].sbdf.sbdf,

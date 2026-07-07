@@ -20,17 +20,16 @@
 #include <xen/delay.h>
 #include <xen/efi.h>
 #include <xen/sched.h>
-
 #include <xen/bitops.h>
+
+#include <asm/apic.h>
+#include <asm/genapic.h>
 #include <asm/smp.h>
 #include <asm/acpi.h>
 #include <asm/mtrr.h>
 #include <asm/mpspec.h>
 #include <asm/io_apic.h>
 #include <asm/setup.h>
-
-#include <mach_apic.h>
-#include <bios_ebda.h>
 
 /* Have we found an MP table */
 bool __initdata smp_found_config;
@@ -161,7 +160,7 @@ static int MP_processor_info_x(struct mpc_config_processor *m,
 	}
 	apic_version[apicid] = ver;
 
-	set_apicid(apicid, &phys_cpu_present_map);
+	physid_set(apicid, phys_cpu_present_map);
 
 	if (num_processors >= nr_cpu_ids) {
 		printk_once(XENLOG_WARNING
@@ -544,6 +543,7 @@ static inline void __init construct_default_ISA_mptable(int mpc_default_type)
 		case 4:
 		case 7:
 			memcpy(bus.mpc_bustype, "MCA   ", 6);
+			break;
 	}
 	MP_bus_info(&bus);
 	if (mpc_default_type > 4) {
@@ -732,6 +732,13 @@ static void __init efi_check_config(void)
 		efi_unmap_mpf();
 }
 
+static unsigned int get_bios_ebda(void)
+{
+	unsigned int address = *(uint16_t *)maddr_to_virt(0x40e);
+
+	return address << 4; /* 0 means none */
+}
+
 void __init find_smp_config (void)
 {
 	unsigned int address;
@@ -841,8 +848,7 @@ static struct mp_ioapic_routing {
 } mp_ioapic_routing[MAX_IO_APICS];
 
 
-static int mp_find_ioapic (
-	int			gsi)
+int mp_find_ioapic(unsigned int gsi)
 {
 	unsigned int		i;
 
@@ -853,7 +859,7 @@ static int mp_find_ioapic (
 			return i;
 	}
 
-	printk(KERN_ERR "ERROR: Unable to locate IOAPIC for GSI %d\n", gsi);
+	printk(KERN_ERR "ERROR: Unable to locate IOAPIC for GSI %u\n", gsi);
 
 	return -1;
 }
@@ -914,7 +920,7 @@ void __init mp_register_ioapic (
 	return;
 }
 
-unsigned __init highest_gsi(void)
+unsigned highest_gsi(void)
 {
 	unsigned x, res = 0;
 	for (x = 0; x < nr_ioapics; x++)

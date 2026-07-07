@@ -86,13 +86,12 @@ void cpufreq_statistic_update(unsigned int cpu, uint8_t from, uint8_t to)
     spin_unlock(cpufreq_statistic_lock);
 }
 
-int cpufreq_statistic_init(unsigned int cpuid)
+int cpufreq_statistic_init(unsigned int cpu)
 {
     uint32_t i, count;
     struct pm_px *pxpt;
-    const struct processor_pminfo *pmpt = processor_pminfo[cpuid];
-    spinlock_t *cpufreq_statistic_lock = 
-                          &per_cpu(cpufreq_statistic_lock, cpuid);
+    const struct processor_pminfo *pmpt = processor_pminfo[cpu];
+    spinlock_t *cpufreq_statistic_lock = &per_cpu(cpufreq_statistic_lock, cpu);
 
     spin_lock_init(cpufreq_statistic_lock);
 
@@ -101,7 +100,7 @@ int cpufreq_statistic_init(unsigned int cpuid)
 
     spin_lock(cpufreq_statistic_lock);
 
-    pxpt = per_cpu(cpufreq_statistic_data, cpuid);
+    pxpt = per_cpu(cpufreq_statistic_data, cpu);
     if ( pxpt ) {
         spin_unlock(cpufreq_statistic_lock);
         return 0;
@@ -114,7 +113,6 @@ int cpufreq_statistic_init(unsigned int cpuid)
         spin_unlock(cpufreq_statistic_lock);
         return -ENOMEM;
     }
-    per_cpu(cpufreq_statistic_data, cpuid) = pxpt;
 
     pxpt->u.trans_pt = xzalloc_array(uint64_t, count * count);
     if (!pxpt->u.trans_pt) {
@@ -138,22 +136,23 @@ int cpufreq_statistic_init(unsigned int cpuid)
         pxpt->u.pt[i].freq = pmpt->perf.states[i].core_frequency;
 
     pxpt->prev_state_wall = NOW();
-    pxpt->prev_idle_wall = get_cpu_idle_time(cpuid);
+    pxpt->prev_idle_wall = get_cpu_idle_time(cpu);
+
+    per_cpu(cpufreq_statistic_data, cpu) = pxpt;
 
     spin_unlock(cpufreq_statistic_lock);
 
     return 0;
 }
 
-void cpufreq_statistic_exit(unsigned int cpuid)
+void cpufreq_statistic_exit(unsigned int cpu)
 {
     struct pm_px *pxpt;
-    spinlock_t *cpufreq_statistic_lock = 
-               &per_cpu(cpufreq_statistic_lock, cpuid);
+    spinlock_t *cpufreq_statistic_lock = &per_cpu(cpufreq_statistic_lock, cpu);
 
     spin_lock(cpufreq_statistic_lock);
 
-    pxpt = per_cpu(cpufreq_statistic_data, cpuid);
+    pxpt = per_cpu(cpufreq_statistic_data, cpu);
     if (!pxpt) {
         spin_unlock(cpufreq_statistic_lock);
         return;
@@ -162,22 +161,21 @@ void cpufreq_statistic_exit(unsigned int cpuid)
     xfree(pxpt->u.trans_pt);
     xfree(pxpt->u.pt);
     xfree(pxpt);
-    per_cpu(cpufreq_statistic_data, cpuid) = NULL;
+    per_cpu(cpufreq_statistic_data, cpu) = NULL;
 
     spin_unlock(cpufreq_statistic_lock);
 }
 
-void cpufreq_statistic_reset(unsigned int cpuid)
+void cpufreq_statistic_reset(unsigned int cpu)
 {
     uint32_t i, j, count;
     struct pm_px *pxpt;
-    const struct processor_pminfo *pmpt = processor_pminfo[cpuid];
-    spinlock_t *cpufreq_statistic_lock = 
-               &per_cpu(cpufreq_statistic_lock, cpuid);
+    const struct processor_pminfo *pmpt = processor_pminfo[cpu];
+    spinlock_t *cpufreq_statistic_lock = &per_cpu(cpufreq_statistic_lock, cpu);
 
     spin_lock(cpufreq_statistic_lock);
 
-    pxpt = per_cpu(cpufreq_statistic_data, cpuid);
+    pxpt = per_cpu(cpufreq_statistic_data, cpu);
     if ( !pmpt || !pxpt || !pxpt->u.pt || !pxpt->u.trans_pt ) {
         spin_unlock(cpufreq_statistic_lock);
         return;
@@ -194,7 +192,7 @@ void cpufreq_statistic_reset(unsigned int cpuid)
     }
 
     pxpt->prev_state_wall = NOW();
-    pxpt->prev_idle_wall = get_cpu_idle_time(cpuid);
+    pxpt->prev_idle_wall = get_cpu_idle_time(cpu);
 
     spin_unlock(cpufreq_statistic_lock);
 }
@@ -236,6 +234,7 @@ int cpufreq_frequency_table_cpuinfo(struct cpufreq_policy *policy,
 
     policy->min = policy->cpuinfo.min_freq = min_freq;
     policy->max = policy->cpuinfo.max_freq = max_freq;
+    policy->cpuinfo.perf_freq = max_freq;
     policy->cpuinfo.second_max_freq = second_max_freq;
 
     if (policy->min == ~0)
@@ -367,7 +366,7 @@ int __cpufreq_driver_target(struct cpufreq_policy *policy,
         retval = alternative_call(cpufreq_driver.target,
                                   policy, target_freq, relation);
         if ( retval == 0 )
-            TRACE_2D(TRC_PM_FREQ_CHANGE, prev_freq/1000, policy->cur/1000);
+            TRACE_TIME(TRC_PM_FREQ_CHANGE, prev_freq / 1000, policy->cur / 1000);
     }
 
     return retval;
@@ -388,7 +387,7 @@ int cpufreq_driver_getavg(unsigned int cpu, unsigned int flag)
     return policy->cur;
 }
 
-int cpufreq_update_turbo(int cpuid, int new_state)
+int cpufreq_update_turbo(unsigned int cpu, int new_state)
 {
     struct cpufreq_policy *policy;
     int curr_state;
@@ -398,7 +397,7 @@ int cpufreq_update_turbo(int cpuid, int new_state)
         new_state != CPUFREQ_TURBO_DISABLED)
         return -EINVAL;
 
-    policy = per_cpu(cpufreq_cpu_policy, cpuid);
+    policy = per_cpu(cpufreq_cpu_policy, cpu);
     if (!policy)
         return -EACCES;
 
@@ -412,7 +411,7 @@ int cpufreq_update_turbo(int cpuid, int new_state)
     policy->turbo = new_state;
     if (cpufreq_driver.update)
     {
-        ret = cpufreq_driver.update(cpuid, policy);
+        ret = alternative_call(cpufreq_driver.update, cpu, policy);
         if (ret)
             policy->turbo = curr_state;
     }
@@ -421,11 +420,11 @@ int cpufreq_update_turbo(int cpuid, int new_state)
 }
 
 
-int cpufreq_get_turbo_status(int cpuid)
+int cpufreq_get_turbo_status(unsigned int cpu)
 {
     struct cpufreq_policy *policy;
 
-    policy = per_cpu(cpufreq_cpu_policy, cpuid);
+    policy = per_cpu(cpufreq_cpu_policy, cpu);
     return policy && policy->turbo == CPUFREQ_TURBO_ENABLED;
 }
 
@@ -448,7 +447,7 @@ int __cpufreq_set_policy(struct cpufreq_policy *data,
         return -EINVAL;
 
     /* verify the cpu speed can be set within this limit */
-    ret = cpufreq_driver.verify(policy);
+    ret = alternative_call(cpufreq_driver.verify, policy);
     if (ret)
         return ret;
 
@@ -456,7 +455,7 @@ int __cpufreq_set_policy(struct cpufreq_policy *data,
     data->max = policy->max;
     data->limits = policy->limits;
     if (cpufreq_driver.setpolicy)
-        return cpufreq_driver.setpolicy(data);
+        return alternative_call(cpufreq_driver.setpolicy, data);
 
     if (policy->governor != data->governor) {
         /* save old, working values */

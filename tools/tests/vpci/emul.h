@@ -27,11 +27,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define container_of(ptr, type, member) ({                      \
-        typeof(((type *)0)->member) *mptr = (ptr);              \
-                                                                \
-        (type *)((char *)mptr - offsetof(type, member));        \
-})
+#include <xen-tools/common-macros.h>
 
 #define smp_wmb()
 #define prefetch(x) __builtin_prefetch(x)
@@ -41,7 +37,10 @@
 
 #include "list.h"
 
+typedef bool rwlock_t;
+
 struct domain {
+    rwlock_t pci_lock;
 };
 
 struct pci_dev {
@@ -50,7 +49,7 @@ struct pci_dev {
 
 struct vcpu
 {
-    const struct domain *domain;
+    struct domain *domain;
 };
 
 extern const struct vcpu *current;
@@ -60,6 +59,10 @@ typedef bool spinlock_t;
 #define spin_lock_init(l) (*(l) = false)
 #define spin_lock(l) (*(l) = true)
 #define spin_unlock(l) (*(l) = false)
+#define read_lock(l) (*(l) = true)
+#define read_unlock(l) (*(l) = false)
+#define write_lock(l) (*(l) = true)
+#define write_unlock(l) (*(l) = false)
 
 typedef union {
     uint32_t sbdf;
@@ -86,6 +89,8 @@ typedef union {
 
 #define __hwdom_init
 
+#define is_hardware_domain(d) ((void)(d), false)
+
 #define has_vpci(d) true
 
 #define xzalloc(type) ((type *)calloc(1, sizeof(type)))
@@ -109,22 +114,6 @@ typedef union {
 
 #define BUG() assert(0)
 #define ASSERT_UNREACHABLE() assert(0)
-
-#define min(x, y) ({                    \
-        const typeof(x) tx = (x);       \
-        const typeof(y) ty = (y);       \
-                                        \
-        (void) (&tx == &ty);            \
-        tx < ty ? tx : ty;              \
-})
-
-#define max(x, y) ({                    \
-        const typeof(x) tx = (x);       \
-        const typeof(y) ty = (y);       \
-                                        \
-        (void) (&tx == &ty);            \
-        tx > ty ? tx : ty;              \
-})
 
 #endif
 

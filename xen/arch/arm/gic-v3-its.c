@@ -1,21 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * xen/arch/arm/gic-v3-its.c
  *
  * ARM GICv3 Interrupt Translation Service (ITS) support
  *
  * Copyright (C) 2016,2017 - ARM Ltd
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; under version 2 of the License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <xen/acpi.h>
@@ -696,6 +685,9 @@ int gicv3_its_map_guest_device(struct domain *d,
     if ( !itt_addr )
         goto out_unlock;
 
+    clean_and_invalidate_dcache_va_range(itt_addr,
+                                         nr_events * hw_its->itte_size);
+
     dev = xzalloc(struct its_device);
     if ( !dev )
         goto out_unlock;
@@ -959,6 +951,10 @@ int gicv3_its_make_hwdom_dt_nodes(const struct domain *d,
         if ( res )
             return res;
 
+        res = fdt_property_cell(fdt, "#msi-cells", 1);
+        if ( res )
+            return res;
+
         if ( its->phandle )
         {
             res = fdt_property_cell(fdt, "phandle", its->phandle);
@@ -1015,12 +1011,12 @@ static void gicv3_its_dt_init(const struct dt_device_node *node)
      */
     dt_for_each_child_node(node, its)
     {
-        uint64_t addr, size;
+        paddr_t addr, size;
 
         if ( !dt_device_is_compatible(its, "arm,gic-v3-its") )
             continue;
 
-        if ( dt_device_get_address(its, 0, &addr, &size) )
+        if ( dt_device_get_paddr(its, 0, &addr, &size) )
             panic("GICv3: Cannot find a valid ITS frame address\n");
 
         add_to_host_its_list(addr, size, its);

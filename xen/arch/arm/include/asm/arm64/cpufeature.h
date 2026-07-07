@@ -1,6 +1,8 @@
 #ifndef __ASM_ARM_ARM64_CPUFEATURES_H
 #define __ASM_ARM_ARM64_CPUFEATURES_H
 
+#include <xen/linux-compat.h>
+
 /*
  * CPU feature register tracking
  *
@@ -44,25 +46,25 @@ struct arm64_ftr_bits {
 	s64		safe_val; /* safe value for FTR_EXACT features */
 };
 
-static inline int __attribute_const__
+static inline int attr_const
 cpuid_feature_extract_signed_field_width(u64 features, int field, int width)
 {
 	return (s64)(features << (64 - width - field)) >> (64 - width);
 }
 
-static inline int __attribute_const__
+static inline int attr_const
 cpuid_feature_extract_signed_field(u64 features, int field)
 {
 	return cpuid_feature_extract_signed_field_width(features, field, 4);
 }
 
-static inline unsigned int __attribute_const__
+static inline unsigned int attr_const
 cpuid_feature_extract_unsigned_field_width(u64 features, int field, int width)
 {
 	return (u64)(features << (64 - width - field)) >> (64 - width);
 }
 
-static inline unsigned int __attribute_const__
+static inline unsigned int attr_const
 cpuid_feature_extract_unsigned_field(u64 features, int field)
 {
 	return cpuid_feature_extract_unsigned_field_width(features, field, 4);
@@ -73,7 +75,7 @@ static inline u64 arm64_ftr_mask(const struct arm64_ftr_bits *ftrp)
 	return (u64)GENMASK(ftrp->shift + ftrp->width - 1, ftrp->shift);
 }
 
-static inline int __attribute_const__
+static inline int attr_const
 cpuid_feature_extract_field_width(u64 features, int field, int width, bool sign)
 {
 	return (sign) ?
@@ -81,7 +83,7 @@ cpuid_feature_extract_field_width(u64 features, int field, int width, bool sign)
 		cpuid_feature_extract_unsigned_field_width(features, field, width);
 }
 
-static inline int __attribute_const__
+static inline int attr_const
 cpuid_feature_extract_field(u64 features, int field, bool sign)
 {
 	return cpuid_feature_extract_field_width(features, field, 4, sign);

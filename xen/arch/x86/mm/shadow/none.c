@@ -1,13 +1,7 @@
 #include <xen/mm.h>
 #include <asm/shadow.h>
 
-static int cf_check _enable_log_dirty(struct domain *d, bool log_global)
-{
-    ASSERT(is_pv_domain(d));
-    return -EOPNOTSUPP;
-}
-
-static int cf_check _disable_log_dirty(struct domain *d)
+static int cf_check _toggle_log_dirty(struct domain *d)
 {
     ASSERT(is_pv_domain(d));
     return -EOPNOTSUPP;
@@ -18,15 +12,24 @@ static void cf_check _clean_dirty_bitmap(struct domain *d)
     ASSERT(is_pv_domain(d));
 }
 
+static void cf_check _update_paging_modes(struct vcpu *v)
+{
+    ASSERT_UNREACHABLE();
+}
+
 int shadow_domain_init(struct domain *d)
 {
+    /* For HVM set up pointers for safety, then fail. */
     static const struct log_dirty_ops sh_none_ops = {
-        .enable  = _enable_log_dirty,
-        .disable = _disable_log_dirty,
+        .enable  = _toggle_log_dirty,
+        .disable = _toggle_log_dirty,
         .clean   = _clean_dirty_bitmap,
     };
 
     paging_log_dirty_init(d, &sh_none_ops);
+
+    d->arch.paging.update_paging_modes = _update_paging_modes;
+
     return is_hvm_domain(d) ? -EOPNOTSUPP : 0;
 }
 
@@ -52,16 +55,10 @@ static unsigned long cf_check _gva_to_gfn(
 }
 #endif
 
-static pagetable_t cf_check _update_cr3(struct vcpu *v, bool do_locking,
-                                        bool noflush)
+static pagetable_t cf_check _update_cr3(struct vcpu *v, bool noflush)
 {
     ASSERT_UNREACHABLE();
     return pagetable_null();
-}
-
-static void cf_check _update_paging_modes(struct vcpu *v)
-{
-    ASSERT_UNREACHABLE();
 }
 
 static const struct paging_mode sh_paging_none = {
@@ -71,7 +68,6 @@ static const struct paging_mode sh_paging_none = {
     .gva_to_gfn                    = _gva_to_gfn,
 #endif
     .update_cr3                    = _update_cr3,
-    .update_paging_modes           = _update_paging_modes,
 };
 
 void shadow_vcpu_init(struct vcpu *v)

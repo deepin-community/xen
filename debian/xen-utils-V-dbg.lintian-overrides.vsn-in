@@ -1,0 +1,2 @@
+# lintian doesn't detect the non-stripped xen-shim executable as debug file
+debug-file-with-no-debug-symbols *usr/lib/debug/usr/lib/xen-@version@/boot/xen-shim-syms*

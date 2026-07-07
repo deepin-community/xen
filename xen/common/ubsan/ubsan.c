@@ -10,8 +10,11 @@
  *
  */
 
-#include <xen/spinlock.h>
+#include <xen/bitops.h>
+#include <xen/kernel.h>
+#include <xen/lib.h>
 #include <xen/percpu.h>
+#include <xen/spinlock.h>
 
 #define __noreturn    noreturn
 #define pr_err(...) printk(XENLOG_ERR __VA_ARGS__)
@@ -20,8 +23,6 @@ static DEFINE_PER_CPU(struct xen_ubsan[1], in_ubsan);
 #undef current
 #define current this_cpu(in_ubsan)
 #define dump_stack dump_execution_state
-#define u64 long long unsigned int
-#define s64 long long int
 
 #include "ubsan.h"
 
@@ -141,10 +142,11 @@ static void val_to_string(char *str, size_t size, struct type_descriptor *type,
 #endif
 		} else if (type_is_signed(type)) {
 			scnprintf(str, size, "%lld",
-				(s64)get_signed_val(type, value));
+				  (long long)get_signed_val(type, value));
 		} else {
 			scnprintf(str, size, "%llu",
-				(u64)get_unsigned_val(type, value));
+				  (unsigned long long)get_unsigned_val(type,
+								       value));
 		}
 	}
 }
@@ -174,6 +176,9 @@ static void ubsan_epilogue(unsigned long *flags)
 		"========================================\n");
 	spin_unlock_irqrestore(&report_lock, *flags);
 	current->in_ubsan--;
+
+	if (IS_ENABLED(CONFIG_UBSAN_FATAL))
+	    panic("UBSAN failure detected\n");
 }
 
 static void handle_overflow(struct overflow_data *data, unsigned long lhs,
@@ -513,7 +518,7 @@ void __ubsan_handle_pointer_overflow(struct pointer_overflow_data *data,
 	ubsan_prologue(&data->location, &flags);
 
 	pr_err("pointer operation %s %p to %p\n",
-	       base > result ? "underflowed" : "overflowed",
+	       base > result ? "overflowed" : "underflowed",
 	       _p(base), _p(result));
 
 	ubsan_epilogue(&flags);

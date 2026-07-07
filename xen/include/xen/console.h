@@ -20,8 +20,7 @@ void console_init_postirq(void);
 void console_endboot(void);
 int console_has(const char *device);
 
-int fill_console_start_info(struct dom0_vga_console_info *);
-
+/* Not speculation safe - only used to prevent interleaving of output. */
 unsigned long console_lock_recursive_irqsave(void);
 void console_unlock_recursive_irqrestore(unsigned long flags);
 void console_force_unlock(void);
@@ -38,7 +37,7 @@ struct domain *console_input_domain(void);
  * Steal output from the console. Returns +ve identifier, else -ve error.
  * Takes the handle of the serial line to steal, and steal callback function.
  */
-int console_steal(int handle, void (*fn)(const char *, size_t nr));
+int console_steal(int handle, void (*fn)(const char *str, size_t nr));
 
 /* Give back stolen console. Takes the identifier returned by console_steal. */
 void console_giveback(int id);

@@ -2,9 +2,27 @@
 #define __TYPES_H__
 
 #include <xen/stdbool.h>
+#include <xen/stdint.h>
+
+/* Linux inherited types which are being phased out */
+typedef uint8_t u8;
+typedef uint16_t u16;
+typedef uint32_t u32;
+typedef uint64_t u64;
 
 #include <asm/types.h>
 
+typedef __SIZE_TYPE__ size_t;
+
+typedef signed long ssize_t;
+
+typedef __PTRDIFF_TYPE__ ptrdiff_t;
+
+/*
+ * Users of this macro are expected to pass a positive value.
+ *
+ * XXX: should become an unsigned quantity
+ */
 #define BITS_TO_LONGS(bits) \
     (((bits)+BITS_PER_LONG-1)/BITS_PER_LONG)
 #define DECLARE_BITMAP(name,bits) \
@@ -33,28 +51,15 @@
 #define LONG_MIN        (-LONG_MAX - 1)
 #define ULONG_MAX       (~0UL)
 
-typedef         __u8            uint8_t;
-typedef         __s8            int8_t;
-
-typedef         __u16           uint16_t;
-typedef         __s16           int16_t;
-
-typedef         __u32           uint32_t;
-typedef         __s32           int32_t;
-
-typedef         __u64           uint64_t;
-typedef         __s64           int64_t;
-
-typedef __u16 __le16;
-typedef __u16 __be16;
-typedef __u32 __le32;
-typedef __u32 __be32;
-typedef __u64 __le64;
-typedef __u64 __be64;
+typedef uint16_t __le16;
+typedef uint16_t __be16;
+typedef uint32_t __le32;
+typedef uint32_t __be32;
+typedef uint64_t __le64;
+typedef uint64_t __be64;
 
 typedef unsigned int __attribute__((__mode__(__pointer__))) uintptr_t;
 
-typedef bool bool_t;
 #define test_and_set_bool(b)   xchg(&(b), true)
 #define test_and_clear_bool(b) xchg(&(b), false)
 

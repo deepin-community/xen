@@ -1,19 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * vpmu.h: PMU virtualization for HVM domain.
  *
  * Copyright (c) 2007, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  *
  * Author: Haitao Shan <haitao.shan@intel.com>
  */
@@ -34,19 +23,19 @@
 #define MSR_TYPE_ARCH_CTRL          4
 
 /* Start of PMU register bank */
-#define vpmu_reg_pointer(ctxt, offset) ((void *)((uintptr_t)ctxt + \
-                                                 (uintptr_t)ctxt->offset))
+#define vpmu_reg_pointer(ctxt, offset) ((void *)((uintptr_t)(ctxt) + \
+                                                 (uintptr_t)(ctxt)->offset))
 
 /* Arch specific operations shared by all vpmus */
 struct arch_vpmu_ops {
     int (*initialise)(struct vcpu *v);
     int (*do_wrmsr)(unsigned int msr, uint64_t msr_content);
     int (*do_rdmsr)(unsigned int msr, uint64_t *msr_content);
-    int (*do_interrupt)(struct cpu_user_regs *regs);
+    int (*do_interrupt)(void);
     void (*arch_vpmu_destroy)(struct vcpu *v);
-    int (*arch_vpmu_save)(struct vcpu *v, bool_t to_guest);
-    int (*arch_vpmu_load)(struct vcpu *v, bool_t from_guest);
-    void (*arch_vpmu_dump)(const struct vcpu *);
+    int (*arch_vpmu_save)(struct vcpu *v, bool to_guest);
+    int (*arch_vpmu_load)(struct vcpu *v, bool from_guest);
+    void (*arch_vpmu_dump)(const struct vcpu *v);
 
 #ifdef CONFIG_MEM_SHARING
     int (*allocate_context)(struct vcpu *v);
@@ -98,24 +87,24 @@ static inline void vpmu_clear(struct vpmu_struct *vpmu)
     /* VPMU_AVAILABLE should be altered by get/put_vpmu(). */
     vpmu->flags &= VPMU_AVAILABLE;
 }
-static inline bool_t vpmu_is_set(const struct vpmu_struct *vpmu, const u32 mask)
+static inline bool vpmu_is_set(const struct vpmu_struct *vpmu, const u32 mask)
 {
     return !!(vpmu->flags & mask);
 }
-static inline bool_t vpmu_are_all_set(const struct vpmu_struct *vpmu,
-                                      const u32 mask)
+static inline bool vpmu_are_all_set(const struct vpmu_struct *vpmu,
+                                    const u32 mask)
 {
     return !!((vpmu->flags & mask) == mask);
 }
 
 void vpmu_lvtpc_update(uint32_t val);
 int vpmu_do_msr(unsigned int msr, uint64_t *msr_content, bool is_write);
-void vpmu_do_interrupt(struct cpu_user_regs *regs);
+void vpmu_do_interrupt(void);
 void vpmu_initialise(struct vcpu *v);
 void vpmu_destroy(struct vcpu *v);
 void vpmu_save(struct vcpu *v);
 void cf_check vpmu_save_force(void *arg);
-int vpmu_load(struct vcpu *v, bool_t from_guest);
+int vpmu_load(struct vcpu *v, bool from_guest);
 void vpmu_dump(struct vcpu *v);
 
 static inline int vpmu_do_wrmsr(unsigned int msr, uint64_t msr_content)

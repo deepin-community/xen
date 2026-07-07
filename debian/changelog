@@ -1,8 +1,204 @@
-xen (4.17.3+10-g091466ba55-1deepin1) unstable; urgency=medium
+xen (4.20.2+37-g61ff35323e-0+deb13u1) trixie; urgency=medium
 
-  * No source change upload against python 3.12.
+  * Update to new upstream version 4.20.2+37-g61ff35323e, which also contains
+    security fixes for the following issues:
+    - x86: buffer overrun with shadow paging + tracing
+      XSA-477 CVE-2025-58150
+    - x86: incomplete IBPB for vCPU isolation
+      XSA-479 CVE-2026-23553
+  * Note that the following XSA are not listed, because...
+    - XSA-478 applies to XAPI which is not included in Debian
 
- -- Tianyu Chen <sweetyfish@deepin.org>  Mon, 08 Jul 2024 09:58:33 +0200
+ -- Maximilian Engelhardt <maxi@daemonizer.de>  Thu, 05 Mar 2026 21:05:14 +0100
+
+xen (4.20.2+7-g1badcf5035-0+deb13u1) trixie-security; urgency=medium
+
+  Significant changes:
+  * Update to new upstream version 4.20.2+7-g1badcf5035, which also contains
+    security fixes for the following issues:
+    (Closes: #1105193) (Closes: #1120075)
+    - x86: Indirect Target Selection
+      XSA-469 CVE-2024-28956
+    - x86: Incorrect stubs exception handling for flags recovery
+      XSA-470 CVE-2025-27465
+    - x86: Transitive Scheduler Attacks
+      XSA-471 CVE-2024-36350 CVE-2024-36357
+    - Multiple vulnerabilities in the Viridian interface
+      XSA-472 CVE-2025-27466 CVE-2025-58142 CVE-2025-58143
+    - Arm issues with page refcounting
+      XSA-473 CVE-2025-58144 CVE-2025-58145
+    - x86: Incorrect input sanitisation in Viridian hypercalls
+      XSA-475 CVE-2025-58147 CVE-2025-58148
+    - Incorrect removal of permissions on PCI device unplug
+      XSA-476 CVE-2025-58149
+  * Note that the following XSA are not listed, because...
+    - XSA-468 applies to Windows PV drivers
+    - XSA-474 applies to XAPI which is not included in Debian
+
+  Packaging minor fixes and improvements:
+  * debian/salsa-ci.yml: adjust for trixie and new salsa-ci pipeline
+
+ -- Maximilian Engelhardt <maxi@daemonizer.de>  Sun, 30 Nov 2025 16:57:07 +0100
+
+xen (4.20.0+68-g35cb38b222-1) unstable; urgency=medium
+
+  * Update to new upstream version 4.20.0+68-g35cb38b222.
+
+ -- Hans van Kranenburg <hans@knorrie.org>  Mon, 05 May 2025 19:24:56 +0200
+
+xen (4.20.0-1) unstable; urgency=medium
+
+  * Update to new upstream version 4.20.0, which also contains
+    security fixes for the following issues:
+    - deadlock potential with VT-d and legacy PCI device pass-through
+      XSA-467 CVE-2025-1713
+  * disable dh_dwz as it's of limited use and breaks our build
+  * Upload to unstable
+
+ -- Maximilian Engelhardt <maxi@daemonizer.de>  Thu, 06 Mar 2025 09:10:56 +0100
+
+xen (4.20.0~rc2+1-gfcde5e0de8-1~exp1) experimental; urgency=medium
+
+  Significant changes:
+  * Update to new upstream version 4.20.0~rc2+1-gfcde5e0de8.
+
+  Changes related to upgrading to Xen 4.20:
+  * debian/control: adjust to 4.20
+  * Refresh remaining patches if needed
+  * debian: ship the new xsd_glue ocaml plugin in xen-utils-V
+
+  Packaging minor fixes and improvements:
+  * d/copyright: update year to 2025
+  * debian: convert xen-doc to architecture all
+  * d/control: mark libxen-dev as Multi-Arch: same
+  * d/control: remove versioned dpkg-dev from Build-Depends
+  * d/rules: remove environment variables no longer needed for reproducible
+    builds
+  * d/rules: disable debug build for xen tools
+  * update lintian overrides
+
+ -- Maximilian Engelhardt <maxi@daemonizer.de>  Sat, 08 Feb 2025 22:55:56 +0100
+
+xen (4.19.1-1) unstable; urgency=medium
+
+  * Upload to unstable (Closes: #1089033)
+  * Pick upstream commit e6472d46680c ("tools/xg: increase LZMA_BLOCK_SIZE for
+    uncompressing the kernel") to fix decompressing Linux 6.12 when starting
+    in PV mode.
+  * Note that the following XSA were not listed, because...
+    - XSA-465 has patches for the Linux kernel.
+    - XSA-466 contains a documentation update that was only applied to the
+      current development version of Xen
+
+ -- Hans van Kranenburg <hans@knorrie.org>  Sat, 21 Dec 2024 11:33:16 +0100
+
+xen (4.19.1-1~exp4) experimental; urgency=medium
+
+  * Upload again, with binaries this time.
+
+ -- Sean Whitton <spwhitton@spwhitton.name>  Sat, 21 Dec 2024 11:43:57 +0800
+
+xen (4.19.1-1~exp3) experimental; urgency=medium
+
+  * d/copyright: Fix invalid "-present" copyright years. (Closes: #1089621)
+
+ -- Hans van Kranenburg <hans@knorrie.org>  Fri, 20 Dec 2024 17:00:44 +0100
+
+xen (4.19.1-1~exp2) experimental; urgency=medium
+
+  * Drop support for armhf (Closes: #989560)
+    - src:xen now FTBFS on armhf because OCaml 5.x has no support for native
+      compilation on 32-bit systems any more.
+    - As seen in #989560, Xen on armhf was already dysfunctional for years
+    - The team does not have resources or knowledge to support the armhf build
+
+  [ Maximilian Engelhardt ]
+
+  * d/control: Add Maximilian Engelhardt to Uploaders
+  * d/copyright: Specify correct years for authors of debian/*
+  * debian: undo ABI-stable t64 package renaming
+
+ -- Hans van Kranenburg <hans@knorrie.org>  Mon, 16 Dec 2024 22:01:57 +0100
+
+xen (4.19.1-1~exp1) experimental; urgency=medium
+
+  * Update to new upstream version 4.19.1, which also contains
+    security fixes for the following issues:
+    - x86: Deadlock in vlapic_error()
+      XSA-462 CVE-2024-45817
+    - Deadlock in x86 HVM standard VGA handling
+      XSA-463 CVE-2024-45818
+    - libxl leaks data to PVH guests via ACPI tables
+      XSA-464 CVE-2024-45819
+  * Fix compilation on arm64 and armhf with upstream commit ee826bc490
+    ("Arm64: adjust __irq_to_desc() to fix build with gcc14")
+
+ -- Maximilian Engelhardt <maxi@daemonizer.de>  Sun, 15 Dec 2024 13:52:56 +0100
+
+xen (4.19.0+14-g0918434e0f-1~exp1) experimental; urgency=medium
+
+  Significant changes:
+  * Update to new upstream version 4.19.0+14-g0918434e0f, which also contains
+    security fixes for the following issues:
+    - x86: Register File Data Sampling
+      XSA-452 CVE-2023-28746
+    - GhostRace: Speculative Race Conditions
+      XSA-453 CVE-2024-2193
+    - x86 HVM hypercalls may trigger Xen bug check
+      XSA-454 CVE-2023-46842
+    - x86: Incorrect logic for BTC/SRSO mitigations
+      XSA-455 CVE-2024-31142
+    - x86: Native Branch History Injection
+      XSA-456 CVE-2024-2201
+    - double unlock in x86 guest IRQ handling
+      XSA-458 CVE-2024-31143
+    - error handling in x86 IOMMU identity mapping
+      XSA-460 CVE-2024-31145
+    - PCI device pass-through with shared resources
+      XSA-461 CVE-2024-31146
+  * Note that the following XSA are not listed, because...
+    - XSA-457 has patches for the Linux kernel.
+    - XSA-459 is within Xapi which is not shipped by this package.
+  * Fix compilation with OCaml 5.2.0 (Closes: #1073913)
+
+  Changes related to upgrading to Xen 4.19:
+  * debian/control: adjust to 4.19
+  * debian/copyright: update for xen 4.19
+  * Refresh remaining patches if needed
+
+  Packaging minor fixes and improvements:
+  * debian/control: remove old version constraints and cleanup
+  * debian/control: update Standards-Version to 4.7.0
+  * debian/control: add python3-setuptools dependency
+  * debian/rules: cleanup and improved comments
+  * debian/rules: enable parallel build
+  * debian/rules: move xenstore-control to xen-utils-common (Closes: #1036601)
+  * debian: ship systemd service files for xen and xendomains
+    (Closes: #1029998)
+  * docs/Makefile: Work around a reproducibility issue by generating
+    documentation for ppc and riscv architectures.
+
+ -- Maximilian Engelhardt <maxi@daemonizer.de>  Mon, 09 Sep 2024 12:05:47 +0200
+
+xen (4.17.3+36-g54dacb5c02-1) unstable; urgency=medium
+
+  * Update to new upstream version 4.17.3+36-g54dacb5c02, which also contains
+    security fixes for the following issues:
+    - x86: shadow stack vs exceptions from emulation stubs
+      XSA-451 CVE-2023-46841
+  * Properly incorporate NMU changes.
+  * Pick upstream commit b33a5c5929 ("tools/xenstore/xenstored_control.c:
+    correctly print time_t") to fix a FTBFS on armhf with 64 bits time_t.
+    (Closes: #1065794)
+
+ -- Hans van Kranenburg <hans@knorrie.org>  Sat, 09 Mar 2024 22:03:11 +0100
+
+xen (4.17.3+10-g091466ba55-1.1) unstable; urgency=medium
+
+  * Non-maintainer upload.
+  * Rename libraries for 64-bit time_t transition.  Closes: #1063270
+
+ -- Steve Langasek <vorlon@debian.org>  Thu, 29 Feb 2024 07:08:41 +0000
 
 xen (4.17.3+10-g091466ba55-1) unstable; urgency=medium
 

@@ -16,7 +16,7 @@ allow dom0_t xen_t:xen {
 allow dom0_t xen_t:xen2 {
 	resource_op psr_cmt_op psr_alloc pmu_ctrl get_symbol
 	get_cpu_levelling_caps get_cpu_featureset livepatch_op
-	coverage_op
+	coverage_op get_dom0_console
 };
 
 # Allow dom0 to use all XENVER_ subops that have checks.
@@ -40,7 +40,7 @@ allow dom0_t dom0_t:domain {
 };
 allow dom0_t dom0_t:domain2 {
 	set_cpu_policy gettsc settsc setscheduler set_vnumainfo
-	get_vnumainfo psr_cmt_op psr_alloc get_cpu_policy
+	get_vnumainfo psr_cmt_op psr_alloc get_cpu_policy dt_overlay
 };
 allow dom0_t dom0_t:resource { add remove };
 

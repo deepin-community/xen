@@ -349,15 +349,11 @@ int libxl_domain_info(libxl_ctx *ctx, libxl_dominfo *info_r,
     int ret;
     GC_INIT(ctx);
 
-    ret = xc_domain_getinfolist(ctx->xch, domid, 1, &xcinfo);
-    if (ret<0) {
-        LOGED(ERROR, domid, "Getting domain info list");
+    ret = xc_domain_getinfo_single(ctx->xch, domid, &xcinfo);
+    if (ret < 0) {
+        LOGED(ERROR, domid, "Getting domain info");
         GC_FREE;
-        return ERROR_FAIL;
-    }
-    if (ret==0 || xcinfo.domain != domid) {
-        GC_FREE;
-        return ERROR_DOMAIN_NOTFOUND;
+        return errno == ESRCH ? ERROR_DOMAIN_NOTFOUND : ERROR_FAIL;
     }
 
     if (info_r)
@@ -1529,6 +1525,10 @@ static void devices_destroy_cb(libxl__egc *egc,
     if (rc < 0)
         LOGD(ERROR, domid, "libxl__devices_destroy failed");
 
+    /* Remove the file after the hotplug scripts have run.  The scripts won't
+     * run if the file doesn't exist when they are run.  */
+    libxl__remove_file(gc, GCSPRINTF(LIBXL_STUBDOM_EMPTY_CDROM ".%u", domid));
+
     vm_path = libxl__xs_read(gc, XBT_NULL, GCSPRINTF("%s/vm", dom_path));
     if (vm_path)
         if (!xs_rm(ctx->xsh, XBT_NULL, vm_path))
@@ -1657,14 +1657,16 @@ int libxl__resolve_domid(libxl__gc *gc, const char *name, uint32_t *domid)
 libxl_vcpuinfo *libxl_list_vcpu(libxl_ctx *ctx, uint32_t domid,
                                        int *nr_vcpus_out, int *nr_cpus_out)
 {
+    int r;
     GC_INIT(ctx);
     libxl_vcpuinfo *ptr, *ret;
     xc_domaininfo_t domaininfo;
     xc_vcpuinfo_t vcpuinfo;
     unsigned int nr_vcpus;
 
-    if (xc_domain_getinfolist(ctx->xch, domid, 1, &domaininfo) != 1) {
-        LOGED(ERROR, domid, "Getting infolist");
+    r = xc_domain_getinfo_single(ctx->xch, domid, &domaininfo);
+    if (r < 0) {
+        LOGED(ERROR, domid, "Getting dominfo");
         GC_FREE;
         return NULL;
     }

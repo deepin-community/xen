@@ -47,6 +47,7 @@ LIST_HEAD_READ_MOSTLY(acpi_drhd_units);
 LIST_HEAD_READ_MOSTLY(acpi_rmrr_units);
 static LIST_HEAD_READ_MOSTLY(acpi_atsr_units);
 static LIST_HEAD_READ_MOSTLY(acpi_rhsa_units);
+static LIST_HEAD_READ_MOSTLY(acpi_satc_units);
 
 static struct acpi_table_header *__read_mostly dmar_table;
 static int __read_mostly dmar_flags;
@@ -82,14 +83,13 @@ static int __init acpi_register_rmrr_unit(struct acpi_rmrr_unit *rmrr)
     return 0;
 }
 
-static void scope_devices_free(struct dmar_scope *scope)
+static void __init scope_devices_free(struct dmar_scope *scope)
 {
     if ( !scope )
         return;
 
     scope->devices_cnt = 0;
-    xfree(scope->devices);
-    scope->devices = NULL;
+    XFREE(scope->devices);
 }
 
 static void __init disable_all_dmar_units(void)
@@ -149,7 +149,7 @@ struct vtd_iommu *ioapic_to_iommu(unsigned int apic_id)
     return NULL;
 }
 
-static bool_t acpi_hpet_device_match(
+static bool acpi_hpet_device_match(
     struct list_head *list, unsigned int hpet_id)
 {
     struct acpi_hpet_unit *hpet;
@@ -557,7 +557,7 @@ out:
     return ret;
 }
 
-static int register_one_rmrr(struct acpi_rmrr_unit *rmrru)
+static int __init register_one_rmrr(struct acpi_rmrr_unit *rmrru)
 {
     bool ignore = false;
     unsigned int i = 0;
@@ -595,17 +595,13 @@ static int register_one_rmrr(struct acpi_rmrr_unit *rmrru)
                 " Ignore RMRR [%"PRIx64",%"PRIx64"] as no device"
                 " under its scope is PCI discoverable!\n",
                 rmrru->base_address, rmrru->end_address);
-        scope_devices_free(&rmrru->scope);
-        xfree(rmrru);
-        return 1;
+        ret = 1;
     }
     else if ( rmrru->base_address > rmrru->end_address )
     {
         dprintk(XENLOG_WARNING VTDPREFIX,
                 " RMRR [%"PRIx64",%"PRIx64"] is incorrect!\n",
                 rmrru->base_address, rmrru->end_address);
-        scope_devices_free(&rmrru->scope);
-        xfree(rmrru);
         ret = -EFAULT;
     }
     else
@@ -642,17 +638,9 @@ acpi_parse_one_rmrr(struct acpi_dmar_header *header)
            return -EEXIST;
        }
 
-    /* This check is here simply to detect when RMRR values are
-     * not properly represented in the system memory map and
-     * inform the user
-     */
-    if ( !e820_all_mapped(base_addr, end_addr + 1, E820_RESERVED) &&
-         !e820_all_mapped(base_addr, end_addr + 1, E820_NVS) &&
-         !e820_all_mapped(base_addr, end_addr + 1, E820_ACPI) )
-        printk(XENLOG_WARNING VTDPREFIX
-               " RMRR [%"PRIx64",%"PRIx64"] not in reserved memory;"
-               " need \"iommu_inclusive_mapping=1\"?\n",
-                base_addr, end_addr);
+    if ( !iommu_unity_region_ok("RMRR", maddr_to_mfn(base_addr),
+                                maddr_to_mfn(end_addr)) )
+        return -EIO;
 
     rmrru = xzalloc(struct acpi_rmrr_unit);
     if ( !rmrru )
@@ -668,21 +656,20 @@ acpi_parse_one_rmrr(struct acpi_dmar_header *header)
                                &rmrru->scope, RMRR_TYPE, rmrr->segment);
 
     if ( !ret && (rmrru->scope.devices_cnt != 0) )
-    {
         ret = register_one_rmrr(rmrru);
-        /*
-         * register_one_rmrr() returns greater than 0 when a specified
-         * PCIe device cannot be detected. To prevent VT-d from being
-         * disabled in such cases, reset the return value to 0 here.
-         */
-        if ( ret > 0 )
-            ret = 0;
 
-    }
-    else
+    if ( ret )
+    {
+        scope_devices_free(&rmrru->scope);
         xfree(rmrru);
+    }
 
-    return ret;
+    /*
+     * register_one_rmrr() returns greater than 0 when a specified PCIe
+     * device cannot be detected. To prevent VT-d from being disabled in
+     * such cases, make the return value 0 here.
+     */
+    return ret > 0 ? 0 : ret;
 }
 
 static int __init
@@ -764,6 +751,93 @@ acpi_parse_one_rhsa(struct acpi_dmar_header *header)
     return ret;
 }
 
+static int __init register_one_satc(struct acpi_satc_unit *satcu)
+{
+    bool ignore = false;
+    unsigned int i = 0;
+    int ret = 0;
+
+    /* Skip checking if segment is not accessible yet. */
+    if ( !pci_known_segment(satcu->segment) )
+        i = UINT_MAX;
+
+    for ( ; i < satcu->scope.devices_cnt; i++ )
+    {
+        uint8_t b = PCI_BUS(satcu->scope.devices[i]);
+        uint8_t d = PCI_SLOT(satcu->scope.devices[i]);
+        uint8_t f = PCI_FUNC(satcu->scope.devices[i]);
+
+        if ( !pci_device_detect(satcu->segment, b, d, f) )
+        {
+            dprintk(XENLOG_WARNING VTDPREFIX,
+                    " Non-existent device (%pp) is reported in SATC scope!\n",
+                    &PCI_SBDF(satcu->segment, b, d, f));
+            ignore = true;
+        }
+        else
+        {
+            ignore = false;
+            break;
+        }
+    }
+
+    if ( ignore )
+    {
+        dprintk(XENLOG_WARNING VTDPREFIX,
+                " Ignore SATC for seg %04x as no device under its scope is PCI discoverable\n",
+                satcu->segment);
+        return 1;
+    }
+
+    if ( iommu_verbose )
+        printk(VTDPREFIX " ATC required: %d\n", satcu->atc_required);
+
+    list_add(&satcu->list, &acpi_satc_units);
+
+    return ret;
+}
+
+static int __init
+acpi_parse_one_satc(const struct acpi_dmar_header *header)
+{
+    const struct acpi_dmar_satc *satc =
+        container_of(header, const struct acpi_dmar_satc, header);
+    struct acpi_satc_unit *satcu;
+    const void *dev_scope_start, *dev_scope_end;
+    int ret = acpi_dmar_check_length(header, sizeof(*satc));
+
+    if ( ret )
+        return ret;
+
+    satcu = xzalloc(struct acpi_satc_unit);
+    if ( !satcu )
+        return -ENOMEM;
+
+    satcu->segment = satc->segment;
+    satcu->atc_required = satc->flags & ACPI_SATC_ATC_REQUIRED;
+
+    dev_scope_start = (const void *)(satc + 1);
+    dev_scope_end   = (const void *)satc + header->length;
+    ret = acpi_parse_dev_scope(dev_scope_start, dev_scope_end,
+                               &satcu->scope, SATC_TYPE, satc->segment);
+
+    if ( !ret && satcu->scope.devices_cnt )
+        ret = register_one_satc(satcu);
+
+    if ( ret )
+    {
+        scope_devices_free(&satcu->scope);
+        xfree(satcu);
+    }
+
+    /*
+     * register_one_satc() returns greater than 0 when a specified PCIe
+     * device cannot be detected. To prevent VT-d from being disabled in
+     * such cases, make the return value 0 here.
+     */
+    return ret > 0 ? 0 : ret;
+}
+
 static int __init cf_check acpi_parse_dmar(struct acpi_table_header *table)
 {
     struct acpi_table_dmar *dmar;
@@ -817,6 +891,13 @@ static int __init cf_check acpi_parse_dmar(struct acpi_table_header *table)
                 printk(VTDPREFIX "found ACPI_DMAR_RHSA:\n");
             ret = acpi_parse_one_rhsa(entry_header);
             break;
+
+        case ACPI_DMAR_TYPE_SATC:
+            if ( iommu_verbose )
+                printk(VTDPREFIX "found ACPI_DMAR_SATC:\n");
+            ret = acpi_parse_one_satc(entry_header);
+            break;
+
         default:
             dprintk(XENLOG_WARNING VTDPREFIX,
                     "Ignore unknown DMAR structure type (%#x)\n",
@@ -953,9 +1034,13 @@ static int __init add_one_user_rmrr(unsigned long base_pfn,
     rmrr->scope.devices_cnt = dev_count;
 
     if ( register_one_rmrr(rmrr) )
+    {
         printk(XENLOG_ERR VTDPREFIX
                "Could not register RMMR range "ERMRRU_FMT"\n",
                ERMRRU_ARG);
+        scope_devices_free(&rmrr->scope);
+        xfree(rmrr);
+    }
 
     return 1;
 }
@@ -1052,14 +1137,14 @@ void acpi_dmar_zap(void)
         write_atomic((uint32_t*)&dmar_table->signature[0], sig);
 }
 
-bool_t platform_supports_intremap(void)
+bool platform_supports_intremap(void)
 {
     const unsigned int mask = ACPI_DMAR_INTR_REMAP;
 
     return (dmar_flags & mask) == ACPI_DMAR_INTR_REMAP;
 }
 
-bool_t __init platform_supports_x2apic(void)
+bool __init platform_supports_x2apic(void)
 {
     const unsigned int mask = ACPI_DMAR_INTR_REMAP | ACPI_DMAR_X2APIC_OPT_OUT;
 

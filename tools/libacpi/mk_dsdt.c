@@ -1,14 +1,4 @@
-/*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published
- * by the Free Software Foundation; version 2.1 only. with the special
- * exception on linking described in file LICENSE.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Lesser General Public License for more details.
- */
+/* SPDX-License-Identifier: LGPL-2.1-only */
 
 #include <stdio.h>
 #include <stdarg.h>
@@ -247,6 +237,11 @@ int main(int argc, char **argv)
     pop_block();
     /**** Processor end ****/
 #else
+    if (dm_version == QEMU_NONE) {
+        pop_block();
+        pop_block();
+        return 0;
+    }
 
     /* Operation Region 'PRST': bitmask of online CPUs. */
     stmt("OperationRegion", "PRST, SystemIO, %#x, %d",
@@ -295,10 +290,6 @@ int main(int argc, char **argv)
     pop_block();
     pop_block();
 
-    if (dm_version == QEMU_NONE) {
-        pop_block();
-        return 0;
-    }
     /**** Processor end ****/
 
 

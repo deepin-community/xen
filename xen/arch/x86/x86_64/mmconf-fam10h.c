@@ -135,14 +135,14 @@ static void __init get_fam10h_pci_mmconf_base(void)
 	return;
 
 out:
-	if (e820_add_range(&e820, start, start + SIZE, E820_RESERVED))
+	if (e820_add_range(start, start + SIZE, E820_RESERVED))
 		fam10h_pci_mmconf_base = start;
 }
 
 void fam10h_check_enable_mmcfg(void)
 {
 	u64 val;
-	bool_t print = opt_cpu_info;
+	bool print = opt_cpu_info;
 
 	if (!(pci_probe & PCI_CHECK_ENABLE_AMD_MMCONF))
 		return;
@@ -188,9 +188,8 @@ void fam10h_check_enable_mmcfg(void)
 static const struct dmi_system_id __initconstrel mmconf_dmi_table[] = {
 	{
 		.ident = "Sun Microsystems Machine",
-		.matches = {
-			DMI_MATCH(DMI_SYS_VENDOR, "Sun Microsystems"),
-		},
+		DMI_MATCH1(
+			DMI_MATCH(DMI_SYS_VENDOR, "Sun Microsystems")),
 	},
 	{}
 };

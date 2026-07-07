@@ -3,6 +3,7 @@
 #include <xen/event.h>
 #include <xen/init.h>
 #include <xen/sched.h>
+#include <xen/sections.h>
 #include <xen/stop_machine.h>
 #include <xen/rcupdate.h>
 
@@ -68,6 +69,11 @@ void cpu_hotplug_done(void)
     write_unlock(&cpu_add_remove_lock);
 }
 
+bool cpu_in_hotplug_context(void)
+{
+    return rw_is_write_locked_by_me(&cpu_add_remove_lock);
+}
+
 static NOTIFIER_HEAD(cpu_chain);
 
 void __init register_cpu_notifier(struct notifier_block *nb)
@@ -82,7 +88,7 @@ static int cpu_notifier_call_chain(unsigned int cpu, unsigned long action,
 {
     void *hcpu = (void *)(long)cpu;
     int notifier_rc = notifier_call_chain(&cpu_chain, action, hcpu, nb);
-    int ret = (notifier_rc == NOTIFY_DONE) ? 0 : notifier_to_errno(notifier_rc);
+    int ret =  notifier_to_errno(notifier_rc);
 
     BUG_ON(ret && nofail);
 

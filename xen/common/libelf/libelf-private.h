@@ -26,7 +26,7 @@
 /* we would like to use elf->log_callback but we can't because
  * there is no vprintk in Xen */
 #define elf_msg(elf, fmt, args ... ) \
-   if (elf->verbose) printk(fmt, ## args )
+   if ((elf)->verbose) printk(fmt, ## args )
 #define elf_err(elf, fmt, args ... ) \
    printk(fmt, ## args )
 
@@ -71,6 +71,7 @@
 #endif
 #include <xen/elfnote.h>
 #include <xen/libelf/libelf.h>
+#include <xen-tools/common-macros.h>
 
 #ifndef FUZZ_NO_LIBXC
 #include "xenctrl.h"

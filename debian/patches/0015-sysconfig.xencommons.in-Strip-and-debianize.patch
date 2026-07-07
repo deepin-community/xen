@@ -13,21 +13,21 @@ instead of the default oxenstored if they really want.
 Signed-off-by: Hans van Kranenburg <hans@knorrie.org>
 Acked-by: Ian Jackson <ijackson@chiark.greenend.org.uk>
 ---
- tools/hotplug/Linux/init.d/sysconfig.xencommons.in | 82 +---------------------
- 1 file changed, 3 insertions(+), 79 deletions(-)
+ tools/hotplug/Linux/init.d/sysconfig.xencommons.in | 81 +---------------------
+ 1 file changed, 3 insertions(+), 78 deletions(-)
 
 diff --git a/tools/hotplug/Linux/init.d/sysconfig.xencommons.in b/tools/hotplug/Linux/init.d/sysconfig.xencommons.in
-index 433e484..e948543 100644
+index 1720a9b..e948543 100644
 --- a/tools/hotplug/Linux/init.d/sysconfig.xencommons.in
 +++ b/tools/hotplug/Linux/init.d/sysconfig.xencommons.in
-@@ -6,104 +6,28 @@
+@@ -6,52 +6,21 @@
  #XENCONSOLED_TRACE=[none|guest|hv|all]
  
  ## Type: string
 -## Default: daemon
 +## Default: oxenstored
  #
--# Select type of xentore service.
+-# Select type of xenstore service.
 -#
 -# This can be either of:
 -#  * daemon
@@ -76,10 +76,8 @@ index 433e484..e948543 100644
  XENSTORED_ARGS=
  
  ## Type: string
- ## Default: Not defined, tracing off
- #
+@@ -60,49 +29,5 @@ XENSTORED_ARGS=
  # Log xenstored messages
--# Only evaluated if XENSTORETYPE is "daemon".
  #XENSTORED_TRACE=[yes|on|1]
  
 -## Type: integer

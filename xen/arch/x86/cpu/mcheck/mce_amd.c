@@ -1,19 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * common MCA implementation for AMD CPUs.
  * Copyright (c) 2012-2014 Advanced Micro Devices, Inc.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 /* K8 common MCA documentation published at
@@ -99,7 +87,7 @@ enum mc_ec_type {
     MC_EC_BUS_TYPE = 0x0800,
 };
 
-enum mc_ec_type
+static enum mc_ec_type
 mc_ec2type(uint16_t errorcode)
 {
     if ( errorcode & MC_EC_BUS_TYPE )
@@ -213,6 +201,7 @@ static void mcequirk_amd_apply(enum mcequirk_amd_flags flags)
 
     default:
         ASSERT(flags == MCEQUIRK_NONE);
+        break;
     }
 }
 
@@ -283,20 +272,32 @@ int vmce_amd_rdmsr(const struct vcpu *v, uint32_t msr, uint64_t *val)
     return 1;
 }
 
+static const struct mce_callbacks __initconst_cf_clobber k8_callbacks = {
+    .handler = mcheck_cmn_handler,
+    .need_clearbank_scan = amd_need_clearbank_scan,
+};
+
+static const struct mce_callbacks __initconst_cf_clobber k10_callbacks = {
+    .handler = mcheck_cmn_handler,
+    .check_addr = mc_amd_addrcheck,
+    .recoverable_scan = mc_amd_recoverable_scan,
+    .need_clearbank_scan = amd_need_clearbank_scan,
+    .info_collect = amd_f10_handler,
+};
+
 enum mcheck_type
-amd_mcheck_init(struct cpuinfo_x86 *ci)
+amd_mcheck_init(const struct cpuinfo_x86 *c, bool bsp)
 {
     uint32_t i;
     enum mcequirk_amd_flags quirkflag = 0;
 
-    if ( ci->x86_vendor != X86_VENDOR_HYGON )
-        quirkflag = mcequirk_lookup_amd_quirkdata(ci);
+    if ( c->x86_vendor != X86_VENDOR_HYGON )
+        quirkflag = mcequirk_lookup_amd_quirkdata(c);
 
     /* Assume that machine check support is available.
      * The minimum provided support is at least the K8. */
-    mce_handler_init();
-    x86_mce_vector_register(mcheck_cmn_handler);
-    mce_need_clearbank_register(amd_need_clearbank_scan);
+    if ( bsp )
+        mce_handler_init(c->x86 == 0xf ? &k8_callbacks : &k10_callbacks);
 
     for ( i = 0; i < this_cpu(nr_mce_banks); i++ )
     {
@@ -310,14 +311,14 @@ amd_mcheck_init(struct cpuinfo_x86 *ci)
         }
     }
 
-    if ( ci->x86 == 0xf )
+    if ( c->x86 == 0xf )
         return mcheck_amd_k8;
 
     if ( quirkflag == MCEQUIRK_F10_GART )
         mcequirk_amd_apply(quirkflag);
 
-    if ( cpu_has(ci, X86_FEATURE_AMD_PPIN) &&
-         (ci == &boot_cpu_data || ppin_msr) )
+    if ( cpu_has(c, X86_FEATURE_AMD_PPIN) &&
+         (c == &boot_cpu_data || ppin_msr) )
     {
         uint64_t val;
 
@@ -332,14 +333,10 @@ amd_mcheck_init(struct cpuinfo_x86 *ci)
 
         if ( !(val & PPIN_ENABLE) )
             ppin_msr = 0;
-        else if ( ci == &boot_cpu_data )
+        else if ( c == &boot_cpu_data )
             ppin_msr = MSR_AMD_PPIN;
     }
 
-    x86_mce_callback_register(amd_f10_handler);
-    mce_recoverable_register(mc_amd_recoverable_scan);
-    mce_register_addrcheck(mc_amd_addrcheck);
-
-    return ci->x86_vendor == X86_VENDOR_HYGON ?
+    return c->x86_vendor == X86_VENDOR_HYGON ?
             mcheck_hygon : mcheck_amd_famXX;
 }

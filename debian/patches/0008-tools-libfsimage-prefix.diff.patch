@@ -10,7 +10,7 @@ Subject: tools-libfsimage-prefix.diff
  3 files changed, 13 insertions(+), 8 deletions(-)
 
 diff --git a/tools/Rules.mk b/tools/Rules.mk
-index a5229bb..6fd54fd 100644
+index d0d77a4..517524c 100644
 --- a/tools/Rules.mk
 +++ b/tools/Rules.mk
 @@ -16,6 +16,8 @@ INSTALL = $(XEN_ROOT)/tools/cross-install

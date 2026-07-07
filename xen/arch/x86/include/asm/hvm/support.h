@@ -1,20 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * support.h: HVM support routines used by VT-x and SVM.
  *
  * Leendert van Doorn, leendert@watson.ibm.com
  * Copyright (c) 2005, International Business Machines Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef __ASM_X86_HVM_SUPPORT_H__
@@ -70,7 +59,7 @@ enum hvm_translation_result {
  * address range does not map entirely onto ordinary machine memory.
  */
 enum hvm_translation_result hvm_copy_to_guest_phys(
-    paddr_t paddr, void *buf, unsigned int size, struct vcpu *v);
+    paddr_t paddr, const void *buf, unsigned int size, struct vcpu *v);
 enum hvm_translation_result hvm_copy_from_guest_phys(
     void *buf, paddr_t paddr, unsigned int size);
 
@@ -96,7 +85,7 @@ typedef struct pagefault_info
 } pagefault_info_t;
 
 enum hvm_translation_result hvm_copy_to_guest_linear(
-    unsigned long addr, void *buf, unsigned int size, uint32_t pfec,
+    unsigned long addr, const void *buf, unsigned int size, uint32_t pfec,
     pagefault_info_t *pfinfo);
 enum hvm_translation_result hvm_copy_from_guest_linear(
     void *buf, unsigned long addr, unsigned int size, uint32_t pfec,
@@ -146,7 +135,7 @@ int hvm_descriptor_access_intercept(uint64_t exit_info,
                                     unsigned int descriptor, bool is_write);
 int hvm_mov_to_cr(unsigned int cr, unsigned int gpr);
 int hvm_mov_from_cr(unsigned int cr, unsigned int gpr);
-void hvm_ud_intercept(struct cpu_user_regs *);
+void hvm_ud_intercept(struct cpu_user_regs *regs);
 
 /*
  * May return X86EMUL_EXCEPTION, at which point the caller is responsible for

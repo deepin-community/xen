@@ -115,11 +115,11 @@ struct vgic_dist {
     unsigned int        nr_spis;
 
     /* base addresses in guest physical address space: */
-    paddr_t             vgic_dist_base;     /* distributor */
+    paddr_t             dbase;     /* distributor */
     union
     {
         /* either a GICv2 CPU interface */
-        paddr_t         vgic_cpu_base;
+        paddr_t         cbase;
         /* or a number of GICv3 redistributor regions */
         struct
         {
@@ -127,6 +127,8 @@ struct vgic_dist {
             paddr_t     vgic_redist_free_offset;
         };
     };
+    paddr_t             csize; /* CPU interface size */
+    paddr_t             vbase; /* virtual CPU interface base address */
 
     /* distributor enabled */
     bool                enabled;
@@ -188,12 +190,12 @@ struct vgic_cpu {
 
 static inline paddr_t vgic_cpu_base(const struct vgic_dist *vgic)
 {
-    return vgic->vgic_cpu_base;
+    return vgic->cbase;
 }
 
 static inline paddr_t vgic_dist_base(const struct vgic_dist *vgic)
 {
-    return vgic->vgic_dist_base;
+    return vgic->dbase;
 }
 
 #endif /* __ASM_ARM_NEW_VGIC_H */

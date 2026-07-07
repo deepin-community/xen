@@ -24,7 +24,7 @@
 #define VMRESUME     .byte 0x0f,0x01,0xc3
 #define VMLAUNCH     .byte 0x0f,0x01,0xc2
 
-ENTRY(vmx_asm_vmexit_handler)
+FUNC(vmx_asm_vmexit_handler)
         SAVE_ALL
 
         mov  %cr2,%rax
@@ -34,15 +34,42 @@ ENTRY(vmx_asm_vmexit_handler)
         mov  %rax,VCPU_hvm_guest_cr2(%rbx)
 
         /* SPEC_CTRL_ENTRY_FROM_VMX    Req: b=curr %rsp=regs/cpuinfo, Clob: acd */
+        /*
+         * RSB stuffing is to prevents RET predictions following guest
+         * entries.  This is *not* sufficient to flush all RSB entries on
+         * parts enumerating eIBRS, although the following restore_spec_ctrl
+         * does covers us.
+         */
         ALTERNATIVE "", DO_OVERWRITE_RSB, X86_FEATURE_SC_RSB_HVM
 
+        /*
+         * Restore Xen's MSR_SPEC_CTRL setting.  The guest's value resides in
+         * the MSR load/save list.  For Legacy IBRS, this flushes/inhibits
+         * indirect predictions and does not flush the RSB.  For eIBRS, this
+         * prevents CALLs/JMPs using predictions learnt at a lower predictor
+         * mode, and it flushes the RSB.  On eIBRS parts that also suffer from
+         * PBRSB, the prior RSB stuffing suffices to make the RSB safe.
+         */
         .macro restore_spec_ctrl
             mov    $MSR_SPEC_CTRL, %ecx
-            movzbl CPUINFO_xen_spec_ctrl(%rsp), %eax
+            mov    CPUINFO_xen_spec_ctrl(%rsp), %eax
             xor    %edx, %edx
             wrmsr
         .endm
         ALTERNATIVE "", restore_spec_ctrl, X86_FEATURE_SC_MSR_HVM
+
+        /*
+         * Clear the BHB to mitigate BHI.  Used on eIBRS parts, and uses RETs
+         * itself so must be after we've perfomed all the RET-safety we can.
+         */
+        testb $SCF_entry_bhb, CPUINFO_scf(%rsp)
+        jz .L_skip_bhb
+        ALTERNATIVE_2 "",                                    \
+            "call clear_bhb_loops", X86_SPEC_BHB_LOOPS,      \
+            "call clear_bhb_tsx", X86_SPEC_BHB_TSX
+.L_skip_bhb:
+
+        ALTERNATIVE "lfence", "", X86_SPEC_NO_LFENCE_ENTRY_VMX
         /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
 
         /* Hardware clears MSR_DEBUGCTL on VMExit.  Reinstate it if debugging Xen. */
@@ -87,17 +114,39 @@ UNLIKELY_END(realmode)
 
         /* WARNING! `ret`, `call *`, `jmp *` not safe beyond this point. */
         /* SPEC_CTRL_EXIT_TO_VMX   Req: %rsp=regs/cpuinfo              Clob:    */
-        DO_SPEC_CTRL_COND_VERW
+        /*
+         * All speculation safety work happens to be elsewhere.  VERW is after
+         * popping the GPRs, while restoring the guest MSR_SPEC_CTRL is left
+         * to the MSR load list.
+         */
 
         mov  VCPU_hvm_guest_cr2(%rbx),%rax
+        mov  %rax, %cr2
+
+        /*
+         * We need to perform two conditional actions (VERW, and Resume vs
+         * Launch) after popping GPRs.  With some cunning, we can encode both
+         * of these in eflags together.
+         *
+         * Parity is only calculated over the bottom byte of the answer, while
+         * Sign is simply the top bit.
+         *
+         * Therefore, the final OR instruction ends up producing:
+         *   SF = VCPU_vmx_launched
+         *   PF = !SCF_verw
+         */
+        BUILD_BUG_ON(SCF_verw & ~0xff)
+        movzbl VCPU_vmx_launched(%rbx), %ecx
+        shl  $31, %ecx
+        movzbl CPUINFO_scf(%rsp), %eax
+        and  $SCF_verw, %eax
+        or   %eax, %ecx
 
         pop  %r15
         pop  %r14
         pop  %r13
         pop  %r12
         pop  %rbp
-        mov  %rax,%cr2
-        cmpb $0,VCPU_vmx_launched(%rbx)
         pop  %rbx
         pop  %r11
         pop  %r10
@@ -108,7 +157,13 @@ UNLIKELY_END(realmode)
         pop  %rdx
         pop  %rsi
         pop  %rdi
-        je   .Lvmx_launch
+
+        jpe  .L_skip_verw
+        /* VERW clobbers ZF, but preserves all others, including SF. */
+        verw STK_REL(CPUINFO_verw_sel, CPUINFO_error_code)(%rsp)
+.L_skip_verw:
+
+        jns  .Lvmx_launch
 
 /*.Lvmx_resume:*/
         VMRESUME
@@ -132,7 +187,7 @@ UNLIKELY_END(realmode)
         call vmx_vmentry_failure
         jmp  .Lvmx_process_softirqs
 
-ENTRY(vmx_asm_do_vmentry)
+LABEL(vmx_asm_do_vmentry)
         GET_CURRENT(bx)
         jmp  .Lvmx_do_vmentry
 
@@ -150,3 +205,4 @@ ENTRY(vmx_asm_do_vmentry)
         sti
         call do_softirq
         jmp  .Lvmx_do_vmentry
+END(vmx_asm_vmexit_handler)

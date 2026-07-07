@@ -1,22 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /******************************************************************************
  * arch/x86/mm/mem_paging.c
  *
  * Memory paging support.
  *
  * Copyright (c) 2009 Citrix Systems, Inc. (Patrick Colp)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 
@@ -316,9 +304,6 @@ static int evict(struct domain *d, gfn_t gfn)
     ret = p2m_set_entry(p2m, gfn, INVALID_MFN, PAGE_ORDER_4K,
                         p2m_ram_paged, a);
 
-    /* Clear content before returning the page to Xen */
-    scrub_one_page(page);
-
     /* Track number of paged gfns */
     atomic_inc(&d->paged_pages);
 
@@ -443,7 +428,7 @@ int mem_paging_memop(XEN_GUEST_HANDLE_PARAM(xen_mem_paging_op_t) arg)
     int rc;
     xen_mem_paging_op_t mpo;
     struct domain *d;
-    bool_t copyback = 0;
+    bool copyback = false;
 
     if ( copy_from_guest(&mpo, arg, 1) )
         return -EFAULT;

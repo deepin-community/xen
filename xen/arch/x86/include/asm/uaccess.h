@@ -10,10 +10,10 @@
 #include <asm/x86_64/uaccess.h>
 
 unsigned int copy_to_guest_pv(void __user *to, const void *from,
-                              unsigned int len);
-unsigned int clear_guest_pv(void __user *to, unsigned int len);
+                              unsigned int n);
+unsigned int clear_guest_pv(void __user *to, unsigned int n);
 unsigned int copy_from_guest_pv(void *to, const void __user *from,
-                                unsigned int len);
+                                unsigned int n);
 
 /* Handles exceptions in both to and from, but doesn't do access_ok */
 unsigned int copy_to_guest_ll(void __user*to, const void *from, unsigned int n);
@@ -21,8 +21,8 @@ unsigned int copy_from_guest_ll(void *to, const void __user *from, unsigned int 
 unsigned int copy_to_unsafe_ll(void *to, const void *from, unsigned int n);
 unsigned int copy_from_unsafe_ll(void *to, const void *from, unsigned int n);
 
-extern long __get_user_bad(void);
-extern void __put_user_bad(void);
+void noreturn __get_user_bad(void);
+void noreturn __put_user_bad(void);
 
 #define UA_KEEP(args...) args
 #define UA_DROP(args...)
@@ -251,7 +251,8 @@ do {                                                                       \
 static always_inline unsigned long
 __copy_to_guest_pv(void __user *to, const void *from, unsigned long n)
 {
-    if (__builtin_constant_p(n)) {
+    if ( __builtin_constant_p(n) && !((unsigned long)to & (n - 1)) )
+    {
         unsigned long ret;
 
         switch (n) {
@@ -291,7 +292,8 @@ __copy_to_guest_pv(void __user *to, const void *from, unsigned long n)
 static always_inline unsigned long
 __copy_from_guest_pv(void *to, const void __user *from, unsigned long n)
 {
-    if (__builtin_constant_p(n)) {
+    if ( __builtin_constant_p(n) && !((unsigned long)from & (n - 1)) )
+    {
         unsigned long ret;
 
         switch (n) {
@@ -321,8 +323,7 @@ __copy_from_guest_pv(void *to, const void __user *from, unsigned long n)
  *
  * Copy data from hypervisor space to a potentially unmapped area.
  *
- * Returns number of bytes that could not be copied.
- * On success, this will be zero.
+ * Returns zero on success and non-zero if some bytes could not be copied.
  */
 static always_inline unsigned int
 copy_to_unsafe(void __user *to, const void *from, unsigned int n)
@@ -358,8 +359,7 @@ copy_to_unsafe(void __user *to, const void *from, unsigned int n)
  *
  * Copy data from a potentially unmapped area space to hypervisor space.
  *
- * Returns number of bytes that could not be copied.
- * On success, this will be zero.
+ * Returns zero on success and non-zero if some bytes could not be copied.
  *
  * If some data could not be copied, this function will pad the copied
  * data to the requested size using zero bytes.
@@ -406,7 +406,7 @@ copy_from_unsafe(void *to, const void __user *from, unsigned int n)
 
 struct exception_table_entry
 {
-	s32 addr, cont;
+	int32_t addr, cont;
 };
 extern struct exception_table_entry __start___ex_table[];
 extern struct exception_table_entry __stop___ex_table[];
@@ -421,7 +421,8 @@ union stub_exception_token {
     unsigned long raw;
 };
 
-extern unsigned long search_exception_table(const struct cpu_user_regs *regs);
+extern unsigned long search_exception_table(const struct cpu_user_regs *regs,
+                                            unsigned long *stub_ra);
 extern void sort_exception_tables(void);
 extern void sort_exception_table(struct exception_table_entry *start,
                                  const struct exception_table_entry *stop);

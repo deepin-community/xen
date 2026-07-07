@@ -162,6 +162,11 @@ with the following properties:
 
     An integer specifying the number of vcpus to allocate to the guest.
 
+- llc-colors
+    A string specifying the LLC color configuration for the guest.
+    Refer to docs/misc/cache_coloring.rst for syntax. This option is applicable
+    only to Arm64 guests.
+
 - vpl011
 
     An empty property to enable/disable a virtual pl011 for the guest to
@@ -193,6 +198,22 @@ with the following properties:
     Optional. Handle to a xen,cpupool device tree node that identifies the
     cpupool where the guest will be started at boot.
 
+- sve
+
+    Optional. The `sve` property enables Arm SVE usage for the domain and sets
+    the maximum SVE vector length, the option is applicable only to Arm64
+    guests.
+    A value equal to 0 disables the feature, this is the default value.
+    Specifying this property with no value, means that the SVE vector length
+    will be set equal to the maximum vector length supported by the platform.
+    Values above 0 explicitly set the maximum SVE vector length for the domain,
+    allowed values are from 128 to maximum 2048, being multiple of 128.
+    Please note that when the user explicitly specifies the value, if that value
+    is above the hardware supported maximum SVE vector length, the domain
+    creation will fail and the system will stop, the same will occur if the
+    option is provided with a non zero value, but the platform doesn't support
+    SVE.
+
 - xen,enhanced
 
     A string property. Possible property values are:
@@ -222,6 +243,43 @@ with the following properties:
     option in xl.cfg. Leaving this field empty in device tree will lead to
     the default size of domain P2M pool, i.e. 1MB per guest vCPU plus 4KB
     per MB of guest RAM plus 512KB for guest extended regions.
+
+- max_grant_version
+
+    Optional. A 32-bit integer specifying the maximum grant table version
+    the domain is allowed to use (valid values are 1 or 2). If this property
+    is missing, the value specified by Xen command line parameter gnttab=max-ver
+    (or its default value if unspecified, i.e. 1) is used.
+
+- max_grant_frames
+
+    Optional. A 32-bit integer specifying the maximum number of grant frames
+    the domain is allowed to have. If this property is missing, the value
+    specified by Xen command line parameter gnttab_max_frames (or its default
+    value if unspecified, i.e. 64) is used.
+
+- max_maptrack_frames
+
+    Optional. A 32-bit integer specifying the maximum number of grant maptrack
+    frames the domain is allowed to have. If this property is missing, the
+    value specified by Xen command line parameter gnttab_max_maptrack_frames
+    (or its default value if unspecified, i.e. 1024) is used.
+
+- passthrough
+
+    A string property specifying whether IOMMU mappings are enabled for the
+    domain and hence whether it will be enabled for passthrough hardware.
+    Possible property values are:
+
+    - "enabled"
+    IOMMU mappings are enabled for the domain. Note that this option is the
+    default if the user provides the device partial passthrough device tree
+    for the domain.
+
+    - "disabled"
+    IOMMU mappings are disabled for the domain and so hardware may not be
+    passed through. This option is the default if this property is missing
+    and the user does not provide the device partial device tree for the domain.
 
 Under the "xen,domain" compatible node, one or more sub-nodes are present
 for the DomU kernel and ramdisk.
@@ -553,7 +611,10 @@ communication.
     An array takes a physical address, which is the base address of the
     shared memory region in host physical address space, a size, and a guest
     physical address, as the target address of the mapping.
-    e.g. xen,shared-mem = < [host physical address] [guest address] [size] >
+    e.g. xen,shared-mem = < [host physical address] [guest address] [size] >;
+    Note that if a domain is direct-mapped, i.e. the Dom0 and the Dom0less
+    DomUs with `direct-map` device tree property, the static shared memory
+    should also be direct-mapped (host physical address == guest address).
 
     It shall also meet the following criteria:
     1) If the SHM ID matches with an existing region, the address range of the
@@ -564,8 +625,8 @@ communication.
     The number of cells for the host address (and size) is the same as the
     guest pseudo-physical address and they are inherited from the parent node.
 
-    Host physical address is optional, when missing Xen decides the location
-    (currently unimplemented).
+    Host physical address is optional, when missing Xen decides the location.
+    e.g. xen,shared-mem = < [guest address] [size] >;
 
 - role (Optional)
 
@@ -592,7 +653,7 @@ chosen {
         role = "owner";
         xen,shm-id = "my-shared-mem-0";
         xen,shared-mem = <0x10000000 0x10000000 0x10000000>;
-    }
+    };
 
     domU1 {
         compatible = "xen,domain";
@@ -603,25 +664,36 @@ chosen {
         vpl011;
 
         /*
-         * shared memory region identified as 0x0(xen,shm-id = <0x0>)
-         * is shared between Dom0 and DomU1.
+         * shared memory region "my-shared-mem-0" is shared
+         * between Dom0 and DomU1.
          */
         domU1-shared-mem@10000000 {
             compatible = "xen,domain-shared-memory-v1";
             role = "borrower";
             xen,shm-id = "my-shared-mem-0";
             xen,shared-mem = <0x10000000 0x50000000 0x10000000>;
-        }
+        };
 
         /*
-         * shared memory region identified as 0x1(xen,shm-id = <0x1>)
-         * is shared between DomU1 and DomU2.
+         * shared memory region "my-shared-mem-1" is shared between
+         * DomU1 and DomU2.
          */
         domU1-shared-mem@50000000 {
             compatible = "xen,domain-shared-memory-v1";
             xen,shm-id = "my-shared-mem-1";
             xen,shared-mem = <0x50000000 0x60000000 0x20000000>;
-        }
+        };
+
+        /*
+         * shared memory region "my-shared-mem-2" is shared between
+         * DomU1 and DomU2.
+         */
+        domU1-shared-mem-2 {
+            compatible = "xen,domain-shared-memory-v1";
+            xen,shm-id = "my-shared-mem-2";
+            role = "owner";
+            xen,shared-mem = <0x80000000 0x20000000>;
+        };
 
         ......
 
@@ -635,14 +707,21 @@ chosen {
         cpus = <1>;
 
         /*
-         * shared memory region identified as 0x1(xen,shm-id = <0x1>)
-         * is shared between domU1 and domU2.
+         * shared memory region "my-shared-mem-1" is shared between
+         * domU1 and domU2.
          */
         domU2-shared-mem@50000000 {
             compatible = "xen,domain-shared-memory-v1";
             xen,shm-id = "my-shared-mem-1";
             xen,shared-mem = <0x50000000 0x70000000 0x20000000>;
-        }
+        };
+
+        domU2-shared-mem-2 {
+            compatible = "xen,domain-shared-memory-v1";
+            xen,shm-id = "my-shared-mem-2";
+            role = "borrower";
+            xen,shared-mem = <0x90000000 0x20000000>;
+        };
 
         ......
     };
@@ -662,3 +741,11 @@ shared between DomU1 and DomU2. It will get mapped at 0x60000000 in DomU1 guest
 physical address space, and at 0x70000000 in DomU2 guest physical address space.
 DomU1 and DomU2 are both the borrower domain, the owner domain is the default
 owner domain DOMID_IO.
+
+For the static shared memory region "my-shared-mem-2", since host physical
+address is not provided by user, Xen will automatically allocate 512MB
+from heap as static shared memory to be shared between DomU1 and DomU2.
+The automatically allocated static shared memory will get mapped at
+0x80000000 in DomU1 guest physical address space, and at 0x90000000 in DomU2
+guest physical address space. DomU1 is explicitly defined as the owner domain,
+and DomU2 is the borrower domain.

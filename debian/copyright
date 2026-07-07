@@ -4,7 +4,7 @@ Upstream-Contact: Xen developer discussion <xen-devel@lists.xenproject.org>
 Source: https://xenbits.xen.org/git-http/xen.git
 
 Files: *
-Copyright: 2002-present Keir Fraser and/or many others
+Copyright: 2002-2025 Keir Fraser and many others
 License: GPL-2
 Comment:
  GNU General Public License
@@ -82,7 +82,7 @@ Comment:
  For more information, see the CONTRIBUTING file.
 
 Files: xen/*
-Copyright: 2002-present Keir Fraser and/or many others
+Copyright: 2002-2025 Keir Fraser and many others
 License: GPL-2
 Comment:
  XEN NOTICE
@@ -111,7 +111,7 @@ Comment:
   -- Keir Fraser (on behalf of the Xen team)
 
 Files: xen/include/public/*
-Copyright: 2002-present Keir Fraser and/or many others
+Copyright: 2002-2025 Keir Fraser and many others
 License: Expat
 Comment:
  XEN NOTICE
@@ -134,7 +134,7 @@ Comment:
   -- Keir Fraser (on behalf of the Xen team)
 
 Files: xen/common/*
-Copyright: 2002-present Keir Fraser and/or many others
+Copyright: 2002-2025 Keir Fraser and many others
 License: GPL-2
 Comment:
  Most files in this directory are covered by version 2 of the
@@ -208,7 +208,7 @@ License: XEN-MISC-PUBLIC-DOMAIN-VMAC
  The authors offers no warranty. Use at your own risk.
 
 Files: docs/*
-Copyright: 2002-present Keir Fraser and/or many others
+Copyright: 2002-2025 Keir Fraser and many others
 License: CC-BY-4.0
 Comment:
  Sphinx documentation:
@@ -250,7 +250,7 @@ Copyright: 2014 Luis R. Rodriguez <mcgrof@suse.com>
 License: GPL-2+
 
 Files: stubdom/*
-Copyright: 2002-present Keir Fraser and/or many others
+Copyright: 2002-2025 Keir Fraser and many others
 License: GPL-2
 Comment:
  Most files in this directory are covered by version 2 of the
@@ -283,7 +283,7 @@ Copyright: 2001-2008 the LGPL VGABios developers Team
 License: LGPL-2.1
 
 Files: tools/include/*
-Copyright: 2002-present Keir Fraser and many others
+Copyright: 2002-2025 Keir Fraser and many others
 License: Expat
  Permission is hereby granted, free of charge, to any person obtaining a copy
  of this software and associated documentation files (the "Software"), to
@@ -310,19 +310,37 @@ Comment:
  with the exception of "sys/" which may include headers under different
  licences.
 
+Files: tools/include/xen-sd-notify.h
+Copyright: 2024 Luca Boccassi <bluca@debian.org>
+License: MIT-0
+ Permission is hereby granted, free of charge, to any person obtaining a copy
+ of this software and associated documentation files (the "Software"), to deal
+ in the Software without restriction, including without limitation the rights
+ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ copies of the Software, and to permit persons to whom the Software is
+ furnished to do so.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ SOFTWARE.
+
 Files: tools/libacpi/*
 Copyright: 2004, Intel Corporation
 License: LGPL-2.1
 
-Files: tools/libs/guest/* tools/libs/stat/* tools/xenmon/* tools/xenstore/*
-Copyright: 2002-present Keir Fraser and many others
+Files: tools/libs/guest/* tools/libs/stat/* tools/xenmon/* tools/xenstored/* tools/xs-clients/*
+Copyright: 2002-2025 Keir Fraser and many others
 License: LGPL-2.1
 
 Files: debian/*
-Copyright: 2008-2015, Bastian Blank
-           2016-present Ian Jackson <ijackson@chiark.greenend.org.uk>
-           2018-present Hans van Kranenburg <hans@knorrie.org>
-           2020-present Maximilian Engelhardt <maxi@daemonizer.de>
+Copyright: 2008-2015 Bastian Blank
+           2016-2023 Ian Jackson <ijackson@chiark.greenend.org.uk>
+           2018-2025 Hans van Kranenburg <hans@knorrie.org>
+           2020-2025 Maximilian Engelhardt <maxi@daemonizer.de>
 License: GPL-2+
 
 License: GPL-2

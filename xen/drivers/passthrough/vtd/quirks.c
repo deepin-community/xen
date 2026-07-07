@@ -32,7 +32,7 @@
 #include <asm/msi.h>
 #include <asm/irq.h>
 #include <asm/pci.h>
-#include <mach_apic.h>
+
 #include "iommu.h"
 #include "dmar.h"
 #include "extern.h"
@@ -56,9 +56,9 @@ static unsigned int snb_igd_timeout;
 
 static u32 __read_mostly ioh_id;
 static u32 __initdata igd_id;
-bool_t __read_mostly rwbf_quirk;
-static bool_t __read_mostly is_cantiga_b3;
-static bool_t __read_mostly is_snb_gfx;
+bool __read_mostly rwbf_quirk;
+static bool __read_mostly is_cantiga_b3;
+static bool __read_mostly is_snb_gfx;
 static u8 *__read_mostly igd_reg_va;
 static spinlock_t igd_lock;
 
@@ -321,7 +321,7 @@ static int __init cf_check parse_snb_timeout(const char *s)
         else if ( strcmp(s, "cap") == 0 )
             t = SNB_IGD_TIMEOUT;
         else
-            t = strtoul(s, &q, 0);
+            t = simple_strtoul(s, &q, 0);
     }
     else
         t = t ? SNB_IGD_TIMEOUT_LEGACY : 0;
@@ -392,7 +392,7 @@ void __init platform_quirks_init(void)
     map_igd_reg();
 
     /* Tylersburg interrupt remap quirk */
-    if ( iommu_intremap )
+    if ( iommu_intremap != iommu_intremap_off )
         tylersburg_intremap_quirk();
 }
 
@@ -495,10 +495,8 @@ int me_wifi_quirk(struct domain *domain, uint8_t bus, uint8_t devfn,
 
 void pci_vtd_quirk(const struct pci_dev *pdev)
 {
-    int seg = pdev->seg;
-    int bus = pdev->bus;
     int pos;
-    bool_t ff;
+    bool ff;
     u32 val, val2;
     u64 bar;
     paddr_t pa;
@@ -532,12 +530,10 @@ void pci_vtd_quirk(const struct pci_dev *pdev)
     /* Sandybridge-EP (Romley) */
     case 0x3c00: /* host bridge */
     case 0x3c01 ... 0x3c0b: /* root ports */
-        pos = pci_find_ext_capability(seg, bus, pdev->devfn,
-                                      PCI_EXT_CAP_ID_ERR);
+        pos = pci_find_ext_capability(pdev->sbdf, PCI_EXT_CAP_ID_ERR);
         if ( !pos )
         {
-            pos = pci_find_ext_capability(seg, bus, pdev->devfn,
-                                          PCI_EXT_CAP_ID_VNDR);
+            pos = pci_find_ext_capability(pdev->sbdf, PCI_EXT_CAP_ID_VNDR);
             while ( pos )
             {
                 val = pci_conf_read32(pdev->sbdf, pos + PCI_VNDR_HEADER);
@@ -546,7 +542,7 @@ void pci_vtd_quirk(const struct pci_dev *pdev)
                     pos += PCI_VNDR_HEADER;
                     break;
                 }
-                pos = pci_find_next_ext_capability(seg, bus, pdev->devfn, pos,
+                pos = pci_find_next_ext_capability(pdev->sbdf, pos,
                                                    PCI_EXT_CAP_ID_VNDR);
             }
             ff = 0;

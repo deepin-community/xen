@@ -1,17 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /******************************************************************************
  * x86/hvm/quirks.c
- * 
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <xen/types.h>
@@ -22,7 +11,7 @@
 #include <xen/param.h>
 #include <asm/hvm/support.h>
 
-s8 __read_mostly hvm_port80_allowed = -1;
+int8_t __ro_after_init hvm_port80_allowed = -1;
 boolean_param("hvm_port80", hvm_port80_allowed);
 
 static int __init cf_check dmi_hvm_deny_port80(const struct dmi_system_id *id)
@@ -47,42 +36,37 @@ static int __init cf_check check_port80(void)
         {
             .callback = dmi_hvm_deny_port80,
             .ident    = "Compaq Presario V6000",
-            .matches  = {
+	    DMI_MATCH2(
                 DMI_MATCH(DMI_BOARD_VENDOR, "Quanta"),
-                DMI_MATCH(DMI_BOARD_NAME,   "30B7")
-            }
+                DMI_MATCH(DMI_BOARD_NAME,   "30B7")),
         },
         {
             .callback = dmi_hvm_deny_port80,
             .ident    = "HP Pavilion dv9000z",
-            .matches  = {
+	    DMI_MATCH2(
                 DMI_MATCH(DMI_BOARD_VENDOR, "Quanta"),
-                DMI_MATCH(DMI_BOARD_NAME,   "30B9")
-            }
+                DMI_MATCH(DMI_BOARD_NAME,   "30B9")),
         },
         {
             .callback = dmi_hvm_deny_port80,
             .ident    = "HP Pavilion dv6000",
-            .matches  = {
+	    DMI_MATCH2(
                 DMI_MATCH(DMI_BOARD_VENDOR, "Quanta"),
-                DMI_MATCH(DMI_BOARD_NAME,   "30B8")
-            }
+                DMI_MATCH(DMI_BOARD_NAME,   "30B8")),
         },
         {
             .callback = dmi_hvm_deny_port80,
             .ident    = "HP Pavilion tx1000",
-            .matches  = {
+	    DMI_MATCH2(
                 DMI_MATCH(DMI_BOARD_VENDOR, "Quanta"),
-                DMI_MATCH(DMI_BOARD_NAME,   "30BF")
-            }
+                DMI_MATCH(DMI_BOARD_NAME,   "30BF")),
         },
         {
             .callback = dmi_hvm_deny_port80,
             .ident    = "Presario F700",
-            .matches  = {
+	    DMI_MATCH2(
                 DMI_MATCH(DMI_BOARD_VENDOR, "Quanta"),
-                DMI_MATCH(DMI_BOARD_NAME,   "30D3")
-            }
+                DMI_MATCH(DMI_BOARD_NAME,   "30D3")),
         },
         { }
     };

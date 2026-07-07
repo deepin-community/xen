@@ -62,7 +62,7 @@ int arch_livepatch_safety_check(void)
 int noinline arch_livepatch_quiesce(void)
 {
     /*
-     * Relax perms on .text to be RWX, so we can modify them.
+     * Relax perms on .text/.rodata, so we can modify them.
      *
      * This relaxes perms globally, but all other CPUs are waiting on us.
      */
@@ -75,7 +75,7 @@ int noinline arch_livepatch_quiesce(void)
 void noinline arch_livepatch_revive(void)
 {
     /*
-     * Reinstate perms on .text to be RX.  This also cleans out the dirty
+     * Reinstate perms on .text/.rodata.  This also cleans out the dirty
      * bits, which matters when CET Shstk is active.
      *
      * The other CPUs waiting for us could in principle have re-walked while
@@ -258,9 +258,9 @@ int arch_livepatch_perform_rela(struct livepatch_elf *elf,
 
     for ( i = 0; i < (rela->sec->sh_size / rela->sec->sh_entsize); i++ )
     {
-        const Elf_RelA *r = rela->data + i * rela->sec->sh_entsize;
+        const Elf_RelA *r = rela->addr + i * rela->sec->sh_entsize;
         unsigned int symndx = ELF64_R_SYM(r->r_info);
-        uint8_t *dest = base->load_addr + r->r_offset;
+        uint8_t *dest = base->addr + r->r_offset;
         uint64_t val;
 
         if ( symndx == STN_UNDEF )

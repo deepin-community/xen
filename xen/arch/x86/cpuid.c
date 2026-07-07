@@ -93,20 +93,19 @@ void guest_cpuid(const struct vcpu *v, uint32_t leaf,
         }
         break;
 
-    case 0x40000000 ... 0x400000ff:
+    case 0x40000000U ... 0x400000ffU:
         if ( is_viridian_domain(d) )
             return cpuid_viridian_leaves(v, leaf, subleaf, res);
 
+        fallthrough;
         /*
-         * Fallthrough.
-         *
          * Intel reserve up until 0x4fffffff for hypervisor use.  AMD reserve
          * only until 0x400000ff, but we already use double that.
          */
-    case 0x40000100 ... 0x400001ff:
+    case 0x40000100U ... 0x400001ffU:
         return cpuid_hypervisor_leaves(v, leaf, subleaf, res);
 
-    case 0x80000000 ... 0x80000000 + CPUID_GUEST_NR_EXTD - 1:
+    case 0x80000000U ... 0x80000000U + CPUID_GUEST_NR_EXTD - 1:
         ASSERT((p->extd.max_leaf & 0xffff) < ARRAY_SIZE(p->extd.raw));
         if ( (leaf & 0xffff) > min_t(uint32_t, p->extd.max_leaf & 0xffff,
                                      ARRAY_SIZE(p->extd.raw) - 1) )
@@ -219,7 +218,7 @@ void guest_cpuid(const struct vcpu *v, uint32_t leaf,
             /* OSXSAVE clear in policy.  Fast-forward CR4 back in. */
             if ( (v->arch.pv.ctrlreg[4] & X86_CR4_OSXSAVE) ||
                  (p->basic.xsave &&
-                  regs->entry_vector == TRAP_invalid_op &&
+                  regs->entry_vector == X86_EXC_UD &&
                   guest_kernel_mode(v, regs) &&
                   (read_cr4() & X86_CR4_OSXSAVE)) )
                 res->c |= cpufeat_mask(X86_FEATURE_OSXSAVE);
@@ -255,7 +254,7 @@ void guest_cpuid(const struct vcpu *v, uint32_t leaf,
                  * emulated CPUID from a faulted CPUID by whether a #UD or #GP
                  * fault is currently being serviced.  Yuck...
                  */
-                if ( cpu_has_monitor && regs->entry_vector == TRAP_gp_fault )
+                if ( cpu_has_monitor && regs->entry_vector == X86_EXC_GP )
                     res->c |= cpufeat_mask(X86_FEATURE_MONITOR);
 
                 /*
@@ -280,7 +279,7 @@ void guest_cpuid(const struct vcpu *v, uint32_t leaf,
         regs = guest_cpu_user_regs();
         if ( is_pv_domain(d) && is_hardware_domain(d) &&
              guest_kernel_mode(v, regs) && cpu_has_monitor &&
-             regs->entry_vector == TRAP_gp_fault )
+             regs->entry_vector == X86_EXC_GP )
             *res = raw_cpu_policy.basic.raw[5];
         break;
 
@@ -330,29 +329,20 @@ void guest_cpuid(const struct vcpu *v, uint32_t leaf,
     case XSTATE_CPUID:
         switch ( subleaf )
         {
-        case 1:
-            if ( p->xstate.xsavec || p->xstate.xsaves )
-            {
-                /*
-                 * TODO: Figure out what to do for XSS state.  VT-x manages
-                 * host vs guest MSR_XSS automatically, so as soon as we start
-                 * supporting any XSS states, the wrong XSS will be in
-                 * context.
-                 */
-                BUILD_BUG_ON(XSTATE_XSAVES_ONLY != 0);
-
-                /*
-                 * Read CPUID[0xD,0/1].EBX from hardware.  They vary with
-                 * enabled XSTATE, and appropraite XCR0|XSS are in context.
-                 */
         case 0:
-                res->b = cpuid_count_ebx(leaf, subleaf);
-            }
+            if ( p->basic.xsave )
+                res->b = xstate_uncompressed_size(v->arch.xcr0);
+            break;
+
+        case 1:
+            if ( p->xstate.xsavec )
+                res->b = xstate_compressed_size(v->arch.xcr0 |
+                                                v->arch.msrs->xss.raw);
             break;
         }
         break;
 
-    case 0x80000001:
+    case 0x80000001U:
         /* SYSCALL is hidden outside of long mode on Intel. */
         if ( p->x86_vendor == X86_VENDOR_INTEL &&
              is_hvm_domain(d) && !hvm_long_mode_active(v) )

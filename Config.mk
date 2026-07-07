@@ -85,17 +85,17 @@ PYTHON_PREFIX_ARG ?= --prefix="$(prefix)"
 
 # cc-option: Check if compiler supports first option, else fall back to second.
 #
-# This is complicated by the fact that unrecognised -Wno-* options:
+# This is complicated by the fact that with most gcc versions unrecognised
+# -Wno-* options:
 #   (a) are ignored unless the compilation emits a warning; and
 #   (b) even then produce a warning rather than an error
-# To handle this we do a test compile, passing the option-under-test, on a code
-# fragment that will always produce a warning (integer assigned to pointer).
-# We then grep for the option-under-test in the compiler's output, the presence
-# of which would indicate an "unrecognized command-line option" warning/error.
+# Further Clang also only warns for unrecognised -W* options.  To handle this
+# we do a test compile, substituting -Wno-* by -W* and adding -Werror.  This
+# way all unrecognised options are diagnosed uniformly, allowing us to merely
+# check exit status.
 #
 # Usage: cflags-y += $(call cc-option,$(CC),-march=winchip-c6,-march=i586)
-cc-option = $(shell if test -z "`echo 'void*p=1;' | \
-              $(1) $(2) -c -o /dev/null -x c - 2>&1 | grep -- $(2:-Wa$(comma)%=%) -`"; \
+cc-option = $(shell if $(1) $(2:-Wno-%=-W%) -Werror -c -o /dev/null -x c /dev/null >/dev/null 2>&1; \
               then echo "$(2)"; else echo "$(3)"; fi ;)
 
 # cc-option-add: Add an option to compilation flags, but only if supported.
@@ -139,6 +139,14 @@ else
 CFLAGS += -DBUILD_ID
 export XEN_HAS_BUILD_ID=y
 build_id_linker := --build-id=sha1
+endif
+
+# Wrap date(1) to use SOURCE_DATE_EPOCH if set the environment.
+# See https://reproducible-builds.org/docs/source-date-epoch/
+ifdef SOURCE_DATE_EPOCH
+date = $(shell LC_ALL=C date -u -d "@$(SOURCE_DATE_EPOCH)" $(1) 2>/dev/null || LC_ALL=C date -u -r "$(SOURCE_DATE_EPOCH)" $(1) 2>/dev/null || LC_ALL=C date -u $(1))
+else
+date = $(shell LC_ALL=C date $(1))
 endif
 
 define buildmakevars2shellvars
@@ -190,10 +198,10 @@ endif
 APPEND_LDFLAGS += $(foreach i, $(APPEND_LIB), -L$(i))
 APPEND_CFLAGS += $(foreach i, $(APPEND_INCLUDES), -I$(i))
 
-EMBEDDED_EXTRA_CFLAGS := -fno-pie -fno-stack-protector -fno-stack-protector-all
+EMBEDDED_EXTRA_CFLAGS := -fno-pie -fno-stack-protector
 EMBEDDED_EXTRA_CFLAGS += -fno-exceptions -fno-asynchronous-unwind-tables
 
-XEN_EXTFILES_URL ?= http://xenbits.xen.org/xen-extfiles
+XEN_EXTFILES_URL ?= https://xenbits.xen.org/xen-extfiles
 # All the files at that location were downloaded from elsewhere on
 # the internet.  The original download URL is preserved as a comment
 # near the place in the Xen Makefiles where the file is used.
@@ -217,29 +225,23 @@ ifneq (,$(QEMU_TAG))
 QEMU_TRADITIONAL_REVISION ?= $(QEMU_TAG)
 endif
 
-ifeq ($(GIT_HTTP),y)
-OVMF_UPSTREAM_URL ?= http://xenbits.xen.org/git-http/ovmf.git
-QEMU_UPSTREAM_URL ?= http://xenbits.xen.org/git-http/qemu-xen.git
-QEMU_TRADITIONAL_URL ?= http://xenbits.xen.org/git-http/qemu-xen-traditional.git
-SEABIOS_UPSTREAM_URL ?= http://xenbits.xen.org/git-http/seabios.git
-MINIOS_UPSTREAM_URL ?= http://xenbits.xen.org/git-http/mini-os.git
-else
-OVMF_UPSTREAM_URL ?= git://xenbits.xen.org/ovmf.git
-QEMU_UPSTREAM_URL ?= git://xenbits.xen.org/qemu-xen.git
-QEMU_TRADITIONAL_URL ?= git://xenbits.xen.org/qemu-xen-traditional.git
-SEABIOS_UPSTREAM_URL ?= git://xenbits.xen.org/seabios.git
-MINIOS_UPSTREAM_URL ?= git://xenbits.xen.org/mini-os.git
-endif
-OVMF_UPSTREAM_REVISION ?= 7b4a99be8a39c12d3a7fc4b8db9f0eab4ac688d5
-QEMU_UPSTREAM_REVISION ?= qemu-xen-4.17.3
-MINIOS_UPSTREAM_REVISION ?= xen-RELEASE-4.17.3
+OVMF_UPSTREAM_URL ?= https://xenbits.xen.org/git-http/ovmf.git
+OVMF_UPSTREAM_REVISION ?= ba91d0292e593df8528b66f99c1b0b14fadc8e16
 
-SEABIOS_UPSTREAM_REVISION ?= rel-1.16.0
+QEMU_UPSTREAM_URL ?= https://xenbits.xen.org/git-http/qemu-xen.git
+QEMU_UPSTREAM_REVISION ?= qemu-xen-4.20.1
+
+MINIOS_UPSTREAM_URL ?= https://xenbits.xen.org/git-http/mini-os.git
+MINIOS_UPSTREAM_REVISION ?= xen-RELEASE-4.20.0
+
+SEABIOS_UPSTREAM_URL ?= https://xenbits.xen.org/git-http/seabios.git
+SEABIOS_UPSTREAM_REVISION ?= rel-1.16.3
 
 ETHERBOOT_NICS ?= rtl8139 8086100e
 
 
-QEMU_TRADITIONAL_REVISION ?= xen-4.17.3
+QEMU_TRADITIONAL_URL ?= https://xenbits.xen.org/git-http/qemu-xen-traditional.git
+QEMU_TRADITIONAL_REVISION ?= xen-4.20.0
 
 # Specify which qemu-dm to use. This may be `ioemu' to use the old
 # Mercurial in-tree version, or a local directory, or a git URL.

@@ -1,20 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /******************************************************************************
  * arch/x86/msr.c
  *
  * Policy objects for Model-Specific Registers.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
  *
  * Copyright (c) 2017 Citrix Systems Ltd.
  */
@@ -35,6 +23,8 @@
 #include <asm/xstate.h>
 
 #include <public/hvm/params.h>
+
+#include "cpu/mcheck/mce.h" /* for vmce_has_lmce() */
 
 DEFINE_PER_CPU(uint32_t, tsc_aux);
 
@@ -186,6 +176,11 @@ int guest_rdmsr(struct vcpu *v, uint32_t msr, uint64_t *val)
         *val = 0;
         break;
 
+    case MSR_PKRS:
+        if ( !cp->feat.pks )
+            goto gp_fault;
+        goto get_reg;
+
     case MSR_X2APIC_FIRST ... MSR_X2APIC_LAST:
         if ( !is_hvm_domain(d) || v != curr )
             goto gp_fault;
@@ -250,6 +245,14 @@ int guest_rdmsr(struct vcpu *v, uint32_t msr, uint64_t *val)
         *val = 0;
         break;
 
+    case MSR_FAM10H_MMIO_CONF_BASE:
+        if ( !is_hardware_domain(d) ||
+             !(cp->x86_vendor & (X86_VENDOR_AMD | X86_VENDOR_HYGON)) ||
+             rdmsr_safe(msr, *val) )
+            goto gp_fault;
+
+        break;
+
     case MSR_VIRT_SPEC_CTRL:
         if ( !cp->extd.virt_ssbd )
             goto gp_fault;
@@ -277,7 +280,7 @@ int guest_rdmsr(struct vcpu *v, uint32_t msr, uint64_t *val)
          * out of hardware.
          */
 #ifdef CONFIG_HVM
-        if ( v == current && is_hvm_domain(d) && v->arch.hvm.flag_dr_dirty )
+        if ( v == curr && is_hvm_domain(d) && v->arch.hvm.flag_dr_dirty )
             rdmsrl(msr, *val);
         else
 #endif
@@ -316,8 +319,8 @@ int guest_rdmsr(struct vcpu *v, uint32_t msr, uint64_t *val)
 
 /*
  * Caller to confirm that MSR_SPEC_CTRL is available.  Intel and AMD have
- * separate CPUID features for this functionality, but only set will be
- * active.
+ * separate CPUID features for some of this functionality, but only one
+ * vendors-worth will be active on a single host.
  */
 uint64_t msr_spec_ctrl_valid_bits(const struct cpu_policy *cp)
 {
@@ -331,6 +334,11 @@ uint64_t msr_spec_ctrl_valid_bits(const struct cpu_policy *cp)
     return (SPEC_CTRL_IBRS | SPEC_CTRL_STIBP |
             (ssbd       ? SPEC_CTRL_SSBD       : 0) |
             (psfd       ? SPEC_CTRL_PSFD       : 0) |
+            (cp->feat.ipred_ctrl
+             ? (SPEC_CTRL_IPRED_DIS_U | SPEC_CTRL_IPRED_DIS_S) : 0) |
+            (cp->feat.rrsba_ctrl
+             ? (SPEC_CTRL_RRSBA_DIS_U | SPEC_CTRL_RRSBA_DIS_S) : 0) |
+            (cp->feat.bhi_ctrl   ? SPEC_CTRL_BHI_DIS_S : 0) |
             0);
 }
 
@@ -440,7 +448,7 @@ int guest_wrmsr(struct vcpu *v, uint32_t msr, uint64_t val)
     {
         bool old_cpuid_faulting = msrs->misc_features_enables.cpuid_faulting;
 
-        rsvd = ~0ull;
+        rsvd = ~0ULL;
         if ( cp->platform_info.cpuid_faulting )
             rsvd &= ~MSR_MISC_FEATURES_CPUID_FAULTING;
 
@@ -478,6 +486,11 @@ int guest_wrmsr(struct vcpu *v, uint32_t msr, uint64_t val)
             break;
         goto gp_fault;
 
+    case MSR_PKRS:
+        if ( !cp->feat.pks || val != (uint32_t)val )
+            goto gp_fault;
+        goto set_reg;
+
     case MSR_X2APIC_FIRST ... MSR_X2APIC_LAST:
         if ( !is_hvm_domain(d) || v != curr )
             goto gp_fault;
@@ -501,7 +514,7 @@ int guest_wrmsr(struct vcpu *v, uint32_t msr, uint64_t val)
         {
             uint64_t xcr0 = get_xcr0();
 
-            if ( v != current ||
+            if ( v != curr ||
                  handle_xsetbv(XCR_XFEATURE_ENABLED_MASK,
                                xcr0 | X86_XCR0_BNDREGS | X86_XCR0_BNDCSR) )
                 goto gp_fault;

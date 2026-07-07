@@ -15,7 +15,7 @@ config CORE_PARKING
 config GRANT_TABLE
 	bool "Grant table support" if EXPERT
 	default y
-	---help---
+	help
 	  Grant table provides a generic mechanism to memory sharing
 	  between domains. This shared memory interface underpins the
 	  split device drivers for block and network IO in a classic
@@ -23,10 +23,28 @@ config GRANT_TABLE
 
 	  If unsure, say Y.
 
+config PDX_COMPRESSION
+	bool "PDX (Page inDeX) compression" if EXPERT && !X86 && !RISCV
+	default ARM || PPC
+	help
+	  PDX compression is a technique designed to reduce the memory
+	  overhead of physical memory management on platforms with sparse RAM
+	  banks.
+
+	  If your platform does have sparse RAM banks, enabling PDX
+	  compression may reduce the memory overhead of Xen, but does carry a
+	  runtime performance cost.
+
+	  If your platform does not have sparse RAM banks, do not enable PDX
+	  compression.
+
 config ALTERNATIVE_CALL
 	bool
 
 config ARCH_MAP_DOMAIN_PAGE
+	bool
+
+config GENERIC_BUG_FRAME
 	bool
 
 config HAS_ALTERNATIVE
@@ -53,7 +71,10 @@ config HAS_IOPORTS
 config HAS_KEXEC
 	bool
 
-config HAS_PDX
+config HAS_LLC_COLORING
+	bool
+
+config HAS_PIRQ
 	bool
 
 config HAS_PMAP
@@ -65,6 +86,9 @@ config HAS_SCHED_GRANULARITY
 config HAS_UBSAN
 	bool
 
+config HAS_VMAP
+	bool
+
 config MEM_ACCESS_ALWAYS_ON
 	bool
 
@@ -72,7 +96,7 @@ config MEM_ACCESS
 	def_bool MEM_ACCESS_ALWAYS_ON
 	prompt "Memory Access and VM events" if !MEM_ACCESS_ALWAYS_ON
 	depends on HVM
-	---help---
+	help
 
 	  Framework to configure memory access types for guests and receive
 	  related events in userspace.
@@ -85,7 +109,7 @@ config NUMA
 
 config STATIC_MEMORY
 	bool "Static Allocation Support (UNSUPPORTED)" if UNSUPPORTED
-	depends on ARM
+	depends on DOM0LESS_BOOT
 	help
 	  Static Allocation refers to system or sub-system(domains) for
 	  which memory areas are pre-defined by configuration using physical
@@ -112,10 +136,21 @@ config INDIRECT_THUNK
 	  When enabled, indirect branches are implemented using a new construct
 	  called "retpoline" that prevents speculation.
 
+config RETURN_THUNK
+	bool "Out-of-line Returns"
+	depends on CC_HAS_RETURN_THUNK
+	default INDIRECT_THUNK
+	help
+	  Compile Xen with out-of-line returns.
+
+	  This allows Xen to mitigate a variety of speculative vulnerabilities
+	  by choosing a hardware-dependent instruction sequence to implement
+	  function returns safely.
+
 config SPECULATIVE_HARDEN_ARRAY
 	bool "Speculative Array Hardening"
 	default y
-	---help---
+	help
 	  Contemporary processors may use speculative execution as a
 	  performance optimisation, but this can potentially be abused by an
 	  attacker to leak data via speculative sidechannels.
@@ -136,7 +171,7 @@ config SPECULATIVE_HARDEN_BRANCH
 	bool "Speculative Branch Hardening"
 	default y
 	depends on X86
-        ---help---
+        help
 	  Contemporary processors may use speculative execution as a
 	  performance optimisation, but this can potentially be abused by an
 	  attacker to leak data via speculative sidechannels.
@@ -173,6 +208,23 @@ config SPECULATIVE_HARDEN_GUEST_ACCESS
 
 	  If unsure, say Y.
 
+config SPECULATIVE_HARDEN_LOCK
+	bool "Speculative lock context hardening"
+	default y
+	depends on X86
+	help
+	  Contemporary processors may use speculative execution as a
+	  performance optimisation, but this can potentially be abused by an
+	  attacker to leak data via speculative sidechannels.
+
+	  One source of data leakage is via speculative accesses to lock
+	  critical regions.
+
+	  This option is disabled by default at run time, and needs to be
+	  enabled on the command line.
+
+	  If unsure, say Y.
+
 endmenu
 
 config DIT_DEFAULT
@@ -193,7 +245,7 @@ config DIT_DEFAULT
 config HYPFS
 	bool "Hypervisor file system support"
 	default y
-	---help---
+	help
 	  Support Xen hypervisor file system. This file system is used to
 	  present various hypervisor internal data to dom0 and in some
 	  cases to allow modifying settings. Disabling the support will
@@ -206,7 +258,7 @@ config HYPFS_CONFIG
 	bool "Provide hypervisor .config via hypfs entry"
 	default y
 	depends on HYPFS
-	---help---
+	help
 	  When enabled the contents of the .config file used to build the
 	  hypervisor are provided via the hypfs entry /buildinfo/config.
 
@@ -217,7 +269,7 @@ config IOREQ_SERVER
 	bool "IOREQ support (EXPERT)" if EXPERT && !X86
 	default X86
 	depends on HVM
-	---help---
+	help
 	  Enables generic mechanism for providing emulated devices to the guests.
 
 	  If unsure, say N.
@@ -226,7 +278,7 @@ config KEXEC
 	bool "kexec support"
 	default y
 	depends on HAS_KEXEC
-	---help---
+	help
 	  Allows a running Xen hypervisor to be replaced with another OS
 	  without rebooting. This is primarily used to execute a crash
 	  environment to collect information on a Xen hypervisor or dom0 crash.
@@ -235,7 +287,7 @@ config KEXEC
 
 config EFI_SET_VIRTUAL_ADDRESS_MAP
     bool "EFI: call SetVirtualAddressMap()" if EXPERT
-    ---help---
+    help
       Call EFI SetVirtualAddressMap() runtime service to setup memory map for
       further runtime services. According to UEFI spec, it isn't strictly
       necessary, but many UEFI implementations misbehave when this call is
@@ -244,10 +296,9 @@ config EFI_SET_VIRTUAL_ADDRESS_MAP
       If unsure, say N.
 
 config XENOPROF
-	def_bool y
-	prompt "Xen Oprofile Support" if EXPERT
+	bool "Xen Oprofile Support" if EXPERT
 	depends on X86
-	---help---
+	help
 	  Xen OProfile (Xenoprof) is a system-wide profiler for Xen virtual
 	  machine environments, capable of profiling the Xen virtual machine
 	  monitor, multiple Linux guest operating systems, and applications
@@ -258,7 +309,7 @@ config XENOPROF
 config XSM
 	bool "Xen Security Modules support"
 	default ARM
-	---help---
+	help
 	  Enables the security framework known as Xen Security Modules which
 	  allows administrators fine-grained control over a Xen domain and
 	  its capabilities by defining permissible interactions between domains,
@@ -271,7 +322,7 @@ config XSM_FLASK
 	def_bool y
 	prompt "FLux Advanced Security Kernel support"
 	depends on XSM
-	---help---
+	help
 	  Enables FLASK (FLux Advanced Security Kernel) as the access control
 	  mechanism used by the XSM framework.  This provides a mandatory access
 	  control framework by which security enforcement, isolation, and
@@ -284,7 +335,7 @@ config XSM_FLASK_AVC_STATS
 	def_bool y
 	prompt "Maintain statistics on the FLASK access vector cache" if EXPERT
 	depends on XSM_FLASK
-	---help---
+	help
 	  Maintain counters on the access vector cache that can be viewed using
 	  the FLASK_AVC_CACHESTATS sub-op of the xsm_op hypercall.  Disabling
 	  this will save a tiny amount of memory and time to update the stats.
@@ -295,7 +346,7 @@ config XSM_FLASK_POLICY
 	bool "Compile Xen with a built-in FLASK security policy"
 	default y if "$(XEN_HAS_CHECKPOLICY)" = "y"
 	depends on XSM_FLASK
-	---help---
+	help
 	  This includes a default XSM policy in the hypervisor so that the
 	  bootloader does not need to load a policy to get sane behavior from an
 	  XSM-enabled hypervisor.  If this is disabled, a policy must be
@@ -311,7 +362,7 @@ config XSM_SILO
 	def_bool y
 	prompt "SILO support"
 	depends on XSM
-	---help---
+	help
 	  Enables SILO as the access control mechanism used by the XSM framework.
 	  This is not the default module, add boot parameter xsm=silo to choose
 	  it. This will deny any unmediated communication channels (grant tables
@@ -338,7 +389,7 @@ config LATE_HWDOM
 	bool "Dedicated hardware domain"
 	default n
 	depends on XSM && X86
-	---help---
+	help
 	  Allows the creation of a dedicated hardware domain distinct from
 	  domain 0 that manages devices without needing access to other
 	  privileged functionality such as the ability to manage domains.
@@ -356,7 +407,7 @@ config LATE_HWDOM
 
 config ARGO
 	bool "Argo: hypervisor-mediated interdomain communication (UNSUPPORTED)" if UNSUPPORTED
-	---help---
+	help
 	  Enables a hypercall for domains to ask the hypervisor to perform
 	  data transfer of messages between domains.
 
@@ -383,7 +434,7 @@ config LIVEPATCH
 	default X86
 	depends on "$(XEN_HAS_BUILD_ID)" = "y"
 	select CC_SPLIT_SECTIONS
-	---help---
+	help
 	  Allows a running Xen hypervisor to be dynamically patched using
 	  binary patches without rebooting. This is primarily used to binarily
 	  patch in the field an hypervisor with XSA fixes.
@@ -394,7 +445,7 @@ config FAST_SYMBOL_LOOKUP
 	bool "Fast symbol lookup (bigger binary)"
 	default y
 	depends on LIVEPATCH
-	---help---
+	help
 	  When searching for symbol addresses we can use the built-in system
 	  that is optimized for searching symbols using addresses as the key.
 	  However using it for the inverse (find address using the symbol name)
@@ -406,7 +457,7 @@ config FAST_SYMBOL_LOOKUP
 config ENFORCE_UNIQUE_SYMBOLS
 	bool "Enforce unique symbols"
 	default LIVEPATCH
-	---help---
+	help
 	  Multiple symbols with the same name aren't generally a problem
 	  unless livepatching is to be used.
 
@@ -420,7 +471,7 @@ config ENFORCE_UNIQUE_SYMBOLS
 config SUPPRESS_DUPLICATE_SYMBOL_WARNINGS
 	bool "Suppress duplicate symbol warnings"
 	depends on !ENFORCE_UNIQUE_SYMBOLS
-	---help---
+	help
 	  Multiple symbols with the same name aren't generally a problem
 	  unless Live patching is to be used, so these warnings can be
 	  suppressed by enabling this option.  Certain other options (known
@@ -430,7 +481,7 @@ config SUPPRESS_DUPLICATE_SYMBOL_WARNINGS
 config CMDLINE
 	string "Built-in hypervisor command string" if EXPERT
 	default ""
-	---help---
+	help
 	  Enter arguments here that should be compiled into the hypervisor
 	  image and used at boot time. When the system boots, this string
 	  will be parsed prior to the bootloader command line. So if a
@@ -441,7 +492,7 @@ config CMDLINE_OVERRIDE
 	bool "Built-in command line overrides bootloader arguments"
 	default n
 	depends on CMDLINE != ""
-	---help---
+	help
 	  Set this option to 'Y' to have the hypervisor ignore the bootloader
 	  command line, and use ONLY the built-in command line.
 
@@ -451,12 +502,12 @@ config CMDLINE_OVERRIDE
 config DOM0_MEM
 	string "Default value for dom0_mem boot parameter"
 	default ""
-	---help---
+	help
 	  Sets a default value for dom0_mem, e.g. "512M".
 	  The specified string will be used for the dom0_mem parameter in
 	  case it was not specified on the command line.
 
-	  See docs/misc/xen-command-line.markdown for the supported syntax.
+	  See docs/misc/xen-command-line.pandoc for the supported syntax.
 
 	  Leave empty if you are not sure what to specify.
 
@@ -473,10 +524,36 @@ config DTB_FILE
 config TRACEBUFFER
 	bool "Enable tracing infrastructure" if EXPERT
 	default y
-	---help---
+	help
 	  Enable tracing infrastructure and pre-defined tracepoints within Xen.
 	  This will allow live information about Xen's execution and performance
 	  to be collected at run time for debugging or performance analysis.
 	  Memory and execution overhead when not active is minimal.
+
+config LLC_COLORING
+	bool "Last Level Cache (LLC) coloring" if EXPERT
+	depends on HAS_LLC_COLORING
+
+config LLC_COLORS_ORDER
+	int "Maximum number of LLC colors (base-2 exponent)"
+	range 1 10
+	default 7
+	depends on LLC_COLORING
+	help
+	  Controls the build-time size of various arrays associated with LLC
+	  coloring. The value is a base-2 exponent. Refer to cache coloring
+	  documentation for how to compute the number of colors supported by the
+	  platform. This is only an upper bound. The runtime value is autocomputed
+	  or manually set via cmdline parameters.
+	  The default value corresponds to an 8 MiB 16-ways LLC, which should be
+	  more than what's needed in the general case.
+
+config BUDDY_ALLOCATOR_SIZE
+	int "Buddy allocator reserved memory size (MiB)"
+	default "64"
+	depends on LLC_COLORING
+	help
+	  Amount of memory reserved for the buddy allocator to serve Xen heap,
+	  working alongside the colored one.
 
 endmenu

@@ -123,7 +123,7 @@ void __init vesa_init(void)
     if ( vlfb_info.bits_per_pixel > 8 )
     {
         /* Light grey in truecolor. */
-        unsigned int grey = 0xaaaaaaaa;
+        unsigned int grey = 0xaaaaaaaaU;
         lfbp.pixel_on =
             ((grey >> (32 - vlfb_info.  red_size)) << vlfb_info.  red_pos) |
             ((grey >> (32 - vlfb_info.green_size)) << vlfb_info.green_pos) |
@@ -145,7 +145,7 @@ static void cf_check lfb_flush(void)
     __asm__ __volatile__ ("sfence" : : : "memory");
 }
 
-void __init vesa_endboot(bool_t keep)
+void __init vesa_endboot(bool keep)
 {
     if ( keep )
     {

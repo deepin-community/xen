@@ -13,7 +13,7 @@ typedef struct {
     unsigned int name_len;
     EFI_PHYSICAL_ADDRESS addr;
     UINTN size;
-} module_name;
+} module_info;
 
 /*
  * Binaries will be translated into bootmodules, the maximum number for them is
@@ -21,7 +21,7 @@ typedef struct {
  */
 #define MAX_UEFI_MODULES (MAX_MODULES - 2)
 static struct file __initdata module_binary;
-static module_name __initdata modules[MAX_UEFI_MODULES];
+static module_info __initdata modules[MAX_UEFI_MODULES];
 static unsigned int __initdata modules_available = MAX_UEFI_MODULES;
 static unsigned int __initdata modules_idx;
 
@@ -46,10 +46,10 @@ static int get_module_file_index(const char *name, unsigned int name_len);
 static void PrintMessage(const CHAR16 *s);
 
 #define DEVICE_TREE_GUID \
-{0xb1b621d5, 0xf19c, 0x41a5, {0x83, 0x0b, 0xd9, 0x15, 0x2c, 0x69, 0xaa, 0xe0}}
+{0xb1b621d5U, 0xf19c, 0x41a5, {0x83, 0x0b, 0xd9, 0x15, 0x2c, 0x69, 0xaa, 0xe0}}
 
 static struct file __initdata dtbfile;
-static void __initdata *fdt;
+static void __initdata *fdt_efi;
 static void __initdata *memmap;
 
 static int __init setup_chosen_node(void *fdt, int *addr_cells, int *size_cells)
@@ -157,17 +157,24 @@ static void __init *lookup_fdt_config_table(EFI_SYSTEM_TABLE *sys_table)
     return fdt;
 }
 
-static bool __init meminfo_add_bank(struct meminfo *mem,
+static bool __init meminfo_add_bank(struct membanks *mem,
                                     EFI_MEMORY_DESCRIPTOR *desc)
 {
     struct membank *bank;
+    paddr_t start = desc->PhysicalStart;
+    paddr_t size = desc->NumberOfPages * EFI_PAGE_SIZE;
 
-    if ( mem->nr_banks >= NR_MEM_BANKS )
+    if ( mem->nr_banks >= mem->max_banks )
         return false;
+#ifdef CONFIG_ACPI
+    if ( check_reserved_regions_overlap(start, size, false) )
+        return false;
+#endif
 
     bank = &mem->bank[mem->nr_banks];
-    bank->start = desc->PhysicalStart;
-    bank->size = desc->NumberOfPages * EFI_PAGE_SIZE;
+    bank->start = start;
+    bank->size = size;
+    bank->type = MEMBANK_DEFAULT;
 
     mem->nr_banks++;
 
@@ -192,7 +199,7 @@ static EFI_STATUS __init efi_process_memory_map_bootinfo(EFI_MEMORY_DESCRIPTOR *
                (desc_ptr->Type == EfiBootServicesCode ||
                 desc_ptr->Type == EfiBootServicesData))) )
         {
-            if ( !meminfo_add_bank(&bootinfo.mem, desc_ptr) )
+            if ( !meminfo_add_bank(bootinfo_get_mem(), desc_ptr) )
             {
                 PrintStr(L"Warning: All " __stringify(NR_MEM_BANKS)
                           " bootinfo mem banks exhausted.\r\n");
@@ -202,7 +209,7 @@ static EFI_STATUS __init efi_process_memory_map_bootinfo(EFI_MEMORY_DESCRIPTOR *
 #ifdef CONFIG_ACPI
         else if ( desc_ptr->Type == EfiACPIReclaimMemory )
         {
-            if ( !meminfo_add_bank(&bootinfo.acpi, desc_ptr) )
+            if ( !meminfo_add_bank(bootinfo_get_acpi(), desc_ptr) )
             {
                 PrintStr(L"Error: All " __stringify(NR_MEM_BANKS)
                           " acpi meminfo mem banks exhausted.\r\n");
@@ -221,7 +228,7 @@ static EFI_STATUS __init efi_process_memory_map_bootinfo(EFI_MEMORY_DESCRIPTOR *
  * of the System table address, the address of the final EFI memory map,
  * and memory map information.
  */
-EFI_STATUS __init fdt_add_uefi_nodes(EFI_SYSTEM_TABLE *sys_table,
+static EFI_STATUS __init fdt_add_uefi_nodes(EFI_SYSTEM_TABLE *sys_table,
                                             void *fdt,
                                             EFI_MEMORY_DESCRIPTOR *memory_map,
                                             UINTN map_size,
@@ -377,7 +384,7 @@ static void __init efi_arch_process_memory_map(EFI_SYSTEM_TABLE *SystemTable,
     if ( EFI_ERROR(status) )
         blexit(L"EFI memory map processing failed");
 
-    status = fdt_add_uefi_nodes(SystemTable, fdt, map, map_size, desc_size,
+    status = fdt_add_uefi_nodes(SystemTable, fdt_efi, map, map_size, desc_size,
                                 desc_ver);
     if ( EFI_ERROR(status) )
         PrintErrMesg(L"Updating FDT failed", status);
@@ -389,7 +396,7 @@ static void __init efi_arch_pre_exit_boot(void)
 
 static void __init noreturn efi_arch_post_exit_boot(void)
 {
-    efi_xen_start(fdt, fdt_totalsize(fdt));
+    efi_xen_start(fdt_efi, fdt_totalsize(fdt_efi));
 }
 
 static void __init efi_arch_cfg_file_early(const EFI_LOADED_IMAGE *image,
@@ -414,8 +421,8 @@ static void __init efi_arch_cfg_file_early(const EFI_LOADED_IMAGE *image,
             efi_bs->FreePool(name.w);
         }
     }
-    fdt = fdt_increase_size(&dtbfile, cfg.size + EFI_PAGE_SIZE);
-    if ( !fdt )
+    fdt_efi = fdt_increase_size(&dtbfile, cfg.size + EFI_PAGE_SIZE);
+    if ( !fdt_efi )
         blexit(L"Unable to create new FDT");
 }
 
@@ -448,38 +455,23 @@ static void __init efi_arch_memory_setup(void)
 {
 }
 
-static void __init efi_arch_handle_cmdline(CHAR16 *image_name,
-                                           CHAR16 *cmdline_options,
+static void __init efi_arch_handle_cmdline(CHAR16 *cmdline_options,
                                            const char *cfgfile_options)
 {
     union string name;
     char *buf;
     EFI_STATUS status;
-    int prop_len;
+    int prop_len = 0;
     int chosen;
 
     /* locate chosen node, which is where we add Xen module info. */
-    chosen = fdt_subnode_offset(fdt, 0, "chosen");
+    chosen = fdt_subnode_offset(fdt_efi, 0, "chosen");
     if ( chosen < 0 )
         blexit(L"Unable to find chosen node");
 
     status = efi_bs->AllocatePool(EfiBootServicesData, EFI_PAGE_SIZE, (void **)&buf);
     if ( EFI_ERROR(status) )
         PrintErrMesg(L"Unable to allocate string buffer", status);
-
-    if ( image_name )
-    {
-        name.w = image_name;
-        w2s(&name);
-    }
-    else
-        name.s = "xen";
-
-    prop_len = 0;
-    prop_len += snprintf(buf + prop_len,
-                           EFI_PAGE_SIZE - prop_len, "%s", name.s);
-    if ( prop_len >= EFI_PAGE_SIZE )
-        blexit(L"FDT string overflow");
 
     if ( cfgfile_options )
     {
@@ -492,7 +484,7 @@ static void __init efi_arch_handle_cmdline(CHAR16 *image_name,
     else
     {
         /* Get xen,xen-bootargs in /chosen if it is specified */
-        const char *dt_bootargs_prop = fdt_getprop(fdt, chosen,
+        const char *dt_bootargs_prop = fdt_getprop(fdt_efi, chosen,
                                                    "xen,xen-bootargs", NULL);
         if ( dt_bootargs_prop )
         {
@@ -520,7 +512,7 @@ static void __init efi_arch_handle_cmdline(CHAR16 *image_name,
             blexit(L"FDT string overflow");
     }
 
-    if ( fdt_setprop_string(fdt, chosen, "xen,xen-bootargs", buf) < 0 )
+    if ( fdt_setprop_string(fdt_efi, chosen, "xen,xen-bootargs", buf) < 0 )
         blexit(L"Unable to set xen,xen-bootargs property.");
 
     efi_bs->FreePool(buf);
@@ -536,48 +528,54 @@ static void __init efi_arch_handle_module(const struct file *file,
 
     if ( file == &dtbfile )
         return;
-    chosen = setup_chosen_node(fdt, &addr_len, &size_len);
+    chosen = setup_chosen_node(fdt_efi, &addr_len, &size_len);
     if ( chosen < 0 )
         blexit(L"Unable to setup chosen node");
 
     if ( file == &ramdisk )
     {
-        char ramdisk_compat[] = "multiboot,ramdisk\0multiboot,module";
-        node = fdt_add_subnode(fdt, chosen, "ramdisk");
+        static const char __initconst ramdisk_compat[] = "multiboot,ramdisk\0"
+                                                         "multiboot,module";
+
+        node = fdt_add_subnode(fdt_efi, chosen, "ramdisk");
         if ( node < 0 )
             blexit(L"Unable to add ramdisk FDT node.");
-        if ( fdt_setprop(fdt, node, "compatible", ramdisk_compat,
+        if ( fdt_setprop(fdt_efi, node, "compatible", ramdisk_compat,
                          sizeof(ramdisk_compat)) < 0 )
             blexit(L"Unable to set compatible property.");
-        if ( fdt_set_reg(fdt, node, addr_len, size_len, ramdisk.addr,
+        if ( fdt_set_reg(fdt_efi, node, addr_len, size_len, ramdisk.addr,
                     ramdisk.size) < 0 )
             blexit(L"Unable to set reg property.");
     }
     else if ( file == &xsm )
     {
-        char xsm_compat[] = "xen,xsm-policy\0multiboot,module";
-        node = fdt_add_subnode(fdt, chosen, "xsm");
+        static const char __initconst xsm_compat[] = "xen,xsm-policy\0"
+                                                     "multiboot,module";
+
+        node = fdt_add_subnode(fdt_efi, chosen, "xsm");
         if ( node < 0 )
             blexit(L"Unable to add xsm FDT node.");
-        if ( fdt_setprop(fdt, node, "compatible", xsm_compat,
+        if ( fdt_setprop(fdt_efi, node, "compatible", xsm_compat,
                          sizeof(xsm_compat)) < 0 )
             blexit(L"Unable to set compatible property.");
-        if ( fdt_set_reg(fdt, node, addr_len, size_len, xsm.addr,
+        if ( fdt_set_reg(fdt_efi, node, addr_len, size_len, xsm.addr,
                     xsm.size) < 0 )
             blexit(L"Unable to set reg property.");
     }
     else if ( file == &kernel )
     {
-        char kernel_compat[] = "multiboot,kernel\0multiboot,module";
-        node = fdt_add_subnode(fdt, chosen, "kernel");
+        static const char __initconst kernel_compat[] = "multiboot,kernel\0"
+                                                        "multiboot,module";
+
+        node = fdt_add_subnode(fdt_efi, chosen, "kernel");
         if ( node < 0 )
             blexit(L"Unable to add dom0 FDT node.");
-        if ( fdt_setprop(fdt, node, "compatible", kernel_compat,
+        if ( fdt_setprop(fdt_efi, node, "compatible", kernel_compat,
                          sizeof(kernel_compat)) < 0 )
             blexit(L"Unable to set compatible property.");
-        if ( options && fdt_setprop_string(fdt, node, "bootargs", options) < 0 )
+        if ( options && fdt_setprop_string(fdt_efi, node, "bootargs", options) < 0 )
             blexit(L"Unable to set bootargs property.");
-        if ( fdt_set_reg(fdt, node, addr_len, size_len, kernel.addr,
+        if ( fdt_set_reg(fdt_efi, node, addr_len, size_len, kernel.addr,
                          kernel.size) < 0 )
             blexit(L"Unable to set reg property.");
     }
@@ -610,7 +608,7 @@ static int __init get_module_file_index(const char *name,
 
     for ( i = 0; i < modules_idx; i++ )
     {
-        module_name *mod = &modules[i];
+        module_info *mod = &modules[i];
         if ( (mod->name_len == name_len) &&
              (strncmp(mod->name, name, name_len) == 0) )
         {
@@ -636,7 +634,7 @@ static int __init allocate_module_file(const EFI_LOADED_IMAGE *loaded_image,
                                        const char *name,
                                        unsigned int name_len)
 {
-    module_name *file_name;
+    module_info *file_info;
     CHAR16 *fname;
     union string module_name;
     int ret;
@@ -656,18 +654,18 @@ static int __init allocate_module_file(const EFI_LOADED_IMAGE *loaded_image,
     ret = modules_idx;
 
     /* Save at this index the name of this binary */
-    file_name = &modules[ret];
+    file_info = &modules[ret];
 
     if ( efi_bs->AllocatePool(EfiLoaderData, (name_len + 1) * sizeof(char),
-                              (void**)&file_name->name) != EFI_SUCCESS )
+                              (void**)&file_info->name) != EFI_SUCCESS )
     {
         PrintMessage(L"Error allocating memory for module binary name");
         return ERROR_ALLOC_MODULE_NAME;
     }
 
     /* Save name and length of the binary in the data structure */
-    strlcpy(file_name->name, name, name_len + 1);
-    file_name->name_len = name_len;
+    strlcpy(file_info->name, name, name_len + 1);
+    file_info->name_len = name_len;
 
     /* Get the file system interface. */
     if ( !*dir_handle )
@@ -677,8 +675,8 @@ static int __init allocate_module_file(const EFI_LOADED_IMAGE *loaded_image,
     read_file(*dir_handle, s2w(&module_name), &module_binary, NULL);
 
     /* Save address and size */
-    file_name->addr = module_binary.addr;
-    file_name->size = module_binary.size;
+    file_info->addr = module_binary.addr;
+    file_info->size = module_binary.size;
 
     /* s2w(...) allocates some memory, free it */
     efi_bs->FreePool(module_name.w);
@@ -704,10 +702,10 @@ static int __init handle_module_node(const EFI_LOADED_IMAGE *loaded_image,
     const void *uefi_name_prop;
     char mod_string[24]; /* Placeholder for module@ + a 64-bit number + \0 */
     int uefi_name_len, file_idx, module_compat;
-    module_name *file;
+    module_info *file;
 
     /* Check if the node is a multiboot,module otherwise return */
-    module_compat = fdt_node_check_compatible(fdt, module_node_offset,
+    module_compat = fdt_node_check_compatible(fdt_efi, module_node_offset,
                                               "multiboot,module");
     if ( module_compat < 0 )
         /* Error while checking the compatible string */
@@ -718,7 +716,7 @@ static int __init handle_module_node(const EFI_LOADED_IMAGE *loaded_image,
         return 0;
 
     /* Read xen,uefi-binary property to get the file name. */
-    uefi_name_prop = fdt_getprop(fdt, module_node_offset, "xen,uefi-binary",
+    uefi_name_prop = fdt_getprop(fdt_efi, module_node_offset, "xen,uefi-binary",
                                  &uefi_name_len);
 
     if ( !uefi_name_prop )
@@ -739,13 +737,13 @@ static int __init handle_module_node(const EFI_LOADED_IMAGE *loaded_image,
     snprintf(mod_string, sizeof(mod_string), "module@%"PRIx64, file->addr);
 
     /* Rename the module to be module@{address} */
-    if ( fdt_set_name(fdt, module_node_offset, mod_string) < 0 )
+    if ( fdt_set_name(fdt_efi, module_node_offset, mod_string) < 0 )
     {
         PrintMessage(L"Unable to modify module node name.");
         return ERROR_RENAME_MODULE_NAME;
     }
 
-    if ( fdt_set_reg(fdt, module_node_offset, reg_addr_cells, reg_size_cells,
+    if ( fdt_set_reg(fdt_efi, module_node_offset, reg_addr_cells, reg_size_cells,
                      file->addr, file->size) < 0 )
     {
         PrintMessage(L"Unable to set module reg property.");
@@ -754,7 +752,7 @@ static int __init handle_module_node(const EFI_LOADED_IMAGE *loaded_image,
 
     if ( !is_domu_module )
     {
-        if ( (fdt_node_check_compatible(fdt, module_node_offset,
+        if ( (fdt_node_check_compatible(fdt_efi, module_node_offset,
                                     "multiboot,kernel") == 0) )
         {
             /*
@@ -772,14 +770,14 @@ static int __init handle_module_node(const EFI_LOADED_IMAGE *loaded_image,
             kernel.size = file->size;
         }
         else if ( ramdisk.addr &&
-                  (fdt_node_check_compatible(fdt, module_node_offset,
+                  (fdt_node_check_compatible(fdt_efi, module_node_offset,
                                              "multiboot,ramdisk") == 0) )
         {
             PrintMessage(L"Dom0 ramdisk already found in cfg file.");
             return ERROR_DOM0_RAMDISK_FOUND;
         }
         else if ( xsm.addr &&
-                  (fdt_node_check_compatible(fdt, module_node_offset,
+                  (fdt_node_check_compatible(fdt_efi, module_node_offset,
                                              "xen,xsm-policy") == 0) )
         {
             PrintMessage(L"XSM policy already found in cfg file.");
@@ -790,6 +788,7 @@ static int __init handle_module_node(const EFI_LOADED_IMAGE *loaded_image,
     return 1;
 }
 
+#ifdef CONFIG_DOM0LESS_BOOT
 /*
  * This function checks for boot modules under the domU guest domain node
  * in the DT.
@@ -804,7 +803,7 @@ static int __init handle_dom0less_domain_node(const EFI_LOADED_IMAGE *loaded_ima
     unsigned int mb_modules_found = 0;
 
     /* Get #address-cells and #size-cells from domain node */
-    prop = fdt_get_property(fdt, domain_node, "#address-cells", &len);
+    prop = fdt_get_property(fdt_efi, domain_node, "#address-cells", &len);
     if ( !prop )
     {
         PrintMessage(L"#address-cells not found in domain node.");
@@ -813,7 +812,7 @@ static int __init handle_dom0less_domain_node(const EFI_LOADED_IMAGE *loaded_ima
 
     addr_cells = fdt32_to_cpu(*((uint32_t *)prop->data));
 
-    prop = fdt_get_property(fdt, domain_node, "#size-cells", &len);
+    prop = fdt_get_property(fdt_efi, domain_node, "#size-cells", &len);
     if ( !prop )
     {
         PrintMessage(L"#size-cells not found in domain node.");
@@ -823,9 +822,9 @@ static int __init handle_dom0less_domain_node(const EFI_LOADED_IMAGE *loaded_ima
     size_cells = fdt32_to_cpu(*((uint32_t *)prop->data));
 
     /* Check for nodes compatible with multiboot,module inside this node */
-    for ( module_node = fdt_first_subnode(fdt, domain_node);
+    for ( module_node = fdt_first_subnode(fdt_efi, domain_node);
           module_node > 0;
-          module_node = fdt_next_subnode(fdt, module_node) )
+          module_node = fdt_next_subnode(fdt_efi, module_node) )
     {
         int ret = handle_module_node(loaded_image, dir_handle, module_node,
                                      addr_cells, size_cells, true);
@@ -837,6 +836,7 @@ static int __init handle_dom0less_domain_node(const EFI_LOADED_IMAGE *loaded_ima
 
     return mb_modules_found;
 }
+#endif
 
 /*
  * This function checks for xen domain nodes under the /chosen node for possible
@@ -850,7 +850,7 @@ static int __init efi_check_dt_boot(const EFI_LOADED_IMAGE *loaded_image)
     EFI_FILE_HANDLE dir_handle = NULL;
 
     /* Check for the chosen node in the current DTB */
-    chosen = setup_chosen_node(fdt, &addr_len, &size_len);
+    chosen = setup_chosen_node(fdt_efi, &addr_len, &size_len);
     if ( chosen < 0 )
     {
         PrintMessage(L"Unable to setup chosen node");
@@ -858,13 +858,14 @@ static int __init efi_check_dt_boot(const EFI_LOADED_IMAGE *loaded_image)
     }
 
     /* Check for nodes compatible with xen,domain under the chosen node */
-    for ( node = fdt_first_subnode(fdt, chosen);
+    for ( node = fdt_first_subnode(fdt_efi, chosen);
           node > 0;
-          node = fdt_next_subnode(fdt, node) )
+          node = fdt_next_subnode(fdt_efi, node) )
     {
         int ret;
 
-        if ( !fdt_node_check_compatible(fdt, node, "xen,domain") )
+#ifdef CONFIG_DOM0LESS_BOOT
+        if ( !fdt_node_check_compatible(fdt_efi, node, "xen,domain") )
         {
             /* Found a node with compatible xen,domain; handle this node. */
             ret = handle_dom0less_domain_node(loaded_image, &dir_handle, node);
@@ -872,6 +873,7 @@ static int __init efi_check_dt_boot(const EFI_LOADED_IMAGE *loaded_image)
                 return ERROR_DT_MODULE_DOMU;
         }
         else
+#endif
         {
             ret = handle_module_node(loaded_image, &dir_handle, node, addr_len,
                                      size_len, false);
@@ -939,29 +941,29 @@ static bool __init efi_arch_use_config_file(EFI_SYSTEM_TABLE *SystemTable)
      * node to decide whether to skip the UEFI Xen configuration file or not.
      */
 
-    fdt = lookup_fdt_config_table(SystemTable);
-    dtbfile.ptr = fdt;
+    fdt_efi = lookup_fdt_config_table(SystemTable);
+    dtbfile.ptr = fdt_efi;
     dtbfile.need_to_free = false; /* Config table memory can't be freed. */
 
-    if ( fdt &&
-         (fdt_node_offset_by_compatible(fdt, 0, "multiboot,module") > 0) )
+    if ( fdt_efi &&
+         (fdt_node_offset_by_compatible(fdt_efi, 0, "multiboot,module") > 0) )
     {
         /* Locate chosen node */
-        int node = fdt_subnode_offset(fdt, 0, "chosen");
+        int node = fdt_subnode_offset(fdt_efi, 0, "chosen");
         const void *cfg_load_prop;
         int cfg_load_len;
 
         if ( node > 0 )
         {
             /* Check if xen,uefi-cfg-load property exists */
-            cfg_load_prop = fdt_getprop(fdt, node, "xen,uefi-cfg-load",
+            cfg_load_prop = fdt_getprop(fdt_efi, node, "xen,uefi-cfg-load",
                                         &cfg_load_len);
             if ( !cfg_load_prop )
                 load_cfg_file = false;
         }
     }
 
-    if ( !fdt || load_cfg_file )
+    if ( !fdt_efi || load_cfg_file )
     {
         /*
          * We either have no FDT, or one without modules, so we must have a
@@ -971,7 +973,7 @@ static bool __init efi_arch_use_config_file(EFI_SYSTEM_TABLE *SystemTable)
     }
     PrintStr(L"Using modules provided by bootloader in FDT\r\n");
     /* We have modules already defined in fdt, just add space. */
-    fdt = fdt_increase_size(&dtbfile, EFI_PAGE_SIZE);
+    fdt_efi = fdt_increase_size(&dtbfile, EFI_PAGE_SIZE);
 
     return false;
 }

@@ -147,8 +147,8 @@ typedef int INT32;
 
 /*! [End] no source code translation !*/
 
-typedef u64 acpi_native_uint;
-typedef s64 acpi_native_int;
+typedef uint64_t acpi_native_uint;
+typedef int64_t acpi_native_int;
 
 typedef u64 acpi_io_address;
 typedef u64 acpi_physical_address;
@@ -186,8 +186,8 @@ typedef int INT32;
 
 /*! [End] no source code translation !*/
 
-typedef u32 acpi_native_uint;
-typedef s32 acpi_native_int;
+typedef uint32_t acpi_native_uint;
+typedef int32_t acpi_native_int;
 
 typedef u32 acpi_io_address;
 typedef u32 acpi_physical_address;
@@ -281,7 +281,6 @@ typedef acpi_native_uint acpi_size;
  */
 typedef u32 acpi_status;	/* All ACPI Exceptions */
 typedef u32 acpi_name;		/* 4-byte ACPI name */
-typedef char *acpi_string;	/* Null terminated ASCII string */
 typedef void *acpi_handle;	/* Actually a ptr to a NS Node */
 
 struct uint64_struct {

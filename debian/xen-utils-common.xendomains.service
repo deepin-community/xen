@@ -1,0 +1,33 @@
+# adapted from systemd-sysv-generator
+
+[Unit]
+SourcePath=/etc/init.d/xendomains
+Description=Start/stop secondary xen domains
+Before=multi-user.target
+Before=graphical.target
+Before=corosync.service
+Before=heartbeat.service
+Before=libvirtd.service
+After=network-online.target
+After=remote-fs.target
+After=xen.service
+After=drbd.service
+After=iscsi.service
+After=openvswitch-switch.service
+After=nfs-kernel-server.service
+Wants=network-online.target
+
+[Service]
+Type=forking
+Restart=no
+TimeoutSec=5min
+IgnoreSIGPIPE=no
+KillMode=process
+GuessMainPID=no
+RemainAfterExit=yes
+ExecStart=/etc/init.d/xendomains start
+ExecStop=/etc/init.d/xendomains stop
+ExecReload=/etc/init.d/xendomains reload
+
+[Install]
+WantedBy=multi-user.target

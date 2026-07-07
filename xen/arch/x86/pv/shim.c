@@ -1,20 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /******************************************************************************
  * arch/x86/pv/shim.c
  *
  * Functionaltiy for PV Shim mode
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
  *
  * Copyright (c) 2017 Citrix Systems Ltd.
  */
@@ -110,17 +98,17 @@ uint64_t pv_shim_mem(uint64_t avail)
     return shim_nrpages;
 }
 
-static void __init mark_pfn_as_ram(struct e820map *e820, uint64_t pfn)
+static void __init mark_pfn_as_ram(uint64_t pfn)
 {
-    if ( !e820_add_range(e820, pfn << PAGE_SHIFT,
+    if ( !e820_add_range(pfn << PAGE_SHIFT,
                          (pfn << PAGE_SHIFT) + PAGE_SIZE, E820_RAM) &&
-         !e820_change_range_type(e820, pfn << PAGE_SHIFT,
+         !e820_change_range_type(&e820, pfn << PAGE_SHIFT,
                                  (pfn << PAGE_SHIFT) + PAGE_SIZE,
                                  E820_RESERVED, E820_RAM) )
         panic("Unable to add/change memory type of pfn %#lx to RAM\n", pfn);
 }
 
-void __init pv_shim_fixup_e820(struct e820map *e820)
+void __init pv_shim_fixup_e820(void)
 {
     uint64_t pfn = 0;
     unsigned int i = 0;
@@ -132,7 +120,7 @@ void __init pv_shim_fixup_e820(struct e820map *e820)
     rc = xen_hypercall_hvm_get_param(p, &pfn);  \
     if ( rc )                                   \
         panic("Unable to get " #p "\n");        \
-    mark_pfn_as_ram(e820, pfn);                 \
+    mark_pfn_as_ram(pfn);                       \
     ASSERT(i < ARRAY_SIZE(reserved_pages));     \
     reserved_pages[i++].mfn = pfn;              \
 })
@@ -394,8 +382,14 @@ int pv_shim_shutdown(uint8_t reason)
 
     for_each_vcpu ( d, v )
     {
-        /* Unmap guest vcpu_info pages. */
-        unmap_vcpu_info(v);
+        /* Unmap guest vcpu_info page and runstate/time areas. */
+        unmap_guest_area(v, &v->vcpu_info_area);
+        unmap_guest_area(v, &v->runstate_guest_area);
+        unmap_guest_area(v, &v->arch.time_guest_area);
+
+        /* Zap runstate and time area handles. */
+        set_xen_guest_handle(runstate_guest(v), NULL);
+        set_xen_guest_handle(v->arch.time_info_guest, NULL);
 
         /* Reset the periodic timer to the default value. */
         vcpu_set_periodic_timer(v, MILLISECS(10));

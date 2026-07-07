@@ -17,6 +17,7 @@
  * License along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <xen/lib.h>
 #include <xen/sched.h>
 #include <xen/vpci.h>
 
@@ -135,6 +136,13 @@ static void cf_check control_write(
         }
     }
 
+    /* Make sure domU doesn't enable INTx while enabling MSI-X. */
+    if ( new_enabled && !msix->enabled && !is_hardware_domain(pdev->domain) )
+    {
+        pci_intx(pdev, false);
+        pdev->vpci->header.guest_cmd |= PCI_COMMAND_INTX_DISABLE;
+    }
+
     msix->masked = new_masked;
     msix->enabled = new_enabled;
 
@@ -146,6 +154,8 @@ static void cf_check control_write(
 static struct vpci_msix *msix_find(const struct domain *d, unsigned long addr)
 {
     struct vpci_msix *msix;
+
+    ASSERT_PDEV_LIST_IS_READ_LOCKED(d);
 
     list_for_each_entry ( msix, &d->arch.hvm.msix_tables, next )
     {
@@ -163,7 +173,13 @@ static struct vpci_msix *msix_find(const struct domain *d, unsigned long addr)
 
 static int cf_check msix_accept(struct vcpu *v, unsigned long addr)
 {
-    return !!msix_find(v->domain, addr);
+    int rc;
+
+    read_lock(&v->domain->pci_lock);
+    rc = !!msix_find(v->domain, addr);
+    read_unlock(&v->domain->pci_lock);
+
+    return rc;
 }
 
 static bool access_allowed(const struct pci_dev *pdev, unsigned long addr,
@@ -187,7 +203,7 @@ static struct vpci_msix_entry *get_entry(struct vpci_msix *msix,
     return &msix->entries[(addr - start) / PCI_MSIX_ENTRY_SIZE];
 }
 
-static void __iomem *get_table(struct vpci *vpci, unsigned int slot)
+static void __iomem *get_table(const struct vpci *vpci, unsigned int slot)
 {
     struct vpci_msix *msix = vpci->msix;
     paddr_t addr = 0;
@@ -223,7 +239,7 @@ static void __iomem *get_table(struct vpci *vpci, unsigned int slot)
     return msix->table[slot];
 }
 
-unsigned int get_slot(const struct vpci *vpci, unsigned long addr)
+static unsigned int get_slot(const struct vpci *vpci, unsigned long addr)
 {
     unsigned long pfn = PFN_DOWN(addr);
 
@@ -273,7 +289,7 @@ static int adjacent_read(const struct domain *d, const struct vpci_msix *msix,
     struct vpci *vpci = msix->pdev->vpci;
     unsigned int slot;
 
-    *data = ~0ul;
+    *data = ~0UL;
 
     if ( !adjacent_handle(msix, addr + len - 1) )
         return X86EMUL_OKAY;
@@ -305,13 +321,13 @@ static int adjacent_read(const struct domain *d, const struct vpci_msix *msix,
          */
         for ( i = 0; i < len; i++ )
         {
-            unsigned long partial = ~0ul;
+            unsigned long partial = ~0UL;
             int rc = adjacent_read(d, msix, addr + i, 1, &partial);
 
             if ( rc != X86EMUL_OKAY )
                 return rc;
 
-            *data &= ~(0xfful << (i * 8));
+            *data &= ~(0xffUL << (i * 8));
             *data |= (partial & 0xff) << (i * 8);
         }
 
@@ -349,6 +365,7 @@ static int adjacent_read(const struct domain *d, const struct vpci_msix *msix,
 
     default:
         ASSERT_UNREACHABLE();
+        break;
     }
     spin_unlock(&vpci->lock);
 
@@ -358,21 +375,35 @@ static int adjacent_read(const struct domain *d, const struct vpci_msix *msix,
 static int cf_check msix_read(
     struct vcpu *v, unsigned long addr, unsigned int len, unsigned long *data)
 {
-    const struct domain *d = v->domain;
-    struct vpci_msix *msix = msix_find(d, addr);
+    struct domain *d = v->domain;
+    struct vpci_msix *msix;
     const struct vpci_msix_entry *entry;
     unsigned int offset;
 
-    *data = ~0ul;
+    *data = ~0UL;
 
+    read_lock(&d->pci_lock);
+
+    msix = msix_find(d, addr);
     if ( !msix )
+    {
+        read_unlock(&d->pci_lock);
         return X86EMUL_RETRY;
+    }
 
     if ( adjacent_handle(msix, addr) )
-        return adjacent_read(d, msix, addr, len, data);
+    {
+        int rc = adjacent_read(d, msix, addr, len, data);
+
+        read_unlock(&d->pci_lock);
+        return rc;
+    }
 
     if ( !access_allowed(msix->pdev, addr, len) )
+    {
+        read_unlock(&d->pci_lock);
         return X86EMUL_OKAY;
+    }
 
     spin_lock(&msix->pdev->vpci->lock);
     entry = get_entry(msix, addr);
@@ -404,6 +435,7 @@ static int cf_check msix_read(
         break;
     }
     spin_unlock(&msix->pdev->vpci->lock);
+    read_unlock(&d->pci_lock);
 
     return X86EMUL_OKAY;
 }
@@ -482,6 +514,7 @@ static int adjacent_write(const struct domain *d, const struct vpci_msix *msix,
 
     default:
         ASSERT_UNREACHABLE();
+        break;
     }
     spin_unlock(&vpci->lock);
 
@@ -491,19 +524,33 @@ static int adjacent_write(const struct domain *d, const struct vpci_msix *msix,
 static int cf_check msix_write(
     struct vcpu *v, unsigned long addr, unsigned int len, unsigned long data)
 {
-    const struct domain *d = v->domain;
-    struct vpci_msix *msix = msix_find(d, addr);
+    struct domain *d = v->domain;
+    struct vpci_msix *msix;
     struct vpci_msix_entry *entry;
     unsigned int offset;
 
+    read_lock(&d->pci_lock);
+
+    msix = msix_find(d, addr);
     if ( !msix )
+    {
+        read_unlock(&d->pci_lock);
         return X86EMUL_RETRY;
+    }
 
     if ( adjacent_handle(msix, addr) )
-        return adjacent_write(d, msix, addr, len, data);
+    {
+        int rc = adjacent_write(d, msix, addr, len, data);
+
+        read_unlock(&d->pci_lock);
+        return rc;
+    }
 
     if ( !access_allowed(msix->pdev, addr, len) )
+    {
+        read_unlock(&d->pci_lock);
         return X86EMUL_OKAY;
+    }
 
     spin_lock(&msix->pdev->vpci->lock);
     entry = get_entry(msix, addr);
@@ -525,13 +572,13 @@ static int cf_check msix_write(
             entry->addr = data;
             break;
         }
-        entry->addr &= ~0xffffffffull;
+        entry->addr &= ~0xffffffffULL;
         entry->addr |= data;
         break;
 
     case PCI_MSIX_ENTRY_UPPER_ADDR_OFFSET:
         entry->updated = true;
-        entry->addr &= 0xffffffff;
+        entry->addr  = (uint32_t)entry->addr;
         entry->addr |= (uint64_t)data << 32;
         break;
 
@@ -579,6 +626,7 @@ static int cf_check msix_write(
         break;
     }
     spin_unlock(&msix->pdev->vpci->lock);
+    read_unlock(&d->pci_lock);
 
     return X86EMUL_OKAY;
 }
@@ -659,14 +707,12 @@ int vpci_make_msix_hole(const struct pci_dev *pdev)
 static int cf_check init_msix(struct pci_dev *pdev)
 {
     struct domain *d = pdev->domain;
-    uint8_t slot = PCI_SLOT(pdev->devfn), func = PCI_FUNC(pdev->devfn);
     unsigned int msix_offset, i, max_entries;
     uint16_t control;
     struct vpci_msix *msix;
     int rc;
 
-    msix_offset = pci_find_cap_offset(pdev->seg, pdev->bus, slot, func,
-                                      PCI_CAP_ID_MSIX);
+    msix_offset = pdev->msix_pos;
     if ( !msix_offset )
         return 0;
 
@@ -678,6 +724,51 @@ static int cf_check init_msix(struct pci_dev *pdev)
     if ( !msix )
         return -ENOMEM;
 
+    msix->tables[VPCI_MSIX_TABLE] =
+        pci_conf_read32(pdev->sbdf, msix_table_offset_reg(msix_offset));
+    msix->tables[VPCI_MSIX_PBA] =
+        pci_conf_read32(pdev->sbdf, msix_pba_offset_reg(msix_offset));
+
+    /* Check that the referenced BAR(s) regions are valid. */
+    for ( i = 0; i < ARRAY_SIZE(msix->tables); i++ )
+    {
+        const char *name = (i == VPCI_MSIX_TABLE) ? "vector" : "PBA";
+        const struct vpci_bar *bars = pdev->vpci->header.bars;
+        unsigned int bir = msix->tables[i] & PCI_MSIX_BIRMASK;
+        unsigned int type;
+        unsigned int offset = msix->tables[i] & ~PCI_MSIX_BIRMASK;
+        unsigned int size =
+            (i == VPCI_MSIX_TABLE) ? max_entries * PCI_MSIX_ENTRY_SIZE
+                                   : ROUNDUP(DIV_ROUND_UP(max_entries, 8), 8);
+
+        if ( bir >= ARRAY_SIZE(pdev->vpci->header.bars) )
+        {
+            printk(XENLOG_ERR DEV_BUG_PREFIX
+                   "%pp: MSI-X %s table with out of range BIR %u\n",
+                   &pdev->sbdf, name, bir);
+ invalid:
+            xfree(msix);
+            return -ENODEV;
+        }
+
+        type = bars[bir].type;
+        if ( type != VPCI_BAR_MEM32 && type != VPCI_BAR_MEM64_LO )
+        {
+            printk(XENLOG_ERR DEV_BUG_PREFIX
+                   "%pp: MSI-X %s table at invalid BAR%u with type %u\n",
+                   &pdev->sbdf, name, bir, type);
+            goto invalid;
+        }
+
+        if ( (uint64_t)offset + size > bars[bir].size )
+        {
+            printk(XENLOG_ERR DEV_BUG_PREFIX
+                   "%pp: MSI-X %s table offset %#x size %#x outside of BAR%u size %#lx\n",
+                   &pdev->sbdf, name, offset, size, bir, bars[bir].size);
+            goto invalid;
+        }
+    }
+
     rc = vpci_add_register(pdev->vpci, control_read, control_write,
                            msix_control_reg(msix_offset), 2, msix);
     if ( rc )
@@ -688,11 +779,6 @@ static int cf_check init_msix(struct pci_dev *pdev)
 
     msix->max_entries = max_entries;
     msix->pdev = pdev;
-
-    msix->tables[VPCI_MSIX_TABLE] =
-        pci_conf_read32(pdev->sbdf, msix_table_offset_reg(msix_offset));
-    msix->tables[VPCI_MSIX_PBA] =
-        pci_conf_read32(pdev->sbdf, msix_pba_offset_reg(msix_offset));
 
     for ( i = 0; i < max_entries; i++)
     {
@@ -706,9 +792,14 @@ static int cf_check init_msix(struct pci_dev *pdev)
     pdev->vpci->msix = msix;
     list_add(&msix->next, &d->arch.hvm.msix_tables);
 
-    return 0;
+    /*
+     * vPCI header initialization will have mapped the whole BAR into the
+     * p2m, as MSI-X capability was not yet initialized.  Crave a hole for
+     * the MSI-X table here, so that Xen can trap accesses.
+     */
+    return vpci_make_msix_hole(pdev);
 }
-REGISTER_VPCI_INIT(init_msix, VPCI_PRIORITY_HIGH);
+REGISTER_VPCI_INIT(init_msix, VPCI_PRIORITY_MIDDLE);
 
 /*
  * Local variables:

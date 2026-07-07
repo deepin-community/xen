@@ -21,7 +21,17 @@
 #include "hvm/save.h"
 #include "memory.h"
 
-#define XEN_DOMCTL_INTERFACE_VERSION 0x00000015
+/*
+ * The interface version needs to be incremented by 1 in case the interface
+ * is modified in an incompatible way AND if the version hasn't been
+ * incremented in the current development cycle already.
+ * Pure additions (e.g. new sub-commands) or compatible interface changes
+ * (e.g. adding semantics to 0-checked input fields or data to zeroed output
+ * fields) don't require a change of the version.
+ *
+ * Last version bump: Xen 4.19
+ */
+#define XEN_DOMCTL_INTERFACE_VERSION 0x00000017
 
 /*
  * NB. xen_domctl.domain is an IN/OUT parameter for this operation.
@@ -85,6 +95,24 @@ struct xen_domctl_createdomain {
 #define XEN_DOMCTL_GRANT_version(v)      ((v) & XEN_DOMCTL_GRANT_version_mask)
 
     uint32_t grant_opts;
+
+/*
+ * Enable altp2m mixed mode.
+ *
+ * Note that 'mixed' mode has not been evaluated for safety from a security
+ * perspective.  Before using this mode in a security-critical environment,
+ * each subop should be evaluated for safety, with unsafe subops blacklisted in
+ * XSM.
+ */
+#define XEN_DOMCTL_ALTP2M_mixed      (1U)
+/* Enable altp2m external mode. */
+#define XEN_DOMCTL_ALTP2M_external   (2U)
+/* Enable altp2m limited mode. */
+#define XEN_DOMCTL_ALTP2M_limited    (3U)
+/* Altp2m mode signaling uses bits [0, 1]. */
+#define XEN_DOMCTL_ALTP2M_mode_mask  (0x3U)
+#define XEN_DOMCTL_ALTP2M_mode(m)    ((m) & XEN_DOMCTL_ALTP2M_mode_mask)
+    uint32_t altp2m_opts;
 
     /* Per-vCPU buffer size in bytes.  0 to disable. */
     uint32_t vmtrace_size;
@@ -446,6 +474,14 @@ struct xen_domctl_irq_permission {
     uint8_t pad[3];
 };
 
+/* XEN_DOMCTL_gsi_permission */
+struct xen_domctl_gsi_permission {
+    uint32_t gsi;
+#define XEN_DOMCTL_GSI_REVOKE      0
+#define XEN_DOMCTL_GSI_GRANT       1
+#define XEN_DOMCTL_GSI_ACTION_MASK 1
+    uint32_t flags;
+};
 
 /* XEN_DOMCTL_iomem_permission */
 struct xen_domctl_iomem_permission {
@@ -1061,6 +1097,7 @@ struct xen_domctl_psr_cmt_op {
 /* Enabled by default */
 #define XEN_DOMCTL_MONITOR_EVENT_INGUEST_PAGEFAULT     11
 #define XEN_DOMCTL_MONITOR_EVENT_VMEXIT                12
+#define XEN_DOMCTL_MONITOR_EVENT_IO                    13
 
 struct xen_domctl_monitor_op {
     uint32_t op; /* XEN_DOMCTL_MONITOR_OP_* */
@@ -1189,6 +1226,23 @@ struct xen_domctl_vmtrace_op {
 typedef struct xen_domctl_vmtrace_op xen_domctl_vmtrace_op_t;
 DEFINE_XEN_GUEST_HANDLE(xen_domctl_vmtrace_op_t);
 
+#if defined(__arm__) || defined(__aarch64__)
+struct xen_domctl_dt_overlay {
+    XEN_GUEST_HANDLE_64(const_void) overlay_fdt;  /* IN: overlay fdt. */
+    uint32_t overlay_fdt_size;              /* IN: Overlay dtb size. */
+#define XEN_DOMCTL_DT_OVERLAY_ATTACH                1
+    uint8_t overlay_op;                     /* IN: Attach. */
+    uint8_t pad[3];                         /* IN: Must be zero. */
+};
+#endif
+
+struct xen_domctl_set_llc_colors {
+    /* IN LLC coloring parameters */
+    uint32_t num_llc_colors;
+    uint32_t pad;
+    XEN_GUEST_HANDLE_64(uint32) llc_colors;
+};
+
 struct xen_domctl {
     uint32_t cmd;
 #define XEN_DOMCTL_createdomain                   1
@@ -1276,6 +1330,9 @@ struct xen_domctl {
 #define XEN_DOMCTL_vmtrace_op                    84
 #define XEN_DOMCTL_get_paging_mempool_size       85
 #define XEN_DOMCTL_set_paging_mempool_size       86
+#define XEN_DOMCTL_dt_overlay                    87
+#define XEN_DOMCTL_gsi_permission                88
+#define XEN_DOMCTL_set_llc_colors                89
 #define XEN_DOMCTL_gdbsx_guestmemio            1000
 #define XEN_DOMCTL_gdbsx_pausevcpu             1001
 #define XEN_DOMCTL_gdbsx_unpausevcpu           1002
@@ -1298,6 +1355,7 @@ struct xen_domctl {
         struct xen_domctl_setdomainhandle   setdomainhandle;
         struct xen_domctl_setdebugging      setdebugging;
         struct xen_domctl_irq_permission    irq_permission;
+        struct xen_domctl_gsi_permission    gsi_permission;
         struct xen_domctl_iomem_permission  iomem_permission;
         struct xen_domctl_ioport_permission ioport_permission;
         struct xen_domctl_hypercall_init    hypercall_init;
@@ -1338,6 +1396,10 @@ struct xen_domctl {
         struct xen_domctl_vuart_op          vuart_op;
         struct xen_domctl_vmtrace_op        vmtrace_op;
         struct xen_domctl_paging_mempool    paging_mempool;
+#if defined(__arm__) || defined(__aarch64__)
+        struct xen_domctl_dt_overlay        dt_overlay;
+#endif
+        struct xen_domctl_set_llc_colors    set_llc_colors;
         uint8_t                             pad[128];
     } u;
 };

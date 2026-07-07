@@ -52,12 +52,11 @@ struct arch_irq_desc {
 
 extern const unsigned int nr_irqs;
 #define nr_static_irqs NR_IRQS
-#define arch_hwdom_irqs(domid) NR_IRQS
 
 struct irq_desc;
 struct irqaction;
 
-struct irq_desc *__irq_to_desc(int irq);
+struct irq_desc *__irq_to_desc(unsigned int irq);
 
 #define irq_to_desc(irq)    __irq_to_desc(irq)
 
@@ -76,7 +75,7 @@ void init_IRQ(void);
 
 int route_irq_to_guest(struct domain *d, unsigned int virq,
                        unsigned int irq, const char *devname);
-int release_guest_irq(struct domain *d, unsigned int irq);
+int release_guest_irq(struct domain *d, unsigned int virq);
 
 void arch_move_irqs(struct vcpu *v);
 
@@ -89,13 +88,18 @@ int irq_set_type(unsigned int irq, unsigned int type);
 
 int platform_get_irq(const struct dt_device_node *device, int index);
 
-void irq_set_affinity(struct irq_desc *desc, const cpumask_t *cpu_mask);
+int platform_get_irq_byname(const struct dt_device_node *np, const char *name);
+
+void irq_set_affinity(struct irq_desc *desc, const cpumask_t *mask);
 
 /*
  * Use this helper in places that need to know whether the IRQ type is
  * set by the domain.
  */
 bool irq_type_set_by_domain(const struct domain *d);
+
+void irq_end_none(struct irq_desc *irq);
+#define irq_end_none irq_end_none
 
 #endif /* _ASM_HW_IRQ_H */
 /*

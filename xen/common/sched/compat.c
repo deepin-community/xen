@@ -3,6 +3,10 @@
  *
  */
 
+#ifndef __COMMON_SCHED_COMPAT_C__
+#define __COMMON_SCHED_COMPAT_C__
+
+
 #include <compat/sched.h>
 
 #define COMPAT
@@ -22,7 +26,7 @@ CHECK_sched_shutdown;
 CHECK_sched_remote_shutdown;
 #undef xen_sched_remote_shutdown
 
-static int compat_poll(struct compat_sched_poll *compat)
+static int compat_poll(const struct compat_sched_poll *compat)
 {
     struct sched_poll native;
 
@@ -39,10 +43,12 @@ static int compat_poll(struct compat_sched_poll *compat)
 
 #include "core.c"
 
-int compat_set_timer_op(u32 lo, s32 hi)
+int compat_set_timer_op(uint32_t lo, uint32_t hi)
 {
-    return do_set_timer_op(((s64)hi << 32) | lo);
+    return do_set_timer_op(((uint64_t)hi << 32) | lo);
 }
+
+#endif /* __COMMON_SCHED_COMPAT_C__ */
 
 /*
  * Local variables:

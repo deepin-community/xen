@@ -5,6 +5,7 @@
 /* NB. Auto-generated from arch/.../asm-offsets.c */
 #include <asm/asm-offsets.h>
 #endif
+#include <xen/linkage.h>
 #include <asm/processor.h>
 
 /* Macros for generic assembly code */
@@ -22,16 +23,10 @@
 # error "unknown ARM variant"
 #endif
 
-#define RODATA_STR(label, msg)                  \
-.pushsection .rodata.str, "aMS", %progbits, 1 ; \
+#define RODATA_SECT(section, label, msg)         \
+.pushsection section, "aMS", %progbits, 1 ;     \
 label:  .asciz msg;                             \
 .popsection
-
-#define ASM_INT(label, val)                 \
-    .p2align 2;                             \
-label: .long (val);                         \
-    .size label, . - label;                 \
-    .type label, %object
 
 #endif /* __ARM_ASM_DEFNS_H__ */
 /*

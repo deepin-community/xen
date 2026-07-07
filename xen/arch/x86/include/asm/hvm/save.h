@@ -1,17 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * save.h: HVM support routines for save/restore
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef __XEN_HVM_SAVE_H__
@@ -47,8 +36,23 @@ void _hvm_write_entry(struct hvm_domain_context *h,
     r; })
 
 /* Unmarshalling: test an entry's size and typecode and record the instance */
-int _hvm_check_entry(struct hvm_domain_context *h, 
-                     uint16_t type, uint32_t len, bool_t strict_length);
+int _hvm_check_entry(struct hvm_domain_context *h,
+                     uint16_t type, uint32_t len, bool strict_length);
+
+/*
+ * Unmarshalling: check, then return pointer. Evaluates to non-NULL on success.
+ * This macro requires the save entry to be the same size as the dest structure.
+ */
+#define hvm_get_entry(x, h) ({                                  \
+    const void *ptr = NULL;                                     \
+    BUILD_BUG_ON(HVM_SAVE_HAS_COMPAT(x));                       \
+    if ( _hvm_check_entry(h, HVM_SAVE_CODE(x),                  \
+                          HVM_SAVE_LENGTH(x), true) == 0 )      \
+    {                                                           \
+        ptr = &(h)->data[(h)->cur];                             \
+        (h)->cur += HVM_SAVE_LENGTH(x);                         \
+    }                                                           \
+    ptr; })
 
 /* Unmarshalling: copy the contents in a type-safe way */
 void _hvm_read_entry(struct hvm_domain_context *h,
@@ -58,30 +62,32 @@ void _hvm_read_entry(struct hvm_domain_context *h,
  * Unmarshalling: check, then copy. Evaluates to zero on success. This load
  * function requires the save entry to be the same size as the dest structure.
  */
-#define _hvm_load_entry(_x, _h, _dst, _strict) ({                       \
-    int r;                                                              \
-    struct hvm_save_descriptor *desc                                    \
-        = (struct hvm_save_descriptor *)&(_h)->data[(_h)->cur];         \
-    if ( (r = _hvm_check_entry((_h), HVM_SAVE_CODE(_x),                 \
-               HVM_SAVE_LENGTH(_x), (_strict))) == 0 )                  \
+#define _hvm_load_entry(x, h, dst, strict) ({                           \
+    int r_;                                                             \
+    struct hvm_save_descriptor *desc_                                   \
+        = (struct hvm_save_descriptor *)&(h)->data[(h)->cur];           \
+    if ( (r_ = _hvm_check_entry(h, HVM_SAVE_CODE(x),                    \
+                                HVM_SAVE_LENGTH(x), strict)) == 0 )     \
     {                                                                   \
-        _hvm_read_entry((_h), (_dst), HVM_SAVE_LENGTH(_x));             \
-        if ( HVM_SAVE_HAS_COMPAT(_x) &&                                 \
-             desc->length != HVM_SAVE_LENGTH(_x) )                      \
-            r = HVM_SAVE_FIX_COMPAT(_x, (_dst), desc->length);          \
+        _hvm_read_entry(h, dst, HVM_SAVE_LENGTH(x));                    \
+        if ( HVM_SAVE_HAS_COMPAT(x) &&                                  \
+             desc_->length != HVM_SAVE_LENGTH(x) )                      \
+            r_ = HVM_SAVE_FIX_COMPAT(x, dst, desc_->length);            \
     }                                                                   \
-    else if (HVM_SAVE_HAS_COMPAT(_x)                                    \
-             && (r = _hvm_check_entry((_h), HVM_SAVE_CODE(_x),          \
-                       HVM_SAVE_LENGTH_COMPAT(_x), (_strict))) == 0 ) { \
-        _hvm_read_entry((_h), (_dst), HVM_SAVE_LENGTH_COMPAT(_x));      \
-        r = HVM_SAVE_FIX_COMPAT(_x, (_dst), desc->length);              \
+    else if ( HVM_SAVE_HAS_COMPAT(x) &&                                 \
+              (r_ = _hvm_check_entry(h, HVM_SAVE_CODE(x),               \
+                                     HVM_SAVE_LENGTH_COMPAT(x),         \
+                                     strict)) == 0 )                    \
+    {                                                                   \
+        _hvm_read_entry(h, dst, HVM_SAVE_LENGTH_COMPAT(x));             \
+        r_ = HVM_SAVE_FIX_COMPAT(x, dst, desc_->length);                \
     }                                                                   \
-    r; })
+    r_; })
 
-#define hvm_load_entry(_x, _h, _dst)            \
-    _hvm_load_entry(_x, _h, _dst, 1)
-#define hvm_load_entry_zeroextend(_x, _h, _dst) \
-    _hvm_load_entry(_x, _h, _dst, 0)
+#define hvm_load_entry(x, h, dst)            \
+    _hvm_load_entry(x, h, dst, true)
+#define hvm_load_entry_zeroextend(x, h, dst) \
+    _hvm_load_entry(x, h, dst, false)
 
 /* Unmarshalling: what is the instance ID of the next entry? */
 static inline unsigned int hvm_load_instance(const struct hvm_domain_context *h)
@@ -97,6 +103,8 @@ static inline unsigned int hvm_load_instance(const struct hvm_domain_context *h)
  * restoring.  Both return non-zero on error. */
 typedef int (*hvm_save_handler) (struct vcpu *v,
                                  hvm_domain_context_t *h);
+typedef int (*hvm_check_handler)(const struct domain *d,
+                                 hvm_domain_context_t *h);
 typedef int (*hvm_load_handler) (struct domain *d,
                                  hvm_domain_context_t *h);
 
@@ -105,6 +113,7 @@ typedef int (*hvm_load_handler) (struct domain *d,
 void hvm_register_savevm(uint16_t typecode,
                          const char *name, 
                          hvm_save_handler save_state,
+                         hvm_check_handler check_state,
                          hvm_load_handler load_state,
                          size_t size, int kind);
 
@@ -114,13 +123,14 @@ void hvm_register_savevm(uint16_t typecode,
 
 /* Syntactic sugar around that function: specify the max number of
  * saves, and this calculates the size of buffer needed */
-#define HVM_REGISTER_SAVE_RESTORE(_x, _save, _load, _num, _k)             \
+#define HVM_REGISTER_SAVE_RESTORE(_x, _save, check, _load, _num, _k)      \
 static int __init cf_check __hvm_register_##_x##_save_and_restore(void)   \
 {                                                                         \
     hvm_register_savevm(HVM_SAVE_CODE(_x),                                \
                         #_x,                                              \
-                        &_save,                                           \
-                        &_load,                                           \
+                        _save,                                            \
+                        check,                                            \
+                        _load,                                            \
                         (_num) * (HVM_SAVE_LENGTH(_x)                     \
                                   + sizeof (struct hvm_save_descriptor)), \
                         _k);                                              \
@@ -134,11 +144,6 @@ size_t hvm_save_size(struct domain *d);
 int hvm_save(struct domain *d, hvm_domain_context_t *h);
 int hvm_save_one(struct domain *d, unsigned int typecode, unsigned int instance,
                  XEN_GUEST_HANDLE_64(uint8) handle, uint64_t *bufsz);
-int hvm_load(struct domain *d, hvm_domain_context_t *h);
-
-/* Arch-specific definitions. */
-struct hvm_save_header;
-void arch_hvm_save(struct domain *d, struct hvm_save_header *hdr);
-int arch_hvm_load(struct domain *d, struct hvm_save_header *hdr);
+int hvm_load(struct domain *d, bool real, hvm_domain_context_t *h);
 
 #endif /* __XEN_HVM_SAVE_H__ */

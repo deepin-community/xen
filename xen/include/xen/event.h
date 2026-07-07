@@ -48,10 +48,10 @@ int set_global_virq_handler(struct domain *d, uint32_t virq);
  *  @d:        Domain to which physical IRQ should be sent
  *  @pirq:     Physical IRQ number
  */
-void send_guest_pirq(struct domain *, const struct pirq *);
+void send_guest_pirq(struct domain *d, const struct pirq *pirq);
 
 /* Send a notification from a given domain's event-channel port. */
-int evtchn_send(struct domain *d, unsigned int lport);
+int evtchn_send(struct domain *ld, unsigned int lport);
 
 /* Bind a local event-channel port to the specified VCPU. */
 int evtchn_bind_vcpu(evtchn_port_t port, unsigned int vcpu_id);
@@ -69,7 +69,7 @@ int evtchn_close(struct domain *d1, int port1, bool guest);
 void evtchn_free(struct domain *d, struct evtchn *chn);
 
 /* Allocate a specific event channel port. */
-int evtchn_allocate_port(struct domain *d, unsigned int port);
+int evtchn_allocate_port(struct domain *d, evtchn_port_t port);
 
 /* Allocate a new event channel */
 int __must_check evtchn_alloc_unbound(evtchn_alloc_unbound_t *alloc,
@@ -78,7 +78,7 @@ int __must_check evtchn_alloc_unbound(evtchn_alloc_unbound_t *alloc,
 /* Bind an event channel port to interdomain */
 int __must_check evtchn_bind_interdomain(evtchn_bind_interdomain_t *bind,
                                          struct domain *ld,
-                                         evtchn_port_t port);
+                                         evtchn_port_t lport);
 
 /* Unmask a local event-channel port. */
 int evtchn_unmask(unsigned int port);
@@ -114,12 +114,12 @@ void notify_via_xen_event_channel(struct domain *ld, int lport);
 #define bucket_from_port(d, p) \
     ((group_from_port(d, p))[((p) % EVTCHNS_PER_GROUP) / EVTCHNS_PER_BUCKET])
 
-static inline void evtchn_read_lock(struct evtchn *evtchn)
+static always_inline void evtchn_read_lock(struct evtchn *evtchn)
 {
     read_lock(&evtchn->lock);
 }
 
-static inline bool evtchn_read_trylock(struct evtchn *evtchn)
+static always_inline bool evtchn_read_trylock(struct evtchn *evtchn)
 {
     return read_trylock(&evtchn->lock);
 }
@@ -183,13 +183,14 @@ static bool evtchn_usable(const struct evtchn *evtchn)
 /* Wait on a Xen-attached event channel. */
 #define wait_on_xen_event_channel(port, condition)                      \
     do {                                                                \
+        struct vcpu *v = current;                                       \
         if ( condition )                                                \
             break;                                                      \
-        set_bit(_VPF_blocked_in_xen, &current->pause_flags);            \
+        set_bit(_VPF_blocked_in_xen, &v->pause_flags);                  \
         smp_mb(); /* set blocked status /then/ re-evaluate condition */ \
         if ( condition )                                                \
         {                                                               \
-            clear_bit(_VPF_blocked_in_xen, &current->pause_flags);      \
+            clear_bit(_VPF_blocked_in_xen, &v->pause_flags);            \
             break;                                                      \
         }                                                               \
         raise_softirq(SCHEDULE_SOFTIRQ);                                \
@@ -198,7 +199,8 @@ static bool evtchn_usable(const struct evtchn *evtchn)
 
 #define prepare_wait_on_xen_event_channel(port)                         \
     do {                                                                \
-        set_bit(_VPF_blocked_in_xen, &current->pause_flags);            \
+        struct vcpu *v = current;                                       \
+        set_bit(_VPF_blocked_in_xen, &v->pause_flags);                  \
         raise_softirq(SCHEDULE_SOFTIRQ);                                \
         smp_mb(); /* set blocked status /then/ caller does his work */  \
     } while ( 0 )

@@ -10,7 +10,7 @@
 #include <asm/asm_defns.h>
 
 /* Load guest GPRs.  Parameter in %rdi, clobbers all registers. */
-ENTRY(load_guest_gprs)
+FUNC(load_guest_gprs)
         movq  UREGS_rdx(%rdi), %rdx
         movq  UREGS_rax(%rdi), %rax
         movq  UREGS_rbx(%rdi), %rbx
@@ -26,14 +26,11 @@ ENTRY(load_guest_gprs)
         movq  UREGS_r15(%rdi), %r15
         movq  UREGS_rcx(%rdi), %rcx
         movq  UREGS_rdi(%rdi), %rdi
-        ret
-
-        .size load_guest_gprs, . - load_guest_gprs
-        .type load_guest_gprs, STT_FUNC
-
+        RET
+END(load_guest_gprs)
 
 /* Save guest GPRs.  Parameter on the stack above the return address. */
-ENTRY(save_guest_gprs)
+FUNC(save_guest_gprs)
         pushq %rdi
         movq  2*8(%rsp), %rdi
         movq  %rax, UREGS_rax(%rdi)
@@ -51,7 +48,5 @@ ENTRY(save_guest_gprs)
         movq  %rbx, UREGS_rbx(%rdi)
         movq  %rdx, UREGS_rdx(%rdi)
         movq  %rcx, UREGS_rcx(%rdi)
-        ret
-
-        .size save_guest_gprs, . - save_guest_gprs
-        .type save_guest_gprs, STT_FUNC
+        RET
+END(save_guest_gprs)

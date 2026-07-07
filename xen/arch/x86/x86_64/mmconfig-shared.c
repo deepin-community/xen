@@ -112,6 +112,7 @@ static const char *__init cf_check pci_mmcfg_intel_945(void)
         break;
     default:
         pci_mmcfg_config_num = 0;
+        break;
     }
 
     /* Errata #2, things break when not aligned on a 256Mb boundary */
@@ -192,7 +193,7 @@ static const char *__init cf_check pci_mmcfg_amd_fam10h(void)
 
 static const char *__init cf_check pci_mmcfg_nvidia_mcp55(void)
 {
-    static bool_t __initdata mcp55_checked;
+    static bool __initdata mcp55_checked;
     int bus, i;
 
     static const u32 extcfg_regnum      = 0x90;
@@ -361,11 +362,11 @@ static int __init is_mmconf_reserved(
     return valid;
 }
 
-static bool_t __init pci_mmcfg_reject_broken(void)
+static bool __init pci_mmcfg_reject_broken(void)
 {
     typeof(pci_mmcfg_config[0]) *cfg;
     int i;
-    bool_t valid = 1;
+    bool valid = true;
 
     if ((pci_mmcfg_config_num == 0) ||
         (pci_mmcfg_config == NULL) ||
@@ -399,9 +400,12 @@ static bool_t __init pci_mmcfg_reject_broken(void)
 
 void __init acpi_mmcfg_init(void)
 {
-    bool_t valid = 1;
+    bool valid = true;
 
     pci_segments_init();
+
+    if ( acpi_disabled )
+        return;
 
     /* MMCONFIG disabled */
     if ((pci_probe & PCI_PROBE_MMCONF) == 0)

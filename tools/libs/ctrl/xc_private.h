@@ -16,6 +16,7 @@
 #ifndef XC_PRIVATE_H
 #define XC_PRIVATE_H
 
+#include <inttypes.h>
 #include <unistd.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -39,7 +40,7 @@
 
 #include <xen/sys/privcmd.h>
 
-#include <xen-tools/libs.h>
+#include <xen-tools/common-macros.h>
 
 #if defined(HAVE_VALGRIND_MEMCHECK_H) && !defined(NDEBUG) && !defined(__MINIOS__)
 /* Compile in Valgrind client requests? */
@@ -60,12 +61,6 @@ struct iovec {
 #else
 #include <sys/uio.h>
 #endif
-
-#define DECLARE_DOMCTL struct xen_domctl domctl
-#define DECLARE_SYSCTL struct xen_sysctl sysctl
-#define DECLARE_PHYSDEV_OP struct physdev_op physdev_op
-#define DECLARE_FLASK_OP struct xen_flask_op op
-#define DECLARE_PLATFORM_OP struct xen_platform_op platform_op
 
 #undef PAGE_SHIFT
 #undef PAGE_SIZE
@@ -214,13 +209,6 @@ void xc__hypercall_buffer_cache_release(xc_interface *xch);
 /*
  * Hypercall interfaces.
  */
-
-static inline int do_xen_version(xc_interface *xch, int cmd, xc_hypercall_buffer_t *dest)
-{
-    DECLARE_HYPERCALL_BUFFER_ARGUMENT(dest);
-    return xencall2(xch->xcall, __HYPERVISOR_xen_version,
-                    cmd, HYPERCALL_BUFFER_AS_ARG(dest));
-}
 
 static inline int do_physdev_op(xc_interface *xch, int cmd, void *op, size_t len)
 {
@@ -420,12 +408,12 @@ void *xc_vm_event_enable(xc_interface *xch, uint32_t domain_id, int param,
 int do_dm_op(xc_interface *xch, uint32_t domid, unsigned int nr_bufs, ...);
 
 #if defined (__i386__) || defined (__x86_64__)
-static inline int xc_core_arch_auto_translated_physmap(const xc_dominfo_t *info)
+static inline int xc_core_arch_auto_translated_physmap(const xc_domaininfo_t *info)
 {
-    return info->hvm;
+    return info->flags & XEN_DOMINF_hvm_guest;
 }
 #elif defined (__arm__) || defined(__aarch64__)
-static inline int xc_core_arch_auto_translated_physmap(const xc_dominfo_t *info)
+static inline int xc_core_arch_auto_translated_physmap(const xc_domaininfo_t *info)
 {
     return 1;
 }

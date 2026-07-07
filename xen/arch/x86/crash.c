@@ -24,7 +24,6 @@
 #include <xen/keyhandler.h>
 #include <public/xen.h>
 #include <asm/shared.h>
-#include <asm/hvm/support.h>
 #include <asm/apic.h>
 #include <asm/io_apic.h>
 #include <xen/iommu.h>
@@ -61,7 +60,7 @@ static int noreturn cf_check do_nmi_crash(
          * This update is safe from a security point of view, as this
          * pcpu is never going to try to sysret back to a PV vcpu.
          */
-        set_ist(&idt_tables[cpu][TRAP_machine_check], IST_NONE);
+        set_ist(&idt_tables[cpu][X86_EXC_MC], IST_NONE);
 
         kexec_crash_save_cpu();
         __stop_this_cpu();
@@ -131,9 +130,9 @@ static void nmi_shootdown_cpus(void)
      * Disable IST for MCEs to avoid stack corruption race conditions, and
      * change the NMI handler to a nop to avoid deviation from this codepath.
      */
-    _set_gate_lower(&idt_tables[cpu][TRAP_nmi],
+    _set_gate_lower(&idt_tables[cpu][X86_EXC_NMI],
                     SYS_DESC_irq_gate, 0, &trap_nop);
-    set_ist(&idt_tables[cpu][TRAP_machine_check], IST_NONE);
+    set_ist(&idt_tables[cpu][X86_EXC_MC], IST_NONE);
 
     set_nmi_callback(do_nmi_crash);
     smp_send_nmi_allbutself();
@@ -176,8 +175,19 @@ static void nmi_shootdown_cpus(void)
          */
         x2apic_enabled = (current_local_apic_mode() == APIC_MODE_X2APIC);
 
+        if ( pcidevs_trylock() )
+        {
+            /*
+             * Assume the PCI device list to be in a consistent state if the
+             * lock is not held when the crash happened.
+             */
+            pci_disable_msi_all();
+            pcidevs_unlock();
+        }
+
         disable_IO_APIC();
         hpet_disable();
+        iommu_quiesce();
     }
 }
 

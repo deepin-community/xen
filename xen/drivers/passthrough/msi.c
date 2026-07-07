@@ -24,17 +24,16 @@ int pdev_msi_init(struct pci_dev *pdev)
 
     INIT_LIST_HEAD(&pdev->msi_list);
 
-    pos = pci_find_cap_offset(pdev->seg, pdev->bus, PCI_SLOT(pdev->devfn),
-                              PCI_FUNC(pdev->devfn), PCI_CAP_ID_MSI);
+    pos = pci_find_cap_offset(pdev->sbdf, PCI_CAP_ID_MSI);
     if ( pos )
     {
         uint16_t ctrl = pci_conf_read16(pdev->sbdf, msi_control_reg(pos));
 
+        pdev->msi_pos = pos;
         pdev->msi_maxvec = multi_msi_capable(ctrl);
     }
 
-    pos = pci_find_cap_offset(pdev->seg, pdev->bus, PCI_SLOT(pdev->devfn),
-                              PCI_FUNC(pdev->devfn), PCI_CAP_ID_MSIX);
+    pos = pci_find_cap_offset(pdev->sbdf, PCI_CAP_ID_MSIX);
     if ( pos )
     {
         struct arch_msix *msix = xzalloc(struct arch_msix);
@@ -42,6 +41,8 @@ int pdev_msi_init(struct pci_dev *pdev)
 
         if ( !msix )
             return -ENOMEM;
+
+        pdev->msix_pos = pos;
 
         spin_lock_init(&msix->table_lock);
 

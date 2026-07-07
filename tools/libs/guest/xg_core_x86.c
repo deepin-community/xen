@@ -49,14 +49,14 @@ xc_core_arch_gpfn_may_present(struct xc_core_arch_context *arch_ctxt,
 
 int
 xc_core_arch_memory_map_get(xc_interface *xch, struct xc_core_arch_context *unused,
-                            xc_dominfo_t *info, shared_info_any_t *live_shinfo,
+                            xc_domaininfo_t *info, shared_info_any_t *live_shinfo,
                             xc_core_memory_map_t **mapp,
                             unsigned int *nr_entries)
 {
     xen_pfn_t p2m_size = 0;
     xc_core_memory_map_t *map;
 
-    if ( xc_domain_nr_gpfns(xch, info->domid, &p2m_size) < 0 )
+    if ( xc_domain_nr_gpfns(xch, info->domain, &p2m_size) < 0 )
         return -1;
 
     map = malloc(sizeof(*map));
@@ -92,11 +92,9 @@ xc_core_arch_map_p2m_list_rw(xc_interface *xch, struct domain_info_context *dinf
                              uint64_t p2m_cr3)
 {
     uint64_t p2m_vaddr, p2m_end, mask, off;
-    xen_pfn_t p2m_mfn, mfn, saved_mfn, max_pfn;
-    uint64_t *ptes = NULL;
+    xen_pfn_t p2m_mfn, saved_mfn;
     xen_pfn_t *mfns = NULL;
-    unsigned int fpp, n_pages, level, n_levels, shift,
-                 idx_start, idx_end, idx, saved_idx;
+    unsigned int fpp, level, n_levels, idx_start, idx_end, saved_idx;
 
     p2m_vaddr = GET_FIELD(live_shinfo, arch.p2m_vaddr, dinfo->guest_width);
     fpp = PAGE_SIZE / dinfo->guest_width;
@@ -152,8 +150,10 @@ xc_core_arch_map_p2m_list_rw(xc_interface *xch, struct domain_info_context *dinf
 
     for ( level = n_levels; level > 0; level-- )
     {
-        n_pages = idx_end - idx_start + 1;
-        ptes = xc_map_foreign_pages(xch, dom, PROT_READ, mfns, n_pages);
+        unsigned int n_pages = idx_end - idx_start + 1;
+        uint64_t *ptes = xc_map_foreign_pages(xch, dom, PROT_READ, mfns, n_pages);
+        unsigned int shift, idx;
+
         if ( !ptes )
         {
             PERROR("Failed to map %u page table pages for p2m list", n_pages);
@@ -169,18 +169,21 @@ xc_core_arch_map_p2m_list_rw(xc_interface *xch, struct domain_info_context *dinf
         if ( !mfns )
         {
             ERROR("Cannot allocate memory for array of %u mfns", idx);
+        out_unmap:
+            munmap(ptes, n_pages * PAGE_SIZE);
             goto out;
         }
 
         for ( idx = idx_start; idx <= idx_end; idx++ )
         {
-            mfn = (ptes[idx] & 0x000ffffffffff000ULL) >> PAGE_SHIFT;
+            xen_pfn_t mfn = (ptes[idx] & 0x000ffffffffff000ULL) >> PAGE_SHIFT;
+
             if ( mfn == 0 )
             {
                 ERROR("Bad mfn %#lx during page table walk for vaddr %#" PRIx64 " at level %d of p2m list",
                       mfn, off + ((uint64_t)idx << shift), level);
                 errno = ERANGE;
-                goto out;
+                goto out_unmap;
             }
             mfns[idx - idx_start] = mfn;
 
@@ -197,6 +200,8 @@ xc_core_arch_map_p2m_list_rw(xc_interface *xch, struct domain_info_context *dinf
 
         if ( level == 2 )
         {
+            xen_pfn_t max_pfn;
+
             if ( saved_idx == idx_end )
                 saved_idx++;
             max_pfn = ((xen_pfn_t)saved_idx << 9) * fpp;
@@ -210,7 +215,6 @@ xc_core_arch_map_p2m_list_rw(xc_interface *xch, struct domain_info_context *dinf
         }
 
         munmap(ptes, n_pages * PAGE_SIZE);
-        ptes = NULL;
         off = p2m_vaddr & ((mask >> shift) << shift);
     }
 
@@ -218,8 +222,6 @@ xc_core_arch_map_p2m_list_rw(xc_interface *xch, struct domain_info_context *dinf
 
  out:
     free(mfns);
-    if ( ptes )
-        munmap(ptes, n_pages * PAGE_SIZE);
 
     return NULL;
 }
@@ -314,24 +316,24 @@ xc_core_arch_map_p2m_tree_rw(xc_interface *xch, struct domain_info_context *dinf
 }
 
 static int
-xc_core_arch_map_p2m_rw(xc_interface *xch, struct domain_info_context *dinfo, xc_dominfo_t *info,
+xc_core_arch_map_p2m_rw(xc_interface *xch, struct domain_info_context *dinfo, xc_domaininfo_t *info,
                         shared_info_any_t *live_shinfo, xen_pfn_t **live_p2m, int rw)
 {
     xen_pfn_t *p2m_frame_list = NULL;
     uint64_t p2m_cr3;
-    uint32_t dom = info->domid;
+    uint32_t dom = info->domain;
     int ret = -1;
     int err;
 
-    if ( xc_domain_nr_gpfns(xch, info->domid, &dinfo->p2m_size) < 0 )
+    if ( xc_domain_nr_gpfns(xch, info->domain, &dinfo->p2m_size) < 0 )
     {
         ERROR("Could not get maximum GPFN!");
         goto out;
     }
 
-    if ( dinfo->p2m_size < info->nr_pages  )
+    if ( dinfo->p2m_size < info->tot_pages  )
     {
-        ERROR("p2m_size < nr_pages -1 (%lx < %lx", dinfo->p2m_size, info->nr_pages - 1);
+        ERROR("p2m_size < nr_pages -1 (%lx < %"PRIx64, dinfo->p2m_size, info->tot_pages - 1);
         goto out;
     }
 
@@ -366,14 +368,14 @@ out:
 }
 
 int
-xc_core_arch_map_p2m(xc_interface *xch, struct domain_info_context *dinfo, xc_dominfo_t *info,
+xc_core_arch_map_p2m(xc_interface *xch, struct domain_info_context *dinfo, xc_domaininfo_t *info,
                         shared_info_any_t *live_shinfo, xen_pfn_t **live_p2m)
 {
     return xc_core_arch_map_p2m_rw(xch, dinfo, info, live_shinfo, live_p2m, 0);
 }
 
 int
-xc_core_arch_map_p2m_writable(xc_interface *xch, struct domain_info_context *dinfo, xc_dominfo_t *info,
+xc_core_arch_map_p2m_writable(xc_interface *xch, struct domain_info_context *dinfo, xc_domaininfo_t *info,
                               shared_info_any_t *live_shinfo, xen_pfn_t **live_p2m)
 {
     return xc_core_arch_map_p2m_rw(xch, dinfo, info, live_shinfo, live_p2m, 1);

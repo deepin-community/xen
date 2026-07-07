@@ -1,25 +1,13 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * hpet.c: HPET emulation for HVM guests.
  * Copyright (c) 2006, Intel Corporation.
  * Copyright (c) 2006, Keir Fraser <keir@xensource.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <asm/hvm/vpt.h>
 #include <asm/hvm/io.h>
-#include <asm/hvm/support.h>
-#include <asm/hvm/trace.h>
+#include <asm/hvm/save.h>
 #include <asm/current.h>
 #include <asm/hpet.h>
 #include <asm/mc146818rtc.h>
@@ -54,12 +42,14 @@
     ((s_time_t)((((tick) > (h)->hpet_to_ns_limit) ?     \
         ~0ULL : (tick) * (h)->hpet_to_ns_scale) >> 10))
 
-#define timer_config(h, n)       (h->hpet.timers[n].config)
+#define timer_config(h, n)       ((h)->hpet.timers[n].config)
 #define timer_enabled(h, n)      (timer_config(h, n) & HPET_TN_ENABLE)
 #define timer_is_periodic(h, n)  (timer_config(h, n) & HPET_TN_PERIODIC)
 #define timer_is_32bit(h, n)     (timer_config(h, n) & HPET_TN_32BIT)
-#define hpet_enabled(h)          (h->hpet.config & HPET_CFG_ENABLE)
+#define hpet_enabled(h)          ((h)->hpet.config & HPET_CFG_ENABLE)
 #define timer_level(h, n)        (timer_config(h, n) & HPET_TN_LEVEL)
+#define timer_is_legacy(h, n) \
+    (((n) <= 1) && ((h)->hpet.config & HPET_CFG_LEGACY))
 
 #define timer_int_route(h, n)    MASK_EXTR(timer_config(h, n), HPET_TN_ROUTE)
 
@@ -67,7 +57,8 @@
     MASK_EXTR(timer_config(h, n), HPET_TN_INT_ROUTE_CAP)
 
 #define timer_int_route_valid(h, n) \
-    ((1u << timer_int_route(h, n)) & timer_int_route_cap(h, n))
+    (timer_is_legacy(h, n) || \
+     ((1u << timer_int_route(h, n)) & timer_int_route_cap(h, n)))
 
 static inline uint64_t hpet_read_maincounter(HPETState *h, uint64_t guest_time)
 {
@@ -172,7 +163,7 @@ static int cf_check hpet_read(
 
     if ( !v->domain->arch.hvm.params[HVM_PARAM_HPET_ENABLED] )
     {
-        result = ~0ul;
+        result = ~0UL;
         goto out;
     }
 
@@ -180,7 +171,7 @@ static int cf_check hpet_read(
 
     if ( hpet_check_access_length(addr, length) != 0 )
     {
-        result = ~0ul;
+        result = ~0UL;
         goto out;
     }
 
@@ -212,7 +203,7 @@ static void hpet_stop_timer(HPETState *h, unsigned int tn,
 {
     ASSERT(tn < HPET_TIMER_NUM);
     ASSERT(rw_is_write_locked(&h->lock));
-    TRACE_1D(TRC_HVM_EMUL_HPET_STOP_TIMER, tn);
+    TRACE_TIME(TRC_HVM_EMUL_HPET_STOP_TIMER, tn);
     destroy_periodic_time(&h->pt[tn]);
     /* read the comparator to get it updated so a read while stopped will
      * return the expected value. */
@@ -287,7 +278,7 @@ static void hpet_set_timer(HPETState *h, unsigned int tn,
             ? (uint32_t)diff : 0;
 
     destroy_periodic_time(&h->pt[tn]);
-    if ( (tn <= 1) && (h->hpet.config & HPET_CFG_LEGACY) )
+    if ( timer_is_legacy(h, tn) )
     {
         /* if LegacyReplacementRoute bit is set, HPET specification requires
            timer0 be routed to IRQ0 in NON-APIC or IRQ2 in the I/O APIC,
@@ -316,8 +307,8 @@ static void hpet_set_timer(HPETState *h, unsigned int tn,
     if ( !oneshot )
         period_ns = hpet_tick_to_ns(h, h->hpet.period[tn]);
 
-    TRACE_2_LONG_4D(TRC_HVM_EMUL_HPET_START_TIMER, tn, irq,
-                    TRC_PAR_LONG(diff_ns), TRC_PAR_LONG(period_ns));
+    TRACE_TIME(TRC_HVM_EMUL_HPET_START_TIMER, tn, irq,
+               diff_ns, diff_ns >> 32, period_ns, period_ns >> 32);
 
     create_periodic_time(vhpet_vcpu(h), &h->pt[tn], diff_ns, period_ns,
                          irq, timer_level(h, tn) ? hpet_timer_fired : NULL,
@@ -347,7 +338,7 @@ static void timer_sanitize_int_route(HPETState *h, unsigned int tn)
      * enabled pick the first irq.
      */
     timer_config(h, tn) |=
-        MASK_INSR(find_first_set_bit(timer_int_route_cap(h, tn)),
+        MASK_INSR(ffs(timer_int_route_cap(h, tn)) - 1,
                   HPET_TN_ROUTE);
 }
 
@@ -391,6 +382,14 @@ static int cf_check hpet_write(
         h->hpet.config = hpet_fixup_reg(new_val, old_val,
                                         HPET_CFG_ENABLE | HPET_CFG_LEGACY);
 
+        /*
+         * The first 2 channels' interrupt route values only matter when
+         * HPET_CFG_LEGACY is disabled. However, for simplicity's sake, always
+         * resanitize all channels anyway.
+         */
+        for ( i = 0; i < HPET_TIMER_NUM; i++ )
+            timer_sanitize_int_route(h, i);
+
         if ( !(old_val & HPET_CFG_ENABLE) && (new_val & HPET_CFG_ENABLE) )
         {
             /* Enable main counter and interrupt generation. */
@@ -416,12 +415,13 @@ static int cf_check hpet_write(
         break;
 
     case HPET_STATUS:
-        /* write 1 to clear. */
+        /* Write 1 to clear. Therefore don't use new_val directly here. */
+        new_val = val << ((addr & 7) * 8);
         while ( new_val )
         {
             bool active;
 
-            i = find_first_set_bit(new_val);
+            i = ffsl(new_val) - 1;
             if ( i >= HPET_TIMER_NUM )
                 break;
             __clear_bit(i, &new_val);
@@ -497,7 +497,7 @@ static int cf_check hpet_write(
         if ( timer_is_periodic(h, tn) &&
              !(h->hpet.timers[tn].config & HPET_TN_SETVAL) )
         {
-            uint64_t max_period = (timer_is_32bit(h, tn) ? ~0u : ~0ull) >> 1;
+            uint64_t max_period = (timer_is_32bit(h, tn) ? ~0u : ~0ULL) >> 1;
 
             /*
              * Clamp period to reasonable min/max values:
@@ -547,14 +547,14 @@ static int cf_check hpet_write(
     /* stop/start timers whos state was changed by this write. */
     while (stop_timers)
     {
-        i = find_first_set_bit(stop_timers);
+        i = ffsl(stop_timers) - 1;
         __clear_bit(i, &stop_timers);
         hpet_stop_timer(h, i, guest_time);
     }
 
     while (start_timers)
     {
-        i = find_first_set_bit(start_timers);
+        i = ffsl(start_timers) - 1;
         __clear_bit(i, &start_timers);
         hpet_set_timer(h, i, guest_time);
     }
@@ -648,7 +648,7 @@ static int cf_check hpet_save(struct vcpu *v, hvm_domain_context_t *h)
 static int cf_check hpet_load(struct domain *d, hvm_domain_context_t *h)
 {
     HPETState *hp = domain_vhpet(d);
-    struct hvm_hw_hpet *rec;
+    const struct hvm_hw_hpet *rec;
     uint64_t cmp;
     uint64_t guest_time;
     int i;
@@ -656,17 +656,12 @@ static int cf_check hpet_load(struct domain *d, hvm_domain_context_t *h)
     if ( !has_vhpet(d) )
         return -ENODEV;
 
-    write_lock(&hp->lock);
-
     /* Reload the HPET registers */
-    if ( _hvm_check_entry(h, HVM_SAVE_CODE(HPET), HVM_SAVE_LENGTH(HPET), 1) )
-    {
-        write_unlock(&hp->lock);
+    rec = hvm_get_entry(HPET, h);
+    if ( !rec )
         return -EINVAL;
-    }
 
-    rec = (struct hvm_hw_hpet *)&h->data[h->cur];
-    h->cur += HVM_SAVE_LENGTH(HPET);
+    write_lock(&hp->lock);
 
 #define C(x) hp->hpet.x = rec->x
     C(capability);
@@ -708,7 +703,7 @@ static int cf_check hpet_load(struct domain *d, hvm_domain_context_t *h)
     return 0;
 }
 
-HVM_REGISTER_SAVE_RESTORE(HPET, hpet_save, hpet_load, 1, HVMSR_PER_DOM);
+HVM_REGISTER_SAVE_RESTORE(HPET, hpet_save, NULL, hpet_load, 1, HVMSR_PER_DOM);
 
 static void hpet_set(HPETState *h)
 {

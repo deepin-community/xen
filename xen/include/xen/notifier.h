@@ -23,7 +23,8 @@
  */
 
 struct notifier_block {
-    int (*notifier_call)(struct notifier_block *, unsigned long, void *);
+    int (*notifier_call)(struct notifier_block *nfb, unsigned long action,
+                         void *hcpu);
     struct list_head chain;
     int priority;
 };
@@ -33,13 +34,13 @@ struct notifier_head {
 };
 
 #define NOTIFIER_HEAD(name) \
-    struct notifier_head name = { .head = LIST_HEAD_INIT(name.head) }
+    struct notifier_head name = { .head = LIST_HEAD_INIT((name).head) }
 
 
 void notifier_chain_register(
-    struct notifier_head *nh, struct notifier_block *nb);
+    struct notifier_head *nh, struct notifier_block *n);
 void notifier_chain_unregister(
-    struct notifier_head *nh, struct notifier_block *nb);
+    struct notifier_head *nh, struct notifier_block *n);
 
 int notifier_call_chain(
     struct notifier_head *nh, unsigned long val, void *v,
@@ -58,13 +59,13 @@ int notifier_call_chain(
 /* Encapsulate (negative) errno value. */
 static inline int notifier_from_errno(int err)
 {
-    return NOTIFY_STOP_MASK | -err;
+    return err ? (NOTIFY_STOP_MASK | -err) : NOTIFY_DONE;
 }
 
 /* Restore (negative) errno value from notify return value. */
 static inline int notifier_to_errno(int ret)
 {
-    return -(ret & ~NOTIFY_STOP_MASK);
+    return (ret == NOTIFY_DONE) ? 0 : -(ret & ~NOTIFY_STOP_MASK);
 }
 
 #endif /* __XEN_NOTIFIER_H__ */

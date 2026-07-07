@@ -35,12 +35,12 @@ static u32 brcm_boot_continuation_pc;
 
 static struct brcm_plat_regs regs;
 
-static __init int brcm_get_dt_node(char *compat_str,
+static __init int brcm_get_dt_node(const char *compat_str,
                                    const struct dt_device_node **dn,
                                    u32 *reg_base)
 {
     const struct dt_device_node *node;
-    u64 reg_base_64;
+    paddr_t reg_base_paddr;
     int rc;
 
     node = dt_find_compatible_node(NULL, NULL, compat_str);
@@ -50,7 +50,7 @@ static __init int brcm_get_dt_node(char *compat_str,
         return -ENOENT;
     }
 
-    rc = dt_device_get_address(node, 0, &reg_base_64, NULL);
+    rc = dt_device_get_paddr(node, 0, &reg_base_paddr, NULL);
     if ( rc )
     {
         dprintk(XENLOG_ERR, "%s: missing \"reg\" prop\n", __func__);
@@ -61,7 +61,7 @@ static __init int brcm_get_dt_node(char *compat_str,
         *dn = node;
 
     if ( reg_base )
-        *reg_base = reg_base_64;
+        *reg_base = reg_base_paddr;
 
     return 0;
 }

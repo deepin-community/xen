@@ -17,6 +17,7 @@
 #include "libxl_osdeps.h" /* must come before any other headers */
 
 #include "libxl_internal.h"
+#include "libxl_arch.h"
 
 #define PCI_BDF                "%04x:%02x:%02x.%01x"
 #define PCI_BDF_SHORT          "%02x:%02x.%01x"
@@ -632,7 +633,7 @@ bool libxl__is_igd_vga_passthru(libxl__gc *gc,
 
         if (sysfs_dev_get_class(gc, pci, &class))
             continue;
-        if (class == 0x030000)
+        if (class == 0x030000 || class == 0x038000)
             return true;
     }
 
@@ -1478,32 +1479,42 @@ static void pci_add_dm_done(libxl__egc *egc,
     fclose(f);
     if (!pci_supp_legacy_irq())
         goto out_no_irq;
-    sysfs_path = GCSPRINTF(SYSFS_PCI_DEV"/"PCI_BDF"/irq", pci->domain,
-                                pci->bus, pci->dev, pci->func);
-    f = fopen(sysfs_path, "r");
-    if (f == NULL) {
-        LOGED(ERROR, domainid, "Couldn't open %s", sysfs_path);
-        goto out_no_irq;
-    }
-    if ((fscanf(f, "%u", &irq) == 1) && irq) {
-        r = xc_physdev_map_pirq(ctx->xch, domid, irq, &irq);
-        if (r < 0) {
-            LOGED(ERROR, domainid, "xc_physdev_map_pirq irq=%d (error=%d)",
-                  irq, r);
-            fclose(f);
-            rc = ERROR_FAIL;
+
+    /* When dom0 is PVH, should use gsi to map pirq and grant permission */
+    if (libxl__arch_local_domain_has_pirq_notion(gc) == false) {
+        rc = libxl__arch_hvm_map_gsi(gc, pci_encode_bdf(pci), domid);
+        if (rc) {
+            LOGD(ERROR, domainid, "libxl__arch_hvm_map_gsi failed");
             goto out;
         }
-        r = xc_domain_irq_permission(ctx->xch, domid, irq, 1);
-        if (r < 0) {
-            LOGED(ERROR, domainid,
-                  "xc_domain_irq_permission irq=%d (error=%d)", irq, r);
-            fclose(f);
-            rc = ERROR_FAIL;
-            goto out;
+    } else {
+        sysfs_path = GCSPRINTF(SYSFS_PCI_DEV"/"PCI_BDF"/irq", pci->domain,
+                                    pci->bus, pci->dev, pci->func);
+        f = fopen(sysfs_path, "r");
+        if (f == NULL) {
+            LOGED(ERROR, domainid, "Couldn't open %s", sysfs_path);
+            goto out_no_irq;
         }
+        if ((fscanf(f, "%u", &irq) == 1) && irq) {
+            r = xc_physdev_map_pirq(ctx->xch, domid, irq, &irq);
+            if (r < 0) {
+                LOGED(ERROR, domainid, "xc_physdev_map_pirq irq=%d (error=%d)",
+                    irq, r);
+                fclose(f);
+                rc = ERROR_FAIL;
+                goto out;
+            }
+            r = xc_domain_irq_permission(ctx->xch, domid, irq, 1);
+            if (r < 0) {
+                LOGED(ERROR, domainid,
+                    "xc_domain_irq_permission irq=%d (error=%d)", irq, r);
+                fclose(f);
+                rc = ERROR_FAIL;
+                goto out;
+            }
+        }
+        fclose(f);
     }
-    fclose(f);
 
     /* Don't restrict writes to the PCI config space from this VM */
     if (pci->permissive) {
@@ -1554,27 +1565,27 @@ static int libxl__device_pci_reset(libxl__gc *gc, unsigned int domain, unsigned 
         char *buf = GCSPRINTF(PCI_BDF, domain, bus, dev, func);
         rc = write(fd, buf, strlen(buf));
         if (rc < 0)
-            LOGD(ERROR, domain, "write to %s returned %d", reset, rc);
+            LOGE(ERROR, "write '%s' to %s failed", buf, reset);
         close(fd);
         return rc < 0 ? rc : 0;
     }
     if (errno != ENOENT)
-        LOGED(ERROR, domain, "Failed to access pciback path %s", reset);
+        LOGE(ERROR, "Failed to access pciback path %s", reset);
     reset = GCSPRINTF("%s/"PCI_BDF"/reset", SYSFS_PCI_DEV, domain, bus, dev, func);
     fd = open(reset, O_WRONLY);
     if (fd >= 0) {
         rc = write(fd, "1", 1);
         if (rc < 0)
-            LOGED(ERROR, domain, "write to %s returned %d", reset, rc);
+            LOGE(ERROR, "write to %s failed", reset);
         close(fd);
         return rc < 0 ? rc : 0;
     }
     if (errno == ENOENT) {
-        LOGD(ERROR, domain,
-             "The kernel doesn't support reset from sysfs for PCI device "PCI_BDF,
-             domain, bus, dev, func);
+        LOG(ERROR,
+            "The kernel doesn't support reset from sysfs for PCI device "PCI_BDF,
+            domain, bus, dev, func);
     } else {
-        LOGED(ERROR, domain, "Failed to access reset path %s", reset);
+        LOGE(ERROR, "Failed to access reset path %s", reset);
     }
     return -1;
 }
@@ -1953,8 +1964,6 @@ static void do_pci_remove(libxl__egc *egc, pci_remove_state *prs)
     libxl_domain_type type = libxl__domain_type(gc, domid);
     libxl_device_pci *pci = &prs->pci;
     int rc, num;
-    uint32_t domainid = domid;
-
     pcis = libxl_device_pci_list(ctx, domid, &num);
     if (!pcis) {
         rc = ERROR_FAIL;
@@ -1966,11 +1975,10 @@ static void do_pci_remove(libxl__egc *egc, pci_remove_state *prs)
 
     rc = ERROR_INVAL;
     if (!attached) {
-        LOGD(ERROR, domainid, "PCI device not attached to this domain");
+        LOGD(ERROR, domid, "PCI device not attached to this domain");
         goto out_fail;
     }
 
-    rc = ERROR_FAIL;
     if (type == LIBXL_DOMAIN_TYPE_HVM) {
         prs->hvm = true;
         switch (libxl__device_model_version_running(gc, domid)) {
@@ -1991,65 +1999,7 @@ static void do_pci_remove(libxl__egc *egc, pci_remove_state *prs)
             rc = ERROR_INVAL;
             goto out_fail;
         }
-    } else {
-        char *sysfs_path = GCSPRINTF(SYSFS_PCI_DEV"/"PCI_BDF"/resource", pci->domain,
-                                     pci->bus, pci->dev, pci->func);
-        FILE *f = fopen(sysfs_path, "r");
-        unsigned int start = 0, end = 0, flags = 0, size = 0;
-        int irq = 0;
-        int i;
-
-        if (f == NULL) {
-            LOGED(ERROR, domainid, "Couldn't open %s", sysfs_path);
-            goto skip1;
-        }
-        for (i = 0; i < PROC_PCI_NUM_RESOURCES; i++) {
-            if (fscanf(f, "0x%x 0x%x 0x%x\n", &start, &end, &flags) != 3)
-                continue;
-            size = end - start + 1;
-            if (start) {
-                if (flags & PCI_BAR_IO) {
-                    rc = xc_domain_ioport_permission(ctx->xch, domid, start, size, 0);
-                    if (rc < 0)
-                        LOGED(ERROR, domainid,
-                              "xc_domain_ioport_permission error 0x%x/0x%x",
-                              start,
-                              size);
-                } else {
-                    rc = xc_domain_iomem_permission(ctx->xch, domid, start>>XC_PAGE_SHIFT,
-                                                    (size+(XC_PAGE_SIZE-1))>>XC_PAGE_SHIFT, 0);
-                    if (rc < 0)
-                        LOGED(ERROR, domainid,
-                              "xc_domain_iomem_permission error 0x%x/0x%x",
-                              start,
-                              size);
-                }
-            }
-        }
-        fclose(f);
-skip1:
-        if (!pci_supp_legacy_irq())
-            goto skip_irq;
-        sysfs_path = GCSPRINTF(SYSFS_PCI_DEV"/"PCI_BDF"/irq", pci->domain,
-                               pci->bus, pci->dev, pci->func);
-        f = fopen(sysfs_path, "r");
-        if (f == NULL) {
-            LOGED(ERROR, domainid, "Couldn't open %s", sysfs_path);
-            goto skip_irq;
-        }
-        if ((fscanf(f, "%u", &irq) == 1) && irq) {
-            rc = xc_physdev_unmap_pirq(ctx->xch, domid, irq);
-            if (rc < 0) {
-                LOGED(ERROR, domainid, "xc_physdev_unmap_pirq irq=%d", irq);
-            }
-            rc = xc_domain_irq_permission(ctx->xch, domid, irq, 0);
-            if (rc < 0) {
-                LOGED(ERROR, domainid, "xc_domain_irq_permission irq=%d", irq);
-            }
-        }
-        fclose(f);
     }
-skip_irq:
     rc = 0;
 out_fail:
     pci_remove_detached(egc, prs, rc); /* must be last */
@@ -2228,7 +2178,11 @@ static void pci_remove_detached(libxl__egc *egc,
                                 int rc)
 {
     STATE_AO_GC(prs->aodev->ao);
-    int stubdomid = 0;
+    libxl_ctx *ctx = libxl__gc_owner(gc);
+    uint64_t start = 0, end = 0, flags = 0, size = 0;
+    int  irq = 0, i, stubdomid = 0;
+    const char *sysfs_path;
+    FILE *f;
     uint32_t domainid = prs->domid;
     bool isstubdom;
 
@@ -2243,6 +2197,88 @@ static void pci_remove_detached(libxl__egc *egc,
 
     if (rc && !prs->force)
         goto out;
+
+    /* Revoke the permissions */
+    sysfs_path = GCSPRINTF(SYSFS_PCI_DEV"/"PCI_BDF"/resource",
+                           pci->domain, pci->bus, pci->dev, pci->func);
+
+    f = fopen(sysfs_path, "r");
+    if (f == NULL) {
+        LOGED(ERROR, domid, "Couldn't open %s", sysfs_path);
+        goto skip_bar;
+    }
+
+    for (i = 0; i < PROC_PCI_NUM_RESOURCES; i++) {
+        if (fscanf(f, "0x%"SCNx64" 0x%"SCNx64" 0x%"SCNx64"\n",
+                   &start, &end, &flags) != 3)
+            continue;
+        size = end - start + 1;
+        if (start) {
+            if (flags & PCI_BAR_IO) {
+                rc = xc_domain_ioport_permission(ctx->xch, domid, start,
+                                                 size, 0);
+                if (rc < 0)
+                    LOGED(ERROR, domid,
+                          "xc_domain_ioport_permission error %#"PRIx64"/%#"PRIx64,
+                          start,
+                          size);
+            } else {
+                rc = xc_domain_iomem_permission(ctx->xch, domid,
+                                                start >> XC_PAGE_SHIFT,
+                                                (size + (XC_PAGE_SIZE - 1)) >> XC_PAGE_SHIFT,
+                                                0);
+                if (rc < 0)
+                    LOGED(ERROR, domid,
+                          "xc_domain_iomem_permission error %#"PRIx64"/%#"PRIx64,
+                          start,
+                          size);
+            }
+        }
+    }
+    fclose(f);
+
+skip_bar:
+    if (!pci_supp_legacy_irq())
+        goto skip_legacy_irq;
+
+    /* When dom0 is PVH, should use gsi to unmap pirq and deny permission */
+    if (libxl__arch_local_domain_has_pirq_notion(gc) == false) {
+        rc = libxl__arch_hvm_unmap_gsi(gc, pci_encode_bdf(pci), domid);
+        if (rc) {
+            LOGD(ERROR, domid, "libxl__arch_hvm_unmap_gsi failed");
+            goto out;
+        }
+    } else {
+        sysfs_path = GCSPRINTF(SYSFS_PCI_DEV"/"PCI_BDF"/irq", pci->domain,
+                            pci->bus, pci->dev, pci->func);
+
+        f = fopen(sysfs_path, "r");
+        if (f == NULL) {
+            LOGED(ERROR, domid, "Couldn't open %s", sysfs_path);
+            goto skip_legacy_irq;
+        }
+
+        if ((fscanf(f, "%u", &irq) == 1) && irq) {
+            rc = xc_physdev_unmap_pirq(ctx->xch, domid, irq);
+            if (rc < 0) {
+                /*
+                 * QEMU may have already unmapped the IRQ. So the error
+                 * may be spurious. For now, still print an error message as
+                 * it is not easy to distinguished between valid and
+                 * spurious error.
+                 */
+                LOGED(ERROR, domid, "xc_physdev_unmap_pirq irq=%d", irq);
+            }
+            rc = xc_domain_irq_permission(ctx->xch, domid, irq, 0);
+            if (rc < 0) {
+                LOGED(ERROR, domid, "xc_domain_irq_permission irq=%d", irq);
+            }
+        }
+
+        fclose(f);
+    }
+
+skip_legacy_irq:
 
     isstubdom = libxl_is_stubdom(CTX, domid, &domainid);
 

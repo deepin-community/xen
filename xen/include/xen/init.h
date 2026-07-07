@@ -1,8 +1,6 @@
 #ifndef _LINUX_INIT_H
 #define _LINUX_INIT_H
 
-#include <asm/init.h>
-
 /*
  * Mark functions and data as being only used at initialization
  * or exit time.
@@ -65,9 +63,9 @@ typedef int (*initcall_t)(void);
 typedef void (*exitcall_t)(void);
 
 #define presmp_initcall(fn) \
-    const static initcall_t __initcall_##fn __init_call("presmp") = fn
+    const static initcall_t __initcall_##fn __init_call("presmp") = (fn)
 #define __initcall(fn) \
-    const static initcall_t __initcall_##fn __init_call("1") = fn
+    const static initcall_t __initcall_##fn __init_call("1") = (fn)
 #define __exitcall(fn) \
     static exitcall_t __exitcall_##fn __exit_call = fn
 

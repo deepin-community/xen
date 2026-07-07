@@ -19,47 +19,29 @@
 #include <xen/mm.h>
 #include <xen/bitops.h>
 #include <xen/nospec.h>
+#include <xen/sections.h>
 
-/* Parameters for PFN/MADDR compression. */
+/**
+ * Maximum (non-inclusive) usable pdx. Must be
+ * modifiable after init due to memory hotplug
+ */
 unsigned long __read_mostly max_pdx;
-unsigned long __read_mostly pfn_pdx_bottom_mask = ~0UL;
-unsigned long __read_mostly ma_va_bottom_mask = ~0UL;
-unsigned long __read_mostly pfn_top_mask = 0;
-unsigned long __read_mostly ma_top_mask = 0;
-unsigned long __read_mostly pfn_hole_mask = 0;
-unsigned int __read_mostly pfn_pdx_hole_shift = 0;
 
 unsigned long __read_mostly pdx_group_valid[BITS_TO_LONGS(
     (FRAMETABLE_NR + PDX_GROUP_COUNT - 1) / PDX_GROUP_COUNT)] = { [0] = 1 };
 
 bool __mfn_valid(unsigned long mfn)
 {
-    if ( unlikely(evaluate_nospec(mfn >= max_page)) )
+    bool invalid = mfn >= max_page;
+
+#ifdef CONFIG_PDX_COMPRESSION
+    invalid |= mfn & pfn_hole_mask;
+#endif
+
+    if ( unlikely(evaluate_nospec(invalid)) )
         return false;
-    return likely(!(mfn & pfn_hole_mask)) &&
-           likely(test_bit(pfn_to_pdx(mfn) / PDX_GROUP_COUNT,
-                           pdx_group_valid));
-}
 
-/* Sets all bits from the most-significant 1-bit down to the LSB */
-static u64 __init fill_mask(u64 mask)
-{
-    while (mask & (mask + 1))
-        mask |= mask + 1;
-
-    return mask;
-}
-
-/* We don't want to compress the low MAX_ORDER bits of the addresses. */
-uint64_t __init pdx_init_mask(uint64_t base_addr)
-{
-    return fill_mask(max(base_addr,
-                         (uint64_t)1 << (MAX_ORDER + PAGE_SHIFT)) - 1);
-}
-
-u64 __init pdx_region_mask(u64 base, u64 len)
-{
-    return fill_mask(base ^ (base + len - 1));
+    return test_bit(pfn_to_pdx(mfn) / PDX_GROUP_COUNT, pdx_group_valid);
 }
 
 void set_pdx_range(unsigned long smfn, unsigned long emfn)
@@ -71,6 +53,94 @@ void set_pdx_range(unsigned long smfn, unsigned long emfn)
 
     for ( ; idx < eidx; ++idx )
         __set_bit(idx, pdx_group_valid);
+}
+
+#ifdef CONFIG_PDX_COMPRESSION
+
+/*
+ * Diagram to make sense of the following variables. The masks and shifts
+ * are done on mfn values in order to convert to/from pdx:
+ *
+ *                      pfn_hole_mask
+ *                      pfn_pdx_hole_shift (mask bitsize)
+ *                      |
+ *                 |---------|
+ *                 |         |
+ *                 V         V
+ *         --------------------------
+ *         |HHHHHHH|000000000|LLLLLL| <--- mfn
+ *         --------------------------
+ *         ^       ^         ^      ^
+ *         |       |         |------|
+ *         |       |             |
+ *         |       |             pfn_pdx_bottom_mask
+ *         |       |
+ *         |-------|
+ *             |
+ *             pfn_top_mask
+ *
+ * ma_{top,va_bottom}_mask is simply a shifted pfn_{top,pdx_bottom}_mask,
+ * where ma_top_mask has zeroes shifted in while ma_va_bottom_mask has
+ * ones.
+ */
+
+/** Mask for the lower non-compressible bits of an mfn */
+unsigned long __ro_after_init pfn_pdx_bottom_mask = ~0UL;
+
+/** Mask for the lower non-compressible bits of an maddr or vaddr */
+unsigned long __ro_after_init ma_va_bottom_mask = ~0UL;
+
+/** Mask for the higher non-compressible bits of an mfn */
+unsigned long __ro_after_init pfn_top_mask = 0;
+
+/** Mask for the higher non-compressible bits of an maddr or vaddr */
+unsigned long __ro_after_init ma_top_mask = 0;
+
+/**
+ * Mask for a pdx compression bit slice.
+ *
+ *  Invariant: valid(mfn) implies (mfn & pfn_hole_mask) == 0
+ */
+unsigned long __ro_after_init pfn_hole_mask = 0;
+
+/** Number of bits of the "compressible" bit slice of an mfn */
+unsigned int __ro_after_init pfn_pdx_hole_shift = 0;
+
+/* Sets all bits from the most-significant 1-bit down to the LSB */
+static uint64_t fill_mask(uint64_t mask)
+{
+    while (mask & (mask + 1))
+        mask |= mask + 1;
+
+    return mask;
+}
+
+bool pdx_is_region_compressible(paddr_t base, unsigned long npages)
+{
+    return !(paddr_to_pfn(base) & pfn_hole_mask) &&
+           !(pdx_region_mask(base, npages * PAGE_SIZE) & ~ma_va_bottom_mask);
+}
+
+/* We don't want to compress the low MAX_ORDER bits of the addresses. */
+uint64_t __init pdx_init_mask(uint64_t base_addr)
+{
+    return fill_mask(max(base_addr,
+                         (uint64_t)1 << (MAX_ORDER + PAGE_SHIFT)) - 1);
+}
+
+uint64_t pdx_region_mask(uint64_t base, uint64_t len)
+{
+    /*
+     * We say a bit "moves" in a range if there exist 2 addresses in that
+     * range that have that bit both set and cleared respectively. We want
+     * to create a mask of _all_ moving bits in this range. We do this by
+     * comparing the first and last addresses in the range, discarding the
+     * bits that remain the same (this is logically an XOR operation). The
+     * MSB of the resulting expression is the most significant moving bit
+     * in the range. Then it's a matter of setting every bit in lower
+     * positions in order to get the mask of moving bits.
+     */
+    return fill_mask(base ^ (base + len - 1));
 }
 
 void __init pfn_pdx_hole_setup(unsigned long mask)
@@ -114,6 +184,7 @@ void __init pfn_pdx_hole_setup(unsigned long mask)
     ma_top_mask         = pfn_top_mask << PAGE_SHIFT;
 }
 
+#endif /* CONFIG_PDX_COMPRESSION */
 
 /*
  * Local variables:

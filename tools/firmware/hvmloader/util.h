@@ -7,7 +7,10 @@
 #include <stdbool.h>
 #include <xen/xen.h>
 #include <xen/hvm/hvm_info_table.h>
+#include "config.h"
 #include "e820.h"
+
+#include <xen-tools/common-macros.h>
 
 /* Request un-prefixed values from errno.h. */
 #define XEN_ERRNO(name, value) name = value,
@@ -18,21 +21,12 @@ enum {
 /* Cause xs_wire.h to give us xsd_errors[]. */
 #define EINVAL EINVAL
 
-#define __STR(...) #__VA_ARGS__
-#define STR(...) __STR(__VA_ARGS__)
-
 /* GDT selector values. */
 #define SEL_CODE16          0x0008
 #define SEL_DATA16          0x0010
 #define SEL_CODE32          0x0018
 #define SEL_DATA32          0x0020
 #define SEL_CODE64          0x0028
-
-#undef offsetof
-#define offsetof(t, m) ((unsigned long)&((t *)0)->m)
-
-#undef NULL
-#define NULL ((void*)0)
 
 void __assert_failed(const char *assertion, const char *file, int line)
     __attribute__((noreturn));
@@ -41,15 +35,6 @@ void __assert_failed(const char *assertion, const char *file, int line)
 void __bug(const char *file, int line) __attribute__((noreturn));
 #define BUG() __bug(__FILE__, __LINE__)
 #define BUG_ON(p) do { if (p) BUG(); } while (0)
-#define BUILD_BUG_ON(p) ((void)sizeof(char[1 - 2 * !!(p)]))
-
-#define min_t(type,x,y) \
-        ({ type __x = (x); type __y = (y); __x < __y ? __x: __y; })
-#define max_t(type,x,y) \
-        ({ type __x = (x); type __y = (y); __x > __y ? __x: __y; })
-
-#define MB(mb) (mb##ULL << 20)
-#define GB(gb) (gb##ULL << 30)
 
 static inline int test_bit(unsigned int b, const void *p)
 {
@@ -67,28 +52,113 @@ static inline int test_and_clear_bit(int nr, volatile void *addr)
 }
 
 /* MSR access */
-void wrmsr(uint32_t idx, uint64_t v);
-uint64_t rdmsr(uint32_t idx);
+static inline void wrmsr(uint32_t idx, uint64_t v)
+{
+    asm volatile ( "wrmsr" :: "c" (idx), "A" (v) );
+}
+
+static inline uint64_t rdmsr(uint32_t idx)
+{
+    uint64_t res;
+
+    asm volatile ( "rdmsr" : "=A" (res) : "c" (idx) );
+
+    return res;
+}
 
 /* I/O output */
-void outb(uint16_t addr, uint8_t  val);
-void outw(uint16_t addr, uint16_t val);
-void outl(uint16_t addr, uint32_t val);
+static inline void outb(uint16_t port, uint8_t val)
+{
+    asm volatile ( "outb %[val], %[port]"
+                   :
+                   : [port] "Nd" (port),
+                     [val] "a" (val)
+                   : "memory" );
+}
+
+static inline void outw(uint16_t port, uint16_t val)
+{
+    asm volatile ( "outw %[val], %[port]"
+                   :
+                   : [port] "Nd" (port),
+                     [val] "a" (val)
+                   : "memory" );
+}
+
+static inline void outl(uint16_t port, uint32_t val)
+{
+    asm volatile ( "outl %[val], %[port]"
+                   :
+                   : [port] "Nd" (port),
+                     [val] "a" (val)
+                   : "memory" );
+}
 
 /* I/O input */
-uint8_t  inb(uint16_t addr);
-uint16_t inw(uint16_t addr);
-uint32_t inl(uint16_t addr);
+static inline uint8_t inb(uint16_t port)
+{
+    uint8_t val;
+
+    asm volatile ( "inb %[port], %[val]"
+                   : [val] "=a" (val)
+                   : [port] "Nd" (port)
+                   : "memory" );
+
+    return val;
+}
+
+static inline uint16_t inw(uint16_t port)
+{
+    uint16_t val;
+
+    asm volatile ( "inw %[port], %[val]"
+                   : [val] "=a" (val)
+                   : [port] "Nd" (port)
+                   : "memory" );
+
+    return val;
+}
+
+static inline uint32_t inl(uint16_t port)
+{
+    uint32_t val;
+
+    asm volatile ( "inl %[port], %[val]"
+                   : [val] "=a" (val)
+                   : [port] "Nd" (port)
+                   : "memory" );
+
+    return val;
+}
 
 /* CMOS access */
 uint8_t cmos_inb(uint8_t idx);
 void cmos_outb(uint8_t idx, uint8_t val);
 
 /* APIC access */
-uint32_t ioapic_read(uint32_t reg);
-void ioapic_write(uint32_t reg, uint32_t val);
-uint32_t lapic_read(uint32_t reg);
-void lapic_write(uint32_t reg, uint32_t val);
+#define IOAPIC_BASE_ADDRESS 0xfec00000
+static inline uint32_t ioapic_read(uint32_t reg)
+{
+    *(volatile uint32_t *)(IOAPIC_BASE_ADDRESS + 0x00) = reg;
+    return *(volatile uint32_t *)(IOAPIC_BASE_ADDRESS + 0x10);
+}
+
+static inline void ioapic_write(uint32_t reg, uint32_t val)
+{
+    *(volatile uint32_t *)(IOAPIC_BASE_ADDRESS + 0x00) = reg;
+    *(volatile uint32_t *)(IOAPIC_BASE_ADDRESS + 0x10) = val;
+}
+
+#define LAPIC_BASE_ADDRESS  0xfee00000
+static inline uint32_t lapic_read(uint32_t reg)
+{
+    return *(volatile uint32_t *)(LAPIC_BASE_ADDRESS + reg);
+}
+
+static inline void lapic_write(uint32_t reg, uint32_t val)
+{
+    *(volatile uint32_t *)(LAPIC_BASE_ADDRESS + reg) = val;
+}
 
 /* PCI access */
 uint32_t pci_read(uint32_t devfn, uint32_t reg, uint32_t len);
@@ -111,9 +181,30 @@ int uart_exists(uint16_t uart_base);
 int lpt_exists(uint16_t lpt_base);
 int hpet_exists(unsigned long hpet_base);
 
-/* Do cpuid instruction, with operation 'idx' */
-void cpuid(uint32_t idx, uint32_t *eax, uint32_t *ebx,
-           uint32_t *ecx, uint32_t *edx);
+/* Some CPUID calls want 'count' to be placed in ecx */
+static inline void cpuid_count(
+    uint32_t leaf,
+    uint32_t subleaf,
+    uint32_t *eax,
+    uint32_t *ebx,
+    uint32_t *ecx,
+    uint32_t *edx)
+{
+    asm volatile ( "cpuid"
+                   : "=a" (*eax), "=b" (*ebx), "=c" (*ecx), "=d" (*edx)
+                   : "a" (leaf), "c" (subleaf) );
+}
+
+/* Generic CPUID function (subleaf 0) */
+static inline void cpuid(
+    uint32_t leaf,
+    uint32_t *eax,
+    uint32_t *ebx,
+    uint32_t *ecx,
+    uint32_t *edx)
+{
+    cpuid_count(leaf, 0, eax, ebx, ecx, edx);
+}
 
 /* Read the TSC register. */
 static inline uint64_t rdtsc(void)

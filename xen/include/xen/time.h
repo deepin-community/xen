@@ -29,13 +29,14 @@ struct vcpu;
  * of real time into system time 
  */
 
-typedef s64 s_time_t;
+typedef int64_t s_time_t;
 #define PRI_stime PRId64
 
 s_time_t get_s_time_fixed(u64 at_tick);
 s_time_t get_s_time(void);
 unsigned long get_localtime(struct domain *d);
 uint64_t get_localtime_us(struct domain *d);
+unsigned long get_sec(void);
 
 struct tm {
     int     tm_sec;         /* seconds */
@@ -57,9 +58,9 @@ struct tm wallclock_time(uint64_t *ns);
 #define SECONDS(_s)     ((s_time_t)((_s)  * 1000000000ULL))
 #define MILLISECS(_ms)  ((s_time_t)((_ms) * 1000000ULL))
 #define MICROSECS(_us)  ((s_time_t)((_us) * 1000ULL))
-#define STIME_MAX ((s_time_t)((uint64_t)~0ull>>1))
+#define STIME_MAX ((s_time_t)((uint64_t)~0ULL>>1))
 /* Chosen so (NOW() + delta) wont overflow without an uptime of 200 years */
-#define STIME_DELTA_MAX ((s_time_t)((uint64_t)~0ull>>2))
+#define STIME_DELTA_MAX ((s_time_t)((uint64_t)~0ULL>>2))
 
 /* Explicitly OR with 1 just in case version number gets out of sync. */
 #define version_update_begin(v) (((v) + 1) | 1)

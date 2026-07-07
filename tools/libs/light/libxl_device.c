@@ -177,8 +177,13 @@ int libxl__device_generic_add(libxl__gc *gc, xs_transaction_t t,
     ro_frontend_perms[1].perms = backend_perms[1].perms = XS_PERM_READ;
 
 retry_transaction:
-    if (create_transaction)
+    if (create_transaction) {
         t = xs_transaction_start(ctx->xsh);
+        if (t == XBT_NULL) {
+            LOGED(ERROR, device->domid, "xs_transaction_start failed");
+            return ERROR_FAIL;
+        }
+    }
 
     /* FIXME: read frontend_path and check state before removing stuff */
 
@@ -195,42 +200,55 @@ retry_transaction:
         if (rc) goto out;
     }
 
-    /* xxx much of this function lacks error checks! */
-
     if (fents || ro_fents) {
-        xs_rm(ctx->xsh, t, frontend_path);
-        xs_mkdir(ctx->xsh, t, frontend_path);
+        if (!xs_rm(ctx->xsh, t, frontend_path) && errno != ENOENT)
+            goto out;
+        if (!xs_mkdir(ctx->xsh, t, frontend_path))
+            goto out;
         /* Console 0 is a special case. It doesn't use the regular PV
          * state machine but also the frontend directory has
          * historically contained other information, such as the
          * vnc-port, which we don't want the guest fiddling with.
          */
         if ((device->kind == LIBXL__DEVICE_KIND_CONSOLE && device->devid == 0) ||
-            (device->kind == LIBXL__DEVICE_KIND_VUART))
-            xs_set_permissions(ctx->xsh, t, frontend_path,
-                               ro_frontend_perms, ARRAY_SIZE(ro_frontend_perms));
-        else
-            xs_set_permissions(ctx->xsh, t, frontend_path,
-                               frontend_perms, ARRAY_SIZE(frontend_perms));
-        xs_write(ctx->xsh, t, GCSPRINTF("%s/backend", frontend_path),
-                 backend_path, strlen(backend_path));
-        if (fents)
-            libxl__xs_writev_perms(gc, t, frontend_path, fents,
-                                   frontend_perms, ARRAY_SIZE(frontend_perms));
-        if (ro_fents)
-            libxl__xs_writev_perms(gc, t, frontend_path, ro_fents,
-                                   ro_frontend_perms, ARRAY_SIZE(ro_frontend_perms));
+            (device->kind == LIBXL__DEVICE_KIND_VUART)) {
+            if (!xs_set_permissions(ctx->xsh, t, frontend_path,
+                                    ro_frontend_perms, ARRAY_SIZE(ro_frontend_perms)))
+                goto out;
+        } else {
+            if (!xs_set_permissions(ctx->xsh, t, frontend_path,
+                                    frontend_perms, ARRAY_SIZE(frontend_perms)))
+                goto out;
+        }
+        if (!xs_write(ctx->xsh, t, GCSPRINTF("%s/backend", frontend_path),
+                      backend_path, strlen(backend_path)))
+            goto out;
+        if (fents) {
+            rc = libxl__xs_writev_perms(gc, t, frontend_path, fents,
+                                        frontend_perms, ARRAY_SIZE(frontend_perms));
+            if (rc) goto out;
+        }
+        if (ro_fents) {
+            rc = libxl__xs_writev_perms(gc, t, frontend_path, ro_fents,
+                                        ro_frontend_perms, ARRAY_SIZE(ro_frontend_perms));
+            if (rc) goto out;
+        }
     }
 
     if (bents) {
         if (!libxl_only) {
-            xs_rm(ctx->xsh, t, backend_path);
-            xs_mkdir(ctx->xsh, t, backend_path);
-            xs_set_permissions(ctx->xsh, t, backend_path, backend_perms,
-                               ARRAY_SIZE(backend_perms));
-            xs_write(ctx->xsh, t, GCSPRINTF("%s/frontend", backend_path),
-                     frontend_path, strlen(frontend_path));
-            libxl__xs_writev(gc, t, backend_path, bents);
+            if (!xs_rm(ctx->xsh, t, backend_path) && errno != ENOENT)
+                goto out;
+            if (!xs_mkdir(ctx->xsh, t, backend_path))
+                goto out;
+            if (!xs_set_permissions(ctx->xsh, t, backend_path, backend_perms,
+                                    ARRAY_SIZE(backend_perms)))
+                goto out;
+            if (!xs_write(ctx->xsh, t, GCSPRINTF("%s/frontend", backend_path),
+                          frontend_path, strlen(frontend_path)))
+                goto out;
+            rc = libxl__xs_writev(gc, t, backend_path, bents);
+            if (rc) goto out;
         }
 
         /*
@@ -276,7 +294,7 @@ retry_transaction:
  out:
     if (create_transaction && t)
         libxl__xs_transaction_abort(gc, &t);
-    return rc;
+    return rc != 0 ? rc : ERROR_FAIL;
 }
 
 typedef struct {
@@ -301,12 +319,16 @@ static int disk_try_backend(disk_try_backend_args *a,
 
     switch (backend) {
     case LIBXL_DISK_BACKEND_PHY:
-        if (a->disk->format != LIBXL_DISK_FORMAT_RAW) {
-            goto bad_format;
-        }
-
         if (libxl_defbool_val(a->disk->colo_enable))
             goto bad_colo;
+
+        if (a->disk->is_cdrom && a->disk->format == LIBXL_DISK_FORMAT_EMPTY) {
+            LOG(DEBUG, "Disk vdev=%s is an empty cdrom", a->disk->vdev);
+            return backend;
+        }
+
+        if (a->disk->format != LIBXL_DISK_FORMAT_RAW)
+            goto bad_format;
 
         if (a->disk->backend_domid != LIBXL_TOOLSTACK_DOMID) {
             LOG(DEBUG, "Disk vdev=%s, is using a storage driver domain, "
@@ -328,9 +350,15 @@ static int disk_try_backend(disk_try_backend_args *a,
         return 0;
 
     case LIBXL_DISK_BACKEND_TAP:
-        LOG(DEBUG, "Disk vdev=%s, backend tap unsuitable because blktap "
-                   "not available", a->disk->vdev);
-        return 0;
+        if (a->disk->format != LIBXL_DISK_FORMAT_RAW &&
+            a->disk->format != LIBXL_DISK_FORMAT_VHD)
+            goto bad_format;
+
+        if (libxl_defbool_val(a->disk->colo_enable))
+            goto bad_colo;
+
+        LOG(DEBUG, "Disk vdev=%s, returning blktap", a->disk->vdev);
+        return backend;
 
     case LIBXL_DISK_BACKEND_QDISK:
         if (a->disk->script) goto bad_script;
@@ -421,7 +449,10 @@ int libxl__device_disk_set_backend(libxl__gc *gc, libxl_device_disk *disk) {
             LOG(ERROR, "Disk vdev=%s is empty but not cdrom", disk->vdev);
             return ERROR_INVAL;
         }
-        if (disk->pdev_path != NULL && strcmp(disk->pdev_path, "")) {
+        if (disk->pdev_path != NULL &&
+            (strcmp(disk->pdev_path, "") &&
+             strncmp(disk->pdev_path, LIBXL_STUBDOM_EMPTY_CDROM,
+                     strlen(LIBXL_STUBDOM_EMPTY_CDROM)))) {
             LOG(ERROR,
                 "Disk vdev=%s is empty but an image has been provided: %s",
                 disk->vdev, disk->pdev_path);
@@ -478,7 +509,7 @@ char *libxl__device_disk_string_of_backend(libxl_disk_backend backend)
 {
     switch (backend) {
         case LIBXL_DISK_BACKEND_QDISK: return "qdisk";
-        case LIBXL_DISK_BACKEND_TAP: return "phy";
+        case LIBXL_DISK_BACKEND_TAP: return "vbd3";
         case LIBXL_DISK_BACKEND_PHY: return "phy";
         case LIBXL_DISK_BACKEND_STANDALONE: return "standalone";
         default: return NULL;
@@ -1160,9 +1191,10 @@ static void device_backend_callback(libxl__egc *egc, libxl__ev_devstate *ds,
     }
 
     if (rc) {
-        LOGD(ERROR, aodev->dev->domid, "unable to %s device with path %s",
+        LOGD(ERROR, aodev->dev->domid,
+                    "unable to %s device with path %s - rc %d",
                     libxl__device_action_to_string(aodev->action),
-                    libxl__device_backend_path(gc, aodev->dev));
+                    libxl__device_backend_path(gc, aodev->dev), rc);
         goto out;
     }
 
@@ -1510,12 +1542,12 @@ static void device_complete(libxl__egc *egc, libxl__ao_device *aodev)
     libxl__nested_ao_free(aodev->ao);
 }
 
-static void qdisk_spawn_outcome(libxl__egc *egc, libxl__dm_spawn_state *dmss,
-                                int rc)
+static void qemu_xenpv_spawn_outcome(libxl__egc *egc,
+                                     libxl__dm_spawn_state *dmss, int rc)
 {
     STATE_AO_GC(dmss->spawn.ao);
 
-    LOGD(DEBUG, dmss->guest_domid, "qdisk backend spawn %s",
+    LOGD(DEBUG, dmss->guest_domid, "qemu xenpv backend spawn %s",
                 rc ? "failed" : "succeed");
 
     libxl__nested_ao_free(dmss->spawn.ao);
@@ -1538,7 +1570,7 @@ typedef struct libxl__ddomain_device {
  */
 typedef struct libxl__ddomain_guest {
     uint32_t domid;
-    int num_qdisks;
+    int pvqemu_refcnt;
     XEN_SLIST_HEAD(, struct libxl__ddomain_device) devices;
     XEN_SLIST_ENTRY(struct libxl__ddomain_guest) next;
 } libxl__ddomain_guest;
@@ -1632,15 +1664,16 @@ static int add_device(libxl__egc *egc, libxl__ao *ao,
 
     switch(dev->backend_kind) {
     case LIBXL__DEVICE_KIND_QDISK:
-        if (dguest->num_qdisks == 0) {
+    case LIBXL__DEVICE_KIND_9PFS:
+        if (dguest->pvqemu_refcnt == 0) {
             GCNEW(dmss);
             dmss->guest_domid = dev->domid;
             dmss->spawn.ao = ao;
-            dmss->callback = qdisk_spawn_outcome;
+            dmss->callback = qemu_xenpv_spawn_outcome;
 
-            libxl__spawn_qdisk_backend(egc, dmss);
+            libxl__spawn_qemu_xenpv_backend(egc, dmss);
         }
-        dguest->num_qdisks++;
+        dguest->pvqemu_refcnt++;
         break;
     default:
         GCNEW(aodev);
@@ -1671,8 +1704,9 @@ static int remove_device(libxl__egc *egc, libxl__ao *ao,
 
     switch(ddev->dev->backend_kind) {
     case LIBXL__DEVICE_KIND_QDISK:
-        if (--dguest->num_qdisks == 0) {
-            rc = libxl__destroy_qdisk_backend(gc, dev->domid);
+    case LIBXL__DEVICE_KIND_9PFS:
+        if (--dguest->pvqemu_refcnt == 0) {
+            rc = libxl__destroy_qemu_xenpv_backend(gc, dev->domid);
             if (rc)
                 goto out;
         }

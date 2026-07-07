@@ -1,9 +1,9 @@
 quiet_cmd_banner = BANNER  $@
 define cmd_banner
-    if which figlet >/dev/null 2>&1 ; then \
-	echo " Xen $(XEN_FULLVERSION)" | figlet -f $< > $@.tmp; \
+    if command -v figlet >/dev/null 2>&1 ; then \
+	echo " Xen $(XEN_FULLVERSION)" | figlet -w 100 -f $< > $@.tmp; \
     else \
-	echo " Xen $(XEN_FULLVERSION)" > $@.tmp; \
+	echo "Xen $(XEN_FULLVERSION)" > $@.tmp; \
     fi; \
     mv -f $@.tmp $@
 endef
@@ -23,7 +23,7 @@ define cmd_compile.h
 	    -e 's/@@whoami@@/$(XEN_WHOAMI)/g' \
 	    -e 's/@@domain@@/$(XEN_DOMAIN)/g' \
 	    -e 's/@@hostname@@/$(XEN_BUILD_HOST)/g' \
-	    -e 's!@@compiler@@!$(shell $(CC) $(CFLAGS) --version 2>&1 | head -1)!g' \
+	    -e 's!@@compiler@@!$(shell $(CC) --version 2>&1 | head -1)!g' \
 	    -e 's/@@version@@/$(XEN_VERSION)/g' \
 	    -e 's/@@subversion@@/$(XEN_SUBVERSION)/g' \
 	    -e 's/@@extraversion@@/$(XEN_EXTRAVERSION)/g' \

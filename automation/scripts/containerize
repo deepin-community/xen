@@ -24,26 +24,33 @@ die() {
 #
 BASE="registry.gitlab.com/xen-project/xen"
 case "_${CONTAINER}" in
-    _alpine) CONTAINER="${BASE}/alpine:3.12" ;;
+    _alpine) CONTAINER="${BASE}/alpine:3.18" ;;
+    _alpine-arm64v8) CONTAINER="${BASE}/alpine:3.18-arm64v8" ;;
     _archlinux|_arch) CONTAINER="${BASE}/archlinux:current" ;;
-    _riscv64) CONTAINER="${BASE}/archlinux:riscv64" ;;
     _centos7) CONTAINER="${BASE}/centos:7" ;;
-    _centos72) CONTAINER="${BASE}/centos:7.2" ;;
-    _fedora) CONTAINER="${BASE}/fedora:29";;
-    _focal) CONTAINER="${BASE}/ubuntu:focal" ;;
-    _jessie) CONTAINER="${BASE}/debian:jessie" ;;
-    _stretch|_) CONTAINER="${BASE}/debian:stretch" ;;
-    _buster-gcc-ibt) CONTAINER="${BASE}/debian:buster-gcc-ibt" ;;
-    _unstable|_) CONTAINER="${BASE}/debian:unstable" ;;
-    _trusty) CONTAINER="${BASE}/ubuntu:trusty" ;;
-    _xenial) CONTAINER="${BASE}/ubuntu:xenial" ;;
-    _opensuse-leap|_leap) CONTAINER="${BASE}/suse:opensuse-leap" ;;
-    _opensuse-tumbleweed|_tumbleweed) CONTAINER="${BASE}/suse:opensuse-tumbleweed" ;;
+    _fedora) CONTAINER="${BASE}/fedora:41-x86_64";;
+    _bullseye-ppc64le) CONTAINER="${BASE}/debian:11-ppc64le" ;;
+    _bookworm-ppc64le) CONTAINER="${BASE}/debian:12-ppc64le" ;;
+    _bullseye-riscv64) CONTAINER="${BASE}/debian:11-riscv64" ;;
+    _bookworm-riscv64) CONTAINER="${BASE}/debian:12-riscv64" ;;
+    _bookworm-x86_64-gcc-ibt) CONTAINER="${BASE}/debian:12-x86_64-gcc-ibt" ;;
+    _bookworm|_bookworm-x86_64|_) CONTAINER="${BASE}/debian:12-x86_64" ;;
+    _bookworm-i386|_bookworm-x86_32) CONTAINER="${BASE}/debian:12-x86_32" ;;
+    _bookworm-arm64v8-arm32-gcc) CONTAINER="${BASE}/debian:bookworm-arm64v8-arm32-gcc" ;;
+    _bookworm-arm64v8) CONTAINER="${BASE}/debian:bookworm-arm64v8" ;;
+    _bookworm-cppcheck) CONTAINER="${BASE}/debian:bookworm-cppcheck" ;;
+    _opensuse-leap|_leap) CONTAINER="${BASE}/opensuse:leap-15.6-x86_64" ;;
+    _opensuse-tumbleweed|_tumbleweed) CONTAINER="${BASE}/opensuse:tumbleweed-x86_64" ;;
+    _xenial) CONTAINER="${BASE}/ubuntu:16.04-x86_64" ;;
+    _bionic) CONTAINER="${BASE}/ubuntu:18.04-x86_64" ;;
+    _focal)  CONTAINER="${BASE}/ubuntu:20.04-x86_64" ;;
+    _jammy)  CONTAINER="${BASE}/ubuntu:22.04-x86_64" ;;
+    _noble)  CONTAINER="${BASE}/ubuntu:24.04-x86_64" ;;
 esac
 
 # Use this variable to control whether root should be used
 case "_${CONTAINER_UID0}" in
-    _1)   userarg= ;;
+    _1)   userarg="-u 0" ;;
     _0|_) userarg="-u $(id -u) $userns_podman" ;;
 esac
 

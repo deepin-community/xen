@@ -4,10 +4,10 @@
 #include <xen/vmap.h>
 #include <xen/types.h>
 
-#define readb(x) (*(volatile uint8_t  *)(x))
-#define readw(x) (*(volatile uint16_t *)(x))
-#define readl(x) (*(volatile uint32_t *)(x))
-#define readq(x) (*(volatile uint64_t *)(x))
+#define readb(x) (*(const volatile uint8_t  *)(x))
+#define readw(x) (*(const volatile uint16_t *)(x))
+#define readl(x) (*(const volatile uint32_t *)(x))
+#define readq(x) (*(const volatile uint64_t *)(x))
 #define writeb(d,x) (*(volatile uint8_t  *)(x) = (d))
 #define writew(d,x) (*(volatile uint16_t *)(x) = (d))
 #define writel(d,x) (*(volatile uint32_t *)(x) = (d))
@@ -47,10 +47,14 @@ __OUT(b,"b",char)
 __OUT(w,"w",short)
 __OUT(l,,int)
 
-/* Function pointer used to handle platform specific I/O port emulation. */
+/*
+ * Boolean indicator and function used to handle platform specific I/O port
+ * emulation.
+ */
 #define IOEMUL_QUIRK_STUB_BYTES 9
+extern bool ioemul_handle_quirk;
 struct cpu_user_regs;
-extern unsigned int (*ioemul_handle_quirk)(
-    u8 opcode, char *io_emul_stub, struct cpu_user_regs *regs);
+unsigned int ioemul_handle_proliant_quirk(
+    uint8_t opcode, char *io_emul_stub, const struct cpu_user_regs *regs);
 
 #endif

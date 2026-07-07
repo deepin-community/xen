@@ -15,15 +15,19 @@
 #include <xenstore.h>
 
 #include <xen/errno.h>
-#include <xen-tools/libs.h>
+#include <xen-tools/common-macros.h>
 
 static xc_interface *xch;
+
+/* Global option to disable checks. */
+static bool force;
 
 void show_help(void)
 {
     fprintf(stderr,
             "xen-livepatch: live patching tool\n"
-            "Usage: xen-livepatch <command> [args] [command-flags]\n"
+            "Usage: xen-livepatch [--force] <command> [args] [command-flags]\n"
+            " Use --force option to bypass some checks.\n"
             " <name> An unique name of payload. Up to %d characters.\n"
             "Commands:\n"
             "  help                   display this help\n"
@@ -240,7 +244,7 @@ static int upload_func(int argc, char *argv[])
         return saved_errno;
     }
     printf("Uploading %s... ", filename);
-    rc = xc_livepatch_upload(xch, name, fbuf, len);
+    rc = xc_livepatch_upload(xch, name, fbuf, len, force);
     if ( rc )
     {
         rc = errno;
@@ -571,14 +575,27 @@ int main(int argc, char *argv[])
         show_help();
         return 0;
     }
+
+    if ( !strcmp("--force", argv[1]) )
+    {
+        if ( argc <= 2 )
+        {
+            show_help();
+            return EXIT_FAILURE;
+        }
+        force = true;
+        argv++;
+        argc--;
+    }
+
     for ( i = 0; i < ARRAY_SIZE(main_options); i++ )
-        if (!strncmp(main_options[i].name, argv[1], strlen(argv[1])))
+        if (!strcmp(main_options[i].name, argv[1]))
             break;
 
     if ( i == ARRAY_SIZE(main_options) )
     {
         for ( j = 0; j < ARRAY_SIZE(action_options); j++ )
-            if (!strncmp(action_options[j].name, argv[1], strlen(argv[1])))
+            if (!strcmp(action_options[j].name, argv[1]))
                 break;
 
         if ( j == ARRAY_SIZE(action_options) )

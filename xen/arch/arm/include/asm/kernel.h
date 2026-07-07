@@ -7,6 +7,7 @@
 #define __ARCH_ARM_KERNEL_H__
 
 #include <xen/device_tree.h>
+#include <asm/domain.h>
 #include <asm/setup.h>
 
 /*
@@ -38,7 +39,9 @@ struct kernel_info {
     void *fdt; /* flat device tree */
     paddr_t unassigned_mem; /* RAM not (yet) assigned to a bank */
     struct meminfo mem;
-    struct meminfo shm_mem;
+#ifdef CONFIG_STATIC_SHM
+    struct shared_meminfo shm_mem;
+#endif
 
     /* kernel entry point */
     paddr_t entry;
@@ -72,10 +75,36 @@ struct kernel_info {
 #ifdef CONFIG_ARM_64
             paddr_t text_offset; /* 64-bit Image only */
 #endif
-            paddr_t start; /* 32-bit zImage only */
+            paddr_t start; /* Must be 0 for 64-bit Image */
         } zimage;
     };
 };
+
+static inline struct membanks *kernel_info_get_mem(struct kernel_info *kinfo)
+{
+    return container_of(&kinfo->mem.common, struct membanks, common);
+}
+
+static inline const struct membanks *
+kernel_info_get_mem_const(const struct kernel_info *kinfo)
+{
+    return container_of(&kinfo->mem.common, const struct membanks, common);
+}
+
+#ifdef CONFIG_STATIC_SHM
+#define KERNEL_INFO_SHM_MEM_INIT                \
+    .shm_mem.common.max_banks = NR_SHMEM_BANKS, \
+    .shm_mem.common.type = STATIC_SHARED_MEMORY,
+#else
+#define KERNEL_INFO_SHM_MEM_INIT
+#endif
+
+#define KERNEL_INFO_INIT                        \
+{                                               \
+    .mem.common.max_banks = NR_MEM_BANKS,       \
+    .mem.common.type = MEMORY,                  \
+    KERNEL_INFO_SHM_MEM_INIT                    \
+}
 
 /*
  * Probe the kernel to detemine its type and select a loader.

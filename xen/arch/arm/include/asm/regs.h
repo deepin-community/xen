@@ -5,7 +5,7 @@
 
 #ifndef __ASSEMBLY__
 
-#include <xen/lib.h>
+#include <xen/bug.h>
 #include <xen/types.h>
 #include <public/xen.h>
 #include <asm/current.h>
@@ -48,7 +48,7 @@ static inline bool regs_mode_is_32bit(const struct cpu_user_regs *regs)
 
 static inline bool guest_mode(const struct cpu_user_regs *r)
 {
-    unsigned long diff = (char *)guest_cpu_user_regs() - (char *)(r);
+    unsigned long diff = (uintptr_t)guest_cpu_user_regs() - (uintptr_t)(r);
     /* Frame pointer must point into current CPU stack. */
     ASSERT(diff < STACK_SIZE);
     /* If not a guest frame, it must be a hypervisor frame. */
@@ -58,7 +58,19 @@ static inline bool guest_mode(const struct cpu_user_regs *r)
 }
 
 register_t get_user_reg(struct cpu_user_regs *regs, int reg);
-void set_user_reg(struct cpu_user_regs *regs, int reg, register_t val);
+void set_user_reg(struct cpu_user_regs *regs, int reg, register_t value);
+
+static inline uint64_t regpair_to_uint64(register_t reg0, register_t reg1)
+{
+    return ((uint64_t)reg0 << 32) | (uint32_t)reg1;
+}
+
+static inline void uint64_to_regpair(register_t *reg0, register_t *reg1,
+                                     uint64_t val)
+{
+    *reg0 = val >> 32;
+    *reg1 = (uint32_t)val;
+}
 
 #endif
 

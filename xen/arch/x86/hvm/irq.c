@@ -1,21 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /******************************************************************************
  * irq.c
  * 
  * Interrupt distribution and delivery logic.
  * 
  * Copyright (c) 2006, K A Fraser, XenSource Inc.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <xen/types.h>
@@ -24,7 +13,7 @@
 #include <xen/irq.h>
 #include <xen/keyhandler.h>
 #include <asm/hvm/domain.h>
-#include <asm/hvm/support.h>
+#include <asm/hvm/save.h>
 #include <asm/msi.h>
 #include <public/hvm/params.h>
 
@@ -293,6 +282,7 @@ static void hvm_set_callback_irq_level(struct vcpu *v)
             __hvm_pci_intx_assert(d, pdev, pintx);
         else
             __hvm_pci_intx_deassert(d, pdev, pintx);
+        break;
     default:
         break;
     }
@@ -394,7 +384,7 @@ int hvm_inject_msi(struct domain *d, uint64_t addr, uint32_t data)
 
     if ( !vector )
     {
-        int pirq = ((addr >> 32) & 0xffffff00) | dest;
+        unsigned int pirq = ((addr >> 32) & 0xffffff00U) | dest;
 
         if ( pirq > 0 )
         {
@@ -523,13 +513,13 @@ struct hvm_intack hvm_vcpu_has_pending_irq(struct vcpu *v)
     int vector;
 
     /*
-     * Always call vlapic_sync_pir_to_irr so that PIR is synced into IRR when
-     * using posted interrupts. Note this is also done by
+     * Always call hvm_sync_pir_to_irr() so that PIR is synced into IRR
+     * when using posted interrupts. Note this is also done by
      * vlapic_has_pending_irq but depending on which interrupts are pending
      * hvm_vcpu_has_pending_irq will return early without calling
      * vlapic_has_pending_irq.
      */
-    vlapic_sync_pir_to_irr(v);
+    hvm_sync_pir_to_irr(v);
 
     if ( unlikely(v->arch.nmi_pending) )
         return hvm_intack_nmi;
@@ -760,6 +750,30 @@ static int cf_check irq_load_isa(struct domain *d, hvm_domain_context_t *h)
     return 0;
 }
 
+static int cf_check irq_check_link(const struct domain *d,
+                                   hvm_domain_context_t *h)
+{
+    const struct hvm_hw_pci_link *pci_link = hvm_get_entry(PCI_LINK, h);
+    unsigned int link;
+
+    if ( !pci_link )
+        return -ENODATA;
+
+    for ( link = 0; link < ARRAY_SIZE(pci_link->pad0); link++ )
+        if ( pci_link->pad0[link] )
+            return -EINVAL;
+
+    for ( link = 0; link < ARRAY_SIZE(pci_link->route); link++ )
+        if ( pci_link->route[link] > 15 )
+        {
+            printk(XENLOG_G_ERR
+                   "HVM restore: PCI-ISA link %u out of range (%u)\n",
+                   link, pci_link->route[link]);
+            return -EINVAL;
+        }
+
+    return 0;
+}
 
 static int cf_check irq_load_link(struct domain *d, hvm_domain_context_t *h)
 {
@@ -769,16 +783,6 @@ static int cf_check irq_load_link(struct domain *d, hvm_domain_context_t *h)
     /* Load the PCI-ISA IRQ link routing table */
     if ( hvm_load_entry(PCI_LINK, h, &hvm_irq->pci_link) != 0 )
         return -EINVAL;
-
-    /* Sanity check */
-    for ( link = 0; link < 4; link++ )
-        if ( hvm_irq->pci_link.route[link] > 15 )
-        {
-            printk(XENLOG_G_ERR
-                   "HVM restore: PCI-ISA link %u out of range (%u)\n",
-                   link, hvm_irq->pci_link.route[link]);
-            return -EINVAL;
-        }
 
     /* Adjust the GSI assert counts for the link outputs.
      * This relies on the PCI and ISA IRQ state being loaded first */
@@ -795,9 +799,9 @@ static int cf_check irq_load_link(struct domain *d, hvm_domain_context_t *h)
     return 0;
 }
 
-HVM_REGISTER_SAVE_RESTORE(PCI_IRQ, irq_save_pci, irq_load_pci,
+HVM_REGISTER_SAVE_RESTORE(PCI_IRQ, irq_save_pci, NULL, irq_load_pci,
                           1, HVMSR_PER_DOM);
-HVM_REGISTER_SAVE_RESTORE(ISA_IRQ, irq_save_isa, irq_load_isa,
+HVM_REGISTER_SAVE_RESTORE(ISA_IRQ, irq_save_isa, NULL, irq_load_isa,
                           1, HVMSR_PER_DOM);
-HVM_REGISTER_SAVE_RESTORE(PCI_LINK, irq_save_link, irq_load_link,
-                          1, HVMSR_PER_DOM);
+HVM_REGISTER_SAVE_RESTORE(PCI_LINK, irq_save_link, irq_check_link,
+                          irq_load_link, 1, HVMSR_PER_DOM);
