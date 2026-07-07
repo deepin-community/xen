@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /******************************************************************************
  * arch/x86/mm/shadow/private.h
  *
@@ -5,19 +6,6 @@
  * Parts of this code are Copyright (c) 2006 by XenSource Inc.
  * Parts of this code are Copyright (c) 2006 by Michael A Fetterman
  * Parts based on earlier work by Michael A Fetterman, Ian Pratt et al.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef _XEN_SHADOW_PRIVATE_H
@@ -69,7 +57,8 @@ extern int shadow_audit_enable;
 #ifdef CONFIG_HVM
 #define SHADOW_OPTIMIZATIONS     0x1ff
 #else
-#define SHADOW_OPTIMIZATIONS     (0x1ff & ~SHOPT_FAST_EMULATION)
+#define SHADOW_OPTIMIZATIONS     (0x1ff & ~(SHOPT_OUT_OF_SYNC | \
+                                            SHOPT_FAST_EMULATION))
 #endif
 
 
@@ -130,14 +119,6 @@ enum {
     TRCE_SFLAG_OOS_FIXUP_ADD,
     TRCE_SFLAG_OOS_FIXUP_EVICT,
 };
-
-
-/* Size (in bytes) of a guest PTE */
-#if GUEST_PAGING_LEVELS >= 3
-# define GUEST_PTE_SIZE 8
-#else
-# define GUEST_PTE_SIZE 4
-#endif
 
 /******************************************************************************
  * Auditing routines
@@ -204,9 +185,11 @@ extern void shadow_audit_tables(struct vcpu *v);
 #define SH_type_l4_64_shadow   6U /* shadowing a 64-bit L4 page */
 #define SH_type_max_shadow     6U
 #define SH_type_p2m_table      7U /* in use as the p2m table */
-#define SH_type_monitor_table  8U /* in use as a monitor table */
-#define SH_type_oos_snapshot   9U /* in use as OOS snapshot */
-#define SH_type_unused        10U
+#define SH_type_unused         8U
+#endif
+
+#ifndef CONFIG_PV32 /* Unused (but uglier to #ifdef above): */
+#undef SH_type_l2h_64_shadow
 #endif
 
 /*
@@ -286,7 +269,11 @@ static inline void sh_terminate_list(struct page_list_head *tmp_list)
 #define SHF_L1_64   (1u << SH_type_l1_64_shadow)
 #define SHF_FL1_64  (1u << SH_type_fl1_64_shadow)
 #define SHF_L2_64   (1u << SH_type_l2_64_shadow)
+#ifdef CONFIG_PV32
 #define SHF_L2H_64  (1u << SH_type_l2h_64_shadow)
+#else
+#define SHF_L2H_64  0
+#endif
 #define SHF_L3_64   (1u << SH_type_l3_64_shadow)
 #define SHF_L4_64   (1u << SH_type_l4_64_shadow)
 
@@ -315,24 +302,21 @@ static inline void sh_terminate_list(struct page_list_head *tmp_list)
 #define SHF_out_of_sync (1u << (SH_type_max_shadow + 1))
 #define SHF_oos_may_write (1u << (SH_type_max_shadow + 2))
 
-#endif /* (SHADOW_OPTIMIZATIONS & SHOPT_OUT_OF_SYNC) */
-
 static inline int sh_page_has_multiple_shadows(struct page_info *pg)
 {
     u32 shadows;
-    if ( !(pg->count_info & PGC_page_table) )
+    if ( !(pg->count_info & PGC_shadowed_pt) )
         return 0;
     shadows = pg->shadow_flags & SHF_page_type_mask;
     /* More than one type bit set in shadow-flags? */
     return shadows && (shadows & (shadows - 1));
 }
 
-#if (SHADOW_OPTIMIZATIONS & SHOPT_OUT_OF_SYNC)
 /* The caller must verify this is reasonable to call; i.e., valid mfn,
  * domain is translated, &c */
 static inline int page_is_out_of_sync(struct page_info *p)
 {
-    return (p->count_info & PGC_page_table)
+    return (p->count_info & PGC_shadowed_pt)
         && (p->shadow_flags & SHF_out_of_sync);
 }
 
@@ -343,7 +327,7 @@ static inline int mfn_is_out_of_sync(mfn_t gmfn)
 
 static inline int page_oos_may_write(struct page_info *p)
 {
-    return (p->count_info & PGC_page_table)
+    return (p->count_info & PGC_shadowed_pt)
         && (p->shadow_flags & SHF_oos_may_write);
 }
 
@@ -354,7 +338,7 @@ static inline int mfn_oos_may_write(mfn_t gmfn)
 #endif /* (SHADOW_OPTIMIZATIONS & SHOPT_OUT_OF_SYNC) */
 
 /* Figure out the size (in pages) of a given shadow type */
-extern const u8 sh_type_to_size[SH_type_unused];
+extern const uint8_t sh_type_to_size[SH_type_unused];
 static inline unsigned int
 shadow_size(unsigned int shadow_type)
 {
@@ -363,7 +347,7 @@ shadow_size(unsigned int shadow_type)
     return sh_type_to_size[shadow_type];
 #else
     ASSERT(shadow_type < SH_type_unused);
-    return 1;
+    return shadow_type != SH_type_none;
 #endif
 }
 
@@ -419,17 +403,6 @@ static inline int sh_remove_write_access(struct domain *d, mfn_t readonly_mfn,
     return 0;
 }
 #endif
-
-/* Functions that atomically write PV guest PT entries */
-void cf_check sh_write_guest_entry(
-    struct vcpu *v, intpte_t *p, intpte_t new, mfn_t gmfn);
-intpte_t cf_check sh_cmpxchg_guest_entry(
-    struct vcpu *v, intpte_t *p, intpte_t old, intpte_t new, mfn_t gmfn);
-
-/* Update all the things that are derived from the guest's CR0/CR3/CR4.
- * Called to initialize paging structures if the paging mode
- * has changed, and when bringing up a VCPU for the first time. */
-void cf_check shadow_update_paging_modes(struct vcpu *v);
 
 /* Unhook the non-Xen mappings in this top-level shadow mfn.
  * With user_only == 1, unhooks only the user-mode mappings. */
@@ -497,11 +470,6 @@ void shadow_blow_tables(struct domain *d);
  */
 int sh_remove_all_mappings(struct domain *d, mfn_t gmfn, gfn_t gfn);
 
-/* Reset the up-pointers of every L3 shadow to 0.
- * This is called when l3 shadows stop being pinnable, to clear out all
- * the list-head bits so the up-pointer field is properly inititalised. */
-void sh_reset_l3_up_pointers(struct vcpu *v);
-
 /******************************************************************************
  * Flags used in the return value of the shadow_set_lXe() functions...
  */
@@ -536,16 +504,17 @@ static inline unsigned long __backpointer(const struct page_info *sp)
 static inline int
 sh_mfn_is_a_page_table(mfn_t gmfn)
 {
-    struct page_info *page = mfn_to_page(gmfn);
+    const struct page_info *page;
     struct domain *owner;
     unsigned long type_info;
 
     if ( !mfn_valid(gmfn) )
         return 0;
 
+    page = mfn_to_page(gmfn);
     owner = page_get_owner(page);
     if ( owner && shadow_mode_refcounts(owner)
-         && (page->count_info & PGC_page_table) )
+         && (page->count_info & PGC_shadowed_pt) )
         return 1;
 
     type_info = page->u.inuse.type_info & PGT_type_mask;
@@ -583,9 +552,7 @@ static inline int sh_get_ref(struct domain *d, mfn_t smfn, paddr_t entry_pa)
     sp->u.sh.count = nx;
 
     /* We remember the first shadow entry that points to each shadow. */
-    if ( entry_pa != 0
-         && sh_type_has_up_pointer(d, sp->u.sh.type)
-         && sp->up == 0 )
+    if ( !sp->up && sh_type_has_up_pointer(d, sp->u.sh.type) )
         sp->up = entry_pa;
 
     return 1;
@@ -604,10 +571,11 @@ static inline void sh_put_ref(struct domain *d, mfn_t smfn, paddr_t entry_pa)
     ASSERT(!(sp->count_info & PGC_count_mask));
 
     /* If this is the entry in the up-pointer, remove it */
-    if ( entry_pa != 0
-         && sh_type_has_up_pointer(d, sp->u.sh.type)
-         && sp->up == entry_pa )
+    if ( sp->up == entry_pa )
+    {
+        ASSERT(!entry_pa || sh_type_has_up_pointer(d, sp->u.sh.type));
         sp->up = 0;
+    }
 
     x = sp->u.sh.count;
     nx = x - 1;
@@ -722,7 +690,7 @@ static inline void sh_unpin(struct domain *d, mfn_t smfn)
 {
     struct page_list_head tmp_list, *pin_list;
     struct page_info *sp, *next;
-    unsigned int i, head_type;
+    unsigned int i, head_type, sz;
 
     ASSERT(mfn_valid(smfn));
     sp = mfn_to_page(smfn);
@@ -734,20 +702,29 @@ static inline void sh_unpin(struct domain *d, mfn_t smfn)
         return;
     sp->u.sh.pinned = 0;
 
-    /* Cut the sub-list out of the list of pinned shadows,
-     * stitching it back into a list fragment of its own. */
+    sz = shadow_size(head_type);
+
+    /*
+     * Cut the sub-list out of the list of pinned shadows, stitching
+     * multi-page shadows back into a list fragment of their own.
+     */
     pin_list = &d->arch.paging.shadow.pinned_shadows;
     INIT_PAGE_LIST_HEAD(&tmp_list);
-    for ( i = 0; i < shadow_size(head_type); i++ )
+    for ( i = 0; i < sz; i++ )
     {
         ASSERT(sp->u.sh.type == head_type);
         ASSERT(!i || !sp->u.sh.head);
         next = page_list_next(sp, pin_list);
         page_list_del(sp, pin_list);
-        page_list_add_tail(sp, &tmp_list);
+        if ( sz > 1 )
+            page_list_add_tail(sp, &tmp_list);
+        else if ( head_type == SH_type_l3_64_shadow )
+            sp->up = 0;
         sp = next;
     }
-    sh_terminate_list(&tmp_list);
+
+    if ( sz > 1 )
+        sh_terminate_list(&tmp_list);
 
     sh_put_ref(d, smfn, 0);
 }
@@ -765,8 +742,10 @@ get_shadow_status(struct domain *d, mfn_t gmfn, u32 shadow_type)
 /* Look for shadows in the hash table */
 {
     mfn_t smfn = shadow_hash_lookup(d, mfn_x(gmfn), shadow_type);
-    ASSERT(!mfn_valid(smfn) || mfn_to_page(smfn)->u.sh.head);
+
+    ASSERT(mfn_eq(smfn, INVALID_MFN) || mfn_to_page(smfn)->u.sh.head);
     perfc_incr(shadow_get_shadow_status);
+
     return smfn;
 }
 
@@ -829,7 +808,7 @@ struct sh_emulate_ctxt {
 #if (SHADOW_OPTIMIZATIONS & SHOPT_SKIP_VERIFY)
     /* Special case for avoiding having to verify writes: remember
      * whether the old value had its low bit (_PAGE_PRESENT) clear. */
-    int low_bit_was_clear:1;
+    bool low_bit_was_clear;
 #endif
 };
 

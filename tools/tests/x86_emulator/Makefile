@@ -16,9 +16,9 @@ vpath %.c $(XEN_ROOT)/xen/lib/x86
 
 CFLAGS += $(CFLAGS_xeninclude)
 
-SIMD := 3dnow sse sse2 sse4 avx avx2 xop avx512f avx512bw avx512dq avx512er avx512vbmi
+SIMD := 3dnow sse sse2 sse4 avx avx2 xop avx512f avx512bw avx512dq avx512vbmi avx512fp16
 FMA := fma4 fma
-SG := avx2-sg avx512f-sg avx512vl-sg
+SG := avx2-sg avx512f-sg
 AES := ssse3-aes avx-aes avx2-vaes avx512bw-vaes
 CLMUL := ssse3-pclmul avx-pclmul avx2-vpclmulqdq avx512bw-vpclmulqdq avx512vbmi2-vpclmulqdq
 SHA := sse4-sha avx-sha avx512f-sha
@@ -29,7 +29,7 @@ OPMASK := avx512f avx512dq avx512bw
 
 ifeq ($(origin XEN_COMPILE_ARCH),override)
 
-HOSTCFLAGS += -m32
+HOSTCFLAGS += -m32 -I..
 
 else
 
@@ -70,27 +70,23 @@ xop-flts := $(avx-flts)
 avx512f-vecs := 64 16 32
 avx512f-ints := 4 8
 avx512f-flts := 4 8
-avx512f-sg-vecs := 64
+avx512f-sg-vecs := $(avx512f-vecs)
 avx512f-sg-idxs := 4 8
 avx512f-sg-ints := $(avx512f-ints)
 avx512f-sg-flts := $(avx512f-flts)
-avx512vl-sg-vecs := 16 32
-avx512vl-sg-idxs := $(avx512f-sg-idxs)
-avx512vl-sg-ints := $(avx512f-ints)
-avx512vl-sg-flts := $(avx512f-flts)
 avx512bw-vecs := $(avx512f-vecs)
 avx512bw-ints := 1 2
 avx512bw-flts :=
 avx512dq-vecs := $(avx512f-vecs)
 avx512dq-ints := $(avx512f-ints)
 avx512dq-flts := $(avx512f-flts)
-avx512er-vecs := 64
-avx512er-ints :=
-avx512er-flts := 4 8
 avx512vbmi-vecs := $(avx512bw-vecs)
 avx512vbmi-ints := $(avx512bw-ints)
 avx512vbmi-flts := $(avx512bw-flts)
 avx512vbmi2-vecs := $(avx512bw-vecs)
+avx512fp16-vecs := $(avx512bw-vecs)
+avx512fp16-ints :=
+avx512fp16-flts := 2
 
 avx512f-opmask-vecs := 2
 avx512dq-opmask-vecs := 1 2
@@ -102,13 +98,15 @@ avx512bw-opmask-vecs := 4 8
 # partially even with older compilers.
 TARGET-y := $(TARGET)
 
-ifeq ($(filter run%,$(MAKECMDGOALS)),)
+ifneq ($(filter-out run% clean% distclean,$(MAKECMDGOALS)),)
 
-define simd-check-cc
+define isa-check-cc
 TARGET-$(shell echo 'int i;' | $(CC) -x c -c -o /dev/null -m$(1) - || echo y) :=
 endef
 
-$(foreach flavor,$(SIMD) $(FMA),$(eval $(call simd-check-cc,$(flavor))))
+ISA := bmi bmi2 tbm sse4.1 sse4.2 sse4a avx avx2 f16c
+ISA += $(addprefix avx512,f bw dq)
+$(foreach isa,$(ISA),$(eval $(call isa-check-cc,$(isa))))
 
 # Also explicitly check for {evex} pseudo-prefix support, which got introduced
 # only after AVX512F and some of its extensions.
@@ -246,19 +244,25 @@ $(addsuffix .c,$(GF)):
 
 $(addsuffix .h,$(SIMD) $(FMA) $(SG) $(AES) $(CLMUL) $(SHA) $(GF)): simd.h
 
-xop.h avx512f.h: simd-fma.c
+xop.h avx512f.h avx512fp16.h: simd-fma.c
 
 endif # 32-bit override
 
-WRAPPED := $(shell sed -n 's,^ *WRAP(\([[:alnum:]_]*\));,\1,p' x86-emulate.h)
+OBJS := x86-emulate.o cpuid.o test_x86_emulator.o evex-disp8.o predicates.o wrappers.o
+OBJS += x86_emulate/0f01.o x86_emulate/0fae.o x86_emulate/0fc7.o
+OBJS += x86_emulate/blk.o x86_emulate/decode.o x86_emulate/fpu.o x86_emulate/util.o
 
-$(TARGET): x86-emulate.o cpuid.o test_x86_emulator.o evex-disp8.o predicates.o wrappers.o
+WRAPPED := $(shell sed -n 's,^ *WRAP(\([[:alnum:]_]*\));,\1,p' \
+                       $(firstword $(wildcard ../x86-emulate.h) x86-emulate.h))
+
+$(TARGET): $(OBJS)
 	$(HOSTCC) $(HOSTCFLAGS) $(addprefix -Wl$(comma)--wrap=,$(WRAPPED)) -o $@ $^
 
 .PHONY: clean
 clean:
 	rm -rf $(TARGET) *.o *~ core *.bin x86_emulate
-	rm -rf $(TARGET) $(addsuffix .h,$(TESTCASES)) $(addsuffix -opmask.h,$(OPMASK))
+	rm -rf $(addsuffix .h,$(TESTCASES)) $(addsuffix -opmask.h,$(OPMASK))
+	rm -rf $(addsuffix .c,$(filter-out blowfish,$(TESTCASES)))
 
 .PHONY: distclean
 distclean: clean
@@ -276,8 +280,10 @@ else
 run32 clean32: %32: %
 endif
 
+.PHONY: x86_emulate
 x86_emulate:
-	[ -L $@ ] || ln -sf $(XEN_ROOT)/xen/arch/x86/$@
+	mkdir -p $@
+	ln -sf $(XEN_ROOT)/xen/arch/x86/$@/*.[ch] $@/
 
 x86_emulate/%: x86_emulate ;
 
@@ -289,13 +295,13 @@ x86.h := $(addprefix $(XEN_ROOT)/tools/include/xen/asm/,\
                      x86-vendors.h x86-defns.h msr-index.h) \
          $(addprefix $(XEN_ROOT)/tools/include/xen/lib/x86/, \
                      cpu-policy.h cpuid-autogen.h)
-x86_emulate.h := x86-emulate.h x86_emulate/x86_emulate.h $(x86.h)
+x86_emulate.h := x86-emulate.h x86_emulate/x86_emulate.h x86_emulate/private.h $(x86.h)
 
-x86-emulate.o cpuid.o test_x86_emulator.o evex-disp8.o predicates.o wrappers.o: %.o: %.c $(x86_emulate.h)
+$(OBJS): %.o: %.c $(x86_emulate.h)
 	$(HOSTCC) $(HOSTCFLAGS) -c -g -o $@ $<
 
 x86-emulate.o: x86_emulate/x86_emulate.c
-x86-emulate.o: HOSTCFLAGS += -D__XEN_TOOLS__
+x86-emulate.o x86_emulate/%.o: HOSTCFLAGS += -D__XEN_TOOLS__
 
 # In order for our custom .type assembler directives to reliably land after
 # gcc's, we need to keep it from re-ordering top-level constructs.

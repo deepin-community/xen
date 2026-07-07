@@ -1,22 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /******************************************************************************
  * arch/x86/mm/shadow/types.h
  *
  * Parts of this code are Copyright (c) 2006 by XenSource Inc.
  * Parts of this code are Copyright (c) 2006 by Michael A Fetterman
  * Parts based on earlier work by Michael A Fetterman, Ian Pratt et al.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef _XEN_SHADOW_TYPES_H
@@ -232,11 +220,9 @@ static inline shadow_l4e_t shadow_l4e_from_mfn(mfn_t mfn, u32 flags)
 #define sh_destroy_l3_shadow       INTERNAL_NAME(sh_destroy_l3_shadow)
 #define sh_destroy_l2_shadow       INTERNAL_NAME(sh_destroy_l2_shadow)
 #define sh_destroy_l1_shadow       INTERNAL_NAME(sh_destroy_l1_shadow)
-#define sh_unhook_32b_mappings     INTERNAL_NAME(sh_unhook_32b_mappings)
-#define sh_unhook_pae_mappings     INTERNAL_NAME(sh_unhook_pae_mappings)
-#define sh_unhook_64b_mappings     INTERNAL_NAME(sh_unhook_64b_mappings)
+#define sh_unhook_l2_mappings      INTERNAL_NAME(sh_unhook_l2_mappings)
+#define sh_unhook_l4_mappings      INTERNAL_NAME(sh_unhook_l4_mappings)
 #define sh_paging_mode             INTERNAL_NAME(sh_paging_mode)
-#define sh_detach_old_tables       INTERNAL_NAME(sh_detach_old_tables)
 #define sh_audit_l1_table          INTERNAL_NAME(sh_audit_l1_table)
 #define sh_audit_fl1_table         INTERNAL_NAME(sh_audit_fl1_table)
 #define sh_audit_l2_table          INTERNAL_NAME(sh_audit_l2_table)

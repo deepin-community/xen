@@ -196,6 +196,7 @@ struct elf_binary {
     size_t dest_size;
     uint64_t pstart;
     uint64_t pend;
+    uint64_t palign;
     uint64_t reloc_offset;
 
     uint64_t bsd_symtab_pstart;
@@ -260,8 +261,8 @@ struct elf_binary {
    * str should be a HANDLE.
    */
 
-uint64_t elf_access_unsigned(struct elf_binary *elf, elf_ptrval ptr,
-                             uint64_t offset, size_t size);
+uint64_t elf_access_unsigned(struct elf_binary *elf, elf_ptrval base,
+                             uint64_t moreoffset, size_t size);
   /* Reads a field at arbitrary offset and alignemnt */
 
 uint64_t elf_round_up(struct elf_binary *elf, uint64_t addr);
@@ -272,8 +273,10 @@ const char *elf_strval(struct elf_binary *elf, elf_ptrval start);
 const char *elf_strfmt(struct elf_binary *elf, elf_ptrval start);
   /* like elf_strval but returns "(invalid)" instead of NULL */
 
-void elf_memcpy_safe(struct elf_binary*, elf_ptrval dst, elf_ptrval src, size_t);
-void elf_memset_safe(struct elf_binary*, elf_ptrval dst, int c, size_t);
+void elf_memcpy_safe(struct elf_binary *elf, elf_ptrval dst, elf_ptrval src,
+                     size_t size);
+void elf_memset_safe(struct elf_binary *elf, elf_ptrval dst, int c,
+                     size_t size);
   /*
    * Versions of memcpy and memset which arrange never to write
    * outside permitted areas.
@@ -285,7 +288,7 @@ bool elf_access_ok(struct elf_binary * elf,
 #define elf_store_val(elf, type, ptr, val)                              \
     ({                                                                  \
         typeof(type) elf_store__val = (val);                            \
-        elf_ptrval elf_store__targ = ptr;                               \
+        elf_ptrval elf_store__targ = (ptr);                             \
         if (elf_access_ok((elf), elf_store__targ,                       \
                           sizeof(elf_store__val))) {			\
             elf_memcpy_unchecked((void*)elf_store__targ, &elf_store__val, \
@@ -324,7 +327,8 @@ ELF_HANDLE_DECL(elf_sym) elf_sym_by_index(struct elf_binary *elf, unsigned index
 const char *elf_note_name(struct elf_binary *elf, ELF_HANDLE_DECL(elf_note) note); /* may return NULL */
 elf_ptrval elf_note_desc(struct elf_binary *elf, ELF_HANDLE_DECL(elf_note) note);
 uint64_t elf_note_numeric(struct elf_binary *elf, ELF_HANDLE_DECL(elf_note) note);
-uint64_t elf_note_numeric_array(struct elf_binary *, ELF_HANDLE_DECL(elf_note),
+uint64_t elf_note_numeric_array(struct elf_binary *elf,
+                                ELF_HANDLE_DECL(elf_note) note,
                                 unsigned int unitsz, unsigned int idx);
 
 /*
@@ -346,9 +350,10 @@ bool elf_phdr_is_loadable(struct elf_binary *elf, ELF_HANDLE_DECL(elf_phdr) phdr
 /* ------------------------------------------------------------------------ */
 /* xc_libelf_loader.c                                                       */
 
-elf_errorstatus elf_init(struct elf_binary *elf, const char *image, size_t size);
+elf_errorstatus elf_init(struct elf_binary *elf, const char *image_input,
+                         size_t size);
   /*
-   * image and size must be correct.  They will be recorded in
+   * image_input and size must be correct.  They will be recorded in
    * *elf, and must remain valid while the elf is in use.
    */
 #ifdef __XEN__
@@ -421,6 +426,7 @@ struct elf_dom_parms {
     enum xen_pae_type pae;
     bool bsd_symtab;
     bool unmapped_initrd;
+    bool phys_reloc;
     uint64_t virt_base;
     uint64_t virt_entry;
     uint64_t virt_hypercall;
@@ -430,31 +436,34 @@ struct elf_dom_parms {
     uint32_t f_supported[XENFEAT_NR_SUBMAPS];
     uint32_t f_required[XENFEAT_NR_SUBMAPS];
     uint32_t phys_entry;
+    uint32_t phys_align;
+    uint32_t phys_min;
+    uint32_t phys_max;
 
     /* calculated */
     uint64_t virt_kstart;
     uint64_t virt_kend;
 };
 
-static inline void elf_xen_feature_set(int nr, uint32_t * addr)
+static inline void elf_xen_feature_set(unsigned int nr, uint32_t *addr)
 {
-    addr[nr >> 5] |= 1 << (nr & 31);
+    addr[nr >> 5] |= 1U << (nr & 31);
 }
-static inline int elf_xen_feature_get(int nr, uint32_t * addr)
+static inline bool elf_xen_feature_get(unsigned int nr, const uint32_t *addr)
 {
-    return !!(addr[nr >> 5] & (1 << (nr & 31)));
+    return addr[nr >> 5] & (1U << (nr & 31));
 }
 
-int elf_xen_parse_features(const char *features,
-                           uint32_t *supported,
-                           uint32_t *required);
-int elf_xen_parse_note(struct elf_binary *elf,
-                       struct elf_dom_parms *parms,
-                       ELF_HANDLE_DECL(elf_note) note);
-int elf_xen_parse_guest_info(struct elf_binary *elf,
-                             struct elf_dom_parms *parms);
-int elf_xen_parse(struct elf_binary *elf,
-                  struct elf_dom_parms *parms, bool hvm);
+elf_errorstatus elf_xen_parse_features(const char *features,
+                                       uint32_t *supported,
+                                       uint32_t *required);
+elf_errorstatus elf_xen_parse_note(struct elf_binary *elf,
+                                   struct elf_dom_parms *parms,
+                                   ELF_HANDLE_DECL(elf_note) note);
+elf_errorstatus elf_xen_parse_guest_info(struct elf_binary *elf,
+                                         struct elf_dom_parms *parms);
+elf_errorstatus elf_xen_parse(struct elf_binary *elf,
+                              struct elf_dom_parms *parms, bool hvm);
 
 static inline void *elf_memcpy_unchecked(void *dest, const void *src, size_t n)
     { return memcpy(dest, src, n); }

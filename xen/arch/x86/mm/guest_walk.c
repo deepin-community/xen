@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /******************************************************************************
  * arch/x86/mm/guest_walk.c
  *
@@ -6,19 +7,6 @@
  * Parts of this code are Copyright (c) 2006 by XenSource Inc.
  * Parts of this code are Copyright (c) 2006 by Michael A Fetterman
  * Parts based on earlier work by Michael A Fetterman, Ian Pratt et al.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <xen/types.h>
@@ -26,7 +14,9 @@
 #include <xen/paging.h>
 #include <xen/domain_page.h>
 #include <xen/sched.h>
+
 #include <asm/page.h>
+#include <asm/prot-key.h>
 #include <asm/guest_pt.h>
 #include <asm/hvm/emulate.h>
 
@@ -404,19 +394,21 @@ guest_walk_tables(const struct vcpu *v, struct p2m_domain *p2m,
 #if GUEST_PAGING_LEVELS >= 4 /* 64-bit only... */
     /*
      * If all access checks are thus far ok, check Protection Key for 64bit
-     * data accesses to user mappings.
+     * data accesses.
      *
      * N.B. In the case that the walk ended with a superpage, the fabricated
      * gw->l1e contains the appropriate leaf pkey.
      */
-    if ( (ar & _PAGE_USER) && !(walk & PFEC_insn_fetch) &&
-         guest_pku_enabled(v) )
+    if ( !(walk & PFEC_insn_fetch) &&
+         ((ar & _PAGE_USER) ? guest_pku_enabled(v)
+                            : guest_pks_enabled(v)) )
     {
         unsigned int pkey = guest_l1e_get_pkey(gw->l1e);
-        unsigned int pkru = rdpkru();
+        unsigned int pkr = (ar & _PAGE_USER) ? rdpkru() : rdpkrs();
+        unsigned int pk_ar = (pkr >> (pkey * PKEY_WIDTH)) & (PKEY_AD | PKEY_WD);
 
-        if ( read_pkru_ad(pkru, pkey) ||
-             ((walk & PFEC_write_access) && read_pkru_wd(pkru, pkey) &&
+        if ( (pk_ar & PKEY_AD) ||
+             ((walk & PFEC_write_access) && (pk_ar & PKEY_WD) &&
               ((walk & PFEC_user_mode) || guest_wp_enabled(v))) )
         {
             gw->pfec |= PFEC_prot_key;
@@ -506,6 +498,7 @@ guest_walk_tables(const struct vcpu *v, struct p2m_domain *p2m,
             hvmemul_write_cache(v, l4gpa, &gw->l4e, sizeof(gw->l4e));
         }
 #endif
+        break;
     }
 
  out:

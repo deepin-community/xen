@@ -1,31 +1,19 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /******************************************************************************
  * arch/x86/guest/hypervisor.c
  *
  * Support for detecting and running under a hypervisor.
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
- *
  * Copyright (c) 2019 Microsoft.
  */
 #include <xen/cpumask.h>
 #include <xen/init.h>
+#include <xen/sections.h>
 #include <xen/types.h>
 
-#include <asm/cache.h>
 #include <asm/guest.h>
 
-static struct hypervisor_ops __read_mostly ops;
+static struct hypervisor_ops __ro_after_init ops;
 
 const char *__init hypervisor_probe(void)
 {
@@ -61,7 +49,7 @@ void __init hypervisor_setup(void)
 int hypervisor_ap_setup(void)
 {
     if ( ops.ap_setup )
-        return ops.ap_setup();
+        return alternative_call(ops.ap_setup);
 
     return 0;
 }
@@ -69,13 +57,13 @@ int hypervisor_ap_setup(void)
 void hypervisor_resume(void)
 {
     if ( ops.resume )
-        ops.resume();
+        alternative_vcall(ops.resume);
 }
 
-void __init hypervisor_e820_fixup(struct e820map *e820)
+void __init hypervisor_e820_fixup(void)
 {
     if ( ops.e820_fixup )
-        ops.e820_fixup(e820);
+        ops.e820_fixup();
 }
 
 int hypervisor_flush_tlb(const cpumask_t *mask, const void *va,

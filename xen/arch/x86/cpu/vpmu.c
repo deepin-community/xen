@@ -1,19 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * vpmu.c: PMU virtualization for HVM domain.
  *
  * Copyright (c) 2007, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  *
  * Author: Haitao Shan <haitao.shan@intel.com>
  */
@@ -24,19 +13,15 @@
 #include <xen/guest_access.h>
 #include <xen/hypercall.h>
 #include <xen/sched.h>
+
+#include <asm/irq-vectors.h>
 #include <asm/regs.h>
-#include <asm/types.h>
 #include <asm/msr.h>
 #include <asm/nmi.h>
 #include <asm/p2m.h>
 #include <asm/vpmu.h>
-#include <asm/hvm/support.h>
-#include <asm/hvm/vmx/vmx.h>
-#include <asm/hvm/vmx/vmcs.h>
-#include <asm/hvm/svm/svm.h>
-#include <asm/hvm/svm/vmcb.h>
 #include <asm/apic.h>
-#include <irq_vectors.h>
+
 #include <public/pmu.h>
 #include <xsm/xsm.h>
 
@@ -175,7 +160,7 @@ static inline struct vcpu *choose_hwdom_vcpu(void)
     return hardware_domain->vcpu[idx];
 }
 
-void vpmu_do_interrupt(struct cpu_user_regs *regs)
+void vpmu_do_interrupt(void)
 {
     struct vcpu *sampled = current, *sampling;
     struct vpmu_struct *vpmu;
@@ -256,6 +241,7 @@ void vpmu_do_interrupt(struct cpu_user_regs *regs)
         else
 #endif
         {
+            const struct cpu_user_regs *regs = get_irq_regs();
             struct xen_pmu_regs *r = &vpmu->xenpmu_data->pmu.r.regs;
 
             if ( (vpmu_mode & XENPMU_MODE_SELF) )
@@ -318,18 +304,18 @@ void vpmu_do_interrupt(struct cpu_user_regs *regs)
     /* We don't support (yet) HVM dom0 */
     ASSERT(sampling == sampled);
 
-    if ( !alternative_call(vpmu_ops.do_interrupt, regs) ||
+    if ( !alternative_call(vpmu_ops.do_interrupt) ||
          !is_vlapic_lvtpc_enabled(vlapic) )
         return;
 
     vlapic_lvtpc = vlapic_get_reg(vlapic, APIC_LVTPC);
 
-    switch ( GET_APIC_DELIVERY_MODE(vlapic_lvtpc) )
+    switch ( vlapic_lvtpc & APIC_DM_MASK )
     {
-    case APIC_MODE_FIXED:
+    case APIC_DM_FIXED:
         vlapic_set_irq(vlapic, vlapic_lvtpc & APIC_VECTOR_MASK, 0);
         break;
-    case APIC_MODE_NMI:
+    case APIC_DM_NMI:
         sampling->arch.nmi_pending = true;
         break;
     }
@@ -386,7 +372,7 @@ void vpmu_save(struct vcpu *v)
     apic_write(APIC_LVTPC, PMU_APIC_VECTOR | APIC_LVT_MASKED);
 }
 
-int vpmu_load(struct vcpu *v, bool_t from_guest)
+int vpmu_load(struct vcpu *v, bool from_guest)
 {
     struct vpmu_struct *vpmu = vcpu_vpmu(v);
     int ret;
@@ -679,6 +665,8 @@ long do_xenpmu_op(
 
         if ( pmu_params.version.maj != XENPMU_VER_MAJ )
             return -EINVAL;
+
+        break;
     }
 
     switch ( op )
@@ -687,7 +675,7 @@ long do_xenpmu_op(
     {
         if ( (pmu_params.val &
               ~(XENPMU_MODE_SELF | XENPMU_MODE_HV | XENPMU_MODE_ALL)) ||
-             (hweight64(pmu_params.val) > 1) )
+             multiple_bits_set(pmu_params.val) )
             return -EINVAL;
 
         /* 32-bit dom0 can only sample itself. */
@@ -792,6 +780,7 @@ long do_xenpmu_op(
 
     default:
         ret = -EINVAL;
+        break;
     }
 
     return ret;
@@ -843,6 +832,7 @@ static int __init cf_check vpmu_init(void)
 
     switch ( vendor )
     {
+#ifdef CONFIG_AMD
     case X86_VENDOR_AMD:
         ops = amd_vpmu_init();
         break;
@@ -850,10 +840,13 @@ static int __init cf_check vpmu_init(void)
     case X86_VENDOR_HYGON:
         ops = hygon_vpmu_init();
         break;
+#endif
 
+#ifdef CONFIG_INTEL
     case X86_VENDOR_INTEL:
         ops = core2_vpmu_init();
         break;
+#endif
 
     default:
         printk(XENLOG_WARNING "VPMU: Unknown CPU vendor: %d. "

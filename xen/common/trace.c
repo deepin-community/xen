@@ -16,7 +16,6 @@
  * it's possible to reconstruct a chronological record of trace events.
  */
 
-#include <asm/types.h>
 #include <asm/io.h>
 #include <xen/lib.h>
 #include <xen/param.h>
@@ -30,6 +29,7 @@
 #include <xen/mm.h>
 #include <xen/percpu.h>
 #include <xen/pfn.h>
+#include <xen/sections.h>
 #include <xen/cpu.h>
 #include <asm/atomic.h>
 #include <public/sysctl.h>
@@ -67,17 +67,13 @@ static DEFINE_PER_CPU(unsigned long, lost_records_first_tsc);
 
 /* a flag recording whether initialization has been done */
 /* or more properly, if the tbuf subsystem is enabled right now */
-int tb_init_done __read_mostly;
+bool __read_mostly tb_init_done;
 
 /* which CPUs tracing is enabled on */
 static cpumask_t tb_cpu_mask;
 
 /* which tracing events are enabled */
 static u32 tb_event_mask = TRC_ALL;
-
-/* Return the number of elements _type necessary to store at least _x bytes of data
- * i.e., sizeof(_type) * ans >= _x. */
-#define fit_to_type(_type, _x) (((_x)+sizeof(_type)-1) / sizeof(_type))
 
 static int cf_check cpu_callback(
     struct notifier_block *nfb, unsigned long action, void *hcpu)
@@ -96,8 +92,8 @@ static struct notifier_block cpu_nfb = {
 
 static uint32_t calc_tinfo_first_offset(void)
 {
-    int offset_in_bytes = offsetof(struct t_info, mfn_offset[NR_CPUS]);
-    return fit_to_type(uint32_t, offset_in_bytes);
+    return DIV_ROUND_UP(offsetof(struct t_info, mfn_offset[NR_CPUS]),
+                        sizeof(uint32_t));
 }
 
 /**
@@ -148,7 +144,7 @@ static int calculate_tbuf_size(unsigned int pages, uint16_t t_info_first_offset)
         pages = max_pages;
     }
 
-    /* 
+    /*
      * NB this calculation is correct, because t_info_first_offset is
      * in words, not bytes
      */
@@ -167,7 +163,7 @@ static int calculate_tbuf_size(unsigned int pages, uint16_t t_info_first_offset)
  * trace buffers.  The trace buffers are then available for debugging use, via
  * the %TRACE_xD macros exported in <xen/trace.h>.
  *
- * This function may also be called later when enabling trace buffers 
+ * This function may also be called later when enabling trace buffers
  * via the SET_SIZE hypercall.
  */
 static int alloc_trace_bufs(unsigned int pages)
@@ -401,7 +397,7 @@ int tb_control(struct xen_sysctl_tbuf_op *tbc)
         break;
     case XEN_SYSCTL_TBUFOP_enable:
         /* Enable trace buffers. Check buffers are already allocated. */
-        if ( opt_tbuf_size == 0 ) 
+        if ( opt_tbuf_size == 0 )
             rc = -EINVAL;
         else
             tb_init_done = 1;
@@ -438,7 +434,7 @@ int tb_control(struct xen_sysctl_tbuf_op *tbc)
     return rc;
 }
 
-static inline unsigned int calc_rec_size(bool_t cycles, unsigned int extra) 
+static inline unsigned int calc_rec_size(bool cycles, unsigned int extra)
 {
     unsigned int rec_size = 4;
 
@@ -448,7 +444,7 @@ static inline unsigned int calc_rec_size(bool_t cycles, unsigned int extra)
     return rec_size;
 }
 
-static inline bool_t bogus(u32 prod, u32 cons)
+static inline bool bogus(u32 prod, u32 cons)
 {
     if ( unlikely(prod & 3) || unlikely(prod >= 2 * data_size) ||
          unlikely(cons & 3) || unlikely(cons >= 2 * data_size) )
@@ -463,8 +459,8 @@ static inline bool_t bogus(u32 prod, u32 cons)
 
 static inline u32 calc_unconsumed_bytes(const struct t_buf *buf)
 {
-    u32 prod = buf->prod, cons = buf->cons;
-    s32 x;
+    uint32_t prod = buf->prod, cons = buf->cons;
+    int32_t x;
 
     barrier(); /* must read buf->prod and buf->cons only once */
     if ( bogus(prod, cons) )
@@ -482,8 +478,8 @@ static inline u32 calc_unconsumed_bytes(const struct t_buf *buf)
 
 static inline u32 calc_bytes_to_wrap(const struct t_buf *buf)
 {
-    u32 prod = buf->prod, cons = buf->cons;
-    s32 x;
+    uint32_t prod = buf->prod, cons = buf->cons;
+    int32_t x;
 
     barrier(); /* must read buf->prod and buf->cons only once */
     if ( bogus(prod, cons) )
@@ -551,7 +547,7 @@ static unsigned char *next_record(const struct t_buf *buf, uint32_t *next,
 static inline void __insert_record(struct t_buf *buf,
                                    unsigned long event,
                                    unsigned int extra,
-                                   bool_t cycles,
+                                   bool cycles,
                                    unsigned int rec_size,
                                    const void *extra_data)
 {
@@ -597,7 +593,7 @@ static inline void __insert_record(struct t_buf *buf,
         rec->u.cycles.cycles_lo = (uint32_t)tsc;
         rec->u.cycles.cycles_hi = (uint32_t)(tsc >> 32);
         dst = rec->u.cycles.extra_u32;
-    } 
+    }
 
     if ( extra_data && extra )
         memcpy(dst, extra_data, extra);
@@ -622,7 +618,7 @@ static inline void insert_wrap_record(struct t_buf *buf,
 {
     u32 space_left = calc_bytes_to_wrap(buf);
     unsigned int extra_space = space_left - sizeof(u32);
-    bool_t cycles = 0;
+    bool cycles = false;
 
     BUG_ON(space_left > size);
 
@@ -671,37 +667,35 @@ static DECLARE_SOFTIRQ_TASKLET(trace_notify_dom0_tasklet,
                                trace_notify_dom0, NULL);
 
 /**
- * __trace_var - Enters a trace tuple into the trace buffer for the current CPU.
+ * trace - Enters a trace tuple into the trace buffer for the current CPU.
  * @event: the event type being logged
- * @cycles: include tsc timestamp into trace record
  * @extra: size of additional trace data in bytes
  * @extra_data: pointer to additional trace data
  *
  * Logs a trace record into the appropriate buffer.
  */
-void __trace_var(u32 event, bool_t cycles, unsigned int extra,
-                 const void *extra_data)
+void trace(uint32_t event, unsigned int extra, const void *extra_data)
 {
     struct t_buf *buf;
     unsigned long flags;
     u32 bytes_to_tail, bytes_to_wrap;
     unsigned int rec_size, total_size;
-    unsigned int extra_word;
-    bool_t started_below_highwater;
+    bool started_below_highwater;
+    bool cycles = event & TRC_HD_CYCLE_FLAG;
 
     if( !tb_init_done )
         return;
 
-    /* Convert byte count into word count, rounding up */
-    extra_word = (extra / sizeof(u32));
-    if ( (extra % sizeof(u32)) != 0 )
-        extra_word++;
-    
-    ASSERT(extra_word <= TRACE_EXTRA_MAX);
-    extra_word = min_t(int, extra_word, TRACE_EXTRA_MAX);
-
-    /* Round size up to nearest word */
-    extra = extra_word * sizeof(u32);
+    /*
+     * extra data needs to be an exact multiple of uint32_t to prevent the
+     * later logic over-reading the object.  Reject out-of-spec records.  Any
+     * failure here is an error in the caller.
+     */
+    if ( extra % sizeof(uint32_t) ||
+         extra / sizeof(uint32_t) > TRACE_EXTRA_MAX )
+        return printk_once(XENLOG_WARNING
+                           "Trace event %#x bad size %u, discarding\n",
+                           event, extra);
 
     if ( (tb_event_mask & event) == 0 )
         return;
@@ -718,9 +712,6 @@ void __trace_var(u32 event, bool_t cycles, unsigned int extra,
     if ( !cpumask_test_cpu(smp_processor_id(), &tb_cpu_mask) )
         return;
 
-    /* Read tb_init_done /before/ t_bufs. */
-    smp_rmb();
-
     spin_lock_irqsave(&this_cpu(t_lock), flags);
 
     buf = this_cpu(t_bufs);
@@ -736,14 +727,14 @@ void __trace_var(u32 event, bool_t cycles, unsigned int extra,
 
     /* Calculate the record size */
     rec_size = calc_rec_size(cycles, extra);
- 
+
     /* How many bytes are available in the buffer? */
     bytes_to_tail = calc_bytes_avail(buf);
-    
+
     /* How many bytes until the next wrap-around? */
     bytes_to_wrap = calc_bytes_to_wrap(buf);
-    
-    /* 
+
+    /*
      * Calculate expected total size to commit this record by
      * doing a dry-run.
      */
@@ -757,7 +748,7 @@ void __trace_var(u32 event, bool_t cycles, unsigned int extra,
         {
             total_size += bytes_to_wrap;
             bytes_to_wrap = data_size;
-        } 
+        }
         total_size += LOST_REC_SIZE;
         bytes_to_wrap -= LOST_REC_SIZE;
 
@@ -769,7 +760,7 @@ void __trace_var(u32 event, bool_t cycles, unsigned int extra,
     if ( rec_size > bytes_to_wrap )
     {
         total_size += bytes_to_wrap;
-    } 
+    }
     total_size += rec_size;
 
     /* Do we have enough space for everything? */
@@ -782,7 +773,7 @@ void __trace_var(u32 event, bool_t cycles, unsigned int extra,
     }
 
     /*
-     * Now, actually write information 
+     * Now, actually write information
      */
     bytes_to_wrap = calc_bytes_to_wrap(buf);
 
@@ -792,7 +783,7 @@ void __trace_var(u32 event, bool_t cycles, unsigned int extra,
         {
             insert_wrap_record(buf, LOST_REC_SIZE);
             bytes_to_wrap = data_size;
-        } 
+        }
         insert_lost_records(buf);
         bytes_to_wrap -= LOST_REC_SIZE;
 
@@ -872,7 +863,7 @@ void __trace_hypercall(uint32_t event, unsigned long op,
         break;
     }
 
-    __trace_var(event, 1, sizeof(uint32_t) * (1 + (a - d.args)), &d);
+    trace_time(event, sizeof(uint32_t) * (1 + (a - d.args)), &d);
 }
 
 /*

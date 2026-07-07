@@ -14,20 +14,23 @@
 /* Holds the bit size of IPAs in p2m tables.  */
 extern unsigned int p2m_ipa_bits;
 
+#define MAX_VMID_8_BIT  (1UL << 8)
+#define MAX_VMID_16_BIT (1UL << 16)
+
+#define INVALID_VMID 0 /* VMID 0 is reserved */
+
 #ifdef CONFIG_ARM_64
-extern unsigned int p2m_root_order;
-extern unsigned int p2m_root_level;
-#define P2M_ROOT_ORDER    p2m_root_order
-#define P2M_ROOT_LEVEL p2m_root_level
+extern unsigned int max_vmid;
+/* VMID is by default 8 bit width on AArch64 */
+#define MAX_VMID       max_vmid
 #else
-/* First level P2M is always 2 consecutive pages */
-#define P2M_ROOT_ORDER    1
-#define P2M_ROOT_LEVEL 1
+/* VMID is always 8 bit width on AArch32 */
+#define MAX_VMID        MAX_VMID_8_BIT
 #endif
 
 struct domain;
 
-extern void memory_type_changed(struct domain *);
+extern void memory_type_changed(struct domain *d);
 
 /* Per-p2m-table state */
 struct p2m_domain {
@@ -162,6 +165,12 @@ typedef enum {
 #endif
 #include <xen/p2m-common.h>
 
+#if defined(CONFIG_MMU)
+# include <asm/mmu/p2m.h>
+#else
+# error "Unknown memory management layout"
+#endif
+
 static inline bool arch_acquire_resource_check(struct domain *d)
 {
     /*
@@ -186,6 +195,10 @@ void p2m_altp2m_check(struct vcpu *v, uint16_t idx)
  */
 void p2m_restrict_ipa_bits(unsigned int ipa_bits);
 
+void p2m_vmid_allocator_init(void);
+int p2m_alloc_vmid(struct domain *d);
+void p2m_free_vmid(struct domain *d);
+
 /* Second stage paging setup, to be called on all CPUs */
 void setup_virt_paging(void);
 
@@ -194,18 +207,14 @@ int p2m_init(struct domain *d);
 
 /*
  * The P2M resources are freed in two parts:
- *  - p2m_teardown() will be called preemptively when relinquish the
- *    resources, in which case it will free large resources (e.g. intermediate
- *    page-tables) that requires preemption.
+ *  - p2m_teardown() will be called when relinquish the resources. It
+ *    will free large resources (e.g. intermediate page-tables) that
+ *    requires preemption.
  *  - p2m_final_teardown() will be called when domain struct is been
- *    freed. This *cannot* be preempted and therefore one small
+ *    freed. This *cannot* be preempted and therefore only small
  *    resources should be freed here.
- *  Note that p2m_final_teardown() will also call p2m_teardown(), to properly
- *  free the P2M when failures happen in the domain creation with P2M pages
- *  already in use. In this case p2m_teardown() is called non-preemptively and
- *  p2m_teardown() will always return 0.
  */
-int p2m_teardown(struct domain *d, bool allow_preemption);
+int p2m_teardown(struct domain *d);
 void p2m_final_teardown(struct domain *d);
 
 /*
@@ -252,8 +261,6 @@ static inline int p2m_is_write_locked(struct p2m_domain *p2m)
     return rw_is_write_locked(&p2m->lock);
 }
 
-void p2m_tlb_flush_sync(struct p2m_domain *p2m);
-
 /* Look up the MFN corresponding to a domain's GFN. */
 mfn_t p2m_lookup(struct domain *d, gfn_t gfn, p2m_type_t *t);
 
@@ -281,7 +288,7 @@ int p2m_set_entry(struct p2m_domain *p2m,
 
 bool p2m_resolve_translation_fault(struct domain *d, gfn_t gfn);
 
-void p2m_invalidate_root(struct p2m_domain *p2m);
+void p2m_domain_creation_finished(struct domain *d);
 
 /*
  * Clean & invalidate caches corresponding to a region [start,end) of guest

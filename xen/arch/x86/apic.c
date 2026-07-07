@@ -26,6 +26,9 @@
 #include <xen/delay.h>
 #include <xen/smp.h>
 #include <xen/softirq.h>
+
+#include <asm/io-ports.h>
+#include <asm/irq-vectors.h>
 #include <asm/mc146818rtc.h>
 #include <asm/microcode.h>
 #include <asm/msr.h>
@@ -35,9 +38,8 @@
 #include <asm/hardirq.h>
 #include <asm/apic.h>
 #include <asm/io_apic.h>
-#include <mach_apic.h>
-#include <io_ports.h>
-#include <irq_vectors.h>
+#include <asm/genapic.h>
+
 #include <xen/kexec.h>
 #include <asm/guest.h>
 #include <asm/nmi.h>
@@ -63,7 +65,6 @@ static struct {
     unsigned int apic_lvt0;
     unsigned int apic_lvt1;
     unsigned int apic_lvterr;
-    unsigned int apic_tmict;
     unsigned int apic_tdcr;
     unsigned int apic_thmr;
 } apic_pm_state;
@@ -71,7 +72,7 @@ static struct {
 /*
  * Knob to control our willingness to enable the local APIC.
  */
-static s8 __initdata enable_local_apic; /* -1=force-disable, +1=force-enable */
+static int8_t __initdata enable_local_apic; /* -1=force-disable, +1=force-enable */
 
 /*
  * Debug level
@@ -125,21 +126,6 @@ void ack_bad_irq(unsigned int irq)
      */
     if (cpu_has_apic)
         ack_APIC_irq();
-}
-
-void __init apic_intr_init(void)
-{
-    smp_intr_init();
-
-    /* self generated IPI for local APIC timer */
-    set_direct_apic_vector(LOCAL_TIMER_VECTOR, apic_timer_interrupt);
-
-    /* IPI vectors for APIC spurious and error interrupts */
-    set_direct_apic_vector(SPURIOUS_APIC_VECTOR, spurious_interrupt);
-    set_direct_apic_vector(ERROR_APIC_VECTOR, error_interrupt);
-
-    /* Performance Counters Interrupt */
-    set_direct_apic_vector(PMU_APIC_VECTOR, pmu_apic_interrupt);
 }
 
 /* Using APIC to generate smp_local_timer_interrupt? */
@@ -245,7 +231,6 @@ void __init connect_bsp_APIC(void)
     }
 
     printk("Enabling APIC mode.  Using %d I/O APICs\n", nr_ioapics);
-    enable_apic_mode();
 }
 
 void disconnect_bsp_APIC(int virt_wire_setup)
@@ -278,22 +263,20 @@ void disconnect_bsp_APIC(int virt_wire_setup)
         if (!virt_wire_setup) {
             /* For LVT0 make it edge triggered, active high, external and enabled */
             value = apic_read(APIC_LVT0);
-            value &= ~(APIC_MODE_MASK | APIC_SEND_PENDING |
+            value &= ~(APIC_DM_MASK | APIC_SEND_PENDING |
                        APIC_INPUT_POLARITY | APIC_LVT_REMOTE_IRR |
                        APIC_LVT_LEVEL_TRIGGER | APIC_LVT_MASKED );
-            value |= APIC_LVT_REMOTE_IRR | APIC_SEND_PENDING;
-            value = SET_APIC_DELIVERY_MODE(value, APIC_MODE_EXTINT);
+            value |= APIC_LVT_REMOTE_IRR | APIC_SEND_PENDING | APIC_DM_EXTINT;
             apic_write(APIC_LVT0, value);
         }
 
         /* For LVT1 make it edge triggered, active high, nmi and enabled */
         value = apic_read(APIC_LVT1);
         value &= ~(
-            APIC_MODE_MASK | APIC_SEND_PENDING |
+            APIC_DM_MASK | APIC_SEND_PENDING |
             APIC_INPUT_POLARITY | APIC_LVT_REMOTE_IRR |
             APIC_LVT_LEVEL_TRIGGER | APIC_LVT_MASKED);
-        value |= APIC_LVT_REMOTE_IRR | APIC_SEND_PENDING;
-        value = SET_APIC_DELIVERY_MODE(value, APIC_MODE_NMI);
+        value |= APIC_LVT_REMOTE_IRR | APIC_SEND_PENDING | APIC_DM_NMI;
         apic_write(APIC_LVT1, value);
     }
 }
@@ -507,21 +490,12 @@ void setup_local_APIC(bool bsp)
     unsigned long oldvalue, value, maxlvt;
     int i, j;
 
-    /* Pound the ESR really hard over the head with a big hammer - mbligh */
-    if (esr_disable) {
-        apic_write(APIC_ESR, 0);
-        apic_write(APIC_ESR, 0);
-        apic_write(APIC_ESR, 0);
-        apic_write(APIC_ESR, 0);
-    }
-
     BUILD_BUG_ON((SPURIOUS_APIC_VECTOR & 0x0f) != 0x0f);
 
     /*
      * Double-check whether this APIC is really registered.
      */
-    if (!apic_id_registered())
-        BUG();
+    BUG_ON(!physid_isset(get_apic_id(), phys_cpu_present_map));
 
     /*
      * Intel recommends to set DFR, LDR and TPR before enabling
@@ -639,33 +613,21 @@ void setup_local_APIC(bool bsp)
         value = APIC_DM_NMI | APIC_LVT_MASKED;
     apic_write(APIC_LVT1, value);
 
-    if (!esr_disable) {
-        maxlvt = get_maxlvt();
-        if (maxlvt > 3)     /* Due to the Pentium erratum 3AP. */
-            apic_write(APIC_ESR, 0);
-        oldvalue = apic_read(APIC_ESR);
+    maxlvt = get_maxlvt();
+    if (maxlvt > 3)     /* Due to the Pentium erratum 3AP. */
+        apic_write(APIC_ESR, 0);
+    oldvalue = apic_read(APIC_ESR);
 
-        value = ERROR_APIC_VECTOR;      // enables sending errors
-        apic_write(APIC_LVTERR, value);
-        /*
-         * spec says clear errors after enabling vector.
-         */
-        if (maxlvt > 3)
-            apic_write(APIC_ESR, 0);
-        value = apic_read(APIC_ESR);
-        if (value != oldvalue)
-            apic_printk(APIC_VERBOSE, "ESR value before enabling "
-                        "vector: %#lx  after: %#lx\n",
-                        oldvalue, value);
-    } else {
-        /*
-         * Something untraceble is creating bad interrupts on
-         * secondary quads ... for the moment, just leave the
-         * ESR disabled - we can't do anything useful with the
-         * errors anyway - mbligh
-         */
-        printk("Leaving ESR disabled.\n");
-    }
+    value = ERROR_APIC_VECTOR;      // enables sending errors
+    apic_write(APIC_LVTERR, value);
+    /* spec says clear errors after enabling vector. */
+    if (maxlvt > 3)
+        apic_write(APIC_ESR, 0);
+    value = apic_read(APIC_ESR);
+    if (value != oldvalue)
+        apic_printk(APIC_VERBOSE,
+                    "ESR value before enabling vector: %#lx  after: %#lx\n",
+                    oldvalue, value);
 
     if (nmi_watchdog == NMI_LOCAL_APIC && !bsp)
         setup_apic_nmi_watchdog();
@@ -695,7 +657,6 @@ int lapic_suspend(void)
     apic_pm_state.apic_lvt0 = apic_read(APIC_LVT0);
     apic_pm_state.apic_lvt1 = apic_read(APIC_LVT1);
     apic_pm_state.apic_lvterr = apic_read(APIC_LVTERR);
-    apic_pm_state.apic_tmict = apic_read(APIC_TMICT);
     apic_pm_state.apic_tdcr = apic_read(APIC_TDCR);
     if (maxlvt >= 5)
         apic_pm_state.apic_thmr = apic_read(APIC_LVTTHMR);
@@ -755,7 +716,6 @@ int lapic_resume(void)
         apic_write(APIC_LVTPC, apic_pm_state.apic_lvtpc);
     apic_write(APIC_LVTT, apic_pm_state.apic_lvtt);
     apic_write(APIC_TDCR, apic_pm_state.apic_tdcr);
-    apic_write(APIC_TMICT, apic_pm_state.apic_tmict);
     apic_write(APIC_ESR, 0);
     apic_read(APIC_ESR);
     apic_write(APIC_LVTERR, apic_pm_state.apic_lvterr);
@@ -962,7 +922,7 @@ void __init init_apic_mappings(void)
     unsigned long apic_phys;
 
     if ( x2apic_enabled )
-        goto __next;
+        goto next;
     /*
      * If no local APIC can be found then set up a fake all
      * zeroes page to simulate the local APIC and another
@@ -975,10 +935,10 @@ void __init init_apic_mappings(void)
         apic_phys = mp_lapic_addr;
 
     set_fixmap_nocache(FIX_APIC_BASE, apic_phys);
-    apic_printk(APIC_VERBOSE, "mapped APIC to %08Lx (%08lx)\n", APIC_BASE,
-                apic_phys);
+    apic_printk(APIC_VERBOSE, "mapped APIC to %p (%08lx)\n",
+                fix_to_virt(FIX_APIC_BASE), apic_phys);
 
-__next:
+ next:
     /*
      * Fetch the APIC ID of the BSP in case we have a
      * default configuration (or the MP table is broken).
@@ -1020,7 +980,7 @@ static unsigned int __init get_8254_timer_count(void)
 
     /*spin_lock_irqsave(&i8253_lock, flags);*/
 
-    outb_p(0x00, PIT_MODE);
+    outb_p(PIT_LTCH_CH(0), PIT_MODE);
     count = inb_p(PIT_CH0);
     count |= inb_p(PIT_CH0) << 8;
 
@@ -1222,7 +1182,7 @@ static void __init calibrate_APIC_clock(void)
      * Setup the APIC counter to maximum. There is no way the lapic
      * can underflow in the 100ms detection time frame.
      */
-    __setup_APIC_LVTT(0xffffffff);
+    __setup_APIC_LVTT(0xffffffffU);
 
     bus_freq = calibrate_apic_timer();
     if ( !bus_freq )
@@ -1359,7 +1319,7 @@ int reprogram_timer(s_time_t timeout)
     return apic_tmict || !timeout;
 }
 
-void cf_check apic_timer_interrupt(struct cpu_user_regs *regs)
+static void cf_check apic_timer_interrupt(void)
 {
     ack_APIC_irq();
     perfc_incr(apic_timer);
@@ -1378,7 +1338,7 @@ void smp_send_state_dump(unsigned int cpu)
 /*
  * Spurious interrupts should _never_ happen with our APIC/SMP architecture.
  */
-void cf_check spurious_interrupt(struct cpu_user_regs *regs)
+static void cf_check spurious_interrupt(void)
 {
     /*
      * Check if this is a vectored interrupt (most likely, as this is probably
@@ -1392,7 +1352,7 @@ void cf_check spurious_interrupt(struct cpu_user_regs *regs)
         is_spurious = !nmi_check_continuation();
         if (this_cpu(state_dump_pending)) {
             this_cpu(state_dump_pending) = false;
-            dump_execstate(regs);
+            dump_execstate(get_irq_regs());
             is_spurious = false;
         }
 
@@ -1409,20 +1369,21 @@ void cf_check spurious_interrupt(struct cpu_user_regs *regs)
  * This interrupt should never happen with our APIC/SMP architecture
  */
 
-void cf_check error_interrupt(struct cpu_user_regs *regs)
+static void cf_check error_interrupt(void)
 {
     static const char *const esr_fields[] = {
-        "Send CS error",
-        "Receive CS error",
-        "Send accept error",
-        "Receive accept error",
-        "Redirectable IPI",
-        "Send illegal vector",
-        "Received illegal vector",
-        "Illegal register address",
+        ", Send CS error",
+        ", Receive CS error",
+        ", Send accept error",
+        ", Receive accept error",
+        ", Redirectable IPI",
+        ", Send illegal vector",
+        ", Received illegal vector",
+        ", Illegal register address",
     };
+    const char *entries[ARRAY_SIZE(esr_fields)];
     unsigned int v, v1;
-    int i;
+    unsigned int i;
 
     /* First tickle the hardware, only then report what went on. -- REW */
     v = apic_read(APIC_ESR);
@@ -1430,22 +1391,38 @@ void cf_check error_interrupt(struct cpu_user_regs *regs)
     v1 = apic_read(APIC_ESR);
     ack_APIC_irq();
 
-    printk(XENLOG_DEBUG "APIC error on CPU%u: %02x(%02x)",
-            smp_processor_id(), v , v1);
-    for ( i = 7; i >= 0; --i )
-        if ( v1 & (1 << i) )
-            printk(", %s", esr_fields[i]);
-    printk("\n");
+    for ( i = 0; i < ARRAY_SIZE(entries); ++i )
+        entries[i] = v1 & (1 << i) ? esr_fields[i] : "";
+    printk(XENLOG_DEBUG
+           "APIC error on CPU%u: %02x(%02x)%s%s%s%s%s%s%s%s\n",
+           smp_processor_id(), v, v1,
+           entries[7], entries[6], entries[5], entries[4],
+           entries[3], entries[2], entries[1], entries[0]);
 }
 
 /*
  * This interrupt handles performance counters interrupt
  */
 
-void cf_check pmu_apic_interrupt(struct cpu_user_regs *regs)
+static void cf_check pmu_interrupt(void)
 {
     ack_APIC_irq();
-    vpmu_do_interrupt(regs);
+    vpmu_do_interrupt();
+}
+
+void __init apic_intr_init(void)
+{
+    smp_intr_init();
+
+    /* self generated IPI for local APIC timer */
+    set_direct_apic_vector(LOCAL_TIMER_VECTOR, apic_timer_interrupt);
+
+    /* IPI vectors for APIC spurious and error interrupts */
+    set_direct_apic_vector(SPURIOUS_APIC_VECTOR, spurious_interrupt);
+    set_direct_apic_vector(ERROR_APIC_VECTOR, error_interrupt);
+
+    /* Performance Counters Interrupt */
+    set_direct_apic_vector(PMU_APIC_VECTOR, pmu_interrupt);
 }
 
 /*

@@ -42,7 +42,7 @@
 #include <xenstore.h>
 #include "xenctrl.h"
 
-#define ESCAPE_CHARACTER 0x1d
+#define DEFAULT_ESCAPE_CHARACTER 0x1d
 
 static volatile sig_atomic_t received_signal = 0;
 static char lockfile[sizeof (XEN_LOCK_DIR "/xenconsole.") + 8] = { 0 };
@@ -77,6 +77,7 @@ static void usage(const char *program) {
 	       "  -n, --num N      use console number N\n"
 	       "  --type TYPE      console type. must be 'pv', 'serial' or 'vuart'\n"
 	       "  --start-notify-fd N file descriptor used to notify parent\n"
+	       "  --escape E       escape sequence to exit console\n"
 	       , program);
 }
 
@@ -174,7 +175,7 @@ static void restore_term(int fd, struct termios *old)
 }
 
 static int console_loop(int fd, struct xs_handle *xs, char *pty_path,
-		        bool interactive)
+			bool interactive, char escape_character)
 {
 	int ret, xs_fd = xs_fileno(xs), max_fd = -1;
 
@@ -215,7 +216,7 @@ static int console_loop(int fd, struct xs_handle *xs, char *pty_path,
 			char msg[60];
 
 			len = read(STDIN_FILENO, msg, sizeof(msg));
-			if (len == 1 && msg[0] == ESCAPE_CHARACTER) {
+			if (len == 1 && msg[0] == escape_character) {
 				return 0;
 			} 
 
@@ -335,6 +336,7 @@ int main(int argc, char **argv)
 		{ "help",    0, 0, 'h' },
 		{ "start-notify-fd", 1, 0, 's' },
 		{ "interactive", 0, 0, 'i' },
+		{ "escape",  1, 0, 'e' },
 		{ 0 },
 
 	};
@@ -345,6 +347,7 @@ int main(int argc, char **argv)
 	console_type type = CONSOLE_INVAL;
 	bool interactive = 0;
 	const char *console_names = "serial, pv, vuart";
+	char escape_character = DEFAULT_ESCAPE_CHARACTER;
 
 	while((ch = getopt_long(argc, argv, sopt, lopt, &opt_ind)) != -1) {
 		switch(ch) {
@@ -374,6 +377,16 @@ int main(int argc, char **argv)
 			break;
 		case 'i':
 			interactive = 1;
+			break;
+		case 'e':
+			if (optarg[0] == '^' && optarg[1] && optarg[2] == '\0')
+				escape_character = optarg[1] & 0x1f;
+			else if (optarg[0] && optarg[1] == '\0')
+				escape_character = optarg[0];
+			else {
+				fprintf(stderr, "Invalid escape argument\n");
+				exit(EINVAL);
+			}
 			break;
 		default:
 			fprintf(stderr, "Invalid argument\n");
@@ -408,17 +421,16 @@ int main(int argc, char **argv)
 	if (dom_path == NULL)
 		err(errno, "xs_get_domain_path()");
 	if (type == CONSOLE_INVAL) {
-		xc_dominfo_t xcinfo;
+		xc_domaininfo_t xcinfo;
 		xc_interface *xc_handle = xc_interface_open(0,0,0);
 		if (xc_handle == NULL)
 			err(errno, "Could not open xc interface");
-		if ( (xc_domain_getinfo(xc_handle, domid, 1, &xcinfo) != 1) ||
-		     (xcinfo.domid != domid) ) {
+		if (xc_domain_getinfo_single(xc_handle, domid, &xcinfo) < 0) {
 			xc_interface_close(xc_handle);
 			err(errno, "Failed to get domain information");
 		}
 		/* default to pv console for pv guests and serial for hvm guests */
-		if (xcinfo.hvm)
+		if (xcinfo.flags & XEN_DOMINF_hvm_guest)
 			type = CONSOLE_SERIAL;
 		else
 			type = CONSOLE_PV;
@@ -494,7 +506,7 @@ int main(int argc, char **argv)
 		close(start_notify_fd);
 	}
 
-	console_loop(spty, xs, path, interactive);
+	console_loop(spty, xs, path, interactive, escape_character);
 
 	free(path);
 	free(dom_path);

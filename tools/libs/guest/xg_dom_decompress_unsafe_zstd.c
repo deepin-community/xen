@@ -22,17 +22,17 @@ typedef uint16_t __be16;
 typedef uint32_t __be32;
 typedef uint64_t __be64;
 
-#define __attribute_const__
+#define attr_const
 #define __force
 #define always_inline
 #define noinline
+#define __packed __attribute__((__packed__))
 
 #undef ERROR
 
 #define __BYTEORDER_HAS_U64__
 #define __TYPES_H__ /* xen/types.h guard */
 #include "../../xen/include/xen/byteorder/little_endian.h"
-#define __ASM_UNALIGNED_H__ /* asm/unaligned.h guard */
 #include "../../xen/include/xen/unaligned.h"
 #include "../../xen/include/xen/xxhash.h"
 #include "../../xen/lib/xxhash64.c"

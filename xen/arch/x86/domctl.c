@@ -25,7 +25,6 @@
 #include <asm/irq.h>
 #include <asm/hvm/emulate.h>
 #include <asm/hvm/hvm.h>
-#include <asm/hvm/support.h>
 #include <asm/processor.h>
 #include <asm/acpi.h> /* for hvm_acpi_power_button */
 #include <xen/hypercall.h> /* for arch_do_domctl */
@@ -37,6 +36,7 @@
 #include <asm/xstate.h>
 #include <asm/psr.h>
 #include <asm/cpu-policy.h>
+#include <asm/io_apic.h>
 
 static int update_domain_cpu_policy(struct domain *d,
                                     xen_domctl_cpu_policy_t *xdpc)
@@ -238,6 +238,37 @@ long arch_do_domctl(
         break;
     }
 
+    case XEN_DOMCTL_gsi_permission:
+    {
+        int irq;
+        unsigned int gsi = domctl->u.gsi_permission.gsi;
+        uint32_t flags = domctl->u.gsi_permission.flags;
+
+        /* Check only valid bits are set */
+        ret = -EINVAL;
+        if ( flags & ~XEN_DOMCTL_GSI_ACTION_MASK )
+            break;
+
+        irq = gsi_2_irq(gsi);
+        if ( irq <= 0 )
+        {
+            ret = irq ?: -EACCES;
+            break;
+        }
+
+        ret = -EPERM;
+        if ( !irq_access_permitted(currd, irq) ||
+             xsm_irq_permission(XSM_HOOK, d, irq, flags) )
+            break;
+
+        if ( flags )
+            ret = irq_permit_access(d, irq);
+        else
+            ret = irq_deny_access(d, irq);
+
+        break;
+    }
+
     case XEN_DOMCTL_getpageframeinfo3:
     {
         unsigned int num = domctl->u.getpageframeinfo3.num;
@@ -380,8 +411,12 @@ long arch_do_domctl(
         if ( copy_from_guest(c.data, domctl->u.hvmcontext.buffer, c.size) != 0 )
             goto sethvmcontext_out;
 
+        ret = hvm_load(d, false, &c);
+        if ( ret )
+            goto sethvmcontext_out;
+
         domain_pause(d);
-        ret = hvm_load(d, &c);
+        ret = hvm_load(d, true, &c);
         domain_unpause(d);
 
     sethvmcontext_out:
@@ -514,6 +549,7 @@ long arch_do_domctl(
 
         default:
             ret = -ENOSYS;
+            break;
         }
         break;
     }
@@ -815,71 +851,12 @@ long arch_do_domctl(
     }
 #endif
 
-#ifdef CONFIG_GDBSX
     case XEN_DOMCTL_gdbsx_guestmemio:
-        ret = gdbsx_guest_mem_io(d, &domctl->u.gdbsx_guest_memio);
-        if ( !ret )
-           copyback = true;
-        break;
-
     case XEN_DOMCTL_gdbsx_pausevcpu:
-    {
-        struct vcpu *v;
-
-        ret = -EBUSY;
-        if ( !d->controller_pause_count )
-            break;
-        ret = -EINVAL;
-        if ( domctl->u.gdbsx_pauseunp_vcpu.vcpu >= d->max_vcpus ||
-             (v = d->vcpu[domctl->u.gdbsx_pauseunp_vcpu.vcpu]) == NULL )
-            break;
-        ret = vcpu_pause_by_systemcontroller(v);
-        break;
-    }
-
     case XEN_DOMCTL_gdbsx_unpausevcpu:
-    {
-        struct vcpu *v;
-
-        ret = -EBUSY;
-        if ( !d->controller_pause_count )
-            break;
-        ret = -EINVAL;
-        if ( domctl->u.gdbsx_pauseunp_vcpu.vcpu >= d->max_vcpus ||
-             (v = d->vcpu[domctl->u.gdbsx_pauseunp_vcpu.vcpu]) == NULL )
-            break;
-        ret = vcpu_unpause_by_systemcontroller(v);
-        if ( ret == -EINVAL )
-            printk(XENLOG_G_WARNING
-                   "WARN: d%d attempting to unpause %pv which is not paused\n",
-                   currd->domain_id, v);
-        break;
-    }
-
     case XEN_DOMCTL_gdbsx_domstatus:
-    {
-        struct vcpu *v;
-
-        domctl->u.gdbsx_domstatus.vcpu_id = -1;
-        domctl->u.gdbsx_domstatus.paused = d->controller_pause_count > 0;
-        if ( domctl->u.gdbsx_domstatus.paused )
-        {
-            for_each_vcpu ( d, v )
-            {
-                if ( v->arch.gdbsx_vcpu_event )
-                {
-                    domctl->u.gdbsx_domstatus.vcpu_id = v->vcpu_id;
-                    domctl->u.gdbsx_domstatus.vcpu_ev =
-                        v->arch.gdbsx_vcpu_event;
-                    v->arch.gdbsx_vcpu_event = 0;
-                    break;
-                }
-            }
-        }
-        copyback = true;
+        ret = gdbsx_domctl(d, domctl, &copyback);
         break;
-    }
-#endif
 
     case XEN_DOMCTL_setvcpuextstate:
     case XEN_DOMCTL_getvcpuextstate:
@@ -889,7 +866,7 @@ long arch_do_domctl(
         uint32_t offset = 0;
 
 #define PV_XSAVE_HDR_SIZE (2 * sizeof(uint64_t))
-#define PV_XSAVE_SIZE(xcr0) (PV_XSAVE_HDR_SIZE + xstate_ctxt_size(xcr0))
+#define PV_XSAVE_SIZE(xcr0) (PV_XSAVE_HDR_SIZE + xstate_uncompressed_size(xcr0))
 
         ret = -ESRCH;
         if ( (evc->vcpu >= d->max_vcpus) ||
@@ -1111,10 +1088,6 @@ long arch_do_domctl(
              !is_pv_domain(d) )
             break;
 
-        /* Count maximum number of optional msrs. */
-        if ( boot_cpu_has(X86_FEATURE_DBEXT) )
-            nr_msrs += 4;
-
         if ( domctl->cmd == XEN_DOMCTL_get_vcpu_msrs )
         {
             ret = 0; copyback = true;
@@ -1189,6 +1162,7 @@ long arch_do_domctl(
                 if ( msr.reserved )
                     break;
 
+                ret = -ENXIO;
                 switch ( msr.index )
                 {
                 case MSR_SPEC_CTRL:
@@ -1197,9 +1171,16 @@ long arch_do_domctl(
                 case MSR_AMD64_DR0_ADDRESS_MASK:
                 case MSR_AMD64_DR1_ADDRESS_MASK ... MSR_AMD64_DR3_ADDRESS_MASK:
                     if ( guest_wrmsr(v, msr.index, msr.value) != X86EMUL_OKAY )
+                    {
+                        printk(XENLOG_G_ERR
+                               "%pv load MSR %#x with value %#lx failed\n",
+                               v, msr.index, msr.value);
                         break;
+                    }
                     continue;
                 }
+                printk(XENLOG_G_ERR "%pv attempted load of unhandled MSR %#x\n",
+                       v, msr.index);
                 break;
             }
 
@@ -1250,6 +1231,7 @@ long arch_do_domctl(
     case XEN_DOMCTL_psr_alloc:
         switch ( domctl->u.psr_alloc.cmd )
         {
+#ifdef CONFIG_X86_PSR
         case XEN_DOMCTL_PSR_SET_L3_CBM:
             ret = psr_set_val(d, domctl->u.psr_alloc.target,
                               domctl->u.psr_alloc.data,
@@ -1311,6 +1293,8 @@ long arch_do_domctl(
             break;
 
 #undef domctl_psr_get_val
+
+#endif /* CONFIG_X86_PSR */
 
         default:
             ret = -EOPNOTSUPP;
@@ -1382,6 +1366,7 @@ long arch_do_domctl(
 #ifdef CONFIG_COMPAT
 #define xen_vcpu_guest_context vcpu_guest_context
 #define fpu_ctxt fpu_ctxt.x
+/* SAF-6-safe Rule 20.12 expansion of macro fpu_ctxt with CONFIG_COMPAT */
 CHECK_FIELD_(struct, vcpu_guest_context, fpu_ctxt);
 #undef fpu_ctxt
 #undef xen_vcpu_guest_context
@@ -1398,7 +1383,11 @@ void arch_get_info_guest(struct vcpu *v, vcpu_guest_context_u c)
 #define c(fld) (c.nat->fld)
 #endif
 
-    memcpy(&c.nat->fpu_ctxt, v->arch.fpu_ctxt, sizeof(c.nat->fpu_ctxt));
+    BUILD_BUG_ON(sizeof(c.nat->fpu_ctxt) !=
+                 sizeof(v->arch.xsave_area->fpu_sse));
+    memcpy(&c.nat->fpu_ctxt, &v->arch.xsave_area->fpu_sse,
+           sizeof(c.nat->fpu_ctxt));
+
     if ( is_pv_domain(d) )
         c(flags = v->arch.pv.vgc_flags & ~(VGCF_i387_valid|VGCF_in_kernel));
     else

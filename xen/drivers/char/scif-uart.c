@@ -102,7 +102,7 @@ static const struct port_params port_params[NR_PORTS] =
     },
 };
 
-static void scif_uart_interrupt(int irq, void *data, struct cpu_user_regs *regs)
+static void scif_uart_interrupt(int irq, void *data)
 {
     struct serial_port *port = data;
     struct scif_uart *uart = port->uart;
@@ -119,11 +119,11 @@ static void scif_uart_interrupt(int irq, void *data, struct cpu_user_regs *regs)
     {
         /* TX Interrupt */
         if ( status & SCFSR_TDFE )
-            serial_tx_interrupt(port, regs);
+            serial_tx_interrupt(port);
 
         /* RX Interrupt */
         if ( status & (SCFSR_RDF | SCFSR_DR) )
-            serial_rx_interrupt(port, regs);
+            serial_rx_interrupt(port);
 
         /* Error Interrupt */
         if ( status & params->error_mask )
@@ -193,16 +193,6 @@ static void __init scif_uart_init_postirq(struct serial_port *port)
     /* Enable TX/RX and Error Interrupts  */
     scif_writew(uart, SCIF_SCSCR, scif_readw(uart, SCIF_SCSCR) |
                 params->irq_flags);
-}
-
-static void scif_uart_suspend(struct serial_port *port)
-{
-    BUG();
-}
-
-static void scif_uart_resume(struct serial_port *port)
-{
-    BUG();
 }
 
 static int scif_uart_tx_ready(struct serial_port *port)
@@ -284,9 +274,6 @@ static void scif_uart_stop_tx(struct serial_port *port)
 static struct uart_driver __read_mostly scif_uart_driver = {
     .init_preirq  = scif_uart_init_preirq,
     .init_postirq = scif_uart_init_postirq,
-    .endboot      = NULL,
-    .suspend      = scif_uart_suspend,
-    .resume       = scif_uart_resume,
     .tx_ready     = scif_uart_tx_ready,
     .putc         = scif_uart_putc,
     .getc         = scif_uart_getc,
@@ -311,14 +298,14 @@ static int __init scif_uart_init(struct dt_device_node *dev,
     const char *config = data;
     struct scif_uart *uart;
     int res;
-    u64 addr, size;
+    paddr_t addr, size;
 
     if ( strcmp(config, "") )
         printk("WARNING: UART configuration is not supported\n");
 
     uart = &scif_com;
 
-    res = dt_device_get_address(dev, 0, &addr, &size);
+    res = dt_device_get_paddr(dev, 0, &addr, &size);
     if ( res )
     {
         printk("scif-uart: Unable to retrieve the base"

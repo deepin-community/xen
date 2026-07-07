@@ -1,19 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * vpt.h: Virtual Platform Timer definitions
  *
  * Copyright (c) 2004, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef __ASM_X86_HVM_VPT_H__
@@ -22,7 +11,6 @@
 #include <xen/timer.h>
 #include <xen/list.h>
 #include <xen/rwlock.h>
-#include <asm/hvm/hvm.h>
 
 /*
  * Abstract layer of periodic time, one short time.
@@ -59,8 +47,14 @@ struct periodic_time {
 typedef struct PITState {
     /* Hardware state */
     struct hvm_hw_pit hw;
-    /* Last time the counters read zero, for calcuating counter reads */
+
+    /* Last time the counters read zero, for calculating counter reads */
     int64_t count_load_time[3];
+    /* Last time the counters were stopped, for calculating counter reads */
+    int64_t count_stop_time[3];
+    /* Accumulate "stopped" time, since the last counter write/reload. */
+    uint64_t stopped_time[3];
+
     /* Channel 0 IRQ handling. */
     struct periodic_time pt0;
     spinlock_t lock;
@@ -184,7 +178,7 @@ void destroy_periodic_time(struct periodic_time *pt);
 int pv_pit_handler(int port, int data, int write);
 void pit_reset(struct domain *d);
 
-void pit_init(struct domain *d, unsigned long cpu_khz);
+void pit_init(struct domain *d);
 void pit_stop_channel0_irq(PITState * pit);
 void pit_deinit(struct domain *d);
 void rtc_init(struct domain *d);

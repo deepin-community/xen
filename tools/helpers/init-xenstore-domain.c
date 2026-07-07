@@ -11,15 +11,15 @@
 #include <xenguest.h>
 #include <xenstore.h>
 #include <xentoollog.h>
+#include <libxl.h>
 #include <xen/sys/xenbus_dev.h>
+#include <xen-tools/common-macros.h>
 #include <xen-xsm/flask/flask.h>
 #include <xen/io/xenbus.h>
 
 #include "init-dom-json.h"
 
 #define LAPIC_BASE_ADDRESS  0xfee00000UL
-#define MB(x)               ((uint64_t)x << 20)
-#define GB(x)               ((uint64_t)x << 30)
 
 static uint32_t domid = ~0;
 static char *kernel;
@@ -31,6 +31,13 @@ static int memory;
 static int maxmem;
 static xen_pfn_t console_gfn;
 static xc_evtchn_port_or_error_t console_evtchn;
+static xentoollog_level minmsglevel = XTL_PROGRESS;
+static void *logger;
+
+static inline uint64_t mb_to_bytes(int mem)
+{
+    return (uint64_t)mem << 20;
+}
 
 static struct option options[] = {
     { "kernel", 1, NULL, 'k' },
@@ -72,8 +79,8 @@ static int build(xc_interface *xch)
     int rv, xs_fd;
     struct xc_dom_image *dom = NULL;
     int limit_kb = (maxmem ? : memory) * 1024 + X86_HVM_NR_SPECIAL_PAGES * 4;
-    uint64_t mem_size = MB(memory);
-    uint64_t max_size = MB(maxmem ? : memory);
+    uint64_t mem_size = mb_to_bytes(memory);
+    uint64_t max_size = mb_to_bytes(maxmem ? : memory);
     struct e820entry e820[3];
     struct xen_domctl_createdomain config = {
         .ssidref = SECINITSID_DOMU,
@@ -141,19 +148,33 @@ static int build(xc_interface *xch)
         goto err;
     }
 
+    /*
+     * This is a bodge.  We can't currently inspect the kernel's ELF notes
+     * ahead of attempting to construct a domain, so try PVH first, suppressing
+     * errors by setting min level to high, and fall back to PV.
+     */
     dom->container_type = XC_DOM_HVM_CONTAINER;
+    xtl_stdiostream_set_minlevel(logger, XTL_CRITICAL);
     rv = xc_dom_parse_image(dom);
+    xtl_stdiostream_set_minlevel(logger, minmsglevel);
     if ( rv )
     {
         dom->container_type = XC_DOM_PV_CONTAINER;
         rv = xc_dom_parse_image(dom);
         if ( rv )
         {
-            fprintf(stderr, "xc_dom_parse_image failed\n");
-            goto err;
+            /* Retry PVH, now with normal logging level. */
+            dom->container_type = XC_DOM_HVM_CONTAINER;
+            rv = xc_dom_parse_image(dom);
+            if ( rv )
+            {
+                fprintf(stderr, "xc_dom_parse_image failed\n");
+                goto err;
+            }
         }
     }
-    else
+
+    if ( dom->container_type == XC_DOM_HVM_CONTAINER )
     {
         config.flags |= XEN_DOMCTL_CDF_hvm | XEN_DOMCTL_CDF_hap;
         config.arch.emulation_flags = XEN_X86_EMU_LAPIC;
@@ -230,6 +251,13 @@ static int build(xc_interface *xch)
     dom->cmdline = xc_dom_strdup(dom, cmdline);
     dom->xenstore_domid = domid;
     dom->console_evtchn = console_evtchn;
+    rv = xc_evtchn_alloc_unbound(xch, domid, domid);
+    if ( rv < 0 )
+    {
+        fprintf(stderr, "xc_evtchn_alloc_unbound failed\n");
+        goto err;
+    }
+    dom->xenstore_evtchn = rv;
 
     rv = xc_dom_mem_init(dom, memory);
     if ( rv )
@@ -305,16 +333,20 @@ err:
 
 static int check_domain(xc_interface *xch)
 {
-    xc_dominfo_t info;
+    /* Commonly dom0 is the only domain, but buffer a little for efficiency. */
+    xc_domaininfo_t info[8];
     uint32_t dom;
     int ret;
 
     dom = 1;
-    while ( (ret = xc_domain_getinfo(xch, dom, 1, &info)) == 1 )
+    while ( (ret = xc_domain_getinfolist(xch, dom, ARRAY_SIZE(info), info)) > 0 )
     {
-        if ( info.xenstore )
-            return 1;
-        dom = info.domid + 1;
+        for ( size_t i = 0; i < ret; i++ )
+        {
+            if ( info[i].flags & XEN_DOMINF_xs_domain )
+                return 1;
+        }
+        dom = info[ret - 1].domain + 1;
     }
     if ( ret < 0 && errno != ESRCH )
     {
@@ -387,15 +419,6 @@ static void do_xs_write(struct xs_handle *xsh, char *path, char *val)
         fprintf(stderr, "writing %s to xenstore failed.\n", path);
 }
 
-static void do_xs_write_dir_node(struct xs_handle *xsh, char *dir, char *node,
-                                 char *val)
-{
-    char full_path[100];
-
-    snprintf(full_path, 100, "%s/%s", dir, node);
-    do_xs_write(xsh, full_path, val);
-}
-
 static void do_xs_write_dom(struct xs_handle *xsh, char *path, char *val)
 {
     char full_path[64];
@@ -409,11 +432,16 @@ int main(int argc, char** argv)
     int opt;
     xc_interface *xch;
     struct xs_handle *xsh;
-    char buf[16], be_path[64], fe_path[64];
+    char buf[16];
     int rv, fd;
     char *maxmem_str = NULL;
-    xentoollog_level minmsglevel = XTL_PROGRESS;
-    xentoollog_logger *logger = NULL;
+    libxl_ctx *ctx;
+    libxl_device_p9 p9 = { .backend_domid = 0,
+                           .tag = "Xen",
+                           .path = XEN_LIB_DIR"/xenstore",
+                           .security_model = "none",
+                           .type = LIBXL_P9_TYPE_XEN_9PFSD,
+    };
 
     while ( (opt = getopt_long(argc, argv, "v", options, NULL)) != -1 )
     {
@@ -456,9 +484,7 @@ int main(int argc, char** argv)
         return 2;
     }
 
-    logger = (xentoollog_logger *)xtl_createlogger_stdiostream(stderr,
-                                                               minmsglevel, 0);
-
+    logger = xtl_createlogger_stdiostream(stderr, minmsglevel, 0);
     xch = xc_interface_open(logger, logger, 0);
     if ( !xch )
     {
@@ -516,26 +542,18 @@ int main(int argc, char** argv)
     if (maxmem)
         snprintf(buf, 16, "%d", maxmem * 1024);
     do_xs_write_dom(xsh, "memory/static-max", buf);
-    snprintf(be_path, 64, "/local/domain/0/backend/console/%d/0", domid);
-    snprintf(fe_path, 64, "/local/domain/%d/console", domid);
-    snprintf(buf, 16, "%d", domid);
-    do_xs_write_dir_node(xsh, be_path, "frontend-id", buf);
-    do_xs_write_dir_node(xsh, be_path, "frontend", fe_path);
-    do_xs_write_dir_node(xsh, be_path, "online", "1");
-    snprintf(buf, 16, "%d", XenbusStateInitialising);
-    do_xs_write_dir_node(xsh, be_path, "state", buf);
-    do_xs_write_dir_node(xsh, be_path, "protocol", "vt100");
-    do_xs_write_dir_node(xsh, fe_path, "backend", be_path);
-    do_xs_write_dir_node(xsh, fe_path, "backend-id", "0");
-    do_xs_write_dir_node(xsh, fe_path, "limit", "1048576");
-    do_xs_write_dir_node(xsh, fe_path, "type", "xenconsoled");
-    do_xs_write_dir_node(xsh, fe_path, "output", "pty");
-    do_xs_write_dir_node(xsh, fe_path, "tty", "");
-    snprintf(buf, 16, "%d", console_evtchn);
-    do_xs_write_dir_node(xsh, fe_path, "port", buf);
-    snprintf(buf, 16, "%ld", console_gfn);
-    do_xs_write_dir_node(xsh, fe_path, "ring-ref", buf);
     xs_close(xsh);
+
+    if ( libxl_ctx_alloc(&ctx, LIBXL_VERSION, 0, logger))
+    {
+        fprintf(stderr, "libxl_ctx_alloc() failed.\n");
+        rv = 3;
+        goto out;
+    }
+    libxl_console_add_xenstore(ctx, domid, 0, console_evtchn, console_gfn,
+                               NULL);
+    libxl_device_9pfs_add(ctx, domid, &p9, NULL);
+    libxl_ctx_free(ctx);
 
     fd = creat(XEN_RUN_DIR "/xenstored.pid", 0666);
     if ( fd < 0 )

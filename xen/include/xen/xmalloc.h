@@ -7,6 +7,9 @@
 
 /*
  * Xen malloc/free-style interface.
+ *
+ * NOTE: Unless physically contiguous memory space is required, the interfaces
+ *       in xvmalloc.h are to be used in preference to the ones here.
  */
 
 /* Allocate space for typed object. */
@@ -34,6 +37,9 @@
     ((_type *)_xmalloc_array(sizeof(_type), __alignof__(_type), _num))
 #define xzalloc_array(_type, _num) \
     ((_type *)_xzalloc_array(sizeof(_type), __alignof__(_type), _num))
+#define xrealloc_array(_ptr, _num)                                  \
+    ((typeof(_ptr))_xrealloc_array(_ptr, sizeof(typeof(*(_ptr))),   \
+                                   __alignof__(typeof(*(_ptr))), _num))
 
 /* Allocate space for a structure with a flexible array of typed objects. */
 #define xzalloc_flex_struct(type, field, nr) \
@@ -63,12 +69,13 @@
     })
 
 /* Free any of the above. */
-extern void xfree(void *);
+extern void xfree(void *p);
 
 /* Free an allocation, and zero the pointer to it. */
-#define XFREE(p) do { \
-    xfree(p);         \
-    (p) = NULL;       \
+#define XFREE(p) do {                       \
+    void *_ptr_ = (p);                      \
+    (p) = NULL;                             \
+    xfree(_ptr_);                           \
 } while ( false )
 
 /* Underlying functions */
@@ -92,6 +99,15 @@ static inline void *_xzalloc_array(
     if ( size && num > UINT_MAX / size )
         return NULL;
     return _xzalloc(size * num, align);
+}
+
+static inline void *_xrealloc_array(
+    void *ptr, unsigned long size, unsigned long align, unsigned long num)
+{
+    /* Check for overflow. */
+    if ( size && num > UINT_MAX / size )
+        return NULL;
+    return _xrealloc(ptr, size * num, align);
 }
 
 /*

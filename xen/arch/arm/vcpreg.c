@@ -1,19 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * xen/arch/arm/arm64/vcpreg.c
  *
  * Emulate co-processor registers trapped.
  *
  * Copyright (c) 2011 Citrix Systems.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <xen/sched.h>
@@ -48,7 +39,8 @@
  */
 
 #ifdef CONFIG_ARM_64
-#define WRITE_SYSREG_SZ(sz, val, sysreg) WRITE_SYSREG((uint##sz##_t)val, sysreg)
+#define WRITE_SYSREG_SZ(sz, val, sysreg) \
+    WRITE_SYSREG((uint##sz##_t)(val), sysreg)
 #else
 /*
  * WRITE_SYSREG{32/64} on arm32 is defined as variadic macro which imposes
@@ -73,7 +65,7 @@ static bool func(struct cpu_user_regs *regs, type##sz##_t *r, bool read)    \
     bool cache_enabled = vcpu_has_cache_enabled(v);                         \
                                                                             \
     GUEST_BUG_ON(read);                                                     \
-    WRITE_SYSREG_SZ(sz, *r, reg);                                           \
+    WRITE_SYSREG_SZ(sz, *(r), reg);                                         \
                                                                             \
     p2m_toggle_cache(v, cache_enabled);                                     \
                                                                             \
@@ -178,7 +170,7 @@ TVM_REG32(CONTEXTIDR, CONTEXTIDR_EL1)
     case HSR_CPREG32(reg):                                          \
     {                                                               \
         return handle_ro_read_val(regs, regidx, cp32.read, hsr, 1,  \
-                                  guest_cpuinfo.field.bits[offset]);\
+                                  domain_cpuinfo.field.bits[offset]);\
     }
 
 /* helper to define cases for all registers for one CRm value */
@@ -502,11 +494,12 @@ void do_cp14_32(struct cpu_user_regs *regs, const union hsr hsr)
      * ARMv8 (DDI 0487A.d): D1-1509 Table D1-58
      *
      * Unhandled:
-     *    DBGOSLSR
      *    DBGPRCR
      */
     case HSR_CPREG32(DBGOSLAR):
         return handle_wo_wi(regs, regidx, cp32.read, hsr, 1);
+    case HSR_CPREG32(DBGOSLSR):
+        return handle_ro_read_val(regs, regidx, cp32.read, hsr, 1, 1U << 3);
     case HSR_CPREG32(DBGOSDLR):
         return handle_raz_wi(regs, regidx, cp32.read, hsr, 1);
 
@@ -518,8 +511,6 @@ void do_cp14_32(struct cpu_user_regs *regs, const union hsr hsr)
      *
      * Unhandled:
      *    DBGDCCINT
-     *    DBGDTRRXint
-     *    DBGDTRTXint
      *    DBGWFAR
      *    DBGDTRTXext
      *    DBGDTRRXext,
@@ -557,12 +548,27 @@ void do_cp14_32(struct cpu_user_regs *regs, const union hsr hsr)
         break;
     }
 
+    /*
+     * Xen doesn't expose a real (or emulated) Debug Communications Channel
+     * (DCC) to a domain. Yet the Arm ARM implies this is not an optional
+     * feature. So some domains may start to probe it. For instance, the
+     * HVC_DCC driver in Linux (since f377775dc083 and at least up to v6.7),
+     * will try to write some characters and check if the transmit buffer has
+     * emptied.
+     */
     case HSR_CPREG32(DBGDSCRINT):
         /*
-         * Read-only register. Accessible by EL0 if DBGDSCRext.UDCCdis
-         * is set to 0, which we emulated below.
+         * By setting TX status bit (only if partial emulation is enabled) to
+         * indicate the transmit buffer is full, we would hint the OS that the
+         * DCC is probably not working.
+         *
+         * Bit 29: TX full
+         *
+         * Accessible at EL0 only if DBGDSCRext.UDCCdis is set to 0. We emulate
+         * this as RAZ/WI in the next case. So RO at both EL0 and EL1.
          */
-        return handle_ro_raz(regs, regidx, cp32.read, hsr, 1);
+        return handle_ro_read_val(regs, regidx, cp32.read, hsr, 0,
+                                  partial_emulation ? (1U << 29) : 0);
 
     case HSR_CPREG32(DBGDSCREXT):
         /*
@@ -570,6 +576,18 @@ void do_cp14_32(struct cpu_user_regs *regs, const union hsr hsr)
          * The OS won't use Hardware debug if MDBGen not set.
          */
         return handle_raz_wi(regs, regidx, cp32.read, hsr, 1);
+
+    /* DBGDTR[TR]XINT share the same encoding */
+    case HSR_CPREG32(DBGDTRTXINT):
+        /*
+         * Emulate as RAZ/WI (only if partial emulation is enabled) to prevent
+         * injecting undefined exception.
+         * Accessible at EL0 only if DBGDSCREXT is set to 0. We emulate that
+         * register as RAZ/WI.
+         */
+        if ( !partial_emulation )
+            goto fail;
+        return handle_raz_wi(regs, regidx, cp32.read, hsr, 0);
 
     case HSR_CPREG32(DBGVCR):
     case HSR_CPREG32(DBGBVR0):
@@ -600,17 +618,20 @@ void do_cp14_32(struct cpu_user_regs *regs, const union hsr hsr)
      * And all other unknown registers.
      */
     default:
-        gdprintk(XENLOG_ERR,
-                 "%s p14, %d, r%d, cr%d, cr%d, %d @ 0x%"PRIregister"\n",
-                  cp32.read ? "mrc" : "mcr",
-                  cp32.op1, cp32.reg, cp32.crn, cp32.crm, cp32.op2, regs->pc);
-        gdprintk(XENLOG_ERR, "unhandled 32-bit cp14 access %#"PRIregister"\n",
-                 hsr.bits & HSR_CP32_REGS_MASK);
-        inject_undef_exception(regs, hsr);
-        return;
+        goto fail;
     }
 
     advance_pc(regs, hsr);
+    return;
+
+ fail:
+    gdprintk(XENLOG_ERR,
+             "%s p14, %d, r%d, cr%d, cr%d, %d @ 0x%"PRIregister"\n",
+             cp32.read ? "mrc" : "mcr",
+             cp32.op1, cp32.reg, cp32.crn, cp32.crm, cp32.op2, regs->pc);
+    gdprintk(XENLOG_ERR, "unhandled 32-bit cp14 access %#"PRIregister"\n",
+             hsr.bits & HSR_CP32_REGS_MASK);
+    inject_undef_exception(regs, hsr);
 }
 
 void do_cp14_64(struct cpu_user_regs *regs, const union hsr hsr)
@@ -668,10 +689,7 @@ void do_cp14_dbg(struct cpu_user_regs *regs, const union hsr hsr)
      * ARMv8 (DDI 0487A.d): D1-1509 Table D1-58
      *
      * Unhandled:
-     *    DBGDTRTXint
-     *    DBGDTRRXint
-     *
-     * And all other unknown registers.
+     * All unknown registers.
      */
     gdprintk(XENLOG_ERR,
              "%s p14, %d, r%d, r%d, cr%d @ 0x%"PRIregister"\n",
@@ -716,8 +734,14 @@ void do_cp10(struct cpu_user_regs *regs, const union hsr hsr)
         inject_undef_exception(regs, hsr);
         return;
     }
-
-    advance_pc(regs, hsr);
+    
+    /*
+     * All the cases in the switch should return. If this is not the
+     * case, then something went wrong and it is best to crash the
+     * domain.
+     */
+    ASSERT_UNREACHABLE();
+    domain_crash(current->domain);
 }
 
 void do_cp(struct cpu_user_regs *regs, const union hsr hsr)

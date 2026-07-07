@@ -11,10 +11,10 @@
 #include <xen/list.h>
 #include <xen/spinlock.h>
 #include <xen/irq.h>
+#include <xen/numa.h>
 #include <xen/pci_regs.h>
 #include <xen/pfn.h>
 #include <asm/device.h>
-#include <asm/numa.h>
 
 /*
  * The PCI interface treats multi-function devices as independent
@@ -68,15 +68,26 @@ typedef union {
     };
 } pci_sbdf_t;
 
+#ifdef CONFIG_HAS_PCI
 #include <asm/pci.h>
+#else
+
+struct arch_pci_dev { };
+
+static inline bool is_pci_passthrough_enabled(void)
+{
+    return false;
+}
+
+#endif
 
 struct pci_dev_info {
     /*
      * VF's 'is_extfn' field is used to indicate whether its PF is an extended
      * function.
      */
-    bool_t is_extfn;
-    bool_t is_virtfn;
+    bool is_extfn;
+    bool is_virtfn;
     struct {
         u8 bus;
         u8 devfn;
@@ -101,6 +112,9 @@ struct pci_dev {
         };
         pci_sbdf_t sbdf;
     };
+
+    uint8_t msi_pos;
+    uint8_t msix_pos;
 
     uint8_t msi_maxvec;
     uint8_t phantom_stride;
@@ -139,7 +153,20 @@ struct pci_dev {
         unsigned int count;
 #define PT_FAULT_THRESHOLD 10
     } fault;
-    u64 vf_rlen[6];
+
+    /*
+     * List head if PF.
+     * List entry if VF.
+     */
+    struct list_head vf_list;
+    union {
+        struct pf_info {
+            /* Only populated for PFs. */
+            uint64_t vf_rlen[PCI_SRIOV_NUM_BARS];
+        } physfn;
+        /* Link from VF to PF. Only populated for VFs. */
+        const struct pci_dev *pf_pdev;
+    };
 
     /* Data for vPCI. */
     struct vpci *vpci;
@@ -155,31 +182,61 @@ struct pci_dev {
  * devices, it also sync the access to the msi capability that is not
  * interrupt handling related (the mask bit register).
  */
-
-void pcidevs_lock(void);
+void pcidevs_lock_unsafe(void);
+static always_inline void pcidevs_lock(void)
+{
+    pcidevs_lock_unsafe();
+    block_lock_speculation();
+}
 void pcidevs_unlock(void);
-bool_t __must_check pcidevs_locked(void);
+bool __must_check pcidevs_locked(void);
+bool pcidevs_trylock_unsafe(void);
+static always_inline bool pcidevs_trylock(void)
+{
+    return lock_evaluate_nospec(pcidevs_trylock_unsafe());
+}
 
-bool_t pci_known_segment(u16 seg);
-bool_t pci_device_detect(u16 seg, u8 bus, u8 dev, u8 func);
+#ifndef NDEBUG
+/*
+ * Check to ensure there will be no changes to the entries in d->pdev_list (but
+ * not the contents of each entry).
+ * This check is not suitable for protecting other state or critical regions.
+ */
+#define ASSERT_PDEV_LIST_IS_READ_LOCKED(d)                               \
+        /* NB: d may be evaluated multiple times, or not at all */       \
+        ASSERT(pcidevs_locked() || ((d) && rw_is_locked(&(d)->pci_lock)))
+#else
+#define ASSERT_PDEV_LIST_IS_READ_LOCKED(d) ((void)(d))
+#endif
+
+bool pci_known_segment(u16 seg);
+bool pci_device_detect(u16 seg, u8 bus, u8 dev, u8 func);
 int scan_pci_devices(void);
 enum pdev_type pdev_type(u16 seg, u8 bus, u8 devfn);
 int find_upstream_bridge(u16 seg, u8 *bus, u8 *devfn, u8 *secbus);
 
-void setup_hwdom_pci_devices(struct domain *,
-                            int (*)(u8 devfn, struct pci_dev *));
+void setup_hwdom_pci_devices(struct domain *d,
+                             int (*handler)(uint8_t devfn,
+                                            struct pci_dev *pdev));
 int pci_release_devices(struct domain *d);
 void pci_segments_init(void);
 int pci_add_segment(u16 seg);
 const unsigned long *pci_get_ro_map(u16 seg);
 int pci_add_device(u16 seg, u8 bus, u8 devfn,
-                   const struct pci_dev_info *, nodeid_t node);
+                   const struct pci_dev_info *info, nodeid_t node);
 int pci_remove_device(u16 seg, u8 bus, u8 devfn);
 int pci_ro_device(int seg, int bus, int devfn);
 int pci_hide_device(unsigned int seg, unsigned int bus, unsigned int devfn);
 struct pci_dev *pci_get_pdev(const struct domain *d, pci_sbdf_t sbdf);
 struct pci_dev *pci_get_real_pdev(pci_sbdf_t sbdf);
 void pci_check_disable_device(u16 seg, u8 bus, u8 devfn);
+
+/*
+ * Iterate without locking or preemption over all PCI devices known by Xen.
+ * Can be called with interrupts disabled.
+ */
+int pci_iterate_devices(int (*handler)(struct pci_dev *pdev, void *arg),
+                        void *arg);
 
 uint8_t pci_conf_read8(pci_sbdf_t sbdf, unsigned int reg);
 uint16_t pci_conf_read16(pci_sbdf_t sbdf, unsigned int reg);
@@ -193,14 +250,20 @@ int pci_mmcfg_read(unsigned int seg, unsigned int bus,
                    unsigned int devfn, int reg, int len, u32 *value);
 int pci_mmcfg_write(unsigned int seg, unsigned int bus,
                     unsigned int devfn, int reg, int len, u32 value);
-int pci_find_cap_offset(u16 seg, u8 bus, u8 dev, u8 func, u8 cap);
-int pci_find_next_cap(u16 seg, u8 bus, unsigned int devfn, u8 pos, int cap);
-int pci_find_ext_capability(int seg, int bus, int devfn, int cap);
-int pci_find_next_ext_capability(int seg, int bus, int devfn, int pos, int cap);
-const char *parse_pci(const char *, unsigned int *seg, unsigned int *bus,
-                      unsigned int *dev, unsigned int *func);
-const char *parse_pci_seg(const char *, unsigned int *seg, unsigned int *bus,
-                          unsigned int *dev, unsigned int *func, bool *def_seg);
+unsigned int pci_find_cap_offset(pci_sbdf_t sbdf, unsigned int cap);
+unsigned int pci_find_next_cap_ttl(pci_sbdf_t sbdf, unsigned int pos,
+                                   const unsigned int caps[], unsigned int n,
+                                   unsigned int *ttl);
+unsigned int pci_find_next_cap(pci_sbdf_t sbdf, unsigned int pos,
+                               unsigned int cap);
+unsigned int pci_find_ext_capability(pci_sbdf_t sbdf, unsigned int cap);
+unsigned int pci_find_next_ext_capability(pci_sbdf_t sbdf, unsigned int start,
+                                          unsigned int cap);
+const char *parse_pci(const char *s, unsigned int *seg_p, unsigned int *bus_p,
+                      unsigned int *dev_p, unsigned int *func_p);
+const char *parse_pci_seg(const char *s, unsigned int *seg_p,
+                          unsigned int *bus_p, unsigned int *dev_p,
+                          unsigned int *func_p, bool *def_seg);
 
 #define PCI_BAR_VF      (1u << 0)
 #define PCI_BAR_LAST    (1u << 1)
@@ -209,12 +272,12 @@ unsigned int pci_size_mem_bar(pci_sbdf_t sbdf, unsigned int pos,
                               uint64_t *paddr, uint64_t *psize,
                               unsigned int flags);
 
-void pci_intx(const struct pci_dev *, bool enable);
-bool_t pcie_aer_get_firmware_first(const struct pci_dev *);
+void pci_intx(const struct pci_dev *pdev, bool enable);
+bool pcie_aer_get_firmware_first(const struct pci_dev *pdev);
 
 struct pirq;
-int msixtbl_pt_register(struct domain *, struct pirq *, uint64_t gtable);
-void msixtbl_pt_unregister(struct domain *, struct pirq *);
+int msixtbl_pt_register(struct domain *d, struct pirq *pirq, uint64_t gtable);
+void msixtbl_pt_unregister(struct domain *d, struct pirq *pirq);
 void msixtbl_pt_cleanup(struct domain *d);
 
 #ifdef CONFIG_HVM

@@ -12,11 +12,11 @@ unsigned long raw_clear_guest(void *to, unsigned int len);
 
 /* Copy data to guest physical address, then clean the region. */
 unsigned long copy_to_guest_phys_flush_dcache(struct domain *d,
-                                              paddr_t phys,
+                                              paddr_t gpa,
                                               void *buf,
                                               unsigned int len);
 
-int access_guest_memory_by_ipa(struct domain *d, paddr_t ipa, void *buf,
+int access_guest_memory_by_gpa(struct domain *d, paddr_t gpa, void *buf,
                                uint32_t size, bool is_write);
 
 #define __raw_copy_to_guest raw_copy_to_guest

@@ -9,13 +9,13 @@ Signed-off-by: Ian Jackson <ian.jackson@citrix.com>
  1 file changed, 6 insertions(+)
 
 diff --git a/.gitignore b/.gitignore
-index ea3243a..6a5e771 100644
+index 53f5df0..b131d76 100644
 --- a/.gitignore
 +++ b/.gitignore
-@@ -390,3 +390,9 @@ tools/xl/xl
- docs/txt/misc/*.txt
- docs/txt/man/*.txt
- docs/figs/*.png
+@@ -289,3 +289,9 @@ tools/debugger/kdd/kdd
+ tools/firmware/etherboot/ipxe.tar.gz
+ tools/firmware/etherboot/ipxe/
+ tools/xl/xl
 +
 +configure
 +docs/configure

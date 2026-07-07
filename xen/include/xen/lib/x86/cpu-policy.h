@@ -22,6 +22,7 @@
 #define FEATURESET_7d1       15 /* 0x00000007:1.edx    */
 #define FEATURESET_m10Al     16 /* 0x0000010a.eax      */
 #define FEATURESET_m10Ah     17 /* 0x0000010a.edx      */
+#define FEATURESET_e21c      18 /* 0x80000021.ecx      */
 
 struct cpuid_leaf
 {
@@ -100,13 +101,14 @@ const char *x86_cpuid_vendor_to_str(unsigned int vendor);
  * interaction with the toolstack.  (Sum of all leaves in each union, less the
  * entries in basic which sub-unions hang off of.)
  */
-#define CPUID_MAX_SERIALISED_LEAVES                     \
-    (CPUID_GUEST_NR_BASIC +                             \
-     CPUID_GUEST_NR_FEAT   - !!CPUID_GUEST_NR_FEAT +    \
-     CPUID_GUEST_NR_CACHE  - !!CPUID_GUEST_NR_CACHE +   \
-     CPUID_GUEST_NR_TOPO   - !!CPUID_GUEST_NR_TOPO +    \
-     CPUID_GUEST_NR_XSTATE - !!CPUID_GUEST_NR_XSTATE +  \
-     CPUID_GUEST_NR_EXTD + 2 /* hv_limit and hv2_limit */ )
+#define CPUID_MAX_SERIALISED_LEAVES             \
+    (CPUID_GUEST_NR_BASIC +                     \
+     CPUID_GUEST_NR_FEAT   - 1 +                \
+     CPUID_GUEST_NR_CACHE  - 1 +                \
+     CPUID_GUEST_NR_TOPO   - 1 +                \
+     CPUID_GUEST_NR_XSTATE - 1 +                \
+     CPUID_GUEST_NR_EXTD +                      \
+     2 /* hv_limit and hv2_limit */ )
 
 /* Maximum number of MSRs written when serialising a cpu_policy. */
 #define MSR_MAX_SERIALISED_ENTRIES 2
@@ -247,7 +249,7 @@ struct cpu_policy
         };
 
         /* Per-component common state.  Valid for i >= 2. */
-        struct {
+        struct xstate_component {
             uint32_t size, offset;
             bool xss:1, align:1;
             uint32_t _res_d;
@@ -324,7 +326,14 @@ struct cpu_policy
                 uint32_t e21a;
                 struct { DECL_BITFIELD(e21a); };
             };
-            uint32_t /* b */:32, /* c */:32, /* d */:32;
+            uint16_t ucode_size; /* Units of 16 bytes */
+            uint8_t  rap_size;   /* Units of 8 entries */
+            uint8_t  :8;
+            union {
+                uint32_t e21c;
+                struct { DECL_BITFIELD(e21c); };
+            };
+            uint32_t /* d */:32;
         };
     } extd;
 
@@ -438,7 +447,7 @@ void x86_cpu_policy_fill_native(struct cpu_policy *p);
 void x86_cpu_policy_clear_out_of_range_leaves(struct cpu_policy *p);
 
 #ifdef __XEN__
-#include <public/arch-x86/xen.h>
+#include <public/xen.h>
 typedef XEN_GUEST_HANDLE_64(xen_cpuid_leaf_t) cpuid_leaf_buffer_t;
 typedef XEN_GUEST_HANDLE_64(xen_msr_entry_t) msr_entry_buffer_t;
 #else
@@ -451,23 +460,24 @@ typedef xen_msr_entry_t msr_entry_buffer_t[];
  * Serialise the CPUID leaves of a cpu_policy object into an array of cpuid
  * leaves.
  *
- * @param policy     The cpu_policy to serialise.
- * @param leaves     The array of leaves to serialise into.
- * @param nr_entries The number of entries in 'leaves'.
+ * @param p            The cpu_policy to serialise.
+ * @param leaves       The array of leaves to serialise into.
+ * @param nr_entries_p The number of entries in 'leaves'.
  * @returns -errno
  *
  * Writes at most CPUID_MAX_SERIALISED_LEAVES.  May fail with -ENOBUFS if the
  * leaves array is too short.  On success, nr_entries is updated with the
  * actual number of leaves written.
  */
-int x86_cpuid_copy_to_buffer(const struct cpu_policy *policy,
-                             cpuid_leaf_buffer_t leaves, uint32_t *nr_entries);
+int x86_cpuid_copy_to_buffer(const struct cpu_policy *p,
+                             cpuid_leaf_buffer_t leaves,
+                             uint32_t *nr_entries_p);
 
 /**
  * Unserialise the CPUID leaves of a cpu_policy object into an array of cpuid
  * leaves.
  *
- * @param policy      The cpu_policy to unserialise into.
+ * @param p           The cpu_policy to unserialise into.
  * @param leaves      The array of leaves to unserialise from.
  * @param nr_entries  The number of entries in 'leaves'.
  * @param err_leaf    Optional hint for error diagnostics.
@@ -481,7 +491,7 @@ int x86_cpuid_copy_to_buffer(const struct cpu_policy *policy,
  * No content validation of in-range leaves is performed.  Synthesised data is
  * recalculated.
  */
-int x86_cpuid_copy_from_buffer(struct cpu_policy *policy,
+int x86_cpuid_copy_from_buffer(struct cpu_policy *p,
                                const cpuid_leaf_buffer_t leaves,
                                uint32_t nr_entries, uint32_t *err_leaf,
                                uint32_t *err_subleaf);
@@ -489,22 +499,22 @@ int x86_cpuid_copy_from_buffer(struct cpu_policy *policy,
 /**
  * Serialise the MSRs of a cpu_policy object into an array.
  *
- * @param policy     The cpu_policy to serialise.
- * @param msrs       The array of msrs to serialise into.
- * @param nr_entries The number of entries in 'msrs'.
+ * @param p            The cpu_policy to serialise.
+ * @param msrs         The array of msrs to serialise into.
+ * @param nr_entries_p The number of entries in 'msrs'.
  * @returns -errno
  *
  * Writes at most MSR_MAX_SERIALISED_ENTRIES.  May fail with -ENOBUFS if the
  * buffer array is too short.  On success, nr_entries is updated with the
  * actual number of msrs written.
  */
-int x86_msr_copy_to_buffer(const struct cpu_policy *policy,
-                           msr_entry_buffer_t msrs, uint32_t *nr_entries);
+int x86_msr_copy_to_buffer(const struct cpu_policy *p,
+                           msr_entry_buffer_t msrs, uint32_t *nr_entries_p);
 
 /**
  * Unserialise the MSRs of a cpu_policy object from an array of msrs.
  *
- * @param policy     The cpu_policy object to unserialise into.
+ * @param p          The cpu_policy object to unserialise into.
  * @param msrs       The array of msrs to unserialise from.
  * @param nr_entries The number of entries in 'msrs'.
  * @param err_msr    Optional hint for error diagnostics.
@@ -518,7 +528,7 @@ int x86_msr_copy_to_buffer(const struct cpu_policy *policy,
  *
  * No content validation is performed on the data stored in the policy object.
  */
-int x86_msr_copy_from_buffer(struct cpu_policy *policy,
+int x86_msr_copy_from_buffer(struct cpu_policy *p,
                              const msr_entry_buffer_t msrs, uint32_t nr_entries,
                              uint32_t *err_msr);
 

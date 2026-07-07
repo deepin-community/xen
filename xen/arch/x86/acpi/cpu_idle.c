@@ -40,7 +40,8 @@
 #include <xen/param.h>
 #include <xen/trace.h>
 #include <xen/irq.h>
-#include <asm/cache.h>
+#include <xen/sections.h>
+
 #include <asm/io.h>
 #include <asm/iocap.h>
 #include <asm/hpet.h>
@@ -59,6 +60,33 @@
 
 /*#define DEBUG_PM_CX*/
 
+static always_inline void monitor(
+    const void *addr, unsigned int ecx, unsigned int edx)
+{
+    alternative_input("", "clflush (%[addr])", X86_BUG_CLFLUSH_MONITOR,
+                      [addr] "a" (addr));
+
+    /*
+     * The memory clobber is a compiler barrier.  Subseqeunt reads from the
+     * monitored cacheline must not be reordered over MONITOR.
+     */
+    asm volatile ( ".byte 0x0f, 0x01, 0xc8" /* monitor */
+                   :: "a" (addr), "c" (ecx), "d" (edx) : "memory" );
+}
+
+static always_inline void mwait(unsigned int eax, unsigned int ecx)
+{
+    asm volatile ( ".byte 0x0f, 0x01, 0xc9" /* mwait */
+                   :: "a" (eax), "c" (ecx) );
+}
+
+static always_inline void sti_mwait_cli(unsigned int eax, unsigned int ecx)
+{
+    /* STI shadow covers MWAIT. */
+    asm volatile ( "sti; .byte 0x0f, 0x01, 0xc9;" /* mwait */ " cli"
+                   :: "a" (eax), "c" (ecx) );
+}
+
 #define GET_HW_RES_IN_NS(msr, val) \
     do { rdmsrl(msr, val); val = tsc_ticks2ns(val); } while( 0 )
 #define GET_MC6_RES(val)  GET_HW_RES_IN_NS(0x664, val)
@@ -73,7 +101,6 @@
 #define GET_CC3_RES(val)  GET_HW_RES_IN_NS(0x3FC, val)
 #define GET_CC6_RES(val)  GET_HW_RES_IN_NS(0x3FD, val)
 #define GET_CC7_RES(val)  GET_HW_RES_IN_NS(0x3FE, val) /* SNB onwards */
-#define PHI_CC6_RES(val)  GET_HW_RES_IN_NS(0x3FF, val) /* Xeon Phi only */
 
 static void cf_check lapic_timer_nop(void) { }
 void (*__read_mostly lapic_timer_off)(void);
@@ -222,18 +249,6 @@ static void cf_check do_get_hw_residencies(void *arg)
         GET_CC6_RES(hw_res->cc6);
         GET_CC7_RES(hw_res->cc7);
         break;
-    /* Xeon Phi Knights Landing */
-    case 0x57:
-    /* Xeon Phi Knights Mill */
-    case 0x85:
-        GET_CC3_RES(hw_res->mc0); /* abusing GET_CC3_RES */
-        GET_CC6_RES(hw_res->mc6); /* abusing GET_CC6_RES */
-        GET_PC2_RES(hw_res->pc2);
-        GET_PC3_RES(hw_res->pc3);
-        GET_PC6_RES(hw_res->pc6);
-        GET_PC7_RES(hw_res->pc7);
-        PHI_CC6_RES(hw_res->cc6);
-        break;
     /* various Atoms */
     case 0x27:
         GET_PC3_RES(hw_res->pc2); /* abusing GET_PC3_RES */
@@ -302,7 +317,7 @@ static void print_hw_residencies(uint32_t cpu)
            hw_res.cc6, hw_res.cc7);
 }
 
-static char* acpi_cstate_method_name[] =
+static const char *const acpi_cstate_method_name[] =
 {
     "NONE",
     "SYSIO",
@@ -432,72 +447,59 @@ static int __init cf_check cpu_idle_key_init(void)
 }
 __initcall(cpu_idle_key_init);
 
-/*
- * The bit is set iff cpu use monitor/mwait to enter C state
- * with this flag set, CPU can be waken up from C state
- * by writing to specific memory address, instead of sending an IPI.
- */
-static cpumask_t cpuidle_mwait_flags;
-
-void cpuidle_wakeup_mwait(cpumask_t *mask)
-{
-    cpumask_t target;
-    unsigned int cpu;
-
-    cpumask_and(&target, mask, &cpuidle_mwait_flags);
-
-    /* CPU is MWAITing on the cpuidle_mwait_wakeup flag. */
-    for_each_cpu(cpu, &target)
-        mwait_wakeup(cpu) = 0;
-
-    cpumask_andnot(mask, mask, &target);
-}
-
-bool arch_skip_send_event_check(unsigned int cpu)
-{
-    /*
-     * This relies on softirq_pending() and mwait_wakeup() to access data
-     * on the same cache line.
-     */
-    smp_mb();
-    return !!cpumask_test_cpu(cpu, &cpuidle_mwait_flags);
-}
-
 void mwait_idle_with_hints(unsigned int eax, unsigned int ecx)
 {
     unsigned int cpu = smp_processor_id();
-    s_time_t expires = per_cpu(timer_deadline, cpu);
-    const void *monitor_addr = &mwait_wakeup(cpu);
-
-    if ( boot_cpu_has(X86_FEATURE_CLFLUSH_MONITOR) )
-    {
-        mb();
-        clflush(monitor_addr);
-        mb();
-    }
-
-    __monitor(monitor_addr, 0, 0);
-    smp_mb();
+    struct cpu_info *info = get_cpu_info();
+    irq_cpustat_t *stat = &irq_stat[cpu];
+    const unsigned int *this_softirq_pending = &stat->__softirq_pending;
 
     /*
-     * Timer deadline passing is the event on which we will be woken via
-     * cpuidle_mwait_wakeup. So check it now that the location is armed.
+     * Heuristic: if we're definitely not going to idle, bail early as the
+     * speculative safety can be expensive.  This is a performance
+     * consideration not a correctness issue.
      */
-    if ( (expires > NOW() || expires == 0) && !softirq_pending(cpu) )
+    if ( *this_softirq_pending )
+        return;
+
+    /*
+     * By setting in_mwait, we promise to other CPUs that we'll notice changes
+     * to __softirq_pending without being sent an IPI.  We achieve this by
+     * either not going to sleep, or by having hardware notice on our behalf.
+     *
+     * Some errata exist where MONITOR doesn't work properly, and the
+     * workaround is to force the use of an IPI.  Cause this to happen by
+     * simply not advertising ourselves as being in_mwait.
+     */
+    alternative_io("movb $1, %[in_mwait]",
+                   "", X86_BUG_MONITOR,
+                   [in_mwait] "=m" (stat->in_mwait));
+
+    /*
+     * On AMD systems, side effects from VERW cancel MONITOR, causing MWAIT to
+     * wake up immediately.  Therefore, VERW must come ahead of MONITOR.
+     */
+    __spec_ctrl_enter_idle_verw(info);
+
+    monitor(this_softirq_pending, 0, 0);
+
+    ASSERT(!local_irq_is_enabled());
+
+    if ( !*this_softirq_pending )
     {
-        struct cpu_info *info = get_cpu_info();
+        __spec_ctrl_enter_idle(info, false /* VERW handled above */);
 
-        cpumask_set_cpu(cpu, &cpuidle_mwait_flags);
+        if ( ecx & MWAIT_ECX_INTERRUPT_BREAK )
+            mwait(eax, ecx);
+        else
+            sti_mwait_cli(eax, ecx);
 
-        spec_ctrl_enter_idle(info);
-        __mwait(eax, ecx);
         spec_ctrl_exit_idle(info);
-
-        cpumask_clear_cpu(cpu, &cpuidle_mwait_flags);
     }
 
-    if ( expires <= NOW() && expires > 0 )
-        raise_softirq(TIMER_SOFTIRQ);
+    alternative_io("movb $0, %[in_mwait]",
+                   "", X86_BUG_MONITOR,
+                   [in_mwait] "=m" (stat->in_mwait));
 }
 
 static void acpi_processor_ffh_cstate_enter(struct acpi_processor_cx *cx)
@@ -582,18 +584,24 @@ bool errata_c6_workaround(void)
     {
 #define INTEL_FAM6_MODEL(m) { X86_VENDOR_INTEL, 6, m, X86_FEATURE_ALWAYS }
         /*
-         * Errata AAJ72: EOI Transaction May Not be Sent if Software Enters
-         * Core C6 During an Interrupt Service Routine"
+         * Errata AAJ72, etc: EOI Transaction May Not be Sent if Software
+         * Enters Core C6 During an Interrupt Service Routine
          *
-         * There was an errata with some Core i7 processors that an EOI
-         * transaction may not be sent if software enters core C6 during an
-         * interrupt service routine. So we don't enter deep Cx state if
-         * there is an EOI pending.
+         * If core C6 is entered after the start of an interrupt service
+         * routine but before a write to the APIC EOI (End of Interrupt)
+         * register, and the core is woken up by an event other than a fixed
+         * interrupt source the core may drop the EOI transaction the next
+         * time APIC EOI register is written and further interrupts from the
+         * same or lower priority level will be blocked.
+         *
+         * Software should check the ISR register and if any interrupts are in
+         * service only enter C1.
          */
         static const struct x86_cpu_id eoi_errata[] = {
-            INTEL_FAM6_MODEL(0x1a),
+            INTEL_FAM6_MODEL(0x1a), /* AAJ72 */
             INTEL_FAM6_MODEL(0x1e),
             INTEL_FAM6_MODEL(0x1f),
+            INTEL_FAM6_MODEL(0x2e), /* BA106 */
             INTEL_FAM6_MODEL(0x25),
             INTEL_FAM6_MODEL(0x2c),
             INTEL_FAM6_MODEL(0x2f),
@@ -767,7 +775,7 @@ static void cf_check acpi_processor_idle(void)
             /* Get start time (ticks) */
             t1 = alternative_call(cpuidle_get_tick);
             /* Trace cpu idle entry */
-            TRACE_4D(TRC_PM_IDLE_ENTRY, cx->idx, t1, exp, pred);
+            TRACE_TIME(TRC_PM_IDLE_ENTRY, cx->idx, t1, exp, pred);
 
             update_last_cx_stat(power, cx, t1);
 
@@ -777,8 +785,8 @@ static void cf_check acpi_processor_idle(void)
             t2 = alternative_call(cpuidle_get_tick);
             trace_exit_reason(irq_traced);
             /* Trace cpu idle exit */
-            TRACE_6D(TRC_PM_IDLE_EXIT, cx->idx, t2,
-                     irq_traced[0], irq_traced[1], irq_traced[2], irq_traced[3]);
+            TRACE_TIME(TRC_PM_IDLE_EXIT, cx->idx, t2,
+                       irq_traced[0], irq_traced[1], irq_traced[2], irq_traced[3]);
             /* Update statistics */
             update_idle_stats(power, cx, t1, t2);
             /* Re-enable interrupts */
@@ -798,7 +806,7 @@ static void cf_check acpi_processor_idle(void)
         /* Get start time (ticks) */
         t1 = alternative_call(cpuidle_get_tick);
         /* Trace cpu idle entry */
-        TRACE_4D(TRC_PM_IDLE_ENTRY, cx->idx, t1, exp, pred);
+        TRACE_TIME(TRC_PM_IDLE_ENTRY, cx->idx, t1, exp, pred);
 
         update_last_cx_stat(power, cx, t1);
 
@@ -853,8 +861,8 @@ static void cf_check acpi_processor_idle(void)
         cstate_restore_tsc();
         trace_exit_reason(irq_traced);
         /* Trace cpu idle exit */
-        TRACE_6D(TRC_PM_IDLE_EXIT, cx->idx, t2,
-                 irq_traced[0], irq_traced[1], irq_traced[2], irq_traced[3]);
+        TRACE_TIME(TRC_PM_IDLE_EXIT, cx->idx, t2,
+                   irq_traced[0], irq_traced[1], irq_traced[2], irq_traced[3]);
 
         /* Update statistics */
         update_idle_stats(power, cx, t1, t2);
@@ -898,7 +906,7 @@ void cf_check acpi_dead_idle(void)
 
     if ( cx->entry_method == ACPI_CSTATE_EM_FFH )
     {
-        void *mwait_ptr = &mwait_wakeup(smp_processor_id());
+        void *mwait_ptr = &softirq_pending(smp_processor_id());
 
         /*
          * Cache must be flushed as the last operation before sleeping.
@@ -910,20 +918,8 @@ void cf_check acpi_dead_idle(void)
 
         while ( 1 )
         {
-            /*
-             * 1. The CLFLUSH is a workaround for erratum AAI65 for
-             * the Xeon 7400 series.  
-             * 2. The WBINVD is insufficient due to the spurious-wakeup
-             * case where we return around the loop.
-             * 3. Unlike wbinvd, clflush is a light weight but not serializing 
-             * instruction, hence memory fence is necessary to make sure all 
-             * load/store visible before flush cache line.
-             */
-            mb();
-            clflush(mwait_ptr);
-            __monitor(mwait_ptr, 0, 0);
-            mb();
-            __mwait(cx->address, 0);
+            monitor(mwait_ptr, 0, 0);
+            mwait(cx->address, 0);
         }
     }
     else if ( (current_cpu_data.x86_vendor &
@@ -1429,6 +1425,7 @@ static void amd_cpuidle_init(struct acpi_processor_power *power)
 
     switch ( c->x86 )
     {
+    case 0x1a:
     case 0x19:
     case 0x18:
         if ( boot_cpu_data.x86_vendor != X86_VENDOR_HYGON )
@@ -1498,14 +1495,14 @@ static void amd_cpuidle_init(struct acpi_processor_power *power)
         vendor_override = -1;
 }
 
-uint32_t pmstat_get_cx_nr(uint32_t cpuid)
+uint32_t pmstat_get_cx_nr(unsigned int cpu)
 {
-    return processor_powers[cpuid] ? processor_powers[cpuid]->count : 0;
+    return processor_powers[cpu] ? processor_powers[cpu]->count : 0;
 }
 
-int pmstat_get_cx_stat(uint32_t cpuid, struct pm_cx_stat *stat)
+int pmstat_get_cx_stat(unsigned int cpu, struct pm_cx_stat *stat)
 {
-    struct acpi_processor_power *power = processor_powers[cpuid];
+    struct acpi_processor_power *power = processor_powers[cpu];
     uint64_t idle_usage = 0, idle_res = 0;
     uint64_t last_state_update_tick, current_stime, current_tick;
     uint64_t usage[ACPI_PROCESSOR_MAX_POWER] = { 0 };
@@ -1522,7 +1519,7 @@ int pmstat_get_cx_stat(uint32_t cpuid, struct pm_cx_stat *stat)
         return 0;
     }
 
-    stat->idle_time = get_cpu_idle_time(cpuid);
+    stat->idle_time = get_cpu_idle_time(cpu);
     nr = min(stat->nr, power->count);
 
     /* mimic the stat when detail info hasn't been registered by dom0 */
@@ -1572,7 +1569,7 @@ int pmstat_get_cx_stat(uint32_t cpuid, struct pm_cx_stat *stat)
             idle_res += res[i];
         }
 
-        get_hw_residencies(cpuid, &hw_res);
+        get_hw_residencies(cpu, &hw_res);
 
 #define PUT_xC(what, n) do { \
         if ( stat->nr_##what >= n && \
@@ -1613,7 +1610,7 @@ int pmstat_get_cx_stat(uint32_t cpuid, struct pm_cx_stat *stat)
     return 0;
 }
 
-int pmstat_reset_cx_stat(uint32_t cpuid)
+int pmstat_reset_cx_stat(unsigned int cpu)
 {
     return 0;
 }
@@ -1663,7 +1660,7 @@ static int cf_check cpu_callback(
         break;
     }
 
-    return !rc ? NOTIFY_DONE : notifier_from_errno(rc);
+    return notifier_from_errno(rc);
 }
 
 static struct notifier_block cpu_nfb = {

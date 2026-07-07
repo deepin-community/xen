@@ -54,7 +54,7 @@ static int cf_check get_reserved_device_memory(
 }
 #endif
 
-int compat_memory_op(unsigned int cmd, XEN_GUEST_HANDLE_PARAM(void) compat)
+int compat_memory_op(unsigned int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
 {
     struct vcpu *curr = current;
     struct domain *currd = curr->domain;
@@ -81,6 +81,7 @@ int compat_memory_op(unsigned int cmd, XEN_GUEST_HANDLE_PARAM(void) compat)
             struct compat_memory_exchange xchg;
             struct compat_add_to_physmap atp;
             struct compat_add_to_physmap_batch atpb;
+            struct compat_remove_from_physmap xrfp;
             struct compat_vnuma_topology_info vnuma;
             struct compat_mem_access_op mao;
             struct compat_mem_acquire_resource mar;
@@ -95,7 +96,7 @@ int compat_memory_op(unsigned int cmd, XEN_GUEST_HANDLE_PARAM(void) compat)
         case XENMEM_increase_reservation:
         case XENMEM_decrease_reservation:
         case XENMEM_populate_physmap:
-            if ( copy_from_guest(&cmp.rsrv, compat, 1) )
+            if ( copy_from_guest(&cmp.rsrv, arg, 1) )
                 return start_extent;
 
             /* Is size too large for us to encode a continuation? */
@@ -157,8 +158,13 @@ int compat_memory_op(unsigned int cmd, XEN_GUEST_HANDLE_PARAM(void) compat)
         {
             int order_delta;
 
-            if ( copy_from_guest(&cmp.xchg, compat, 1) )
+            if ( copy_from_guest(&cmp.xchg, arg, 1) )
                 return -EFAULT;
+
+            /* Early coarse check, as max_order() isn't available here. */
+            if ( cmp.xchg.in.extent_order >= 32 ||
+                 cmp.xchg.out.extent_order >= 32 )
+                return -EPERM;
 
             order_delta = cmp.xchg.out.extent_order - cmp.xchg.in.extent_order;
             /* Various sanity checks. */
@@ -240,14 +246,14 @@ int compat_memory_op(unsigned int cmd, XEN_GUEST_HANDLE_PARAM(void) compat)
         case XENMEM_maximum_reservation:
         case XENMEM_maximum_gpfn:
         case XENMEM_maximum_ram_page:
-            nat.hnd = compat;
+            nat.hnd = arg;
             break;
 
         case XENMEM_add_to_physmap:
             BUILD_BUG_ON((typeof(cmp.atp.size))-1 >
                          (UINT_MAX >> MEMOP_EXTENT_SHIFT));
 
-            if ( copy_from_guest(&cmp.atp, compat, 1) )
+            if ( copy_from_guest(&cmp.atp, arg, 1) )
                 return -EFAULT;
 
             XLAT_add_to_physmap(nat.atp, &cmp.atp);
@@ -270,7 +276,7 @@ int compat_memory_op(unsigned int cmd, XEN_GUEST_HANDLE_PARAM(void) compat)
             enum XLAT_add_to_physmap_batch_u u =
                 XLAT_add_to_physmap_batch_u_res0;
 
-            if ( copy_from_guest(&cmp.atpb, compat, 1) )
+            if ( copy_from_guest(&cmp.atpb, arg, 1) )
                 return -EFAULT;
             size = cmp.atpb.size;
             if ( !compat_handle_okay(cmp.atpb.idxs, size) ||
@@ -321,18 +327,16 @@ int compat_memory_op(unsigned int cmd, XEN_GUEST_HANDLE_PARAM(void) compat)
 
         case XENMEM_remove_from_physmap:
         {
-            struct compat_remove_from_physmap cmp;
-
-            if ( copy_from_guest(&cmp, compat, 1) )
+            if ( copy_from_guest(&cmp.xrfp, arg, 1) )
                 return -EFAULT;
 
-            XLAT_remove_from_physmap(nat.xrfp, &cmp);
+            XLAT_remove_from_physmap(nat.xrfp, &cmp.xrfp);
 
             break;
         }
 
         case XENMEM_access_op:
-            if ( copy_from_guest(&cmp.mao, compat, 1) )
+            if ( copy_from_guest(&cmp.mao, arg, 1) )
                 return -EFAULT;
             
 #define XLAT_mem_access_op_HNDL_pfn_list(_d_, _s_)                      \
@@ -356,7 +360,7 @@ int compat_memory_op(unsigned int cmd, XEN_GUEST_HANDLE_PARAM(void) compat)
             enum XLAT_vnuma_topology_info_vmemrange vmemrange =
                 XLAT_vnuma_topology_info_vmemrange_h;
 
-            if ( copy_from_guest(&cmp.vnuma, compat, 1) )
+            if ( copy_from_guest(&cmp.vnuma, arg, 1) )
                 return -EFAULT;
 
 #define XLAT_vnuma_topology_info_HNDL_vdistance_h(_d_, _s_)		\
@@ -382,7 +386,7 @@ int compat_memory_op(unsigned int cmd, XEN_GUEST_HANDLE_PARAM(void) compat)
             if ( unlikely(start_extent) )
                 return -EINVAL;
 
-            if ( copy_from_guest(&grdm.map, compat, 1) ||
+            if ( copy_from_guest(&grdm.map, arg, 1) ||
                  !compat_handle_okay(grdm.map.buffer, grdm.map.nr_entries) )
                 return -EFAULT;
 
@@ -396,7 +400,7 @@ int compat_memory_op(unsigned int cmd, XEN_GUEST_HANDLE_PARAM(void) compat)
             if ( !rc && grdm.map.nr_entries < grdm.used_entries )
                 rc = -ENOBUFS;
             grdm.map.nr_entries = grdm.used_entries;
-            if ( __copy_to_guest(compat, &grdm.map, 1) )
+            if ( __copy_to_guest(arg, &grdm.map, 1) )
                 rc = -EFAULT;
 
             return rc;
@@ -407,7 +411,7 @@ int compat_memory_op(unsigned int cmd, XEN_GUEST_HANDLE_PARAM(void) compat)
         {
             xen_pfn_t *xen_frame_list = NULL;
 
-            if ( copy_from_guest(&cmp.mar, compat, 1) )
+            if ( copy_from_guest(&cmp.mar, arg, 1) )
                 return -EFAULT;
 
             /* Marshal the frame list in the remainder of the xlat space. */
@@ -471,7 +475,7 @@ int compat_memory_op(unsigned int cmd, XEN_GUEST_HANDLE_PARAM(void) compat)
             break;
         }
         default:
-            return compat_arch_memory_op(cmd, compat);
+            return compat_arch_memory_op(cmd, arg);
         }
 
         rc = do_memory_op(cmd, nat.hnd);
@@ -482,14 +486,14 @@ int compat_memory_op(unsigned int cmd, XEN_GUEST_HANDLE_PARAM(void) compat)
                 cmp.vnuma.nr_vnodes = nat.vnuma->nr_vnodes;
                 cmp.vnuma.nr_vcpus = nat.vnuma->nr_vcpus;
                 cmp.vnuma.nr_vmemranges = nat.vnuma->nr_vmemranges;
-                if ( __copy_to_guest(compat, &cmp.vnuma, 1) )
+                if ( __copy_to_guest(arg, &cmp.vnuma, 1) )
                     rc = -EFAULT;
             }
             break;
         }
 
         cmd = 0;
-        if ( hypercall_xlat_continuation(&cmd, 2, 0x02, nat.hnd, compat) )
+        if ( hypercall_xlat_continuation(&cmd, 2, 0x02, nat.hnd, arg) )
         {
             BUG_ON(rc != __HYPERVISOR_memory_op);
             BUG_ON((cmd & MEMOP_CMD_MASK) != op);
@@ -574,7 +578,7 @@ int compat_memory_op(unsigned int cmd, XEN_GUEST_HANDLE_PARAM(void) compat)
             }
 
             cmp.xchg.nr_exchanged = nat.xchg->nr_exchanged;
-            if ( __copy_field_to_guest(guest_handle_cast(compat,
+            if ( __copy_field_to_guest(guest_handle_cast(arg,
                                                          compat_memory_exchange_t),
                                        &cmp.xchg, nr_exchanged) )
                 rc = -EFAULT;
@@ -606,7 +610,7 @@ int compat_memory_op(unsigned int cmd, XEN_GUEST_HANDLE_PARAM(void) compat)
             cmp.vnuma.nr_vnodes = nat.vnuma->nr_vnodes;
             cmp.vnuma.nr_vcpus = nat.vnuma->nr_vcpus;
             cmp.vnuma.nr_vmemranges = nat.vnuma->nr_vmemranges;
-            if ( __copy_to_guest(compat, &cmp.vnuma, 1) )
+            if ( __copy_to_guest(arg, &cmp.vnuma, 1) )
                 rc = -EFAULT;
             break;
 
@@ -619,7 +623,7 @@ int compat_memory_op(unsigned int cmd, XEN_GUEST_HANDLE_PARAM(void) compat)
             {
                 ASSERT(split == 0 && rc == 0);
                 if ( __copy_field_to_guest(
-                         guest_handle_cast(compat,
+                         guest_handle_cast(arg,
                                            compat_mem_acquire_resource_t),
                          nat.mar, nr_frames) )
                     return -EFAULT;
@@ -708,7 +712,7 @@ int compat_memory_op(unsigned int cmd, XEN_GUEST_HANDLE_PARAM(void) compat)
             if ( done < nat.mar->nr_frames )
                 return hypercall_create_continuation(
                     __HYPERVISOR_memory_op, "ih",
-                    op | (start_extent << MEMOP_EXTENT_SHIFT), compat);
+                    op | (start_extent << MEMOP_EXTENT_SHIFT), arg);
 
             /*
              * Well... Somethings gone wrong with the two levels of chunking.
@@ -729,7 +733,7 @@ int compat_memory_op(unsigned int cmd, XEN_GUEST_HANDLE_PARAM(void) compat)
         cmd = op | (start_extent << MEMOP_EXTENT_SHIFT);
         if ( split > 0 && hypercall_preempt_check() )
             return hypercall_create_continuation(
-                __HYPERVISOR_memory_op, "ih", cmd, compat);
+                __HYPERVISOR_memory_op, "ih", cmd, arg);
     } while ( split > 0 );
 
     if ( unlikely(rc > INT_MAX) )

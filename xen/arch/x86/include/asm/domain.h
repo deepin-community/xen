@@ -22,7 +22,6 @@
 #define is_hvm_pv_evtchn_domain(d) (is_hvm_domain(d) && \
         ((d)->arch.hvm.irq->callback_via_type == HVMIRQ_callback_vector || \
          (d)->vcpu[0]->arch.hvm.evtchn_upcall_vector))
-#define is_domain_direct_mapped(d) ((void)(d), 0)
 
 #define VCPU_TRAP_NONE         0
 #define VCPU_TRAP_NMI          1
@@ -74,22 +73,20 @@ struct mapcache_domain {
     unsigned long *garbage;
 };
 
-int mapcache_domain_init(struct domain *);
-int mapcache_vcpu_init(struct vcpu *);
-void mapcache_override_current(struct vcpu *);
+int mapcache_domain_init(struct domain *d);
+int mapcache_vcpu_init(struct vcpu *v);
+void mapcache_override_current(struct vcpu *v);
 
 /* x86/64: toggle guest between kernel and user modes. */
-void toggle_guest_mode(struct vcpu *);
+void toggle_guest_mode(struct vcpu *v);
 /* x86/64: toggle guest page tables between kernel and user modes. */
-void toggle_guest_pt(struct vcpu *);
-
-void cpuid_policy_updated(struct vcpu *v);
+void toggle_guest_pt(struct vcpu *v);
 
 /*
  * Initialise a hypercall-transfer page. The given pointer must be mapped
  * in Xen virtual address space (accesses are not validated or checked).
  */
-void init_hypercall_page(struct domain *d, void *);
+void init_hypercall_page(struct domain *d, void *ptr);
 
 /************************************************/
 /*          shadow paging extension             */
@@ -98,12 +95,6 @@ struct shadow_domain {
 #ifdef CONFIG_SHADOW_PAGING
     unsigned int      opt_flags;    /* runtime tunable optimizations on/off */
     struct page_list_head pinned_shadows;
-
-    /* Memory allocation */
-    struct page_list_head freelist;
-    unsigned int      total_pages;  /* number of pages allocated */
-    unsigned int      free_pages;   /* number of pages on freelists */
-    unsigned int      p2m_pages;    /* number of pages allocated to p2m */
 
     /* 1-to-1 map for use when HVM vcpus have paging disabled */
     pagetable_t unpaged_pagetable;
@@ -114,17 +105,17 @@ struct shadow_domain {
 
     /* Shadow hashtable */
     struct page_info **hash_table;
-    bool_t hash_walking;  /* Some function is walking the hash table */
+    bool hash_walking;  /* Some function is walking the hash table */
 
     /* Fast MMIO path heuristic */
     bool has_fast_mmio_entries;
 
-    /* OOS */
-    bool_t oos_active;
-
 #ifdef CONFIG_HVM
+    /* OOS */
+    bool oos_active;
+
     /* Has this domain ever used HVMOP_pagetable_dying? */
-    bool_t pagetable_dying_op;
+    bool pagetable_dying_op;
 #endif
 
 #ifdef CONFIG_PV
@@ -158,7 +149,6 @@ struct shadow_vcpu {
     unsigned long last_emulated_frame;
     /* Last MFN that we emulated a write successfully */
     unsigned long last_emulated_mfn;
-#endif
 
     /* Shadow out-of-sync: pages that this vcpu has let go out of sync */
     mfn_t oos[SHADOW_OOS_PAGES];
@@ -169,8 +159,7 @@ struct shadow_vcpu {
         unsigned long off[SHADOW_OOS_FIXUPS];
     } oos_fixup[SHADOW_OOS_PAGES];
 
-#ifdef CONFIG_HVM
-    bool_t pagetable_dying;
+    bool pagetable_dying;
 #endif
 #endif
 };
@@ -179,10 +168,6 @@ struct shadow_vcpu {
 /*            hardware assisted paging          */
 /************************************************/
 struct hap_domain {
-    struct page_list_head freelist;
-    unsigned int      total_pages;  /* number of pages allocated */
-    unsigned int      free_pages;   /* number of pages on freelists */
-    unsigned int      p2m_pages;    /* number of pages allocated to p2m */
 };
 
 /************************************************/
@@ -200,7 +185,7 @@ struct log_dirty_domain {
 
     /* functions which are paging mode specific */
     const struct log_dirty_ops {
-        int        (*enable  )(struct domain *d, bool log_global);
+        int        (*enable  )(struct domain *d);
         int        (*disable )(struct domain *d);
         void       (*clean   )(struct domain *d);
     } *ops;
@@ -213,11 +198,18 @@ struct paging_domain {
     /* flags to control paging operation */
     u32                     mode;
     /* Has that pool ever run out of memory? */
-    bool_t                  p2m_alloc_failed;
+    bool                    p2m_alloc_failed;
     /* extension for shadow paging support */
     struct shadow_domain    shadow;
     /* extension for hardware-assited paging */
     struct hap_domain       hap;
+
+    /* Memory allocation (common to shadow and HAP) */
+    struct page_list_head   freelist;
+    unsigned int            total_pages;  /* number of pages allocated */
+    unsigned int            free_pages;   /* number of pages on freelists */
+    unsigned int            p2m_pages;    /* number of pages allocated to p2m */
+
     /* log dirty support */
     struct log_dirty_domain log_dirty;
 
@@ -238,6 +230,13 @@ struct paging_domain {
      * (used by p2m and log-dirty code for their tries) */
     struct page_info * (*alloc_page)(struct domain *d);
     void (*free_page)(struct domain *d, struct page_info *pg);
+
+    void (*update_paging_modes)(struct vcpu *v);
+
+#ifdef CONFIG_HVM
+    /* Flush selected vCPUs TLBs.  NULL for all. */
+    bool __must_check (*flush_tlb)(const unsigned long *vcpu_bitmap);
+#endif
 };
 
 struct paging_vcpu {
@@ -324,7 +323,7 @@ struct arch_domain
     uint32_t pci_cf8;
     uint8_t cmos_idx;
 
-    uint8_t spec_ctrl_flags; /* See SCF_DOM_MASK */
+    uint8_t scf; /* See SCF_DOM_MASK */
 
     union {
         struct pv_domain pv;
@@ -342,8 +341,8 @@ struct arch_domain
     struct page_list_head relmem_list;
 
     const struct arch_csw {
-        void (*from)(struct vcpu *);
-        void (*to)(struct vcpu *);
+        void (*from)(struct vcpu *v);
+        void (*to)(struct vcpu *v);
         void noreturn (*tail)(void);
     } *ctxt_switch;
 
@@ -353,7 +352,7 @@ struct arch_domain
     mm_lock_t nested_p2m_lock;
 
     /* altp2m: allow multiple copies of host p2m */
-    bool_t altp2m_active;
+    bool altp2m_active;
     struct p2m_domain *altp2m_p2m[MAX_ALTP2M];
     mm_lock_t altp2m_list_lock;
     uint64_t *altp2m_eptp;
@@ -364,10 +363,10 @@ struct arch_domain
     struct radix_tree_root irq_pirq;
 
     /* Is shared-info page in 32-bit format? */
-    bool_t has_32bit_shinfo;
+    bool has_32bit_shinfo;
 
     /* Is PHYSDEVOP_eoi to automatically unmask the event channel? */
-    bool_t auto_unmask;
+    bool auto_unmask;
 
     /*
      * The width of the FIP/FDP register in the FPU that needs to be
@@ -399,7 +398,7 @@ struct arch_domain
 
     /* TSC management (emulation, pv, scaling, stats) */
     int tsc_mode;            /* see asm/time.h */
-    bool_t vtsc;             /* tsc is emulated (may change after migrate) */
+    bool vtsc;               /* tsc is emulated (may change after migrate) */
     s_time_t vtsc_last;      /* previous TSC value (guarantee monotonicity) */
     uint64_t vtsc_offset;    /* adjustment for save/restore/migrate */
     uint32_t tsc_khz;        /* cached guest khz for certain emulated or
@@ -438,6 +437,7 @@ struct arch_domain
         unsigned int descriptor_access_enabled                             : 1;
         unsigned int guest_request_userspace_enabled                       : 1;
         unsigned int emul_unimplemented_enabled                            : 1;
+        unsigned int io_enabled                                            : 1;
         /*
          * By default all events are sent.
          * This is used to filter out pagefaults.
@@ -451,7 +451,7 @@ struct arch_domain
     } monitor;
 
     /* Mem_access emulation control */
-    bool_t mem_access_emulate_each_rep;
+    bool mem_access_emulate_each_rep;
 
     /* Don't unconditionally inject #GP for unhandled MSRs. */
     bool msr_relaxed;
@@ -543,8 +543,8 @@ struct pv_vcpu
     unsigned long sysenter_callback_eip;
     unsigned short syscall32_callback_cs;
     unsigned short sysenter_callback_cs;
-    bool_t syscall32_disables_events;
-    bool_t sysenter_disables_events;
+    bool syscall32_disables_events;
+    bool sysenter_disables_events;
 
     /*
      * 64bit segment bases.
@@ -573,7 +573,7 @@ struct pv_vcpu
 
     /* I/O-port access bitmap. */
     XEN_GUEST_HANDLE(uint8) iobmp; /* Guest kernel vaddr of the bitmap. */
-    unsigned int iobmp_limit; /* Number of ports represented in the bitmap. */
+    unsigned int iobmp_nr;    /* Number of ports represented in the bitmap. */
 #define IOPL(val) MASK_INSR(val, X86_EFLAGS_IOPL)
     unsigned int iopl;        /* Current IOPL for this VCPU, shifted left by
                                * 12 to match the eflags register. */
@@ -585,18 +585,12 @@ struct pv_vcpu
     uint32_t dr7_emul;
 
     /* Deferred VA-based update state. */
-    bool_t need_update_runstate_area;
+    bool need_update_runstate_area;
     struct vcpu_time_info pending_system_time;
 };
 
 struct arch_vcpu
 {
-    /*
-     * guest context (mirroring struct vcpu_guest_context) common
-     * between pv and hvm guests
-     */
-
-    void              *fpu_ctxt;
     struct cpu_user_regs user_regs;
 
     /* Debug registers. */
@@ -655,7 +649,7 @@ struct arch_vcpu
     uint64_t xcr0_accum;
     /* This variable determines whether nonlazy extended state has been used,
      * and thus should be saved/restored. */
-    bool_t nonlazy_xstate_used;
+    bool nonlazy_xstate_used;
 
     /* Restore all FPU state (lazy and non-lazy state) on context switch? */
     bool fully_eager_fpu;
@@ -668,6 +662,7 @@ struct arch_vcpu
 
     /* A secondary copy of the vcpu time info. */
     XEN_GUEST_HANDLE(vcpu_time_info_t) time_info_guest;
+    struct guest_area time_guest_area;
 
     struct arch_vm_event *vm_event;
 
@@ -688,12 +683,12 @@ void update_guest_memory_policy(struct vcpu *v,
 
 void domain_cpu_policy_changed(struct domain *d);
 
-bool update_runstate_area(struct vcpu *);
-bool update_secondary_system_time(struct vcpu *,
-                                  struct vcpu_time_info *);
+bool update_secondary_system_time(struct vcpu *v,
+                                  struct vcpu_time_info *u);
+void force_update_secondary_system_time(struct vcpu *v,
+                                        struct vcpu_time_info *map);
 
-void vcpu_show_execution_state(struct vcpu *);
-void vcpu_show_registers(const struct vcpu *);
+void vcpu_show_registers(const struct vcpu *v);
 
 static inline struct vcpu_guest_context *alloc_vcpu_guest_context(void)
 {
@@ -723,21 +718,35 @@ static inline void pv_inject_hw_exception(unsigned int vector, int errcode)
 {
     const struct x86_event event = {
         .vector = vector,
-        .type = X86_EVENTTYPE_HW_EXCEPTION,
+        .type = X86_ET_HW_EXC,
         .error_code = errcode,
     };
 
     pv_inject_event(&event);
 }
 
+static inline void pv_inject_DB(unsigned long pending_dbg)
+{
+    struct x86_event event = {
+        .vector      = X86_EXC_DB,
+        .type        = X86_ET_HW_EXC,
+        .error_code  = X86_EVENT_NO_EC,
+    };
+
+    event.pending_dbg = pending_dbg;
+
+    pv_inject_event(&event);
+}
+
 static inline void pv_inject_page_fault(int errcode, unsigned long cr2)
 {
-    const struct x86_event event = {
-        .vector = TRAP_page_fault,
-        .type = X86_EVENTTYPE_HW_EXCEPTION,
+    struct x86_event event = {
+        .vector = X86_EXC_PF,
+        .type = X86_ET_HW_EXC,
         .error_code = errcode,
-        .cr2 = cr2,
     };
+
+    event.cr2 = cr2;
 
     pv_inject_event(&event);
 }
@@ -746,7 +755,7 @@ static inline void pv_inject_sw_interrupt(unsigned int vector)
 {
     const struct x86_event event = {
         .vector = vector,
-        .type = X86_EVENTTYPE_SW_INTERRUPT,
+        .type = X86_ET_SW_INT,
         .error_code = X86_EVENT_NO_EC,
     };
 
@@ -774,6 +783,12 @@ static inline void pv_inject_sw_interrupt(unsigned int vector)
 
 struct arch_vcpu_io {
 };
+
+/* Maxphysaddr supportable by the paging infrastructure. */
+unsigned int domain_max_paddr_bits(const struct domain *d);
+
+#define arch_init_idle_domain arch_init_idle_domain
+void arch_init_idle_domain(struct domain *d);
 
 #endif /* __ASM_DOMAIN_H__ */
 

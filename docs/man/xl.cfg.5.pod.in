@@ -772,10 +772,16 @@ settings, from the following list:
 
 =over 4
 
+=item B<type=TYPE>
+
+The backendtype for the PV device. Supported values are B<qemu> and
+B<xen_9pfsd>.  The default is B<qemu>.
+
 =item B<tag=STRING>
 
 9pfs tag to identify the filesystem share. The tag is needed on the
-guest side to mount it.
+guest side to mount it. For the backendtype of B<xen_9pfsd> the tag defaults to
+"Xen".
 
 =item B<security_model="none">
 
@@ -785,11 +791,37 @@ squash or remap).
 
 =item B<path=STRING>
 
-Filesystem path on the backend to export.
+Filesystem path on the backend to export. For the backendtype of B<xen_9pfsd>
+the path defaults to "@XEN_LOG_DIR@/guests/<guest-name>".
 
 =item B<backend=domain-id>
 
 Specify the backend domain name or id, defaults to dom0.
+
+=item B<max-files=NUMBER>
+
+Specify the maximum number of files below B<path>. A value of 0 (which
+is the default) doesn't limit the number of files. Only valid for
+B<type=xen_9pfsd>.
+
+=item B<max-open-files=NUMBER>
+
+Specify the maximum number of concurrently opened files below B<path>.
+Multiple opens of the same file are counted individually. Only valid for
+B<type=xen_9pfsd>, which has a default of B<max-open-files=5>.
+
+=item B<max-space=NUMBER>
+
+Specify the maximum used disk space in MiB below B<path>. A value of 0 (which
+is the default) doesn't limit the usable disk space. Only valid for
+B<type=xen_9pfsd>.
+
+=item B<auto-delete=BOOLEAN>
+
+When set the backend will delete the oldest file which is currently not
+opened by the guest in case the disk space limit set via B<max-space> or the
+file limit set via B<max-files> is being reached. Only valid for
+B<type=xen_9pfsd>.
 
 =back
 
@@ -1585,6 +1617,50 @@ Set maximum height for pointer device.
 
 =back
 
+=item B<virtio=[ "VIRTIO_DEVICE_STRING", "VIRTIO_DEVICE_STRING", ...]>
+
+Specifies the Virtio devices to be provided to the guest.
+
+Each B<VIRTIO_DEVICE_STRING> is a comma-separated list of C<KEY=VALUE> settings
+from the following list. As a special case, a single comma is allowed in the
+VALUE of the "type" KEY, where the VALUE is set with "virtio,device<N>".
+
+=over 4
+
+=item B<backend=domain-id>
+
+Specifies the backend domain name or id, defaults to dom0.
+
+=item B<type=STRING>
+
+Specifies the compatible string for the specific Virtio device. The same will be
+written in the Device Tree compatible property of the Virtio device. For
+example, "type=virtio,device22" for the I2C device, whose device-tree binding is
+present here:
+
+L<https://www.kernel.org/doc/Documentation/devicetree/bindings/i2c/i2c-virtio.yaml>
+
+For other generic virtio devices, where we don't need to set special or
+compatible properties in the Device Tree, the type field must be set to
+"virtio,device" or "virtio,device<N>", where "N" is the virtio device id in
+hexadecimal format, without the "0x" prefix and all in lower case, like
+"virtio,device1a" for the file system device.
+
+=item B<transport=STRING>
+
+Specifies the transport mechanism for the Virtio device, only "mmio" is
+supported for now.
+
+=item B<grant_usage=BOOLEAN>
+
+If this option is B<true>, the Xen grants are always enabled.
+If this option is B<false>, the Xen grants are always disabled.
+
+If this option is missing, then the default grant setting will be used,
+i.e. enable grants if backend-domid != 0.
+
+=back
+
 =item B<tee="STRING">
 
 B<Arm only.> Set TEE type for the guest. TEE is a Trusted Execution
@@ -1612,6 +1688,21 @@ in OP-TEE.
 
 This feature is a B<technology preview>.
 
+=item B<ffa>
+
+B<Arm only.> Allow a guest to communicate via FF-A with Secure Partitions
+(SP), default false.
+
+Currently only a small subset of the FF-A specification is supported. Just
+enough to communicate with OP-TEE. In general only direct messaging and
+sharing memory with one SP. More advanced use cases where memory might be
+shared or donated to multiple SPs are not supported.
+
+See L<https://developer.arm.com/documentation/den0077/latest> for more
+information about FF-A.
+
+This feature is a B<technology preview>.
+
 =back
 
 =back
@@ -1634,6 +1725,28 @@ for PV guests.
 Append B<ARG>s to the arguments to the B<bootloader>
 program. Alternatively if the argument is a simple string then it will
 be split into words at whitespace B<(this second option is deprecated)>.
+
+=item B<bootloader_restrict=BOOLEAN>
+
+Attempt to restrict the bootloader after startup, to limit the
+consequences of security vulnerabilities due to parsing guest
+owned image files.
+
+See docs/features/qemu-deprivilege.pandoc for more information
+on how to setup the unprivileged users.
+
+Note that running the bootloader in restricted mode also implies using
+non-interactive mode, and the disk image must be readable by the
+restricted user.
+
+=item B<bootloader_user=USERNAME>
+
+When using bootloader_restrict, run the bootloader as this user.  If not
+set the default QEMU restrict users will be used.
+
+NOTE: Each domain MUST have a SEPARATE username.
+
+See docs/features/qemu-deprivilege.pandoc for more information.
 
 =item B<e820_host=BOOLEAN>
 
@@ -2038,6 +2151,55 @@ number of vendor defined SMBIOS structures (type 128 - 255). Since SMBIOS
 structures do not present their overall size, each entry in the file must be
 preceded by a 32b integer indicating the size of the following structure.
 
+=item B<smbios=[ "SMBIOS_SPEC_STRING", "SMBIOS_SPEC_STRING", ...]>
+
+Specifies the SMBIOS values to be provided to the guest.  These set or
+override specific entries in the tables provided to the guest.
+
+Each B<SMBIOS_SPEC_STRING> is a C<KEY=VALUE> string from the following list:
+
+=over 4
+
+=item B<bios_vendor=STRING>
+
+=item B<bios_version=STRING>
+
+=item B<system_manufacturer=STRING>
+
+=item B<system_product_name=STRING>
+
+=item B<system_version=STRING>
+
+=item B<system_serial_number=STRING>
+
+=item B<baseboard_manufacturer=STRING>
+
+=item B<baseboard_product_name=STRING>
+
+=item B<baseboard_version=STRING>
+
+=item B<baseboard_serial_number=STRING>
+
+=item B<baseboard_asset_tag=STRING>
+
+=item B<baseboard_location_in_chassis=STRING>
+
+=item B<enclosure_manufacturer=STRING>
+
+=item B<enclosure_serial_number=STRING>
+
+=item B<enclosure_asset_tag=STRING>
+
+=item B<battery_manufacturer=STRING>
+
+=item B<battery_device_name=STRING>
+
+=item B<oem=STRING>
+
+oem= can be specified up to 99 times.
+
+=back
+
 =item B<ms_vm_genid="OPTION">
 
 Provide a VM generation ID to the guest.
@@ -2299,7 +2461,7 @@ guests effectively allowing vCPU hotplug.
 
 This is a special value that enables the default set of groups, which
 is currently the B<base>, B<freq>, B<time_ref_count>, B<apic_assist>,
-B<crash_ctl>, B<stimer>, B<no_vp_limit> and B<cpu_hotplug> groups.
+B<crash_ctl>, B<no_vp_limit> and B<cpu_hotplug> groups.
 
 =item B<all>
 
@@ -2329,6 +2491,13 @@ interfaces for HVM guests from being used.
 The viridian option can be specified as a boolean. A value of true (1)
 is equivalent to the list [ "defaults" ], and a value of false (0) is
 equivalent to an empty list.
+
+=item B<hvm_pirq=BOOLEAN>
+
+Select whether the guest is allowed to route interrupts from devices (either
+emulated or passed through) over event channels.
+
+This option is disabled by default.
 
 =back
 
@@ -2541,6 +2710,8 @@ device.
 
 Specifies that the HVM guest gets a vkdb. The default is true (1).
 
+This option is only used when B<vkb=[]> is unset.
+
 =item B<usb=BOOLEAN>
 
 Enables or disables an emulated USB bus in the guest.
@@ -2627,6 +2798,27 @@ for PV guests.
 Append B<ARG>s to the arguments to the B<bootloader>
 program. Alternatively if the argument is a simple string then it will
 be split into words at whitespace B<(this second option is deprecated)>.
+
+=item B<bootloader_restrict=BOOLEAN>
+
+Attempt to restrict the bootloader after startup, to limit the
+consequences of security vulnerabilities due to parsing guest
+owned image files.
+
+See docs/features/qemu-deprivilege.pandoc for more information
+on how to setup the unprivileged users.
+
+Note that running the bootloader in restricted mode also implies using
+non-interactive mode, and the disk image must be readable by the
+restricted user.
+
+=item B<bootloader_user=USERNAME>
+
+When using bootloader_restrict, run the bootloader as this user.
+
+NOTE: Each domain MUST have a SEPARATE username.
+
+See docs/features/qemu-deprivilege.pandoc for more information.
 
 =item B<timer_mode="MODE">
 
@@ -2859,6 +3051,46 @@ VM config file:
 vuart = "sbsa_uart"
 
 Currently, only the "sbsa_uart" model is supported for ARM.
+
+=back
+
+=over 4
+
+=item B<sve="vl">
+
+The `sve` parameter enables Arm Scalable Vector Extension (SVE) usage for the
+guest and sets the maximum SVE vector length, the option is applicable only to
+AArch64 guests.
+A value equal to "disabled" disables the feature, this is the default value.
+Allowed values are "disabled", "128", "256", "384", "512", "640", "768", "896",
+"1024", "1152", "1280", "1408", "1536", "1664", "1792", "1920", "2048", "hw".
+Specifying "hw" means that the maximum vector length supported by the platform
+will be used.
+Please be aware that if a specific vector length is passed and its value is
+above the maximum vector length supported by the platform, an error will be
+raised.
+
+=back
+
+=over 4
+
+=item B<llc_colors=[ "RANGE", "RANGE", ...]>
+
+Specify the Last Level Cache (LLC) color configuration for the guest.
+B<RANGE> can be either a single color value or a hypen-separated closed
+interval of colors (such as "0-4").
+
+=item B<nr_spis="NR_SPIS">
+
+An optional integer parameter specifying the number of SPIs (Shared
+Peripheral Interrupts) to allocate for the domain. Max is 991 SPIs. If
+the value specified by the `nr_spis` parameter is smaller than the
+number of SPIs calculated by the toolstack based on the devices
+allocated for the domain, or the `nr_spis` parameter is not specified,
+the value calculated by the toolstack will be used for the domain.
+Otherwise, the value specified by the `nr_spis` parameter will be used.
+The number of SPIs should match the highest interrupt ID that will be
+assigned to the domain.
 
 =back
 

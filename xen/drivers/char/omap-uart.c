@@ -48,8 +48,12 @@
 /* System configuration register */
 #define UART_OMAP_SYSC_DEF_CONF   0x0d   /* autoidle mode, wakeup is enabled */
 
-#define omap_read(uart, off)       readl((uart)->regs + (off<<REG_SHIFT))
-#define omap_write(uart, off, val) writel((val), (uart)->regs + (off<<REG_SHIFT))
+/* default clock frequency in hz */
+#define UART_OMAP_DEFAULT_CLK_SPEED 48000000
+
+#define omap_read(uart, off)       readl((uart)->regs + ((off) << REG_SHIFT))
+#define omap_write(uart, off, val) writel(val, \
+                                          (uart)->regs + ((off) << REG_SHIFT))
 
 static struct omap_uart {
     u32 baud, clock_hz, data_bits, parity, stop_bits, fifo_size;
@@ -59,7 +63,7 @@ static struct omap_uart {
     struct vuart_info vuart;
 } omap_com = {0};
 
-static void omap_uart_interrupt(int irq, void *data, struct cpu_user_regs *regs)
+static void omap_uart_interrupt(int irq, void *data)
 {
     struct serial_port *port = data;
     struct omap_uart *uart = port->uart;
@@ -70,9 +74,9 @@ static void omap_uart_interrupt(int irq, void *data, struct cpu_user_regs *regs)
     {
         lsr = omap_read(uart, UART_LSR) & 0xff;
 	if ( lsr & UART_LSR_THRE )
-            serial_tx_interrupt(port, regs);
+            serial_tx_interrupt(port);
 	if ( lsr & UART_LSR_DR )
-            serial_rx_interrupt(port, regs);
+            serial_rx_interrupt(port);
 
         if ( port->txbufc == port->txbufp ) {
             reg = omap_read(uart, UART_IER);
@@ -242,16 +246,6 @@ static void __init omap_uart_init_postirq(struct serial_port *port)
     omap_write(uart, UART_IER, UART_IER_ERDAI|UART_IER_ETHREI|UART_IER_ELSI);
 }
 
-static void omap_uart_suspend(struct serial_port *port)
-{
-    BUG();
-}
-
-static void omap_uart_resume(struct serial_port *port)
-{
-    BUG();
-}
-
 static int omap_uart_tx_ready(struct serial_port *port)
 {
     struct omap_uart *uart = port->uart;
@@ -307,9 +301,6 @@ static const struct vuart_info *omap_vuart_info(struct serial_port *port)
 static struct uart_driver __read_mostly omap_uart_driver = {
     .init_preirq = omap_uart_init_preirq,
     .init_postirq = omap_uart_init_postirq,
-    .endboot = NULL,
-    .suspend = omap_uart_suspend,
-    .resume = omap_uart_resume,
     .tx_ready = omap_uart_tx_ready,
     .putc = omap_uart_putc,
     .getc = omap_uart_getc,
@@ -324,7 +315,7 @@ static int __init omap_uart_init(struct dt_device_node *dev,
     struct omap_uart *uart;
     u32 clkspec;
     int res;
-    u64 addr, size;
+    paddr_t addr, size;
 
     if ( strcmp(config, "") )
         printk("WARNING: UART configuration is not supported\n");
@@ -334,8 +325,9 @@ static int __init omap_uart_init(struct dt_device_node *dev,
     res = dt_property_read_u32(dev, "clock-frequency", &clkspec);
     if ( !res )
     {
-        printk("omap-uart: Unable to retrieve the clock frequency\n");
-        return -EINVAL;
+        printk("omap-uart: Unable to retrieve the clock frequency, defaulting to %uHz\n",
+               UART_OMAP_DEFAULT_CLK_SPEED);
+        clkspec = UART_OMAP_DEFAULT_CLK_SPEED;
     }
 
     uart->clock_hz = clkspec;
@@ -344,7 +336,7 @@ static int __init omap_uart_init(struct dt_device_node *dev,
     uart->parity = UART_PARITY_NONE;
     uart->stop_bits = 1;
 
-    res = dt_device_get_address(dev, 0, &addr, &size);
+    res = dt_device_get_paddr(dev, 0, &addr, &size);
     if ( res )
     {
         printk("omap-uart: Unable to retrieve the base"
@@ -385,6 +377,7 @@ static int __init omap_uart_init(struct dt_device_node *dev,
 static const struct dt_device_match omap_uart_dt_match[] __initconst =
 {
     DT_MATCH_COMPATIBLE("ti,omap4-uart"),
+    DT_MATCH_COMPATIBLE("ti,am654-uart"),
     { /* sentinel */ },
 };
 

@@ -565,6 +565,8 @@ int parse_nic_config(libxl_device_nic *nic, XLU_Config **config, char *token)
         nic->devid = parse_ulong(oparg);
     } else if (MATCH_OPTION("mtu", token, oparg)) {
         nic->mtu = parse_ulong(oparg);
+    } else if (MATCH_OPTION("vlan", token, oparg)) {
+        replace_string(&nic->vlan, oparg);
     } else if (!strcmp("trusted", token)) {
         libxl_defbool_set(&nic->trusted, true);
     } else if (!strcmp("untrusted", token)) {
@@ -646,7 +648,7 @@ static void parse_vnuma_config(const XLU_Config *config,
              conf_count++) {
 
             if (xlu_cfg_value_type(conf_option) == XLU_STRING) {
-                char *buf, *option_untrimmed, *value_untrimmed;
+                char *buf;
                 char *option, *value;
                 unsigned long val;
 
@@ -654,15 +656,12 @@ static void parse_vnuma_config(const XLU_Config *config,
 
                 if (!buf) continue;
 
-                if (split_string_into_pair(buf, "=",
-                                           &option_untrimmed,
-                                           &value_untrimmed)) {
+                if (split_string_into_pair(buf, '=', &option, &value,
+                                           isspace)) {
                     fprintf(stderr, "xl: failed to split \"%s\" into pair\n",
                             buf);
                     exit(EXIT_FAILURE);
                 }
-                trim(isspace, option_untrimmed, &option);
-                trim(isspace, value_untrimmed, &value);
 
                 if (!strcmp("pnode", option)) {
                     val = parse_ulong(value);
@@ -715,8 +714,6 @@ static void parse_vnuma_config(const XLU_Config *config,
                 }
                 free(option);
                 free(value);
-                free(option_untrimmed);
-                free(value_untrimmed);
             }
         }
     }
@@ -836,9 +833,9 @@ int parse_vdispl_config(libxl_device_vdispl *vdispl, char *token)
         {
             char *resolution;
 
-            rc = split_string_into_pair(connectors[i], ":",
+            rc = split_string_into_pair(connectors[i], ':',
                                         &vdispl->connectors[i].unique_id,
-                                        &resolution);
+                                        &resolution, NULL);
 
             rc= sscanf(resolution, "%ux%u", &vdispl->connectors[i].width,
                        &vdispl->connectors[i].height);
@@ -1208,6 +1205,85 @@ out:
     if (rc) exit(EXIT_FAILURE);
 }
 
+static int parse_virtio_config(libxl_device_virtio *virtio, char *token)
+{
+    char *oparg;
+    int rc;
+
+    if (MATCH_OPTION("backend", token, oparg)) {
+        virtio->backend_domname = strdup(oparg);
+    } else if (MATCH_OPTION("type", token, oparg)) {
+        virtio->type = strdup(oparg);
+    } else if (MATCH_OPTION("transport", token, oparg)) {
+        rc = libxl_virtio_transport_from_string(oparg, &virtio->transport);
+        if (rc) return rc;
+    } else if (MATCH_OPTION("grant_usage", token, oparg)) {
+        libxl_defbool_set(&virtio->grant_usage, strtoul(oparg, NULL, 0));
+    } else {
+        fprintf(stderr, "Unknown string \"%s\" in virtio spec\n", token);
+        return -1;
+    }
+
+    return 0;
+}
+
+static void parse_virtio_list(const XLU_Config *config,
+                              libxl_domain_config *d_config)
+{
+    XLU_ConfigList *virtios;
+    const char *item;
+    char *buf = NULL, *oparg, *str = NULL;
+    int rc;
+
+    if (!xlu_cfg_get_list (config, "virtio", &virtios, 0, 0)) {
+        int entry = 0;
+        while ((item = xlu_cfg_get_listitem(virtios, entry)) != NULL) {
+            libxl_device_virtio *virtio;
+            char *p;
+
+            virtio = ARRAY_EXTEND_INIT(d_config->virtios, d_config->num_virtios,
+                                       libxl_device_virtio_init);
+
+            buf = strdup(item);
+
+            p = strtok(buf, ",");
+            while (p != NULL)
+            {
+                while (*p == ' ') p++;
+
+                // Type may contain a comma, do special handling.
+                if (MATCH_OPTION("type", p, oparg)) {
+                    if (!strncmp(oparg, "virtio", strlen("virtio"))) {
+                        char *p2 = strtok(NULL, ",");
+                        str = malloc(strlen(p) + strlen(p2) + 2);
+
+                        strcpy(str, p);
+                        strcat(str, ",");
+                        strcat(str, p2);
+                        p = str;
+                    }
+                }
+
+                rc = parse_virtio_config(virtio, p);
+                if (rc) goto out;
+
+                free(str);
+                str = NULL;
+                p = strtok(NULL, ",");
+            }
+
+            entry++;
+            free(buf);
+        }
+    }
+
+    return;
+
+out:
+    free(buf);
+    if (rc) exit(EXIT_FAILURE);
+}
+
 void parse_config_data(const char *config_source,
                        const char *config_data,
                        int config_len,
@@ -1220,13 +1296,15 @@ void parse_config_data(const char *config_source,
     XLU_ConfigList *cpus, *vbds, *nics, *pcis, *cvfbs, *cpuids, *vtpms,
                    *usbctrls, *usbdevs, *p9devs, *vdispls, *pvcallsifs_devs;
     XLU_ConfigList *channels, *ioports, *irqs, *iomem, *viridian, *dtdevs,
-                   *mca_caps;
+                   *mca_caps, *smbios, *llc_colors;
     int num_ioports, num_irqs, num_iomem, num_cpus, num_viridian, num_mca_caps;
+    int num_smbios;
     int pci_power_mgmt = 0;
     int pci_msitranslate = 0;
     int pci_permissive = 0;
     int pci_seize = 0;
     int i, e;
+    int num_llc_colors;
     char *kernel_basename;
 
     libxl_domain_create_info *c_info = &d_config->c_info;
@@ -1369,6 +1447,41 @@ void parse_config_data(const char *config_source,
 
     if (!xlu_cfg_get_long (config, "maxmem", &l, 0))
         b_info->max_memkb = l * 1024;
+
+    if (!xlu_cfg_get_list(config, "llc_colors", &llc_colors, &num_llc_colors, 0)) {
+        int cur_index = 0;
+
+        b_info->num_llc_colors = 0;
+        for (i = 0; i < num_llc_colors; i++) {
+            uint32_t start = 0, end = 0, k;
+
+            buf = xlu_cfg_get_listitem(llc_colors, i);
+            if (!buf) {
+                fprintf(stderr,
+                        "xl: Can't get element %d in LLC color list\n", i);
+                exit(1);
+            }
+
+            if (sscanf(buf, "%" SCNu32 "-%" SCNu32, &start, &end) != 2) {
+                if (sscanf(buf, "%" SCNu32, &start) != 1) {
+                    fprintf(stderr, "xl: Invalid LLC color range: %s\n", buf);
+                    exit(1);
+                }
+                end = start;
+            } else if (start > end) {
+                fprintf(stderr,
+                        "xl: Start LLC color is greater than end: %s\n", buf);
+                exit(1);
+            }
+
+            b_info->num_llc_colors += (end - start) + 1;
+            b_info->llc_colors = (uint32_t *)realloc(b_info->llc_colors,
+                        sizeof(*b_info->llc_colors) * b_info->num_llc_colors);
+
+            for (k = start; k <= end; k++)
+                b_info->llc_colors[cur_index++] = k;
+        }
+    }
 
     if (!xlu_cfg_get_long (config, "vcpus", &l, 0)) {
         vcpus = l;
@@ -1585,7 +1698,6 @@ void parse_config_data(const char *config_source,
         }
         b_info->tsc_mode = l;
     } else if (!xlu_cfg_get_string(config, "tsc_mode", &buf, 0)) {
-        fprintf(stderr, "got a tsc mode string: \"%s\"\n", buf);
         if (libxl_tsc_mode_from_string(buf, &b_info->tsc_mode)) {
             fprintf(stderr, "ERROR: invalid value \"%s\" for \"tsc_mode\"\n",
                     buf);
@@ -1617,6 +1729,22 @@ void parse_config_data(const char *config_source,
     xlu_cfg_get_defbool(config, "acpi", &b_info->acpi, 0);
 
     xlu_cfg_replace_string (config, "bootloader", &b_info->bootloader, 0);
+#ifndef HAVE_PYGRUB
+    if (b_info->bootloader &&
+        (!strcmp(b_info->bootloader, "pygrub") ||
+	 !strcmp(b_info->bootloader, "/usr/bin/pygrub"))) {
+        fprintf(stderr, "ERROR: this instance of Xen has been built without support of \"pygrub\".\n");
+        exit(-ERROR_FAIL);
+    }
+#endif
+    xlu_cfg_get_defbool(config, "bootloader_restrict",
+                        &b_info->bootloader_restrict, 0);
+    if (!libxl_defbool_is_default(bootloader_restrict))
+        libxl_defbool_setdefault(&b_info->bootloader_restrict,
+                                 libxl_defbool_val(bootloader_restrict));
+    xlu_cfg_replace_string(config, "bootloader_user",
+                           &b_info->bootloader_user, 0);
+
     switch (xlu_cfg_get_list_as_string_list(config, "bootloader_args",
                                             &b_info->bootloader_args, 1)) {
     case 0:
@@ -1710,6 +1838,7 @@ void parse_config_data(const char *config_source,
         xlu_cfg_get_defbool(config, "hpet", &b_info->u.hvm.hpet, 0);
         xlu_cfg_get_defbool(config, "vpt_align", &b_info->u.hvm.vpt_align, 0);
         xlu_cfg_get_defbool(config, "apic", &b_info->apic, 0);
+        xlu_cfg_get_defbool(config, "hvm_pirq", &b_info->u.hvm.pirq, 0);
 
         switch (xlu_cfg_get_list(config, "viridian",
                                  &viridian, &num_viridian, 1))
@@ -1782,6 +1911,74 @@ void parse_config_data(const char *config_source,
                                &b_info->u.hvm.smbios_firmware, 0);
         xlu_cfg_replace_string(config, "acpi_firmware",
                                &b_info->u.hvm.acpi_firmware, 0);
+
+        switch (xlu_cfg_get_list(config, "smbios", &smbios, &num_smbios, 0))
+        {
+        case 0: /* Success */
+        {
+            unsigned int num_oem = 1;
+
+            b_info->u.hvm.num_smbios = num_smbios;
+            b_info->u.hvm.smbios = xcalloc(num_smbios, sizeof(libxl_smbios));
+            for (i = 0; i < num_smbios; i++) {
+                libxl_smbios_type type;
+                char *option;
+                char *value;
+
+                buf = xlu_cfg_get_listitem(smbios, i);
+                if (!buf) {
+                    fprintf(stderr,
+                            "xl: Unable to get element #%d in smbios list\n",
+                            i);
+                    exit(EXIT_FAILURE);
+                }
+
+                option = xstrdup(buf);
+                value = strchr(option, '=');
+                if (value == NULL) {
+                    fprintf(stderr, "xl: failed to split \"%s\" at '='\n",
+                            option);
+                    exit(EXIT_FAILURE);
+                }
+
+                *value = '\0';
+                value++;
+
+                if (*value == '\0') {
+                    fprintf(stderr,
+                            "xl: empty value not allowed for smbios \"%s=\"\n",
+                            option);
+                    exit(EXIT_FAILURE);
+                }
+
+                e = libxl_smbios_type_from_string(option, &type);
+                if (e) {
+                    fprintf(stderr, "xl: unknown smbios type '%s'\n", option);
+                    exit(EXIT_FAILURE);
+                }
+
+                if (type == LIBXL_SMBIOS_TYPE_OEM) {
+                    if (num_oem > 99) {
+                        fprintf(stderr,
+                                "xl: smbios limited to 99 oem strings\n");
+                        exit(EXIT_FAILURE);
+                    }
+                    num_oem++;
+                }
+
+                b_info->u.hvm.smbios[i].key = type;
+                b_info->u.hvm.smbios[i].value = xstrdup(value);
+
+                free(option);
+            }
+            break;
+        }
+        case ESRCH: /* Option not present */
+            break;
+        default:
+            fprintf(stderr,"xl: Unable to parse smbios options.\n");
+            exit(EXIT_FAILURE);
+        }
 
         if (!xlu_cfg_get_string(config, "ms_vm_genid", &buf, 0)) {
             if (!strcmp(buf, "generate")) {
@@ -2039,54 +2236,71 @@ void parse_config_data(const char *config_source,
 
     if (!xlu_cfg_get_list(config, "p9", &p9devs, 0, 0)) {
         libxl_device_p9 *p9;
-        char *security_model = NULL;
-        char *path = NULL;
-        char *tag = NULL;
-        char *backend = NULL;
-        char *p, *p2, *buf2;
 
         d_config->num_p9s = 0;
         d_config->p9s = NULL;
         while ((buf = xlu_cfg_get_listitem (p9devs, d_config->num_p9s)) != NULL) {
+            libxl_string_list pairs;
+            int len;
+
             p9 = ARRAY_EXTEND_INIT(d_config->p9s,
                                    d_config->num_p9s,
                                    libxl_device_p9_init);
             libxl_device_p9_init(p9);
 
-            buf2 = strdup(buf);
-            p = strtok(buf2, ",");
-            if(p) {
-               do {
-                  while(*p == ' ')
-                     ++p;
-                  if ((p2 = strchr(p, '=')) == NULL)
-                     break;
-                  *p2 = '\0';
-                  if (!strcmp(p, "security_model")) {
-                     security_model = strdup(p2 + 1);
-                  } else if(!strcmp(p, "path")) {
-                     path = strdup(p2 + 1);
-                  } else if(!strcmp(p, "tag")) {
-                     tag = strdup(p2 + 1);
-                  } else if(!strcmp(p, "backend")) {
-                     backend = strdup(p2 + 1);
-                  } else {
-                     fprintf(stderr, "Unknown string `%s' in 9pfs spec\n", p);
-                     exit(1);
-                  }
-               } while ((p = strtok(NULL, ",")) != NULL);
-            }
-            if (!path || !security_model || !tag) {
-               fprintf(stderr, "9pfs spec missing required field!\n");
-               exit(1);
-            }
-            free(buf2);
+            split_string_into_string_list(buf, ",", &pairs);
+            len = libxl_string_list_length(&pairs);
+            for (i = 0; i < len; i++) {
+                char *key, *value;
+                int rc;
 
-            replace_string(&p9->tag, tag);
-            replace_string(&p9->security_model, security_model);
-            replace_string(&p9->path, path);
-            if (backend)
-                    replace_string(&p9->backend_domname, backend);
+                rc = split_string_into_pair(pairs[i], '=', &key, &value,
+                                            isspace);
+                if (rc != 0) {
+                    fprintf(stderr, "failed to parse 9pfs configuration: %s",
+                            pairs[i]);
+                    exit(1);
+                }
+
+                if (!strcmp(key, "security_model")) {
+                    replace_string(&p9->security_model, value);
+                } else if (!strcmp(key, "path")) {
+                    replace_string(&p9->path, value);
+                } else if (!strcmp(key, "tag")) {
+                    replace_string(&p9->tag, value);
+                } else if (!strcmp(key, "backend")) {
+                    replace_string(&p9->backend_domname, value);
+                } else if (!strcmp(key, "type")) {
+                    if (libxl_p9_type_from_string(value, &p9->type)) {
+                        fprintf(stderr, "failed to parse 9pfs type: %s\n",
+                                value);
+                        exit(1);
+                    }
+                } else if (!strcmp(key, "max-files")) {
+                    p9->max_files = parse_ulong(value);
+                } else if (!strcmp(key, "max-open-files")) {
+                    p9->max_open_files = parse_ulong(value);
+                } else if (!strcmp(key, "max-space")) {
+                    p9->max_space = parse_ulong(value);
+                } else if (!strcmp(key, "auto-delete")) {
+                    p9->auto_delete = strtoul(value, NULL, 0);
+                } else {
+                    fprintf(stderr, "Unknown 9pfs parameter '%s'\n", key);
+                    exit(1);
+                }
+                free(key);
+                free(value);
+            }
+
+            libxl_string_list_dispose(&pairs);
+
+            if (p9->type == LIBXL_P9_TYPE_XEN_9PFSD && !p9->path) {
+                char *path;
+
+                xasprintf(&path, XEN_LOG_DIR "/guests/%s", c_info->name);
+                replace_string(&p9->path, path);
+                free(path);
+            }
         }
     }
 
@@ -2209,24 +2423,22 @@ void parse_config_data(const char *config_source,
             char *path = NULL;
             int len;
 
-            chn = ARRAY_EXTEND_INIT(d_config->channels, d_config->num_channels,
-                                   libxl_device_channel_init);
+            chn = ARRAY_EXTEND_INIT_NODEVID(d_config->channels,
+                                            d_config->num_channels,
+                                            libxl_device_channel_init);
 
             split_string_into_string_list(buf, ",", &pairs);
             len = libxl_string_list_length(&pairs);
             for (i = 0; i < len; i++) {
-                char *key, *key_untrimmed, *value, *value_untrimmed;
+                char *key, *value;
                 int rc;
-                rc = split_string_into_pair(pairs[i], "=",
-                                            &key_untrimmed,
-                                            &value_untrimmed);
+                rc = split_string_into_pair(pairs[i], '=', &key, &value,
+                                            isspace);
                 if (rc != 0) {
                     fprintf(stderr, "failed to parse channel configuration: %s",
                             pairs[i]);
                     exit(1);
                 }
-                trim(isspace, key_untrimmed, &key);
-                trim(isspace, value_untrimmed, &value);
 
                 if (!strcmp(key, "backend")) {
                     replace_string(&chn->backend_domname, value);
@@ -2249,9 +2461,7 @@ void parse_config_data(const char *config_source,
                                   " ignoring\n", key);
                 }
                 free(key);
-                free(key_untrimmed);
                 free(value);
-                free(value_untrimmed);
             }
             switch (chn->connection) {
             case LIBXL_CHANNEL_CONNECTION_UNKNOWN:
@@ -2754,7 +2964,22 @@ skip_usbdev:
         }
     }
 
+    if (!xlu_cfg_get_string (config, "sve", &buf, 1)) {
+        e = libxl_sve_type_from_string(buf, &b_info->arch_arm.sve_vl);
+        if (e) {
+            fprintf(stderr, "Unknown sve \"%s\" specified\n", buf);
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    if (!xlu_cfg_get_long (config, "nr_spis", &l, 0))
+        b_info->arch_arm.nr_spis = l;
+
     parse_vkb_list(config, d_config);
+
+    d_config->virtios = NULL;
+    d_config->num_virtios = 0;
+    parse_virtio_list(config, d_config);
 
     xlu_cfg_get_defbool(config, "xend_suspend_evtchn_compat",
                         &c_info->xend_suspend_evtchn_compat, 0);
@@ -2874,28 +3099,35 @@ void trim(char_predicate_t predicate, const char *input, char **output)
     *output = result;
 }
 
-int split_string_into_pair(const char *str,
-                           const char *delim,
-                           char **a,
-                           char **b)
+int split_string_into_pair(const char *str, char delim, char **a, char **b,
+                           char_predicate_t predicate)
 {
-    char *s, *p, *saveptr, *aa = NULL, *bb = NULL;
+    char *s, *p, *aa = NULL, *bb = NULL;
     int rc = 0;
 
     s = xstrdup(str);
 
-    p = strtok_r(s, delim, &saveptr);
+    p = strchr(s, delim);
     if (p == NULL) {
         rc = ERROR_INVAL;
         goto out;
     }
-    aa = xstrdup(p);
-    p = strtok_r(NULL, delim, &saveptr);
-    if (p == NULL) {
+    *p = 0;
+    if (predicate) {
+        trim(predicate, s, &aa);
+    } else {
+        aa = xstrdup(s);
+    }
+    p++;
+    if (!*p) {
         rc = ERROR_INVAL;
         goto out;
     }
-    bb = xstrdup(p);
+    if (predicate) {
+        trim(predicate, p, &bb);
+    } else {
+        bb = xstrdup(p);
+    }
 
     *a = aa;
     aa = NULL;

@@ -32,9 +32,9 @@ libxl_domain_type libxl__domain_type(libxl__gc *gc, uint32_t domid)
     xc_domaininfo_t info;
     int ret;
 
-    ret = xc_domain_getinfolist(ctx->xch, domid, 1, &info);
-    if (ret != 1 || info.domain != domid) {
-        LOG(ERROR, "unable to get domain type for domid=%"PRIu32, domid);
+    ret = xc_domain_getinfo_single(ctx->xch, domid, &info);
+    if (ret < 0) {
+        LOGED(ERROR, domid, "unable to get dominfo");
         return LIBXL_DOMAIN_TYPE_INVALID;
     }
     if (info.flags & XEN_DOMINF_hvm_guest) {
@@ -70,15 +70,10 @@ int libxl__domain_cpupool(libxl__gc *gc, uint32_t domid)
     xc_domaininfo_t info;
     int ret;
 
-    ret = xc_domain_getinfolist(CTX->xch, domid, 1, &info);
-    if (ret != 1)
+    ret = xc_domain_getinfo_single(CTX->xch, domid, &info);
+    if (ret < 0)
     {
-        LOGE(ERROR, "getinfolist failed %d", ret);
-        return ERROR_FAIL;
-    }
-    if (info.domain != domid)
-    {
-        LOGE(ERROR, "got info for dom%d, wanted dom%d\n", info.domain, domid);
+        LOGED(ERROR, domid, "get domaininfo failed");
         return ERROR_FAIL;
     }
     return info.cpupool;
@@ -755,6 +750,7 @@ static int hvm_build_set_xs_values(libxl__gc *gc,
                                    const libxl_domain_build_info *info)
 {
     char *path = NULL;
+    int num_oem = 1;
     int ret = 0;
 
     if (dom->smbios_module.guest_addr_out) {
@@ -769,6 +765,38 @@ static int hvm_build_set_xs_values(libxl__gc *gc,
 
         ret = libxl__xs_printf(gc, XBT_NULL, path, "0x%x",
                                dom->smbios_module.length);
+        if (ret)
+            goto err;
+    }
+
+    for (int i = 0; i < info->u.hvm.num_smbios; i++) {
+        char *p;
+        if (info->u.hvm.smbios[i].key == LIBXL_SMBIOS_TYPE_OEM) {
+            if (num_oem > 99) {
+                LOGD(ERROR, domid, "More than 99 SMBIOS OEM strings specified");
+                ret = ERROR_INVAL;
+                goto err;
+            }
+            path = GCSPRINTF("/local/domain/%d/"HVM_XS_OEM_STRINGS, domid,
+                             num_oem);
+            num_oem++;
+        } else {
+            path = GCSPRINTF("/local/domain/%d/"HVM_XS_BIOS_STRINGS"/%s", domid,
+                       libxl_smbios_type_to_string(info->u.hvm.smbios[i].key));
+        }
+
+        /* Convert libxl_smbios_type string to xenstore path that hvmloader
+         * will use, as defined by HVM_XS_*. That is convert the '_' to '-'. */
+        p = strrchr(path, '/');
+        for ( ; *p; p++) {
+            if (*p == '_')
+                *p = '-';
+        }
+
+        LOGD(DEBUG, domid, "Writing %s = \"%s\"", path,
+             info->u.hvm.smbios[i].value);
+        ret = libxl__xs_printf(gc, XBT_NULL, path, "%s",
+                               info->u.hvm.smbios[i].value);
         if (ret)
             goto err;
     }

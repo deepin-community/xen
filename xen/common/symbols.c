@@ -19,6 +19,7 @@
 #include <xen/virtual_region.h>
 #include <public/platform.h>
 #include <xen/guest_access.h>
+#include <xen/errno.h>
 
 #ifdef SYMBOLS_ORIGIN
 extern const unsigned int symbols_offsets[];
@@ -97,7 +98,7 @@ static unsigned int get_symbol_offset(unsigned long pos)
     return name - symbols_names;
 }
 
-bool_t is_active_kernel_text(unsigned long addr)
+bool is_active_kernel_text(unsigned long addr)
 {
     return !!find_text_region(addr);
 }

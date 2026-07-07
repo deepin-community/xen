@@ -1,18 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * svmdebug.c: debug functions
  * Copyright (c) 2011, Advanced Micro Devices, Inc.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  *
  */
 
@@ -62,8 +51,11 @@ void svm_vmcb_dump(const char *from, const struct vmcb_struct *vmcb)
            vmcb->exitcode, vmcb->exit_int_info.raw);
     printk("exitinfo1 = %#"PRIx64" exitinfo2 = %#"PRIx64"\n",
            vmcb->exitinfo1, vmcb->exitinfo2);
-    printk("np_ctrl = %#"PRIx64" guest_asid = %#x\n",
-           vmcb_get_np_ctrl(vmcb), vmcb_get_guest_asid(vmcb));
+    printk("asid = %#x np_ctrl = %#"PRIx64":%s%s%s\n",
+           vmcb_get_asid(vmcb), vmcb_get_np_ctrl(vmcb),
+           vmcb_get_np(vmcb)     ? " NP"     : "",
+           vmcb_get_sev(vmcb)    ? " SEV"    : "",
+           vmcb_get_sev_es(vmcb) ? " SEV_ES" : "");
     printk("virtual vmload/vmsave = %d, virt_ext = %#"PRIx64"\n",
            vmcb->virt_ext.fields.vloadsave_enable, vmcb->virt_ext.bytes);
     printk("cpl = %d efer = %#"PRIx64" star = %#"PRIx64" lstar = %#"PRIx64"\n",
@@ -135,8 +127,8 @@ bool svm_vmcb_isvalid(const char *from, const struct vmcb_struct *vmcb,
 
     valid = hvm_cr4_guest_valid_bits(v->domain);
     if ( cr4 & ~valid )
-        PRINTF("CR4: invalid bits are set (%#"PRIx64", valid: %#"PRIx64")\n",
-               cr4, valid);
+        PRINTF("CR4: invalid value %#lx (valid %#lx, rejected %#lx)\n",
+               cr4, valid, cr4 & ~valid);
 
     if ( vmcb_get_dr6(vmcb) >> 32 )
         PRINTF("DR6: bits [63:32] are not zero (%#"PRIx64")\n",

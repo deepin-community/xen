@@ -13,7 +13,7 @@
 #ifdef __XEN__
 #include <xen/kernel.h>
 #include <asm/byteorder.h>
-#include <asm/unaligned.h>
+#include <xen/unaligned.h>
 #else
 
 static inline u32 get_unaligned_le32(const void *p)
@@ -237,7 +237,7 @@ XZ_EXTERN void xz_dec_lzma2_end(struct xz_dec_lzma2 *s);
  * Allocate memory for BCJ decoders. xz_dec_bcj_reset() must be used before
  * calling xz_dec_bcj_run().
  */
-XZ_EXTERN struct xz_dec_bcj *xz_dec_bcj_create(bool_t single_call);
+XZ_EXTERN struct xz_dec_bcj *xz_dec_bcj_create(bool single_call);
 
 /*
  * Decode the Filter ID of a BCJ filter. This implementation doesn't

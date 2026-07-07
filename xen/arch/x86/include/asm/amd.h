@@ -119,7 +119,8 @@
 #define AMD_LEGACY_ERRATUM(...)         -1 /* legacy */, __VA_ARGS__, 0
 #define AMD_OSVW_ERRATUM(osvw_id, ...)  osvw_id, __VA_ARGS__, 0
 #define AMD_MODEL_RANGE(f, m_start, s_start, m_end, s_end)              \
-    ((f << 24) | (m_start << 16) | (s_start << 12) | (m_end << 4) | (s_end))
+    (((f) << 24) | ((m_start) << 16) | ((s_start) << 12) | \
+     ((m_end) << 4) | (s_end))
 #define AMD_MODEL_RANGE_FAMILY(range)   (((range) >> 24) & 0xff)
 #define AMD_MODEL_RANGE_START(range)    (((range) >> 12) & 0xfff)
 #define AMD_MODEL_RANGE_END(range)      ((range) & 0xfff)
@@ -157,9 +158,9 @@
 #define is_zen4_uarch()   boot_cpu_has(X86_FEATURE_AUTO_IBRS)
 
 struct cpuinfo_x86;
-int cpu_has_amd_erratum(const struct cpuinfo_x86 *, int, ...);
+int cpu_has_amd_erratum(const struct cpuinfo_x86 *cpu, int osvw_id, ...);
 
-extern s8 opt_allow_unsafe;
+extern int8_t opt_allow_unsafe;
 
 void fam10h_check_enable_mmcfg(void);
 void check_enable_amd_mmconf_dmi(void);
@@ -171,5 +172,6 @@ extern bool amd_legacy_ssbd;
 extern bool amd_virt_spec_ctrl;
 bool amd_setup_legacy_ssbd(void);
 void amd_set_legacy_ssbd(bool enable);
+void amd_set_cpuid_user_dis(bool enable);
 
 #endif /* __AMD_H__ */

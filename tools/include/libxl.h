@@ -81,6 +81,15 @@
  */
 #define LIBXL_HAVE_CONSOLE_NOTIFY_FD 1
 
+/* LIBXL_HAVE_CONSOLE_ESCAPE_CHARACTER
+ *
+ * If this is defined, libxl_console_exec and
+ * libxl_primary_console_exe take an escape_character parameter. That
+ * parameter will be used to modify the escape sequence used to exit the
+ * console.
+ */
+#define LIBXL_HAVE_CONSOLE_ESCAPE_CHARACTER 1
+
 /* LIBXL_HAVE_CONST_COPY_AND_LENGTH_FUNCTIONS
  *
  * If this is defined, the copy functions have constified src parameter and the
@@ -175,6 +184,11 @@
 #define LIBXL_HAVE_BUILDINFO_HVM_MS_VM_GENID 1
 
 /*
+ * libxl_domain_build_info has the u.hvm.smbios field.
+ */
+#define LIBXL_HAVE_BUILDINFO_HVM_SMBIOS 1
+
+/*
  * LIBXL_HAVE_VCPUINFO_SOFT_AFFINITY indicates that a 'cpumap_soft'
  * field (of libxl_bitmap type) is present in libxl_vcpuinfo,
  * containing the soft affinity of a vcpu.
@@ -245,6 +259,12 @@
  */
 #define LIBXL_HAVE_DEVICETREE_PASSTHROUGH 1
 
+#if defined(__arm__) || defined(__aarch64__)
+/**
+ * This means Device Tree Overlay is supported.
+ */
+#define LIBXL_HAVE_DT_OVERLAY 1
+#endif
 /*
  * libxl_domain_build_info has device_model_user to specify the user to
  * run the device model with. See docs/misc/qemu-deprivilege.txt.
@@ -277,6 +297,21 @@
  * libxl_domain_build_info has the arch_arm.tee field.
  */
 #define LIBXL_HAVE_BUILDINFO_ARCH_ARM_TEE 1
+
+/*
+ * arch_arm.tee field in libxl_domain_build_info has ffa value.
+ */
+#define LIBXL_HAVE_BUILDINFO_ARCH_ARM_TEE_FFA 1
+
+/*
+ * libxl_domain_build_info has the arch_arm.sve_vl field.
+ */
+#define LIBXL_HAVE_BUILDINFO_ARCH_ARM_SVE_VL 1
+
+/*
+ * libxl_domain_build_info has the arch_arm.nr_spis field
+ */
+#define LIBXL_HAVE_BUILDINFO_ARCH_NR_SPIS 1
 
 /*
  * LIBXL_HAVE_SOFT_RESET indicates that libxl supports performing
@@ -489,7 +524,7 @@
 #define LIBXL_HAVE_PHYSINFO_CAP_VMTRACE 1
 
 /*
- * LIBXL_HAVE_VMTRACE_BUF_KB indicates that libxl_domain_create_info has a
+ * LIBXL_HAVE_VMTRACE_BUF_KB indicates that libxl_domain_build_info has a
  * vmtrace_buf_kb parameter, which allows to enable pre-allocation of
  * processor tracing buffers of given size.
  */
@@ -521,6 +556,12 @@
 #define LIBXL_HAVE_PHYSINFO_CAP_GNTTAB 1
 
 /*
+ * LIBXL_HAVE_PHYSINFO_ARCH_CAPABILITIES indicates that libxl_physinfo has a
+ * arch_capabilities field.
+ */
+#define LIBXL_HAVE_PHYSINFO_ARCH_CAPABILITIES 1
+
+/*
  * LIBXL_HAVE_MAX_GRANT_VERSION indicates libxl_domain_build_info has a
  * max_grant_version field for setting the max grant table version per
  * domain.
@@ -543,6 +584,25 @@
 #define LIBXL_HAVE_DEVICE_DISK_SPECIFICATION 1
 
 /*
+ * LIBXL_HAVE_DISK_GRANT_USAGE indicates that the libxl_device_disk
+ * has 'grant_usage' field to specify the usage of Xen grants for
+ * the specification 'virtio'.
+ */
+#define LIBXL_HAVE_DISK_GRANT_USAGE 1
+
+/*
+ * LIBXL_HAVE_CONSOLE_ADD_XENSTORE indicates presence of the function
+ * libxl_console_add_xenstore() in libxl.
+ */
+#define LIBXL_HAVE_CONSOLE_ADD_XENSTORE 1
+
+/*
+ * LIBXL_HAVE_P9_ADD indicates presence of the function
+ * libxl_device_9pfs_add() in libxl.
+ */
+#define LIBXL_HAVE_P9_ADD 1
+
+/*
  * libxl ABI compatibility
  *
  * The only guarantee which libxl makes regarding ABI compatibility
@@ -558,6 +618,34 @@
  * As with the API compatiblity the SONAME will only be bumped for the
  * first ABI incompatible change in a development branch.
  */
+
+#define LIBXL_HAVE_BOOTLOADER_RESTRICT 1
+/*
+ * LIBXL_HAVE_BOOTLOADER_RESTRICT indicates the presence of the
+ * bootloader_restrict and bootloader_user fields in libxl_domain_build_info.
+ * Such fields signal the need to pass a --runas parameter to the bootloader
+ * executable in order to not run it as the same user as libxl.
+ */
+
+/*
+ * LIBXL_HAVE_HVM_PIRQ indicates the presence of the u.hvm.pirq filed in
+ * libxl_domain_build_info that signals whether an HVM guest has accesses to
+ * the XENFEAT_hvm_pirqs feature.
+ */
+#define LIBXL_HAVE_HVM_PIRQ 1
+
+/*
+ * LIBXL_HAVE_XEN_9PFS indicates the presence of the xen-9pfsd related
+ * fields in libxl_device_p9: type, max_space, max_files, max_open_files and
+ * auto_delete.
+ */
+#define LIBXL_HAVE_XEN_9PFS 1
+
+/*
+ * LIBXL_HAVE_DT_OVERLAY_DOMAIN indicates the presence of
+ * libxl_dt_overlay_domain.
+ */
+#define LIBXL_HAVE_DT_OVERLAY_DOMAIN 1
 
 /*
  * libxl memory management
@@ -769,7 +857,8 @@ typedef struct libxl__ctx libxl_ctx;
 #if LIBXL_API_VERSION != 0x040200 && LIBXL_API_VERSION != 0x040300 && \
     LIBXL_API_VERSION != 0x040400 && LIBXL_API_VERSION != 0x040500 && \
     LIBXL_API_VERSION != 0x040700 && LIBXL_API_VERSION != 0x040800 && \
-    LIBXL_API_VERSION != 0x041300 && LIBXL_API_VERSION != 0x041400
+    LIBXL_API_VERSION != 0x041300 && LIBXL_API_VERSION != 0x041400 && \
+    LIBXL_API_VERSION != 0x041800
 #error Unknown LIBXL_API_VERSION
 #endif
 #endif
@@ -1289,6 +1378,11 @@ void libxl_mac_copy(libxl_ctx *ctx, libxl_mac *dst, const libxl_mac *src);
  * to provide a different firmware blob (like SeaBIOS or OVMF).
  */
 #define LIBXL_HAVE_BUILDINFO_HVM_SYSTEM_FIRMWARE
+
+/*
+ * The libxl_domain_build_info has the llc_colors array.
+ */
+#define LIBXL_HAVE_BUILDINFO_LLC_COLORS 1
 
 /*
  * ERROR_REMUS_XXX error code only exists from Xen 4.5, Xen 4.6 and it
@@ -1933,7 +2027,8 @@ int libxl_vncviewer_exec(libxl_ctx *ctx, uint32_t domid, int autopass);
  * the caller that it has connected to the guest console.
  */
 int libxl_console_exec(libxl_ctx *ctx, uint32_t domid, int cons_num,
-                       libxl_console_type type, int notify_fd);
+                       libxl_console_type type, int notify_fd,
+                       char* escape_character);
 /* libxl_primary_console_exec finds the domid and console number
  * corresponding to the primary console of the given vm, then calls
  * libxl_console_exec with the right arguments (domid might be different
@@ -1943,9 +2038,12 @@ int libxl_console_exec(libxl_ctx *ctx, uint32_t domid, int cons_num,
  * guests using pygrub.
  * If notify_fd is not -1, xenconsole will write 0x00 to it to nofity
  * the caller that it has connected to the guest console.
+ * If escape_character is not NULL, the provided value is used to exit
+ * the guest console.
  */
 int libxl_primary_console_exec(libxl_ctx *ctx, uint32_t domid_vm,
-                               int notify_fd);
+                               int notify_fd,
+                               char* escape_character);
 
 #if defined(LIBXL_API_VERSION) && LIBXL_API_VERSION < 0x040800
 
@@ -1953,16 +2051,35 @@ static inline int libxl_console_exec_0x040700(libxl_ctx *ctx,
                                               uint32_t domid, int cons_num,
                                               libxl_console_type type)
 {
-    return libxl_console_exec(ctx, domid, cons_num, type, -1);
+    return libxl_console_exec(ctx, domid, cons_num, type, -1, NULL);
 }
 #define libxl_console_exec libxl_console_exec_0x040700
 
 static inline int libxl_primary_console_exec_0x040700(libxl_ctx *ctx,
                                                       uint32_t domid_vm)
 {
-    return libxl_primary_console_exec(ctx, domid_vm, -1);
+    return libxl_primary_console_exec(ctx, domid_vm, -1, NULL);
 }
 #define libxl_primary_console_exec libxl_primary_console_exec_0x040700
+
+#elif defined(LIBXL_API_VERSION) && LIBXL_API_VERSION < 0x041800
+
+static inline int libxl_console_exec_0x041700(libxl_ctx *ctx, uint32_t domid,
+                                              int cons_num,
+                                              libxl_console_type type,
+                                              int notify_fd)
+{
+    return libxl_console_exec(ctx, domid, cons_num, type, notify_fd, NULL);
+}
+#define libxl_console_exec libxl_console_exec_0x041700
+
+static inline int libxl_primary_console_exec_0x041700(libxl_ctx *ctx,
+                                                      uint32_t domid_vm,
+                                                      int notify_fd)
+{
+    return libxl_primary_console_exec(ctx, domid_vm, notify_fd, NULL);
+}
+#define libxl_primary_console_exec libxl_primary_console_exec_0x041700
 
 #endif
 
@@ -1977,6 +2094,23 @@ int libxl_console_get_tty(libxl_ctx *ctx, uint32_t domid, int cons_num,
  * the memory.
  */
 int libxl_primary_console_get_tty(libxl_ctx *ctx, uint32_t domid_vm, char **path);
+
+/* libxl_console_add_xenstore writes the Xenstore entries for a domain's
+ * primary console based on domid, event channel port and the guest frame
+ * number of the PV console's ring page.
+ */
+int libxl_console_add_xenstore(libxl_ctx *ctx, uint32_t domid, uint32_t backend,
+                               unsigned int evtch, unsigned long gfn,
+                               const libxl_asyncop_how *ao_how)
+                               LIBXL_EXTERNAL_CALLERS_ONLY;
+
+/* libxl_device_9pfs_add writes the Xenstore entries for a domain's
+ * primary 9pfs device based on domid, and device parameters.
+ * If needed it will start the backend daemon.
+ */
+int libxl_device_9pfs_add(libxl_ctx *ctx, uint32_t domid, libxl_device_p9 *p9,
+                          const libxl_asyncop_how *ao_how)
+                          LIBXL_EXTERNAL_CALLERS_ONLY;
 
 /* May be called with info_r == NULL to check for domain's existence.
  * Returns ERROR_DOMAIN_NOTFOUND if domain does not exist (used to return
@@ -2430,6 +2564,20 @@ libxl_device_pci *libxl_device_pci_list(libxl_ctx *ctx, uint32_t domid,
                                         int *num);
 void libxl_device_pci_list_free(libxl_device_pci* list, int num);
 
+#if defined(__arm__) || defined(__aarch64__)
+/* Values should keep consistent with the op from XEN_SYSCTL_dt_overlay */
+#define LIBXL_DT_OVERLAY_ADD                   1
+#define LIBXL_DT_OVERLAY_REMOVE                2
+int libxl_dt_overlay(libxl_ctx *ctx, void *overlay,
+                     uint32_t overlay_size, uint8_t overlay_op);
+
+/* Values should keep consistent with the op from XEN_DOMCTL_dt_overlay */
+#define LIBXL_DT_OVERLAY_DOMAIN_ATTACH         1
+int libxl_dt_overlay_domain(libxl_ctx *ctx, uint32_t domain_id,
+                            void *overlay_dt, uint32_t overlay_dt_size,
+                            uint8_t overlay_op);
+#endif
+
 /*
  * Turns the current process into a backend device service daemon
  * for a driver domain.
@@ -2670,7 +2818,7 @@ libxl_xen_console_reader *
     libxl_xen_console_read_start(libxl_ctx *ctx, int clear);
 int libxl_xen_console_read_line(libxl_ctx *ctx,
                                 libxl_xen_console_reader *cr,
-                                char **line_r);
+                                char **buff);
 void libxl_xen_console_read_finish(libxl_ctx *ctx,
                                    libxl_xen_console_reader *cr);
 

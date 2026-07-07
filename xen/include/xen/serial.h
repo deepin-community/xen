@@ -12,10 +12,8 @@
 #include <xen/init.h>
 #include <xen/spinlock.h>
 
-struct cpu_user_regs;
-
 /* Register a character-receive hook on the specified COM port. */
-typedef void (*serial_rx_fn)(char, struct cpu_user_regs *);
+typedef void (*serial_rx_fn)(char c);
 void serial_set_rx_handler(int handle, serial_rx_fn fn);
 
 /* Number of characters we buffer for a polling receiver. */
@@ -48,7 +46,7 @@ struct serial_port {
     /* Transmit data buffer (interrupt-driven uart). */
     char               *txbuf;
     unsigned int        txbufp, txbufc;
-    bool_t              tx_quench;
+    bool                tx_quench;
     int                 tx_log_everything;
     /* Force synchronous transmit. */
     int                 sync;
@@ -63,31 +61,31 @@ struct serial_port {
 
 struct uart_driver {
     /* Driver initialisation (pre- and post-IRQ subsystem setup). */
-    void (*init_preirq)(struct serial_port *);
-    void (*init_irq)(struct serial_port *);
-    void (*init_postirq)(struct serial_port *);
+    void (*init_preirq)(struct serial_port *port);
+    void (*init_irq)(struct serial_port *port);
+    void (*init_postirq)(struct serial_port *port);
     /* Hook to clean up after Xen bootstrap (before domain 0 runs). */
-    void (*endboot)(struct serial_port *);
+    void (*endboot)(struct serial_port *port);
     /* Driver suspend/resume. */
-    void (*suspend)(struct serial_port *);
-    void (*resume)(struct serial_port *);
+    void (*suspend)(struct serial_port *port);
+    void (*resume)(struct serial_port *port);
     /* Return number of characters the port can hold for transmit,
      * or -EIO if port is inaccesible */
-    int (*tx_ready)(struct serial_port *);
+    int (*tx_ready)(struct serial_port *port);
     /* Put a character onto the serial line. */
-    void (*putc)(struct serial_port *, char);
+    void (*putc)(struct serial_port *port, char c);
     /* Flush accumulated characters. */
-    void (*flush)(struct serial_port *);
+    void (*flush)(struct serial_port *port);
     /* Get a character from the serial line: returns 0 if none available. */
-    int  (*getc)(struct serial_port *, char *);
+    int  (*getc)(struct serial_port *port, char *pc);
     /* Get IRQ number for this port's serial line: returns -1 if none. */
-    int  (*irq)(struct serial_port *);
+    int  (*irq)(struct serial_port *port);
     /* Unmask TX interrupt */
-    void  (*start_tx)(struct serial_port *);
+    void  (*start_tx)(struct serial_port *port);
     /* Mask TX interrupt */
-    void  (*stop_tx)(struct serial_port *);
+    void  (*stop_tx)(struct serial_port *port);
     /* Get serial information */
-    const struct vuart_info *(*vuart_info)(struct serial_port *);
+    const struct vuart_info *(*vuart_info)(struct serial_port *port);
 };
 
 /* 'Serial handles' are composed from the following fields. */
@@ -112,18 +110,8 @@ void serial_endboot(void);
 /* Takes a config string and creates a numeric handle on the COM port. */
 int serial_parse_handle(const char *conf);
 
-/* Transmit a single character via the specified COM port. */
-void serial_putc(int handle, char c);
-
 /* Transmit a string via the specified COM port. */
 void serial_puts(int handle, const char *s, size_t nr);
-
-/*
- * An alternative to registering a character-receive hook. This function
- * will not return until a character is available. It can safely be
- * called with interrupts disabled.
- */
-char serial_getc(int handle);
 
 /* Forcibly prevent serial lockup when the system is in a bad way. */
 /* (NB. This also forces an implicit serial_start_sync()). */
@@ -155,8 +143,8 @@ void serial_register_uart(int idx, struct uart_driver *driver, void *uart);
 /* Place the serial port into asynchronous transmit mode. */
 void serial_async_transmit(struct serial_port *port);
 /* Process work in interrupt context. */
-void serial_rx_interrupt(struct serial_port *port, struct cpu_user_regs *regs);
-void serial_tx_interrupt(struct serial_port *port, struct cpu_user_regs *regs);
+void serial_rx_interrupt(struct serial_port *port);
+void serial_tx_interrupt(struct serial_port *port);
 
 /*
  * Initialisers for individual uart drivers.
@@ -175,13 +163,13 @@ void ehci_dbgp_init(void);
 #ifdef CONFIG_XHCI
 void xhci_dbc_uart_init(void);
 #else
-static void inline xhci_dbc_uart_init(void) {};
+static void inline xhci_dbc_uart_init(void) {}
 #endif
 
-void arm_uart_init(void);
+void uart_init(void);
 
 struct physdev_dbgp_op;
-int dbgp_op(const struct physdev_dbgp_op *);
+int dbgp_op(const struct physdev_dbgp_op *op);
 
 /* Baud rate was pre-configured before invoking the UART driver. */
 #define BAUD_AUTO (-1)

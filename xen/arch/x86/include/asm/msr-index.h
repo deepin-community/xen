@@ -22,7 +22,7 @@
 #define  APIC_BASE_BSP                      (_AC(1, ULL) <<  8)
 #define  APIC_BASE_EXTD                     (_AC(1, ULL) << 10)
 #define  APIC_BASE_ENABLE                   (_AC(1, ULL) << 11)
-#define  APIC_BASE_ADDR_MASK                0x000ffffffffff000ULL
+#define  APIC_BASE_ADDR_MASK                _AC(0x000ffffffffff000, ULL)
 
 #define MSR_TEST_CTRL                       0x00000033
 #define  TEST_CTRL_SPLITLOCK_DETECT         (_AC(1, ULL) << 29)
@@ -30,7 +30,7 @@
 
 #define MSR_INTEL_CORE_THREAD_COUNT         0x00000035
 #define  MSR_CTC_THREAD_MASK                0x0000ffff
-#define  MSR_CTC_CORE_MASK                  0xffff0000
+#define  MSR_CTC_CORE_MASK                  _AC(0xffff0000, U)
 
 #define MSR_SPEC_CTRL                       0x00000048
 #define  SPEC_CTRL_IBRS                     (_AC(1, ULL) <<  0)
@@ -41,6 +41,7 @@
 #define  SPEC_CTRL_RRSBA_DIS_U              (_AC(1, ULL) <<  5)
 #define  SPEC_CTRL_RRSBA_DIS_S              (_AC(1, ULL) <<  6)
 #define  SPEC_CTRL_PSFD                     (_AC(1, ULL) <<  7)
+#define  SPEC_CTRL_DDP_DIS_U                (_AC(1, ULL) <<  8)
 #define  SPEC_CTRL_BHI_DIS_S                (_AC(1, ULL) << 10)
 
 #define MSR_PRED_CMD                        0x00000049
@@ -54,6 +55,9 @@
 
 #define MSR_MISC_PACKAGE_CTRL               0x000000bc
 #define  PGK_CTRL_ENERGY_FILTER_EN          (_AC(1, ULL) <<  0)
+
+#define MSR_PB_OPT_CTRL                     0x000000bf
+#define  PB_OPT_IBPB_ALT                    (_AC(1, ULL) <<  0)
 
 #define MSR_CORE_CAPABILITIES               0x000000cf
 #define  CORE_CAPS_SPLITLOCK_DETECT         (_AC(1, ULL) <<  5)
@@ -88,6 +92,8 @@
 #define  ARCH_CAPS_PBRSB_NO                 (_AC(1, ULL) << 24)
 #define  ARCH_CAPS_GDS_CTRL                 (_AC(1, ULL) << 25)
 #define  ARCH_CAPS_GDS_NO                   (_AC(1, ULL) << 26)
+#define  ARCH_CAPS_RFDS_NO                  (_AC(1, ULL) << 27)
+#define  ARCH_CAPS_RFDS_CLEAR               (_AC(1, ULL) << 28)
 
 #define MSR_FLUSH_CMD                       0x0000010b
 #define  FLUSH_CMD_L1D                      (_AC(1, ULL) <<  0)
@@ -153,6 +159,16 @@
 #define MSR_PL3_SSP                         0x000006a7
 #define MSR_INTERRUPT_SSP_TABLE             0x000006a8
 
+#define MSR_PKRS                            0x000006e1
+
+#define MSR_PM_ENABLE                       0x00000770
+#define  PM_ENABLE_HWP_ENABLE               BIT(0, ULL)
+
+#define MSR_HWP_CAPABILITIES                0x00000771
+#define MSR_HWP_INTERRUPT                   0x00000773
+#define MSR_HWP_REQUEST                     0x00000774
+#define MSR_HWP_STATUS                      0x00000777
+
 #define MSR_X2APIC_FIRST                    0x00000800
 #define MSR_X2APIC_LAST                     0x000008ff
 
@@ -167,10 +183,20 @@
 #define  PASID_PASID_MASK                   0x000fffff
 #define  PASID_VALID                        (_AC(1, ULL) << 31)
 
+#define MSR_PKG_HDC_CTL                     0x00000db0
+#define  PKG_HDC_CTL_HDC_PKG_ENABLE         BIT(0, ULL)
+#define MSR_PM_CTL1                         0x00000db1
+#define  PM_CTL1_HDC_ALLOW_BLOCK            BIT(0, ULL)
+
+#define MSR_MCU_CONTROL                     0x00001406
+#define  MCU_CONTROL_LOCK                   (_AC(1, ULL) <<  0)
+#define  MCU_CONTROL_DIS_MCU_LOAD           (_AC(1, ULL) <<  1)
+#define  MCU_CONTROL_EN_SMM_BYPASS          (_AC(1, ULL) <<  2)
+
 #define MSR_UARCH_MISC_CTRL                 0x00001b01
 #define  UARCH_CTRL_DOITM                   (_AC(1, ULL) <<  0)
 
-#define MSR_EFER                            0xc0000080 /* Extended Feature Enable Register */
+#define MSR_EFER                            _AC(0xc0000080, U) /* Extended Feature Enable Register */
 #define  EFER_SCE                           (_AC(1, ULL) <<  0) /* SYSCALL Enable */
 #define  EFER_LME                           (_AC(1, ULL) <<  8) /* Long Mode Enable */
 #define  EFER_LMA                           (_AC(1, ULL) << 10) /* Long Mode Active */
@@ -180,39 +206,40 @@
 #define  EFER_AIBRSE                        (_AC(1, ULL) << 21) /* Automatic IBRS Enable */
 
 #define EFER_KNOWN_MASK \
-    (EFER_SCE | EFER_LME | EFER_LMA | EFER_NXE | EFER_SVME | EFER_FFXSE)
+    (EFER_SCE | EFER_LME | EFER_LMA | EFER_NXE | EFER_SVME | EFER_FFXSE | \
+     EFER_AIBRSE)
 
-#define MSR_STAR                            0xc0000081 /* legacy mode SYSCALL target */
-#define MSR_LSTAR                           0xc0000082 /* long mode SYSCALL target */
-#define MSR_CSTAR                           0xc0000083 /* compat mode SYSCALL target */
-#define MSR_SYSCALL_MASK                    0xc0000084 /* EFLAGS mask for syscall */
-#define MSR_FS_BASE                         0xc0000100 /* 64bit FS base */
-#define MSR_GS_BASE                         0xc0000101 /* 64bit GS base */
-#define MSR_SHADOW_GS_BASE                  0xc0000102 /* SwapGS GS shadow */
-#define MSR_TSC_AUX                         0xc0000103 /* Auxiliary TSC */
+#define MSR_STAR                            _AC(0xc0000081, U) /* legacy mode SYSCALL target */
+#define MSR_LSTAR                           _AC(0xc0000082, U) /* long mode SYSCALL target */
+#define MSR_CSTAR                           _AC(0xc0000083, U) /* compat mode SYSCALL target */
+#define MSR_SYSCALL_MASK                    _AC(0xc0000084, U) /* EFLAGS mask for syscall */
+#define MSR_FS_BASE                         _AC(0xc0000100, U) /* 64bit FS base */
+#define MSR_GS_BASE                         _AC(0xc0000101, U) /* 64bit GS base */
+#define MSR_SHADOW_GS_BASE                  _AC(0xc0000102, U) /* SwapGS GS shadow */
+#define MSR_TSC_AUX                         _AC(0xc0000103, U) /* Auxiliary TSC */
 
-#define MSR_K8_SYSCFG                       0xc0010010
+#define MSR_K8_SYSCFG                       _AC(0xc0010010, U)
 #define  SYSCFG_MTRR_FIX_DRAM_EN            (_AC(1, ULL) << 18)
 #define  SYSCFG_MTRR_FIX_DRAM_MOD_EN        (_AC(1, ULL) << 19)
 #define  SYSCFG_MTRR_VAR_DRAM_EN            (_AC(1, ULL) << 20)
 #define  SYSCFG_MTRR_TOM2_EN                (_AC(1, ULL) << 21)
 #define  SYSCFG_TOM2_FORCE_WB               (_AC(1, ULL) << 22)
 
-#define MSR_K8_IORR_BASE0                   0xc0010016
-#define MSR_K8_IORR_MASK0                   0xc0010017
-#define MSR_K8_IORR_BASE1                   0xc0010018
-#define MSR_K8_IORR_MASK1                   0xc0010019
+#define MSR_K8_IORR_BASE0                   _AC(0xc0010016, U)
+#define MSR_K8_IORR_MASK0                   _AC(0xc0010017, U)
+#define MSR_K8_IORR_BASE1                   _AC(0xc0010018, U)
+#define MSR_K8_IORR_MASK1                   _AC(0xc0010019, U)
 
-#define MSR_K8_TSEG_BASE                    0xc0010112 /* AMD doc: SMMAddr */
-#define MSR_K8_TSEG_MASK                    0xc0010113 /* AMD doc: SMMMask */
+#define MSR_K8_TSEG_BASE                    _AC(0xc0010112, U) /* AMD doc: SMMAddr */
+#define MSR_K8_TSEG_MASK                    _AC(0xc0010113, U) /* AMD doc: SMMMask */
 
-#define MSR_K8_VM_CR                        0xc0010114
+#define MSR_K8_VM_CR                        _AC(0xc0010114, U)
 #define  VM_CR_INIT_REDIRECTION             (_AC(1, ULL) <<  1)
 #define  VM_CR_SVM_DISABLE                  (_AC(1, ULL) <<  4)
 
-#define MSR_VIRT_SPEC_CTRL                  0xc001011f /* Layout matches MSR_SPEC_CTRL */
+#define MSR_VIRT_SPEC_CTRL                  _AC(0xc001011f, U) /* Layout matches MSR_SPEC_CTRL */
 
-#define MSR_AMD_CSTATE_CFG                  0xc0010296
+#define MSR_AMD_CSTATE_CFG                  0xc0010296U
 
 /*
  * Legacy MSR constants in need of cleanup.  No new MSRs below this comment.
@@ -296,7 +323,7 @@
 #define CMCI_EN 			(1UL<<30)
 #define CMCI_THRESHOLD_MASK		0x7FFF
 
-#define MSR_AMD64_MC0_MASK		0xc0010044
+#define MSR_AMD64_MC0_MASK		0xc0010044U
 
 #define MSR_IA32_MCx_CTL(x)		(MSR_IA32_MC0_CTL + 4*(x))
 #define MSR_IA32_MCx_STATUS(x)		(MSR_IA32_MC0_STATUS + 4*(x))
@@ -325,86 +352,88 @@
 #define MSR_IA32_VMX_TRUE_EXIT_CTLS             0x48f
 #define MSR_IA32_VMX_TRUE_ENTRY_CTLS            0x490
 #define MSR_IA32_VMX_VMFUNC                     0x491
+#define MSR_IA32_VMX_PROCBASED_CTLS3            0x492
 
 /* K7/K8 MSRs. Not complete. See the architecture manual for a more
    complete list. */
-#define MSR_K7_EVNTSEL0			0xc0010000
-#define MSR_K7_PERFCTR0			0xc0010004
-#define MSR_K7_EVNTSEL1			0xc0010001
-#define MSR_K7_PERFCTR1			0xc0010005
-#define MSR_K7_EVNTSEL2			0xc0010002
-#define MSR_K7_PERFCTR2			0xc0010006
-#define MSR_K7_EVNTSEL3			0xc0010003
-#define MSR_K7_PERFCTR3			0xc0010007
-#define MSR_K8_TOP_MEM1			0xc001001a
-#define MSR_K7_CLK_CTL			0xc001001b
-#define MSR_K8_TOP_MEM2			0xc001001d
+#define MSR_K7_EVNTSEL0			0xc0010000U
+#define MSR_K7_PERFCTR0			0xc0010004U
+#define MSR_K7_EVNTSEL1			0xc0010001U
+#define MSR_K7_PERFCTR1			0xc0010005U
+#define MSR_K7_EVNTSEL2			0xc0010002U
+#define MSR_K7_PERFCTR2			0xc0010006U
+#define MSR_K7_EVNTSEL3			0xc0010003U
+#define MSR_K7_PERFCTR3			0xc0010007U
+#define MSR_K8_TOP_MEM1			0xc001001aU
+#define MSR_K8_TOP_MEM2			0xc001001dU
 
-#define MSR_K8_HWCR			0xc0010015
+#define MSR_K8_HWCR			0xc0010015U
 #define K8_HWCR_TSC_FREQ_SEL		(1ULL << 24)
+#define K8_HWCR_CPUID_USER_DIS		(1ULL << 35)
 
-#define MSR_K7_FID_VID_CTL		0xc0010041
-#define MSR_K7_FID_VID_STATUS		0xc0010042
-#define MSR_K8_PSTATE_LIMIT		0xc0010061
-#define MSR_K8_PSTATE_CTRL		0xc0010062
-#define MSR_K8_PSTATE_STATUS		0xc0010063
-#define MSR_K8_PSTATE0			0xc0010064
-#define MSR_K8_PSTATE1			0xc0010065
-#define MSR_K8_PSTATE2			0xc0010066
-#define MSR_K8_PSTATE3			0xc0010067
-#define MSR_K8_PSTATE4			0xc0010068
-#define MSR_K8_PSTATE5			0xc0010069
-#define MSR_K8_PSTATE6			0xc001006A
-#define MSR_K8_PSTATE7			0xc001006B
-#define MSR_K8_ENABLE_C1E		0xc0010055
-#define MSR_K8_VM_HSAVE_PA		0xc0010117
+#define MSR_K7_FID_VID_CTL		0xc0010041U
+#define MSR_K7_FID_VID_STATUS		0xc0010042U
+#define MSR_K8_PSTATE_LIMIT		0xc0010061U
+#define MSR_K8_PSTATE_CTRL		0xc0010062U
+#define MSR_K8_PSTATE_STATUS		0xc0010063U
+#define MSR_K8_PSTATE0			0xc0010064U
+#define MSR_K8_PSTATE1			0xc0010065U
+#define MSR_K8_PSTATE2			0xc0010066U
+#define MSR_K8_PSTATE3			0xc0010067U
+#define MSR_K8_PSTATE4			0xc0010068U
+#define MSR_K8_PSTATE5			0xc0010069U
+#define MSR_K8_PSTATE6			0xc001006AU
+#define MSR_K8_PSTATE7			0xc001006BU
+#define MSR_K8_ENABLE_C1E		0xc0010055U
+#define MSR_K8_VM_HSAVE_PA		0xc0010117U
 
-#define MSR_AMD_FAM15H_EVNTSEL0		0xc0010200
-#define MSR_AMD_FAM15H_PERFCTR0		0xc0010201
-#define MSR_AMD_FAM15H_EVNTSEL1		0xc0010202
-#define MSR_AMD_FAM15H_PERFCTR1		0xc0010203
-#define MSR_AMD_FAM15H_EVNTSEL2		0xc0010204
-#define MSR_AMD_FAM15H_PERFCTR2		0xc0010205
-#define MSR_AMD_FAM15H_EVNTSEL3		0xc0010206
-#define MSR_AMD_FAM15H_PERFCTR3		0xc0010207
-#define MSR_AMD_FAM15H_EVNTSEL4		0xc0010208
-#define MSR_AMD_FAM15H_PERFCTR4		0xc0010209
-#define MSR_AMD_FAM15H_EVNTSEL5		0xc001020a
-#define MSR_AMD_FAM15H_PERFCTR5		0xc001020b
+#define MSR_AMD_FAM15H_EVNTSEL0		0xc0010200U
+#define MSR_AMD_FAM15H_PERFCTR0		0xc0010201U
+#define MSR_AMD_FAM15H_EVNTSEL1		0xc0010202U
+#define MSR_AMD_FAM15H_PERFCTR1		0xc0010203U
+#define MSR_AMD_FAM15H_EVNTSEL2		0xc0010204U
+#define MSR_AMD_FAM15H_PERFCTR2		0xc0010205U
+#define MSR_AMD_FAM15H_EVNTSEL3		0xc0010206U
+#define MSR_AMD_FAM15H_PERFCTR3		0xc0010207U
+#define MSR_AMD_FAM15H_EVNTSEL4		0xc0010208U
+#define MSR_AMD_FAM15H_PERFCTR4		0xc0010209U
+#define MSR_AMD_FAM15H_EVNTSEL5		0xc001020aU
+#define MSR_AMD_FAM15H_PERFCTR5		0xc001020bU
 
-#define MSR_AMD_L7S0_FEATURE_MASK	0xc0011002
-#define MSR_AMD_THRM_FEATURE_MASK	0xc0011003
-#define MSR_K8_FEATURE_MASK		0xc0011004
-#define MSR_K8_EXT_FEATURE_MASK		0xc0011005
+#define MSR_AMD_L7S0_FEATURE_MASK	0xc0011002U
+#define MSR_AMD_THRM_FEATURE_MASK	0xc0011003U
+#define MSR_K8_FEATURE_MASK			0xc0011004U
+#define MSR_K8_EXT_FEATURE_MASK		0xc0011005U
 
 /* AMD64 MSRs */
-#define MSR_AMD64_NB_CFG		0xc001001f
+#define MSR_AMD64_NB_CFG		0xc001001fU
 #define AMD64_NB_CFG_CF8_EXT_ENABLE_BIT	46
-#define MSR_AMD64_LS_CFG		0xc0011020
-#define MSR_AMD64_IC_CFG		0xc0011021
-#define MSR_AMD64_DC_CFG		0xc0011022
-#define MSR_AMD64_DE_CFG		0xc0011029
+#define MSR_AMD64_LS_CFG		0xc0011020U
+#define MSR_AMD64_IC_CFG		0xc0011021U
+#define MSR_AMD64_DC_CFG		0xc0011022U
+#define MSR_AMD64_DE_CFG		0xc0011029U
 #define AMD64_DE_CFG_LFENCE_SERIALISE	(_AC(1, ULL) << 1)
-#define MSR_AMD64_EX_CFG		0xc001102c
-#define MSR_AMD64_BP_CFG		0xc001102e
-#define MSR_AMD64_DE_CFG2		0xc00110e3
+#define MSR_AMD64_EX_CFG		0xc001102cU
+#define MSR_AMD64_BP_CFG		0xc001102eU
+#define  BP_CFG_SPEC_REDUCE		(_AC(1, ULL) <<  4)
+#define MSR_AMD64_DE_CFG2		0xc00110e3U
 
-#define MSR_AMD64_DR0_ADDRESS_MASK	0xc0011027
-#define MSR_AMD64_DR1_ADDRESS_MASK	0xc0011019
-#define MSR_AMD64_DR2_ADDRESS_MASK	0xc001101a
-#define MSR_AMD64_DR3_ADDRESS_MASK	0xc001101b
+#define MSR_AMD64_DR0_ADDRESS_MASK	0xc0011027U
+#define MSR_AMD64_DR1_ADDRESS_MASK	0xc0011019U
+#define MSR_AMD64_DR2_ADDRESS_MASK	0xc001101aU
+#define MSR_AMD64_DR3_ADDRESS_MASK	0xc001101bU
 
 /* AMD Family10h machine check MSRs */
-#define MSR_F10_MC4_MISC1		0xc0000408
-#define MSR_F10_MC4_MISC2		0xc0000409
-#define MSR_F10_MC4_MISC3		0xc000040A
+#define MSR_F10_MC4_MISC1		0xc0000408U
+#define MSR_F10_MC4_MISC2		0xc0000409U
+#define MSR_F10_MC4_MISC3		0xc000040AU
 
 /* AMD Family10h Bus Unit MSRs */
-#define MSR_F10_BU_CFG 		0xc0011023
-#define MSR_F10_BU_CFG2		0xc001102a
+#define MSR_F10_BU_CFG 		0xc0011023U
+#define MSR_F10_BU_CFG2		0xc001102aU
 
 /* Other AMD Fam10h MSRs */
-#define MSR_FAM10H_MMIO_CONF_BASE	0xc0010058
+#define MSR_FAM10H_MMIO_CONF_BASE	0xc0010058U
 #define FAM10H_MMIO_CONF_ENABLE         (1<<0)
 #define FAM10H_MMIO_CONF_BUSRANGE_MASK	0xf
 #define FAM10H_MMIO_CONF_BUSRANGE_SHIFT 2
@@ -413,63 +442,28 @@
 
 /* AMD Microcode MSRs */
 #define MSR_AMD_PATCHLEVEL		0x0000008b
-#define MSR_AMD_PATCHLOADER		0xc0010020
+#define MSR_AMD_PATCHLOADER		0xc0010020U
 
 /* AMD TSC RATE MSR */
-#define MSR_AMD64_TSC_RATIO		0xc0000104
+#define MSR_AMD64_TSC_RATIO		0xc0000104U
 
 /* AMD Lightweight Profiling MSRs */
-#define MSR_AMD64_LWP_CFG		0xc0000105
-#define MSR_AMD64_LWP_CBADDR		0xc0000106
+#define MSR_AMD64_LWP_CFG		0xc0000105U
+#define MSR_AMD64_LWP_CBADDR		0xc0000106U
 
 /* AMD OS Visible Workaround MSRs */
-#define MSR_AMD_OSVW_ID_LENGTH          0xc0010140
-#define MSR_AMD_OSVW_STATUS             0xc0010141
+#define MSR_AMD_OSVW_ID_LENGTH          0xc0010140U
+#define MSR_AMD_OSVW_STATUS             0xc0010141U
 
 /* AMD Protected Processor Inventory Number */
-#define MSR_AMD_PPIN_CTL                0xc00102f0
-#define MSR_AMD_PPIN                    0xc00102f1
-
-/* K6 MSRs */
-#define MSR_K6_EFER			0xc0000080
-#define MSR_K6_STAR			0xc0000081
-#define MSR_K6_WHCR			0xc0000082
-#define MSR_K6_UWCCR			0xc0000085
-#define MSR_K6_EPMR			0xc0000086
-#define MSR_K6_PSOR			0xc0000087
-#define MSR_K6_PFIR			0xc0000088
-
-/* Centaur-Hauls/IDT defined MSRs. */
-#define MSR_IDT_FCR1			0x00000107
-#define MSR_IDT_FCR2			0x00000108
-#define MSR_IDT_FCR3			0x00000109
-#define MSR_IDT_FCR4			0x0000010a
-
-#define MSR_IDT_MCR0			0x00000110
-#define MSR_IDT_MCR1			0x00000111
-#define MSR_IDT_MCR2			0x00000112
-#define MSR_IDT_MCR3			0x00000113
-#define MSR_IDT_MCR4			0x00000114
-#define MSR_IDT_MCR5			0x00000115
-#define MSR_IDT_MCR6			0x00000116
-#define MSR_IDT_MCR7			0x00000117
-#define MSR_IDT_MCR_CTRL		0x00000120
+#define MSR_AMD_PPIN_CTL                0xc00102f0U
+#define MSR_AMD_PPIN                    0xc00102f1U
 
 /* VIA Cyrix defined MSRs*/
 #define MSR_VIA_FCR			0x00001107
-#define MSR_VIA_LONGHAUL		0x0000110a
 #define MSR_VIA_RNG			0x0000110b
-#define MSR_VIA_BCR2			0x00001147
-
-/* Transmeta defined MSRs */
-#define MSR_TMTA_LONGRUN_CTRL		0x80868010
-#define MSR_TMTA_LONGRUN_FLAGS		0x80868011
-#define MSR_TMTA_LRTI_READOUT		0x80868018
-#define MSR_TMTA_LRTI_VOLT_MHZ		0x8086801a
 
 /* Intel defined MSRs. */
-#define MSR_IA32_P5_MC_ADDR		0x00000000
-#define MSR_IA32_P5_MC_TYPE		0x00000001
 #define MSR_IA32_TSC			0x00000010
 #define MSR_IA32_PLATFORM_ID		0x00000017
 #define MSR_IA32_EBL_CR_POWERON		0x0000002a
@@ -505,7 +499,8 @@
 #define MSR_IA32_MISC_ENABLE_MONITOR_ENABLE (1<<18)
 #define MSR_IA32_MISC_ENABLE_LIMIT_CPUID  (1<<22)
 #define MSR_IA32_MISC_ENABLE_XTPR_DISABLE (1<<23)
-#define MSR_IA32_MISC_ENABLE_XD_DISABLE	(1ULL << 34)
+#define MSR_IA32_MISC_ENABLE_XD_DISABLE      (_AC(1, ULL) << 34)
+#define MSR_IA32_MISC_ENABLE_TURBO_DISENGAGE (_AC(1, ULL) << 38)
 
 #define MSR_IA32_TSC_DEADLINE		0x000006E0
 #define MSR_IA32_ENERGY_PERF_BIAS	0x000001b0

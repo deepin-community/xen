@@ -27,6 +27,7 @@
 #include <xen/mm.h>
 #include <xen/pfn.h>
 #include <asm/time.h>
+#include <asm/page.h>
 
 #define MAX_POOL_NAME_LEN       16
 
@@ -46,7 +47,7 @@
 #define BHDR_OVERHEAD   (sizeof(struct bhdr) - MIN_BLOCK_SIZE)
 
 #define PTR_MASK        (sizeof(void *) - 1)
-#define BLOCK_SIZE_MASK (0xFFFFFFFF - PTR_MASK)
+#define BLOCK_SIZE_MASK (0xFFFFFFFFU - PTR_MASK)
 
 #define GET_NEXT_BLOCK(addr, r) ((struct bhdr *) \
                                 ((char *)(addr) + (r)))
@@ -139,10 +140,17 @@ static inline void MAPPING_SEARCH(unsigned long *r, int *fl, int *sl)
         *r = *r + t;
         *fl = flsl(*r) - 1;
         *sl = (*r >> (*fl - MAX_LOG2_SLI)) - MAX_SLI;
-        *fl -= FLI_OFFSET;
-        /*if ((*fl -= FLI_OFFSET) < 0) // FL will be always >0!
-         *fl = *sl = 0;
+        /* 
+         * It's unclear what was the purpose of the commented-out code that now
+         * is in the #else branch. The current form is motivated by the correction
+         * of a violation MISRA:C 2012 Rule 3.1
          */
+#if 1
+        *fl -= FLI_OFFSET;
+#else
+        if ((*fl -= FLI_OFFSET) < 0) /* FL will be always >0! */
+          *fl = *sl = 0;
+#endif
         *r &= ~t;
     }
 }
@@ -241,11 +249,14 @@ static inline void EXTRACT_BLOCK(struct bhdr *b, struct xmem_pool *p, int fl,
     }
     b->ptr.free_ptr = (struct free_ptr) {NULL, NULL};
 
-#ifdef CONFIG_XMEM_POOL_POISON
-    if ( (b->size & BLOCK_SIZE_MASK) > MIN_BLOCK_SIZE )
-        ASSERT(!memchr_inv(b->ptr.buffer + MIN_BLOCK_SIZE, POISON_BYTE,
-                           (b->size & BLOCK_SIZE_MASK) - MIN_BLOCK_SIZE));
-#endif /* CONFIG_XMEM_POOL_POISON */
+    if ( IS_ENABLED(CONFIG_XMEM_POOL_POISON) &&
+         (b->size & BLOCK_SIZE_MASK) > MIN_BLOCK_SIZE &&
+         memchr_inv(b->ptr.buffer + MIN_BLOCK_SIZE, POISON_BYTE,
+                    (b->size & BLOCK_SIZE_MASK) - MIN_BLOCK_SIZE) )
+    {
+        printk(XENLOG_ERR "XMEM Pool corruption found");
+        BUG();
+    }
 }
 
 /**
@@ -253,11 +264,10 @@ static inline void EXTRACT_BLOCK(struct bhdr *b, struct xmem_pool *p, int fl,
  */
 static inline void INSERT_BLOCK(struct bhdr *b, struct xmem_pool *p, int fl, int sl)
 {
-#ifdef CONFIG_XMEM_POOL_POISON
-    if ( (b->size & BLOCK_SIZE_MASK) > MIN_BLOCK_SIZE )
+    if ( IS_ENABLED(CONFIG_XMEM_POOL_POISON) &&
+         (b->size & BLOCK_SIZE_MASK) > MIN_BLOCK_SIZE )
         memset(b->ptr.buffer + MIN_BLOCK_SIZE, POISON_BYTE,
                (b->size & BLOCK_SIZE_MASK) - MIN_BLOCK_SIZE);
-#endif /* CONFIG_XMEM_POOL_POISON */
 
     b->ptr.free_ptr = (struct free_ptr) {NULL, p->matrix[fl][sl]};
     if ( p->matrix[fl][sl] )

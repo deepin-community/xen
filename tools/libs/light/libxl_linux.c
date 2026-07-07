@@ -207,6 +207,7 @@ int libxl__get_hotplug_script_info(libxl__gc *gc, libxl__device *dev,
 
     switch (dev->backend_kind) {
     case LIBXL__DEVICE_KIND_VBD:
+    case LIBXL__DEVICE_KIND_VBD3:
         if (num_exec != 0) {
             LOGD(DEBUG, dev->domid,
                  "num_exec %d, not running hotplug scripts", num_exec);
@@ -231,8 +232,8 @@ int libxl__get_hotplug_script_info(libxl__gc *gc, libxl__device *dev,
         break;
     default:
         /* No need to execute any hotplug scripts */
-        LOGD(DEBUG, dev->domid,
-             "backend_kind %d, no need to execute scripts", dev->backend_kind);
+        LOGD(DEBUG, dev->domid, "backend_kind %s, no need to execute scripts",
+             libxl__device_kind_to_string(dev->backend_kind));
         rc = 0;
         break;
     }

@@ -24,13 +24,7 @@
 
 #if BITS_PER_LONG == 64
 
-# define do_div(n,base) ({                                      \
-        uint32_t __base = (base);                               \
-        uint32_t __rem;                                         \
-        __rem = ((uint64_t)(n)) % __base;                       \
-        (n) = ((uint64_t)(n)) / __base;                         \
-        __rem;                                                  \
- })
+#include <asm-generic/div64.h>
 
 #elif BITS_PER_LONG == 32
 
@@ -60,21 +54,7 @@
 	__rem;							\
 })
 
-#if __GNUC__ < 4
-
-/*
- * gcc versions earlier than 4.0 are simply too problematic for the
- * optimized implementation below. First there is gcc PR 15089 that
- * tend to trig on more complex constructs, spurious .global __udivsi3
- * are inserted even if none of those symbols are referenced in the
- * generated code, and those gcc versions are not able to do constant
- * propagation on long long values anyway.
- */
-#define do_div(n, base) __do_div_asm(n, base)
-
-#elif __GNUC__ >= 4
-
-#include <asm/bug.h>
+#include <xen/bug.h>
 
 /*
  * If the divisor happens to be constant, we determine the appropriate
@@ -108,7 +88,7 @@
 		/* preserve low part of n for reminder computation */	\
 		__r = __n;						\
 		/* determine number of bits to represent __b */		\
-		__p = 1 << __div64_fls(__b);				\
+		__p = 1 << fls(__b);					\
 		/* compute __m = ((__p << 64) + __b - 1) / __b */	\
 		__m = (~0ULL / __b) * __p;				\
 		__m += (((~0ULL % __b + 1) * __p) + __b - 1) / __b;	\
@@ -156,8 +136,8 @@
 				__p /= (__m & -__m);			\
 				__m /= (__m & -__m);			\
 			} else {					\
-				__p >>= __div64_fls(__bits);		\
-				__m >>= __div64_fls(__bits);		\
+				__p >>= fls(__bits);			\
+				__m >>= fls(__bits);			\
 			}						\
 			/* No correction needed. */			\
 			__c = 0;					\
@@ -222,20 +202,6 @@
 	}								\
 	__r;								\
 })
-
-/* our own fls implementation to make sure constant propagation is fine */
-#define __div64_fls(bits)						\
-({									\
-	unsigned int __left = (bits), __nr = 0;				\
-	if (__left & 0xffff0000) __nr += 16, __left >>= 16;		\
-	if (__left & 0x0000ff00) __nr +=  8, __left >>=  8;		\
-	if (__left & 0x000000f0) __nr +=  4, __left >>=  4;		\
-	if (__left & 0x0000000c) __nr +=  2, __left >>=  2;		\
-	if (__left & 0x00000002) __nr +=  1;				\
-	__nr;								\
-})
-
-#endif /* GCC version */
 
 #endif /* BITS_PER_LONG */
 

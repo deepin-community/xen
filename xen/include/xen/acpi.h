@@ -37,10 +37,10 @@
 
 #ifndef __ASSEMBLY__
 
+#include <xen/errno.h>
 #include <xen/list.h>
 
-#include <acpi/acpi.h>
-#include <asm/acpi.h>
+#include <public/xen.h>
 
 #define ACPI_MADT_GET_(fld, x) (((x) & ACPI_MADT_##fld##_MASK) / \
 	(ACPI_MADT_##fld##_MASK & -ACPI_MADT_##fld##_MASK))
@@ -53,6 +53,9 @@
                 (entry)->header.length < sizeof(*(entry)))
 
 #ifdef CONFIG_ACPI
+
+#include <acpi/acpi.h>
+#include <asm/acpi.h>
 
 extern acpi_physical_address rsdp_hint;
 
@@ -81,12 +84,12 @@ int erst_init(void);
 void acpi_hest_init(void);
 
 int acpi_table_init (void);
-int acpi_table_parse(char *id, acpi_table_handler handler);
-int acpi_parse_entries(char *id, unsigned long table_size,
+int acpi_table_parse(const char *id, acpi_table_handler handler);
+int acpi_parse_entries(const char *id, unsigned long table_size,
 		       acpi_table_entry_handler handler,
 		       struct acpi_table_header *table_header,
 		       int entry_id, unsigned int max_entries);
-int acpi_table_parse_entries(char *id, unsigned long table_size,
+int acpi_table_parse_entries(const char *id, unsigned long table_size,
 	int entry_id, acpi_table_entry_handler handler, unsigned int max_entries);
 struct acpi_subtable_header *acpi_table_get_entry_madt(enum acpi_madt_type id,
 						      unsigned int entry_index);
@@ -118,6 +121,7 @@ extern u32 pci_mmcfg_base_addr;
 #else	/*!CONFIG_ACPI*/
 
 #define acpi_mp_config	0
+#define acpi_disabled true
 
 static inline int acpi_boot_init(void)
 {
@@ -135,15 +139,6 @@ int get_cpu_id(u32 acpi_id);
 
 unsigned int acpi_register_gsi (u32 gsi, int edge_level, int active_high_low);
 int acpi_gsi_to_irq (u32 gsi, unsigned int *irq);
-
-/*
- * This function undoes the effect of one call to acpi_register_gsi().
- * If this matches the last registration, any IRQ resources for gsi
- * are freed.
- */
-#ifdef CONFIG_ACPI_DEALLOCATE_IRQ
-void acpi_unregister_gsi (u32 gsi);
-#endif
 
 #ifdef	CONFIG_ACPI_CSTATE
 /*
@@ -195,19 +190,17 @@ int acpi_set_pdc_bits(uint32_t acpi_id, XEN_GUEST_HANDLE(uint32));
 #endif
 int arch_acpi_set_pdc_bits(u32 acpi_id, u32 *, u32 mask);
 
-#ifdef CONFIG_ACPI_NUMA
-int acpi_get_pxm(acpi_handle handle);
-#else
-static inline int acpi_get_pxm(acpi_handle handle)
-{
-	return 0;
-}
-#endif
-
 void acpi_reboot(void);
 
+#ifdef CONFIG_INTEL_IOMMU
+int acpi_dmar_init(void);
 void acpi_dmar_zap(void);
 void acpi_dmar_reinstate(void);
+#else
+static inline int acpi_dmar_init(void) { return -ENODEV; }
+static inline void acpi_dmar_zap(void) {}
+static inline void acpi_dmar_reinstate(void) {}
+#endif
 
 #endif /* __ASSEMBLY__ */
 

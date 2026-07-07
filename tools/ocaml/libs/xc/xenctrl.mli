@@ -77,6 +77,8 @@ type domctl_create_config = {
   max_grant_frames: int;
   max_maptrack_frames: int;
   max_grant_version: int;
+  altp2m_opts: int32;
+  vmtrace_buf_kb: int32;
   cpupool_id: int32;
   arch: arch_domainconfig;
 }
@@ -113,12 +115,15 @@ type physinfo_cap_flag =
   | CAP_Gnttab_v1
   | CAP_Gnttab_v2
 
-type arm_physinfo_cap_flag
+type arm_physinfo_caps =
+  {
+    sve_vl: int;
+  }
 
 type x86_physinfo_cap_flag
 
 type arch_physinfo_cap_flags =
-  | ARM of arm_physinfo_cap_flag list
+  | ARM of arm_physinfo_caps
   | X86 of x86_physinfo_cap_flag list
 
 type physinfo = {
@@ -146,7 +151,6 @@ type shutdown_reason = Poweroff | Reboot | Suspend | Crash | Watchdog | Soft_res
 exception Error of string
 type handle
 external interface_open : unit -> handle = "stub_xc_interface_open"
-external interface_close : handle -> unit = "stub_xc_interface_close"
 
 (** [with_intf f] runs [f] with a global handle that is opened on demand
  * and kept open. Conceptually, a client should use either
@@ -183,11 +187,11 @@ external domain_getinfo : handle -> domid -> domaininfo
 external domain_get_vcpuinfo : handle -> int -> int -> vcpuinfo
   = "stub_xc_vcpu_getinfo"
 external domain_ioport_permission: handle -> domid -> int -> int -> bool -> unit
-       = "stub_xc_domain_ioport_permission"
+  = "stub_xc_domain_ioport_permission"
 external domain_iomem_permission: handle -> domid -> nativeint -> nativeint -> bool -> unit
-       = "stub_xc_domain_iomem_permission"
+  = "stub_xc_domain_iomem_permission"
 external domain_irq_permission: handle -> domid -> int -> bool -> unit
-       = "stub_xc_domain_irq_permission"
+  = "stub_xc_domain_irq_permission"
 external vcpu_affinity_set : handle -> domid -> int -> bool array -> unit
   = "stub_xc_vcpu_setaffinity"
 external vcpu_affinity_get : handle -> domid -> int -> bool array
@@ -206,6 +210,21 @@ external shadow_allocation_get : handle -> domid -> int
 external evtchn_alloc_unbound : handle -> domid -> domid -> int
   = "stub_xc_evtchn_alloc_unbound"
 external evtchn_reset : handle -> domid -> unit = "stub_xc_evtchn_reset"
+
+type evtchn_interdomain = { dom: domid; port: int }
+
+type evtchn_stat =
+  | EVTCHNSTAT_unbound of domid
+  | EVTCHNSTAT_interdomain of evtchn_interdomain
+  | EVTCHNSTAT_pirq of int
+  | EVTCHNSTAT_virq of Xeneventchn.virq_t
+  | EVTCHNSTAT_ipi
+
+type evtchn_status = { vcpu: int; status: evtchn_stat }
+
+external evtchn_status: handle -> domid -> int -> evtchn_status option =
+  "stub_xc_evtchn_status"
+
 external readconsolering : handle -> string = "stub_xc_readconsolering"
 external send_debug_keys : handle -> string -> unit = "stub_xc_send_debug_keys"
 external physinfo : handle -> physinfo = "stub_xc_physinfo"
@@ -221,12 +240,60 @@ external map_foreign_range :
   handle -> domid -> int -> nativeint -> Xenmmap.mmap_interface
   = "stub_map_foreign_range"
 
+(* needs to be sorted according to its numeric value, watch out for gaps! *)
+type hvm_param =
+  | HVM_PARAM_CALLBACK_IRQ
+  | HVM_PARAM_STORE_PFN
+  | HVM_PARAM_STORE_EVTCHN
+  | HVM_PARAM_UNDEF_3
+  | HVM_PARAM_PAE_ENABLED
+  | HVM_PARAM_IOREQ_PFN
+  | HVM_PARAM_BUFIOREQ_PFN
+  | HVM_PARAM_UNDEF_7
+  | HVM_PARAM_UNDEF_8
+  | HVM_PARAM_VIRIDIAN
+  | HVM_PARAM_TIMER_MODE
+  | HVM_PARAM_HPET_ENABLED
+  | HVM_PARAM_IDENT_PT
+  | HVM_PARAM_UNDEF_13
+  | HVM_PARAM_ACPI_S_STATE
+  | HVM_PARAM_VM86_TSS
+  | HVM_PARAM_VPT_ALIGN
+  | HVM_PARAM_CONSOLE_PFN
+  | HVM_PARAM_CONSOLE_EVTCHN
+  | HVM_PARAM_ACPI_IOPORTS_LOCATION
+  | HVM_PARAM_MEMORY_EVENT_CR0
+  | HVM_PARAM_MEMORY_EVENT_CR3
+  | HVM_PARAM_MEMORY_EVENT_CR4
+  | HVM_PARAM_MEMORY_EVENT_INT3
+  | HVM_PARAM_NESTEDHVM
+  | HVM_PARAM_MEMORY_EVENT_SINGLE_STEP
+  | HVM_PARAM_UNDEF_26
+  | HVM_PARAM_PAGING_RING_PFN
+  | HVM_PARAM_MONITOR_RING_PFN
+  | HVM_PARAM_SHARING_RING_PFN
+  | HVM_PARAM_MEMORY_EVENT_MSR
+  | HVM_PARAM_TRIPLE_FAULT_REASON
+  | HVM_PARAM_IOREQ_SERVER_PFN
+  | HVM_PARAM_NR_IOREQ_SERVER_PAGES
+  | HVM_PARAM_VM_GENERATION_ID_ADDR
+  | HVM_PARAM_ALTP2M
+  | HVM_PARAM_X87_FIP_WIDTH
+  | HVM_PARAM_VM86_TSS_SIZED
+  | HVM_PARAM_MCA_CAP
+
+external hvm_param_get: handle -> domid -> hvm_param -> int64
+  = "stub_xc_hvm_param_get"
+
+external hvm_param_set: handle -> domid -> hvm_param -> int64 -> unit
+  = "stub_xc_hvm_param_set"
+
 external domain_assign_device: handle -> domid -> (int * int * int * int) -> unit
-       = "stub_xc_domain_assign_device"
+  = "stub_xc_domain_assign_device"
 external domain_deassign_device: handle -> domid -> (int * int * int * int) -> unit
-       = "stub_xc_domain_deassign_device"
+  = "stub_xc_domain_deassign_device"
 external domain_test_assign_device: handle -> domid -> (int * int * int * int) -> bool
-       = "stub_xc_domain_test_assign_device"
+  = "stub_xc_domain_test_assign_device"
 
 external version : handle -> version = "stub_xc_version_version"
 external version_compile_info : handle -> compile_info

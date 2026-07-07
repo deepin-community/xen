@@ -5,6 +5,12 @@
 
 SHELL    := bash -e
 
+# support parallel build
+ifneq (,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
+    NUMJOBS = $(patsubst parallel=%,%,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
+    MAKEFLAGS += -j$(NUMJOBS)
+endif
+
 # This gives us DEB_VERSION_UPSTREAM and DEB_VERSION (used by our delta queue)
 include /usr/share/dpkg/pkg-info.mk
 export DEB_VERSION
@@ -47,11 +53,9 @@ include /usr/share/dpkg/architecture.mk
 # Debian nor GNU names.
 
 flavour_amd64 = amd64
-flavour_armhf = armhf
 flavour_arm64 = arm64
 
 xen_arch_amd64 = x86_64
-xen_arch_armhf = arm32
 xen_arch_arm64 = arm64
 
 flavour=$(flavour_$(DEB_HOST_ARCH))
@@ -118,6 +122,7 @@ templated-files: $(TEMPLATED_FILES)
 # it exports these.  This is a problem because we need to pass different
 # options to the hypervisor build - the default options from dpkg
 # et al are suitable for dom0 binaries but not for the hypervisor.
+# This is still needed post bookworm.
 undefine CFLAGS
 undefine CXXFLAGS
 undefine FFLAGS
@@ -147,6 +152,7 @@ make_args_common := \
 # Additionally passing -fdebug-prefix-map in necessary to work around a gcc bug
 # where -ffile-prefix-map is ignored with assembly files. See
 # https://gcc.gnu.org/bugzilla/show_bug.cgi?id=93371
+# This should be fixed with gcc-13, i.e. trixie onwards
 make_args_xen := $(make_args_common) \
 	XEN_TARGET_ARCH=$(xen_arch_$(flavour)) \
 	EXTRA_CFLAGS_XEN_CORE='-ffile-prefix-map=$(shell pwd)=. -fdebug-prefix-map=$(shell pwd)=.'
@@ -155,30 +161,17 @@ make_args_xen := $(make_args_common) \
 # so we pass those in CFLAGS.)
 # The BUILD_PATH_PREFIX_MAP is needed for ocaml to reproducibly build
 # oxenstored
+# Debug is disabled in xen release branches, but explicitly disable it here so
+# we can also package unstable branches without debugging enabled.
 make_args_tools := $(make_args_common) \
 	XEN_TARGET_ARCH=$(xen_arch_$(DEB_HOST_ARCH)) \
 	EXTRA_CFLAGS_XEN_TOOLS='$(dpkg_CFLAGS) $(dpkg_CPPFLAGS)' \
 	PREPEND_LDFLAGS_XEN_TOOLS='$(dpkg_LDFLAGS)' \
-	BUILD_PATH_PREFIX_MAP='.=$(shell pwd)'
-
-# use the date from SOURCE_DATE_EPOCH for reproducible builds
-export XEN_BUILD_DATE=$(shell LC_ALL=C date -u -d "@$(SOURCE_DATE_EPOCH)")
-export XEN_BUILD_TIME=$(shell LC_ALL=C date -u -d "@$(SOURCE_DATE_EPOCH)" "+%T")
-export SMBIOS_REL_DATE=$(shell LC_ALL=C date -u -d "@$(SOURCE_DATE_EPOCH)" "+%m/%d/%Y")
-export VGABIOS_REL_DATE=$(shell LC_ALL=C date -u -d "@$(SOURCE_DATE_EPOCH)" "+%d %b %Y")
-
+	BUILD_PATH_PREFIX_MAP='.=$(shell pwd)' \
+	debug=n
 
 %:
 	dh $@ --with=python3
-
-# Without this, something on stretch passes CFLAGS in the environment
-# to the Xen build system, which then (with 4.11) chokes printing
-#   /bin/sh: 1: Syntax error: Unterminated quoted string
-# probably because the CFLAGS value contains multiple options and
-# therefore spaces.  See also the note by `undefine CFLAGS', above.
-override_dh_auto_clean:
-	rm -f debian/xen-tools-built.stamp
-	$(MAKE) -j1 distclean
 
 # To avoid that the build dirties the tree, our delta queue deletes
 # config.sub and config.guess.  dh_update_autotools_config can get
@@ -220,7 +213,9 @@ override_dh_auto_configure:
 # do it separately.
 override_dh_auto_build:
 	$(MAKE) $(make_args_xen) xen
-	$(MAKE) $(make_args_tools) tools docs CONFIG_PV_SHIM=n
+	$(MAKE) $(make_args_tools) tools CONFIG_PV_SHIM=n
+	# The docs fail on parallel build, so build linear
+	$(MAKE) $(make_args_tools) docs CONFIG_PV_SHIM=n -j1
 	case $(flavour) in \
 	amd64) \
 		$(MAKE) $(make_args_xen) -C tools/firmware/xen-dir ;; \
@@ -240,7 +235,7 @@ override_dh_auto_install: $(TEMPLATED_FILES)
 	@# need to pass it the make_args_xen settings.
 	@# Luckily this target, unlike the build, is a noop on
 	@# shimless arches, so it does not need to be conditional.
-	$(MAKE) $(make_args_xen) DESTDIR=$t $(make_args_xen) \
+	$(MAKE) $(make_args_xen) DESTDIR=$t \
 		-C tools/firmware install-shim
 	:
 	@# Inexplicably, upstream puts the efi binares in usr/lib64
@@ -273,19 +268,37 @@ dh_install_excludes += -Xusr/bin/pygrub
 # need to exclude them.  debhelpers's -X option is ... odd.  Not
 # suitable, anyway.  So we rm them after running dh_install.
 # The installation is done separately via xenstore-utils.install.
+#
+# We ignore xenstore-control here, as this should be shipped in
+# xen-utils-common. See the comment on override_dh_install. Note our !(control)
+# syntax used here needs bash with the extglob option.
 xenstore_rm = $(addprefix debian/xen-utils-common/,		\
-		$(foreach utility, xenstore xenstore-*,		\
+		$(foreach utility, xenstore xenstore-!(control),\
 			usr/bin/$(utility)			\
 			usr/share/man/man1/$(utility).1		\
 		))
 
+# Starting with bookworm the xenstore-control binary is now linked against
+# unstable xen api libraries (libxenguest.so and libxenctrl.so) which are
+# included in the libxenmiscV package.
+# Because of the additional shared library dependencies our shuffle-binaries
+# script kicks in and sets up the xen-utils-wrapper for xenstore-control. So
+# don't ship xenstore-control in xenstore-utils (which intentionally has no
+# dependency on xen-utils-V), but move it to xen-utils-common to avoid a broken
+# symlink when only the xenstore-utils package, but not the xen-utils-common
+# package is installed. See #1036601 and also the comment for xenstore_rm.
 override_dh_install:
 	debian/shuffle-binaries $(upstream_version)
 	:
 	debian/shuffle-boot-files $(upstream_version) $(flavour)
 	:
-	dh_install $(dh_install_excludes)
-	if test -d debian/xen-utils-common; then rm -v $(xenstore_rm); fi
+	dh_install -pxenstore-utils $(dh_install_excludes) \
+		-Xusr/bin/xenstore-control \
+		-Xusr/share/man/man1/xenstore-control.1
+	dh_install --remaining-packages $(dh_install_excludes)
+	bash -e -O extglob -c \
+	        'if test -d debian/xen-utils-common; then \
+		rm -v $(xenstore_rm); fi'
 	:
 	debian/installsharedlibs
 
@@ -302,6 +315,10 @@ override_dh_python3:
 override_dh_installinit:
 	dh_installinit --name xen --no-start -- defaults
 	dh_installinit --name xendomains --no-start -- defaults
+
+override_dh_installsystemd:
+	dh_installsystemd --name xen --no-start --no-stop-on-upgrade
+	dh_installsystemd --name xendomains --no-start --no-stop-on-upgrade
 
 # We want to ship xen-shim-syms in a -dbg package, but if we just add a
 # xen-utils-V-dbg package for it, lintian will complain with the following
@@ -330,3 +347,8 @@ override_dh_compress:
 		debian/xenstore-utils/usr/bin
 	:
 	dh_compress -Xusr/share/doc/xen/html
+
+# dh_dwz may fail with the output "dwz: Too few files for multifile
+# optimization" which breaks the build. As the use of dh_dwz is limited anyhow
+# (see #1016563), we disable it here.
+override_dh_dwz:

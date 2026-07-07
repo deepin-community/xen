@@ -21,14 +21,14 @@
 #include <stdbool.h>
 #include "xc_private.h"
 
-#include <xen-tools/libs.h>
+#include <xen-tools/common-macros.h>
 
 /*
  * Get PM statistic info
  */
 int xc_pm_get_max_px(xc_interface *xch, int cpuid, int *max_px)
 {
-    DECLARE_SYSCTL;
+    struct xen_sysctl sysctl = {};
     int ret;
 
     sysctl.cmd = XEN_SYSCTL_get_pmstat;
@@ -44,37 +44,35 @@ int xc_pm_get_max_px(xc_interface *xch, int cpuid, int *max_px)
 
 int xc_pm_get_pxstat(xc_interface *xch, int cpuid, struct xc_px_stat *pxpt)
 {
-    DECLARE_SYSCTL;
-    /* Sizes unknown until xc_pm_get_max_px */
-    DECLARE_NAMED_HYPERCALL_BOUNCE(trans, pxpt->trans_pt, 0, XC_HYPERCALL_BUFFER_BOUNCE_BOTH);
-    DECLARE_NAMED_HYPERCALL_BOUNCE(pt, pxpt->pt, 0, XC_HYPERCALL_BUFFER_BOUNCE_BOTH);
+    struct xen_sysctl sysctl = {};
+    DECLARE_NAMED_HYPERCALL_BOUNCE(trans, pxpt->trans_pt,
+                                   pxpt->total * pxpt->total * sizeof(uint64_t),
+                                   XC_HYPERCALL_BUFFER_BOUNCE_BOTH);
+    DECLARE_NAMED_HYPERCALL_BOUNCE(pt, pxpt->pt,
+                                   pxpt->total * sizeof(struct xc_px_val),
+                                   XC_HYPERCALL_BUFFER_BOUNCE_BOTH);
 
-    int max_px, ret;
+    int ret;
 
     if ( !pxpt->trans_pt || !pxpt->pt )
     {
         errno = EINVAL;
         return -1;
     }
-    if ( (ret = xc_pm_get_max_px(xch, cpuid, &max_px)) != 0)
-        return ret;
-
-    HYPERCALL_BOUNCE_SET_SIZE(trans, max_px * max_px * sizeof(uint64_t));
-    HYPERCALL_BOUNCE_SET_SIZE(pt, max_px * sizeof(struct xc_px_val));
 
     if ( xc_hypercall_bounce_pre(xch, trans) )
-        return ret;
+        return -1;
 
     if ( xc_hypercall_bounce_pre(xch, pt) )
     {
         xc_hypercall_bounce_post(xch, trans);
-        return ret;
+        return -1;
     }
 
     sysctl.cmd = XEN_SYSCTL_get_pmstat;
     sysctl.u.get_pmstat.type = PMSTAT_get_pxstat;
     sysctl.u.get_pmstat.cpuid = cpuid;
-    sysctl.u.get_pmstat.u.getpx.total = max_px;
+    sysctl.u.get_pmstat.u.getpx.total = pxpt->total;
     set_xen_guest_handle(sysctl.u.get_pmstat.u.getpx.trans_pt, trans);
     set_xen_guest_handle(sysctl.u.get_pmstat.u.getpx.pt, pt);
 
@@ -99,7 +97,7 @@ int xc_pm_get_pxstat(xc_interface *xch, int cpuid, struct xc_px_stat *pxpt)
 
 int xc_pm_reset_pxstat(xc_interface *xch, int cpuid)
 {
-    DECLARE_SYSCTL;
+    struct xen_sysctl sysctl = {};
 
     sysctl.cmd = XEN_SYSCTL_get_pmstat;
     sysctl.u.get_pmstat.type = PMSTAT_reset_pxstat;
@@ -110,7 +108,7 @@ int xc_pm_reset_pxstat(xc_interface *xch, int cpuid)
 
 int xc_pm_get_max_cx(xc_interface *xch, int cpuid, int *max_cx)
 {
-    DECLARE_SYSCTL;
+    struct xen_sysctl sysctl = {};
     int ret = 0;
 
     sysctl.cmd = XEN_SYSCTL_get_pmstat;
@@ -125,7 +123,7 @@ int xc_pm_get_max_cx(xc_interface *xch, int cpuid, int *max_cx)
 
 int xc_pm_get_cxstat(xc_interface *xch, int cpuid, struct xc_cx_stat *cxpt)
 {
-    DECLARE_SYSCTL;
+    struct xen_sysctl sysctl = {};
     DECLARE_NAMED_HYPERCALL_BOUNCE(triggers, cxpt->triggers,
                                    cxpt->nr * sizeof(*cxpt->triggers),
                                    XC_HYPERCALL_BUFFER_BOUNCE_OUT);
@@ -183,7 +181,7 @@ unlock_0:
 
 int xc_pm_reset_cxstat(xc_interface *xch, int cpuid)
 {
-    DECLARE_SYSCTL;
+    struct xen_sysctl sysctl = {};
 
     sysctl.cmd = XEN_SYSCTL_get_pmstat;
     sysctl.u.get_pmstat.type = PMSTAT_reset_cxstat;
@@ -200,7 +198,7 @@ int xc_pm_reset_cxstat(xc_interface *xch, int cpuid)
 int xc_get_cpufreq_para(xc_interface *xch, int cpuid,
                         struct xc_get_cpufreq_para *user_para)
 {
-    DECLARE_SYSCTL;
+    struct xen_sysctl sysctl = {};
     int ret = 0;
     struct xen_get_cpufreq_para *sys_para = &sysctl.u.pm_op.u.get_para;
     DECLARE_NAMED_HYPERCALL_BOUNCE(affected_cpus,
@@ -221,7 +219,7 @@ int xc_get_cpufreq_para(xc_interface *xch, int cpuid,
     {
         if ( (!user_para->affected_cpus)                    ||
              (!user_para->scaling_available_frequencies)    ||
-             (!user_para->scaling_available_governors) )
+             (user_para->gov_num && !user_para->scaling_available_governors) )
         {
             errno = EINVAL;
             return -1;
@@ -230,12 +228,15 @@ int xc_get_cpufreq_para(xc_interface *xch, int cpuid,
             goto unlock_1;
         if ( xc_hypercall_bounce_pre(xch, scaling_available_frequencies) )
             goto unlock_2;
-        if ( xc_hypercall_bounce_pre(xch, scaling_available_governors) )
+        if ( user_para->gov_num &&
+             xc_hypercall_bounce_pre(xch, scaling_available_governors) )
             goto unlock_3;
 
         set_xen_guest_handle(sys_para->affected_cpus, affected_cpus);
         set_xen_guest_handle(sys_para->scaling_available_frequencies, scaling_available_frequencies);
-        set_xen_guest_handle(sys_para->scaling_available_governors, scaling_available_governors);
+        if ( user_para->gov_num )
+            set_xen_guest_handle(sys_para->scaling_available_governors,
+                                 scaling_available_governors);
     }
 
     sysctl.cmd = XEN_SYSCTL_pm_op;
@@ -265,25 +266,38 @@ int xc_get_cpufreq_para(xc_interface *xch, int cpuid,
         user_para->cpuinfo_cur_freq = sys_para->cpuinfo_cur_freq;
         user_para->cpuinfo_max_freq = sys_para->cpuinfo_max_freq;
         user_para->cpuinfo_min_freq = sys_para->cpuinfo_min_freq;
-        user_para->scaling_cur_freq = sys_para->scaling_cur_freq;
-        user_para->scaling_max_freq = sys_para->scaling_max_freq;
-        user_para->scaling_min_freq = sys_para->scaling_min_freq;
         user_para->turbo_enabled    = sys_para->turbo_enabled;
 
         memcpy(user_para->scaling_driver,
                 sys_para->scaling_driver, CPUFREQ_NAME_LEN);
-        memcpy(user_para->scaling_governor,
-                sys_para->scaling_governor, CPUFREQ_NAME_LEN);
 
-        /* copy to user_para no matter what cpufreq governor */
-        BUILD_BUG_ON(sizeof(((struct xc_get_cpufreq_para *)0)->u) !=
-		     sizeof(((struct xen_get_cpufreq_para *)0)->u));
+        /*
+         * Copy to user_para no matter what cpufreq driver/governor.
+         *
+         * First sanity check layout of the union subject to memcpy() below.
+         */
+        BUILD_BUG_ON(sizeof(user_para->u) != sizeof(sys_para->u));
+
+#define CHK_FIELD(fld) \
+        BUILD_BUG_ON(offsetof(typeof(user_para->u), fld) != \
+                     offsetof(typeof(sys_para->u),  fld))
+
+        CHK_FIELD(s.scaling_cur_freq);
+        CHK_FIELD(s.scaling_governor);
+        CHK_FIELD(s.scaling_max_freq);
+        CHK_FIELD(s.scaling_min_freq);
+        CHK_FIELD(s.u.userspace);
+        CHK_FIELD(s.u.ondemand);
+        CHK_FIELD(cppc_para);
+
+#undef CHK_FIELD
 
         memcpy(&user_para->u, &sys_para->u, sizeof(sys_para->u));
     }
 
 unlock_4:
-    xc_hypercall_bounce_post(xch, scaling_available_governors);
+    if ( user_para->gov_num )
+        xc_hypercall_bounce_post(xch, scaling_available_governors);
 unlock_3:
     xc_hypercall_bounce_post(xch, scaling_available_frequencies);
 unlock_2:
@@ -294,7 +308,7 @@ unlock_1:
 
 int xc_set_cpufreq_gov(xc_interface *xch, int cpuid, char *govname)
 {
-    DECLARE_SYSCTL;
+    struct xen_sysctl sysctl = {};
     char *scaling_governor = sysctl.u.pm_op.u.set_gov.scaling_governor;
 
     if ( !xch || !govname )
@@ -314,7 +328,7 @@ int xc_set_cpufreq_gov(xc_interface *xch, int cpuid, char *govname)
 int xc_set_cpufreq_para(xc_interface *xch, int cpuid, 
                         int ctrl_type, int ctrl_value)
 {
-    DECLARE_SYSCTL;
+    struct xen_sysctl sysctl = {};
 
     if ( !xch )
     {
@@ -330,10 +344,33 @@ int xc_set_cpufreq_para(xc_interface *xch, int cpuid,
     return xc_sysctl(xch, &sysctl);
 }
 
+int xc_set_cpufreq_cppc(xc_interface *xch, int cpuid,
+                        xc_set_cppc_para_t *set_cppc)
+{
+    struct xen_sysctl sysctl = {};
+    int ret;
+
+    if ( !xch )
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    sysctl.cmd = XEN_SYSCTL_pm_op;
+    sysctl.u.pm_op.cmd = SET_CPUFREQ_CPPC;
+    sysctl.u.pm_op.cpuid = cpuid;
+    sysctl.u.pm_op.u.set_cppc = *set_cppc;
+
+    ret = xc_sysctl(xch, &sysctl);
+
+    *set_cppc = sysctl.u.pm_op.u.set_cppc;
+
+    return ret;
+}
+
 int xc_get_cpufreq_avgfreq(xc_interface *xch, int cpuid, int *avg_freq)
 {
     int ret = 0;
-    DECLARE_SYSCTL;
+    struct xen_sysctl sysctl = {};
 
     if ( !xch || !avg_freq )
     {
@@ -356,7 +393,7 @@ int xc_get_cpufreq_avgfreq(xc_interface *xch, int cpuid, int *avg_freq)
 int xc_set_sched_opt_smt(xc_interface *xch, uint32_t value)
 {
    int rc;
-   DECLARE_SYSCTL;
+   struct xen_sysctl sysctl = {};
 
    sysctl.cmd = XEN_SYSCTL_pm_op;
    sysctl.u.pm_op.cmd = XEN_SYSCTL_pm_op_set_sched_opt_smt;
@@ -370,7 +407,7 @@ int xc_set_sched_opt_smt(xc_interface *xch, uint32_t value)
 static int get_max_cstate(xc_interface *xch, uint32_t *value, uint32_t type)
 {
     int rc;
-    DECLARE_SYSCTL;
+    struct xen_sysctl sysctl = {};
 
     if ( !xch || !value )
     {
@@ -399,7 +436,7 @@ int xc_get_cpuidle_max_csubstate(xc_interface *xch, uint32_t *value)
 
 static int set_max_cstate(xc_interface *xch, uint32_t value, uint32_t type)
 {
-    DECLARE_SYSCTL;
+    struct xen_sysctl sysctl = {};
 
     if ( !xch )
     {
@@ -426,7 +463,7 @@ int xc_set_cpuidle_max_csubstate(xc_interface *xch, uint32_t value)
 
 int xc_enable_turbo(xc_interface *xch, int cpuid)
 {
-    DECLARE_SYSCTL;
+    struct xen_sysctl sysctl = {};
 
     if ( !xch )
     {
@@ -441,7 +478,7 @@ int xc_enable_turbo(xc_interface *xch, int cpuid)
 
 int xc_disable_turbo(xc_interface *xch, int cpuid)
 {
-    DECLARE_SYSCTL;
+    struct xen_sysctl sysctl = {};
 
     if ( !xch )
     {

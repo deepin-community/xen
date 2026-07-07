@@ -22,12 +22,15 @@
 
 /* Ported to Xen 3.0, George Coker, <gscoker@alpha.ncsc.mil> */
 
-#include <asm/byteorder.h>
 #include <xen/lib.h>
 #include <xen/types.h>
 #include <xen/xmalloc.h>
 #include <xen/string.h>
 #include <xen/errno.h>
+
+#include <asm/byteorder.h>
+
+#include <conditional.h>
 #include "security.h"
 
 #include "policydb.h"
@@ -1269,7 +1272,10 @@ static int cf_check role_read(struct policydb *p, struct hashtab *h, void *fp)
     if ( ver >= POLICYDB_VERSION_BOUNDARY )
         rc = next_entry(buf, fp, sizeof(buf[0]) * 3);
     else
+    {
         rc = next_entry(buf, fp, sizeof(buf[0]) * 2);
+        buf[2] = cpu_to_le32(0); /* gcc14 onwards */
+    }
 
     if ( rc < 0 )
         goto bad;
@@ -1340,7 +1346,10 @@ static int cf_check type_read(struct policydb *p, struct hashtab *h, void *fp)
     if ( ver >= POLICYDB_VERSION_BOUNDARY )
         rc = next_entry(buf, fp, sizeof(buf[0]) * 4);
     else
+    {
         rc = next_entry(buf, fp, sizeof(buf[0]) * 3);
+        buf[3] = cpu_to_le32(0); /* gcc14 onwards */
+    }
 
     if ( rc < 0 )
         goto bad;
@@ -1434,7 +1443,10 @@ static int cf_check user_read(struct policydb *p, struct hashtab *h, void *fp)
     if ( ver >= POLICYDB_VERSION_BOUNDARY )
         rc = next_entry(buf, fp, sizeof(buf[0]) * 3);
     else
+    {
         rc = next_entry(buf, fp, sizeof(buf[0]) * 2);
+        buf[2] = cpu_to_le32(0); /* gcc14 onwards */
+    }
 
     if ( rc < 0 )
         goto bad;
@@ -1729,8 +1741,6 @@ static int policydb_bounds_sanity_check(struct policydb *p)
 
     return 0;
 }
-
-extern int ss_initialized;
 
 /*
  * Read the configuration data from a policy database binary

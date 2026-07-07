@@ -29,8 +29,6 @@ enum domain_type {
 #define is_64bit_domain(d) (0)
 #endif
 
-#define is_domain_direct_mapped(d) ((d)->cdf & CDF_directmap)
-
 /*
  * Is the domain using the host memory layout?
  *
@@ -67,6 +65,11 @@ struct arch_domain
     enum domain_type type;
 #endif
 
+#ifdef CONFIG_ARM64_SVE
+    /* max SVE encoded vector length */
+    uint8_t sve_vl;
+#endif
+
     /* Virtual MMU */
     struct p2m_domain p2m;
 
@@ -86,6 +89,7 @@ struct arch_domain
 
     struct vgic_dist vgic;
 
+#ifdef CONFIG_HWDOM_VUART
     struct vuart {
 #define VUART_BUF_SIZE 128
         char                        *buf;
@@ -93,6 +97,7 @@ struct arch_domain
         const struct vuart_info     *info;
         spinlock_t                  lock;
     } vuart;
+#endif
 
     unsigned int evtchn_irq;
 #ifdef CONFIG_ACPI
@@ -190,6 +195,12 @@ struct arch_vcpu
     register_t tpidrro_el0;
 
     /* HYP configuration */
+#ifdef CONFIG_ARM64_SVE
+    register_t zcr_el1;
+    register_t zcr_el2;
+#endif
+
+    register_t cptr_el2;
     register_t hcr_el2;
     register_t mdcr_el2;
 
@@ -232,9 +243,8 @@ struct arch_vcpu
 
 }  __cacheline_aligned;
 
-void vcpu_show_execution_state(struct vcpu *);
-void vcpu_show_registers(const struct vcpu *);
-void vcpu_switch_to_aarch64_mode(struct vcpu *);
+void vcpu_show_registers(const struct vcpu *v);
+void vcpu_switch_to_aarch64_mode(struct vcpu *v);
 
 /*
  * Due to the restriction of GICv3, the number of vCPUs in AFF0 is
@@ -294,6 +304,11 @@ static inline void arch_vcpu_block(struct vcpu *v) {}
 struct arch_vcpu_io {
     struct instr_details dabt_instr; /* when the instruction is decoded */
 };
+
+struct guest_memory_policy {};
+static inline void update_guest_memory_policy(struct vcpu *v,
+                                              struct guest_memory_policy *gmp)
+{}
 
 #endif /* __ASM_DOMAIN_H__ */
 

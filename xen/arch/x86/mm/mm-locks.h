@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /******************************************************************************
  * arch/x86/mm/mm-locks.h
  *
@@ -7,19 +8,6 @@
  * Copyright (c) 2007 Advanced Micro Devices (Wei Huang)
  * Copyright (c) 2006-2007 XenSource Inc.
  * Copyright (c) 2006 Michael A Fetterman
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef _MM_LOCKS_H
@@ -32,7 +20,7 @@ DECLARE_PERCPU_RWLOCK_GLOBAL(p2m_percpu_rwlock);
 
 static inline void mm_lock_init(mm_lock_t *l)
 {
-    spin_lock_init(&l->lock);
+    rspin_lock_init(&l->lock);
     l->locker = -1;
     l->locker_function = "nobody";
     l->unlock_level = 0;
@@ -86,12 +74,12 @@ static inline void _set_lock_level(int l)
     this_cpu(mm_lock_level) = l;
 }
 
-static inline void _mm_lock(const struct domain *d, mm_lock_t *l,
-                            const char *func, int level, int rec)
+static always_inline void _mm_lock(const struct domain *d, mm_lock_t *l,
+                                   const char *func, int level, int rec)
 {
     if ( !((mm_locked_by_me(l)) && rec) )
         _check_lock_level(d, level);
-    spin_lock_recursive(&l->lock);
+    rspin_lock(&l->lock);
     if ( l->lock.recurse_cnt == 1 )
     {
         l->locker_function = func;
@@ -134,21 +122,23 @@ static inline void mm_rwlock_init(mm_rwlock_t *l)
 
 static inline int mm_write_locked_by_me(mm_rwlock_t *l)
 {
-    return (l->locker == get_processor_id());
+    return (l->locker == smp_processor_id());
 }
 
-static inline void _mm_write_lock(const struct domain *d, mm_rwlock_t *l,
-                                  const char *func, int level)
+static always_inline void _mm_write_lock(const struct domain *d, mm_rwlock_t *l,
+                                         const char *func, int level)
 {
     if ( !mm_write_locked_by_me(l) )
     {
         _check_lock_level(d, level);
         percpu_write_lock(p2m_percpu_rwlock, &l->lock);
-        l->locker = get_processor_id();
+        l->locker = smp_processor_id();
         l->locker_function = func;
         l->unlock_level = _get_lock_level();
         _set_lock_level(_lock_level(d, level));
     }
+    else
+        block_lock_speculation();
     l->recurse_count++;
 }
 
@@ -162,8 +152,8 @@ static inline void mm_write_unlock(mm_rwlock_t *l)
     percpu_write_unlock(p2m_percpu_rwlock, &l->lock);
 }
 
-static inline void _mm_read_lock(const struct domain *d, mm_rwlock_t *l,
-                                 int level)
+static always_inline void _mm_read_lock(const struct domain *d, mm_rwlock_t *l,
+                                        int level)
 {
     _check_lock_level(d, level);
     percpu_read_lock(p2m_percpu_rwlock, &l->lock);
@@ -178,15 +168,15 @@ static inline void mm_read_unlock(mm_rwlock_t *l)
 
 /* This wrapper uses the line number to express the locking order below */
 #define declare_mm_lock(name)                                                 \
-    static inline void mm_lock_##name(const struct domain *d, mm_lock_t *l,   \
-                                      const char *func, int rec)              \
+    static always_inline void mm_lock_##name(                                 \
+        const struct domain *d, mm_lock_t *l, const char *func, int rec)      \
     { _mm_lock(d, l, func, MM_LOCK_ORDER_##name, rec); }
 #define declare_mm_rwlock(name)                                               \
-    static inline void mm_write_lock_##name(const struct domain *d,           \
-                                            mm_rwlock_t *l, const char *func) \
+    static always_inline void mm_write_lock_##name(                           \
+        const struct domain *d, mm_rwlock_t *l, const char *func)             \
     { _mm_write_lock(d, l, func, MM_LOCK_ORDER_##name); }                     \
-    static inline void mm_read_lock_##name(const struct domain *d,            \
-                                           mm_rwlock_t *l)                    \
+    static always_inline void mm_read_lock_##name(const struct domain *d,     \
+                                                  mm_rwlock_t *l)             \
     { _mm_read_lock(d, l, MM_LOCK_ORDER_##name); }
 /* These capture the name of the calling function */
 #define mm_lock(name, d, l) mm_lock_##name(d, l, __func__, 0)
@@ -212,7 +202,7 @@ static inline void mm_unlock(mm_lock_t *l)
         l->locker_function = "nobody";
         _set_lock_level(l->unlock_level);
     }
-    spin_unlock_recursive(&l->lock);
+    rspin_unlock(&l->lock);
 }
 
 static inline void mm_enforce_order_unlock(int unlock_level,
@@ -321,7 +311,7 @@ declare_mm_lock(altp2mlist)
 #define MM_LOCK_ORDER_altp2m                 40
 declare_mm_rwlock(altp2m);
 
-static inline void p2m_lock(struct p2m_domain *p)
+static always_inline void p2m_lock(struct p2m_domain *p)
 {
     if ( p2m_is_altp2m(p) )
         mm_write_lock(altp2m, p->domain, &p->lock);
@@ -344,6 +334,15 @@ static inline void p2m_unlock(struct p2m_domain *p)
 #define p2m_read_unlock(p)    mm_read_unlock(&(p)->lock)
 #define p2m_locked_by_me(p)   mm_write_locked_by_me(&(p)->lock)
 #define gfn_locked_by_me(p,g) p2m_locked_by_me(p)
+
+static always_inline void gfn_lock_if(bool condition, struct p2m_domain *p2m,
+                                      gfn_t gfn, unsigned int order)
+{
+    if ( condition )
+        gfn_lock(p2m, gfn, order);
+    else
+        block_lock_speculation();
+}
 
 /* PoD lock (per-p2m-table)
  *

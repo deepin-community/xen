@@ -1,21 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * vmce.c - provide software emulated vMCE support to guest
  *
  * Copyright (C) 2010, 2011 Jiang, Yunhong <yunhong.jiang@intel.com>
  * Copyright (C) 2012, 2013 Liu, Jinsong <jinsong.liu@intel.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <xen/init.h>
@@ -150,16 +138,20 @@ static int bank_mce_rdmsr(const struct vcpu *v, uint32_t msr, uint64_t *val)
     default:
         switch ( boot_cpu_data.x86_vendor )
         {
+#ifdef CONFIG_INTEL
         case X86_VENDOR_CENTAUR:
         case X86_VENDOR_SHANGHAI:
         case X86_VENDOR_INTEL:
             ret = vmce_intel_rdmsr(v, msr, val);
             break;
+#endif
 
+#ifdef CONFIG_AMD
         case X86_VENDOR_AMD:
         case X86_VENDOR_HYGON:
             ret = vmce_amd_rdmsr(v, msr, val);
             break;
+#endif
 
         default:
             ret = 0;
@@ -211,7 +203,7 @@ int vmce_rdmsr(uint32_t msr, uint64_t *val)
          * bits are always set in guest MSR_IA32_FEATURE_CONTROL by Xen, so it
          * does not need to check them here.
          */
-        if ( cur->arch.vmce.mcg_cap & MCG_LMCE_P )
+        if ( vmce_has_lmce(cur) )
         {
             *val = cur->arch.vmce.mcg_ext_ctl;
             mce_printk(MCE_VERBOSE, "MCE: %pv: rd MCG_EXT_CTL %#"PRIx64"\n",
@@ -283,14 +275,18 @@ static int bank_mce_wrmsr(struct vcpu *v, uint32_t msr, uint64_t val)
     default:
         switch ( boot_cpu_data.x86_vendor )
         {
+#ifdef CONFIG_INTEL
         case X86_VENDOR_INTEL:
             ret = vmce_intel_wrmsr(v, msr, val);
             break;
+#endif
 
+#ifdef CONFIG_AMD
         case X86_VENDOR_AMD:
         case X86_VENDOR_HYGON:
             ret = vmce_amd_wrmsr(v, msr, val);
             break;
+#endif
 
         default:
             ret = 0;
@@ -336,8 +332,7 @@ int vmce_wrmsr(uint32_t msr, uint64_t val)
         break;
 
     case MSR_IA32_MCG_EXT_CTL:
-        if ( (cur->arch.vmce.mcg_cap & MCG_LMCE_P) &&
-             !(val & ~MCG_EXT_CTL_LMCE_EN) )
+        if ( vmce_has_lmce(cur) && !(val & ~MCG_EXT_CTL_LMCE_EN) )
             cur->arch.vmce.mcg_ext_ctl = val;
         else
             ret = -1;
@@ -386,7 +381,7 @@ static int cf_check vmce_load_vcpu_ctxt(struct domain *d, hvm_domain_context_t *
     return err ?: vmce_restore_vcpu(v, &ctxt);
 }
 
-HVM_REGISTER_SAVE_RESTORE(VMCE_VCPU, vmce_save_vcpu_ctxt,
+HVM_REGISTER_SAVE_RESTORE(VMCE_VCPU, vmce_save_vcpu_ctxt, NULL,
                           vmce_load_vcpu_ctxt, 1, HVMSR_PER_VCPU);
 #endif
 
@@ -414,7 +409,7 @@ int inject_vmce(struct domain *d, int vcpu)
             continue;
 
         if ( (is_hvm_domain(d) ||
-              pv_trap_callback_registered(v, TRAP_machine_check)) &&
+              pv_trap_callback_registered(v, X86_EXC_MC)) &&
              !test_and_set_bool(v->arch.mce_pending) )
         {
             mce_printk(MCE_VERBOSE, "MCE: inject vMCE to %pv\n", v);

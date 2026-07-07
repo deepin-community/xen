@@ -32,16 +32,16 @@
 #include <xen/trace.h>
 #include <asm/hvm/hvm.h>
 #include <asm/hvm/io.h>
-#include <asm/hvm/support.h>
+#include <asm/hvm/save.h>
 
 #define vpic_domain(v) (container_of((v), struct domain, \
-                        arch.hvm.vpic[!vpic->is_master]))
+                                     arch.hvm.vpic[!(v)->is_master]))
 #define __vpic_lock(v) &container_of((v), struct hvm_domain, \
                                         vpic[!(v)->is_master])->irq_lock
 #define vpic_lock(v)   spin_lock(__vpic_lock(v))
 #define vpic_unlock(v) spin_unlock(__vpic_lock(v))
 #define vpic_is_locked(v) spin_is_locked(__vpic_lock(v))
-#define vpic_elcr_mask(v) ((v)->is_master ? 0xf8 : 0xde)
+#define vpic_elcr_mask(v, mb2) ((v)->is_master ? 0xf8 | ((mb2) << 2) : 0xde)
 
 /* Return the highest priority found in mask. Return 8 if none. */
 #define VPIC_PRIO_NONE 8
@@ -99,8 +99,7 @@ static void vpic_update_int_output(struct hvm_hw_vpic *vpic)
     ASSERT(vpic_is_locked(vpic));
 
     irq = vpic_get_highest_priority_irq(vpic);
-    TRACE_3D(TRC_HVM_EMUL_PIC_INT_OUTPUT, vpic->int_output, vpic->is_master,
-             irq);
+    TRACE_TIME(TRC_HVM_EMUL_PIC_INT_OUTPUT, vpic->int_output, vpic->is_master, irq);
     if ( vpic->int_output == (!vpic->init_state && irq >= 0) )
         return;
 
@@ -119,7 +118,7 @@ static void vpic_update_int_output(struct hvm_hw_vpic *vpic)
 
             if ( v != NULL )
             {
-                TRACE_1D(TRC_HVM_EMUL_PIC_KICK, irq);
+                TRACE_TIME(TRC_HVM_EMUL_PIC_KICK, irq);
                 vcpu_kick(v);
             }
         }
@@ -144,7 +143,7 @@ static void __vpic_intack(struct hvm_hw_vpic *vpic, int irq)
 
     ASSERT(vpic_is_locked(vpic));
 
-    TRACE_2D(TRC_HVM_EMUL_PIC_INTACK, vpic->is_master, irq);
+    TRACE_TIME(TRC_HVM_EMUL_PIC_INTACK, vpic->is_master, irq);
     /* Edge-triggered: clear the IRR (forget the edge). */
     if ( !(vpic->elcr & mask) )
         vpic->irr &= ~mask;
@@ -310,6 +309,7 @@ static void vpic_ioport_write(
             if ( !(vpic->init_state & 8) )
                 break; /* CASCADE mode: wait for write to ICW3. */
             /* SNGL mode: fall through (no ICW3). */
+            fallthrough;
         case 2:
             /* ICW3 */
             vpic->init_state++;
@@ -377,25 +377,34 @@ static int cf_check vpic_intercept_elcr_io(
     int dir, unsigned int port, unsigned int bytes, uint32_t *val)
 {
     struct hvm_hw_vpic *vpic;
-    uint32_t data;
+    unsigned int data, shift = 0;
 
-    BUG_ON(bytes != 1);
+    BUG_ON(bytes > 2 - (port & 1));
 
     vpic = &current->domain->arch.hvm.vpic[port & 1];
 
-    if ( dir == IOREQ_WRITE )
-    {
-        /* Some IRs are always edge trig. Slave IR is always level trig. */
-        data = *val & vpic_elcr_mask(vpic);
-        if ( vpic->is_master )
-            data |= 1 << 2;
-        vpic->elcr = data;
-    }
-    else
-    {
-        /* Reader should not see hardcoded level-triggered slave IR. */
-        *val = vpic->elcr & vpic_elcr_mask(vpic);
-    }
+    do {
+        if ( dir == IOREQ_WRITE )
+        {
+            /* Some IRs are always edge trig. Slave IR is always level trig. */
+            data = (*val >> shift) & vpic_elcr_mask(vpic, 1);
+            if ( vpic->is_master )
+                data |= 1 << 2;
+            vpic->elcr = data;
+        }
+        else
+        {
+            /* Reader should not see hardcoded level-triggered slave IR. */
+            data = vpic->elcr & vpic_elcr_mask(vpic, 0);
+            if ( !shift )
+                *val = data;
+            else
+                *val |= data << shift;
+        }
+
+        ++vpic;
+        shift += 8;
+    } while ( --bytes );
 
     return X86EMUL_OKAY;
 }
@@ -420,6 +429,38 @@ static int cf_check vpic_save(struct vcpu *v, hvm_domain_context_t *h)
     return 0;
 }
 
+static int cf_check vpic_check(const struct domain *d, hvm_domain_context_t *h)
+{
+    unsigned int inst = hvm_load_instance(h);
+    const struct hvm_hw_vpic *s;
+
+    if ( !has_vpic(d) )
+        return -ENODEV;
+
+    /* Which PIC is this? */
+    if ( inst >= ARRAY_SIZE(d->arch.hvm.vpic) )
+        return -ENOENT;
+
+    s = hvm_get_entry(PIC, h);
+    if ( !s )
+        return -ENODATA;
+
+    /*
+     * Check to-be-loaded values are within valid range, for them to represent
+     * actually reachable state.  Uses of some of the values elsewhere assume
+     * this is the case.
+     */
+    if ( s->int_output > 1 )
+        return -EDOM;
+
+    if ( s->is_master != !inst ||
+         (s->int_output && s->init_state) ||
+         (s->elcr & ~vpic_elcr_mask(s, 1)) )
+        return -EINVAL;
+
+    return 0;
+}
+
 static int cf_check vpic_load(struct domain *d, hvm_domain_context_t *h)
 {
     struct hvm_hw_vpic *s;
@@ -429,18 +470,21 @@ static int cf_check vpic_load(struct domain *d, hvm_domain_context_t *h)
         return -ENODEV;
 
     /* Which PIC is this? */
-    if ( inst > 1 )
-        return -ENOENT;
+    ASSERT(inst < ARRAY_SIZE(d->arch.hvm.vpic));
     s = &d->arch.hvm.vpic[inst];
 
     /* Load the state */
     if ( hvm_load_entry(PIC, h, s) != 0 )
         return -EINVAL;
 
+    if ( s->is_master )
+        s->elcr |= 1 << 2;
+
     return 0;
 }
 
-HVM_REGISTER_SAVE_RESTORE(PIC, vpic_save, vpic_load, 2, HVMSR_PER_DOM);
+HVM_REGISTER_SAVE_RESTORE(PIC, vpic_save, vpic_check, vpic_load, 2,
+                          HVMSR_PER_DOM);
 
 void vpic_reset(struct domain *d)
 {
@@ -470,8 +514,7 @@ void vpic_init(struct domain *d)
     register_portio_handler(d, 0x20, 2, vpic_intercept_pic_io);
     register_portio_handler(d, 0xa0, 2, vpic_intercept_pic_io);
 
-    register_portio_handler(d, 0x4d0, 1, vpic_intercept_elcr_io);
-    register_portio_handler(d, 0x4d1, 1, vpic_intercept_elcr_io);
+    register_portio_handler(d, 0x4d0, 2, vpic_intercept_elcr_io);
 }
 
 void vpic_irq_positive_edge(struct domain *d, int irq)
@@ -483,7 +526,7 @@ void vpic_irq_positive_edge(struct domain *d, int irq)
     ASSERT(irq <= 15);
     ASSERT(vpic_is_locked(vpic));
 
-    TRACE_1D(TRC_HVM_EMUL_PIC_POSEDGE, irq);
+    TRACE_TIME(TRC_HVM_EMUL_PIC_POSEDGE, irq);
     if ( irq == 2 )
         return;
 
@@ -501,7 +544,7 @@ void vpic_irq_negative_edge(struct domain *d, int irq)
     ASSERT(irq <= 15);
     ASSERT(vpic_is_locked(vpic));
 
-    TRACE_1D(TRC_HVM_EMUL_PIC_NEGEDGE, irq);
+    TRACE_TIME(TRC_HVM_EMUL_PIC_NEGEDGE, irq);
     if ( irq == 2 )
         return;
 
@@ -519,7 +562,7 @@ int vpic_ack_pending_irq(struct vcpu *v)
 
     accept = vlapic_accept_pic_intr(v);
 
-    TRACE_2D(TRC_HVM_EMUL_PIC_PEND_IRQ_CALL, accept, vpic->int_output);
+    TRACE_TIME(TRC_HVM_EMUL_PIC_PEND_IRQ_CALL, accept, vpic->int_output);
     if ( !accept || !vpic->int_output )
         return -1;
 

@@ -180,6 +180,10 @@ static bool msixtbl_initialised(const struct domain *d)
     return d->arch.hvm.msixtbl_list.next;
 }
 
+/*
+ * Lookup an msixtbl_entry on the same page as given addr. It's up to the
+ * caller to check if address is strictly part of the table - if relevant.
+ */
 static struct msixtbl_entry *msixtbl_find_entry(
     struct vcpu *v, unsigned long addr)
 {
@@ -187,8 +191,8 @@ static struct msixtbl_entry *msixtbl_find_entry(
     struct domain *d = v->domain;
 
     list_for_each_entry( entry, &d->arch.hvm.msixtbl_list, list )
-        if ( addr >= entry->gtable &&
-             addr < entry->gtable + entry->table_len )
+        if ( PFN_DOWN(addr) >= PFN_DOWN(entry->gtable) &&
+             PFN_DOWN(addr) <= PFN_DOWN(entry->gtable + entry->table_len - 1) )
             return entry;
 
     return NULL;
@@ -203,6 +207,10 @@ static struct msi_desc *msixtbl_addr_to_desc(
     if ( !entry || !entry->pdev )
         return NULL;
 
+    if ( addr <  entry->gtable ||
+         addr >= entry->gtable + entry->table_len )
+        return NULL;
+
     nr_entry = (addr - entry->gtable) / PCI_MSIX_ENTRY_SIZE;
 
     list_for_each_entry( desc, &entry->pdev->msi_list, list )
@@ -211,6 +219,153 @@ static struct msi_desc *msixtbl_addr_to_desc(
             return desc;
 
     return NULL;
+}
+
+/*
+ * Returns:
+ *  - 0 (FIX_RESERVED) if no handling should be done
+ *  - a fixmap idx to use for handling
+ */
+static unsigned int get_adjacent_idx(
+    const struct msixtbl_entry *entry, unsigned long addr, bool write)
+{
+    unsigned int adj_type;
+    struct arch_msix *msix;
+
+    if ( !entry || !entry->pdev )
+    {
+        ASSERT_UNREACHABLE();
+        return 0;
+    }
+
+    if ( PFN_DOWN(addr) == PFN_DOWN(entry->gtable) && addr < entry->gtable )
+        adj_type = ADJ_IDX_FIRST;
+    else if ( PFN_DOWN(addr) == PFN_DOWN(entry->gtable + entry->table_len - 1) &&
+              addr >= entry->gtable + entry->table_len )
+        adj_type = ADJ_IDX_LAST;
+    else
+    {
+        /* All callers should already do equivalent range checking. */
+        ASSERT_UNREACHABLE();
+        return 0;
+    }
+
+    msix = entry->pdev->msix;
+    if ( !msix )
+    {
+        ASSERT_UNREACHABLE();
+        return 0;
+    }
+
+    if ( !msix->adj_access_idx[adj_type] )
+    {
+        if ( MSIX_CHECK_WARN(msix, entry->pdev->domain->domain_id,
+                             adjacent_not_initialized) )
+            gprintk(XENLOG_WARNING,
+                    "%pp: Page for adjacent(%d) MSI-X table access not initialized (addr %#lx, gtable %#lx)\n",
+                    &entry->pdev->sbdf, adj_type, addr, entry->gtable);
+        return 0;
+    }
+
+    /* If PBA lives on the same page too, discard writes. */
+    if ( write &&
+         ((adj_type == ADJ_IDX_LAST &&
+           msix->table.last == msix->pba.first) ||
+          (adj_type == ADJ_IDX_FIRST &&
+           msix->table.first == msix->pba.last)) )
+    {
+        if ( MSIX_CHECK_WARN(msix, entry->pdev->domain->domain_id,
+                             adjacent_pba) )
+            gprintk(XENLOG_WARNING,
+                    "%pp: MSI-X table and PBA share a page, "
+                    "discard write to adjacent memory (%#lx)\n",
+                    &entry->pdev->sbdf, addr);
+        return 0;
+    }
+
+    return msix->adj_access_idx[adj_type];
+}
+
+static void adjacent_read(
+    const struct msixtbl_entry *entry,
+    paddr_t address, unsigned int len, uint64_t *pval)
+{
+    const void __iomem *hwaddr;
+    unsigned int fixmap_idx;
+
+    ASSERT(IS_ALIGNED(address, len));
+
+    *pval = ~0UL;
+
+    fixmap_idx = get_adjacent_idx(entry, address, false);
+
+    if ( !fixmap_idx )
+        return;
+
+    hwaddr = fix_to_virt(fixmap_idx) + PAGE_OFFSET(address);
+
+    switch ( len )
+    {
+    case 1:
+        *pval = readb(hwaddr);
+        break;
+
+    case 2:
+        *pval = readw(hwaddr);
+        break;
+
+    case 4:
+        *pval = readl(hwaddr);
+        break;
+
+    case 8:
+        *pval = readq(hwaddr);
+        break;
+
+    default:
+        ASSERT_UNREACHABLE();
+        break;
+    }
+}
+
+static void adjacent_write(
+    const struct msixtbl_entry *entry,
+    paddr_t address, unsigned int len, uint64_t val)
+{
+    void __iomem *hwaddr;
+    unsigned int fixmap_idx;
+
+    ASSERT(IS_ALIGNED(address, len));
+
+    fixmap_idx = get_adjacent_idx(entry, address, true);
+
+    if ( !fixmap_idx )
+        return;
+
+    hwaddr = fix_to_virt(fixmap_idx) + PAGE_OFFSET(address);
+
+    switch ( len )
+    {
+    case 1:
+        writeb(val, hwaddr);
+        break;
+
+    case 2:
+        writew(val, hwaddr);
+        break;
+
+    case 4:
+        writel(val, hwaddr);
+        break;
+
+    case 8:
+        writeq(val, hwaddr);
+        break;
+
+    default:
+        ASSERT_UNREACHABLE();
+        break;
+    }
 }
 
 static int cf_check msixtbl_read(
@@ -222,7 +377,7 @@ static int cf_check msixtbl_read(
     unsigned int nr_entry, index;
     int r = X86EMUL_UNHANDLEABLE;
 
-    if ( (len != 4 && len != 8) || (address & (len - 1)) )
+    if ( !IS_ALIGNED(address, len) )
         return r;
 
     rcu_read_lock(&msixtbl_rcu_lock);
@@ -230,6 +385,18 @@ static int cf_check msixtbl_read(
     entry = msixtbl_find_entry(current, address);
     if ( !entry )
         goto out;
+
+    if ( address <  entry->gtable ||
+         address >= entry->gtable + entry->table_len )
+    {
+        adjacent_read(entry, address, len, pval);
+        r = X86EMUL_OKAY;
+        goto out;
+    }
+
+    if ( len != 4 && len != 8 )
+        goto out;
+
     offset = address & (PCI_MSIX_ENTRY_SIZE - 1);
 
     if ( offset != PCI_MSIX_ENTRY_VECTOR_CTRL_OFFSET )
@@ -283,14 +450,26 @@ static int msixtbl_write(struct vcpu *v, unsigned long address,
     unsigned long flags;
     struct irq_desc *desc;
 
-    if ( (len != 4 && len != 8) || (address & (len - 1)) )
-        return r;
+    if ( !IS_ALIGNED(address, len) )
+        return X86EMUL_OKAY;
 
     rcu_read_lock(&msixtbl_rcu_lock);
 
     entry = msixtbl_find_entry(v, address);
     if ( !entry )
         goto out;
+
+    if ( address <  entry->gtable ||
+         address >= entry->gtable + entry->table_len )
+    {
+        adjacent_write(entry, address, len, val);
+        r = X86EMUL_OKAY;
+        goto out;
+    }
+
+    if ( len != 4 && len != 8 )
+        goto out;
+
     nr_entry = array_index_nospec(((address - entry->gtable) /
                                    PCI_MSIX_ENTRY_SIZE),
                                   MAX_MSIX_TABLE_ENTRIES);
@@ -345,8 +524,7 @@ static int msixtbl_write(struct vcpu *v, unsigned long address,
 
 unlock:
     spin_unlock_irqrestore(&desc->lock, flags);
-    if ( len == 4 )
-        r = X86EMUL_OKAY;
+    r = X86EMUL_OKAY;
 
 out:
     rcu_read_unlock(&msixtbl_rcu_lock);
@@ -357,7 +535,17 @@ static int cf_check _msixtbl_write(
     const struct hvm_io_handler *handler, uint64_t address, uint32_t len,
     uint64_t val)
 {
-    return msixtbl_write(current, address, len, val);
+    /* Ignore unaligned writes. */
+    if ( !IS_ALIGNED(address, len) )
+        return X86EMUL_OKAY;
+
+    /*
+     * This function returns X86EMUL_UNHANDLEABLE even if write is properly
+     * handled, to propagate it to the device model (so it can keep its
+     * internal state in sync).
+     */
+    msixtbl_write(current, address, len, val);
+    return X86EMUL_UNHANDLEABLE;
 }
 
 static bool cf_check msixtbl_range(
@@ -365,16 +553,23 @@ static bool cf_check msixtbl_range(
 {
     struct vcpu *curr = current;
     unsigned long addr = r->addr;
-    const struct msi_desc *desc;
+    const struct msixtbl_entry *entry;
+    bool ret = false;
 
     ASSERT(r->type == IOREQ_TYPE_COPY);
 
     rcu_read_lock(&msixtbl_rcu_lock);
-    desc = msixtbl_addr_to_desc(msixtbl_find_entry(curr, addr), addr);
+    entry = msixtbl_find_entry(curr, addr);
+    if ( entry &&
+          /* Adjacent access. */
+         (addr < entry->gtable || addr >= entry->gtable + entry->table_len ||
+          /* Otherwise check if there is a matching msi_desc. */
+          msixtbl_addr_to_desc(entry, addr)) )
+        ret = true;
     rcu_read_unlock(&msixtbl_rcu_lock);
 
-    if ( desc )
-        return 1;
+    if ( ret )
+        return ret;
 
     if ( r->state == STATE_IOREQ_READY && r->dir == IOREQ_WRITE )
     {
@@ -420,7 +615,7 @@ static bool cf_check msixtbl_range(
         }
     }
 
-    return 0;
+    return false;
 }
 
 static const struct hvm_io_ops msixtbl_mmio_ops = {
@@ -462,13 +657,13 @@ static void del_msixtbl_entry(struct msixtbl_entry *entry)
 
 int msixtbl_pt_register(struct domain *d, struct pirq *pirq, uint64_t gtable)
 {
-    struct irq_desc *irq_desc;
+    struct irq_desc *irqd;
     struct msi_desc *msi_desc;
     struct pci_dev *pdev;
     struct msixtbl_entry *entry, *new_entry;
     int r = -EINVAL;
 
-    ASSERT(pcidevs_locked());
+    ASSERT_PDEV_LIST_IS_READ_LOCKED(d);
     ASSERT(rw_is_write_locked(&d->event_lock));
 
     if ( !msixtbl_initialised(d) )
@@ -482,14 +677,14 @@ int msixtbl_pt_register(struct domain *d, struct pirq *pirq, uint64_t gtable)
     if ( !new_entry )
         return -ENOMEM;
 
-    irq_desc = pirq_spin_lock_irq_desc(pirq, NULL);
-    if ( !irq_desc )
+    irqd = pirq_spin_lock_irq_desc(pirq, NULL);
+    if ( !irqd )
     {
         xfree(new_entry);
         return r;
     }
 
-    msi_desc = irq_desc->msi_desc;
+    msi_desc = irqd->msi_desc;
     if ( !msi_desc )
         goto out;
 
@@ -508,7 +703,7 @@ found:
     r = 0;
 
 out:
-    spin_unlock_irq(&irq_desc->lock);
+    spin_unlock_irq(&irqd->lock);
     xfree(new_entry);
 
     if ( !r )
@@ -533,22 +728,22 @@ out:
 
 void msixtbl_pt_unregister(struct domain *d, struct pirq *pirq)
 {
-    struct irq_desc *irq_desc;
+    struct irq_desc *irqd;
     struct msi_desc *msi_desc;
     struct pci_dev *pdev;
     struct msixtbl_entry *entry;
 
-    ASSERT(pcidevs_locked());
+    ASSERT_PDEV_LIST_IS_READ_LOCKED(d);
     ASSERT(rw_is_write_locked(&d->event_lock));
 
     if ( !msixtbl_initialised(d) )
         return;
 
-    irq_desc = pirq_spin_lock_irq_desc(pirq, NULL);
-    if ( !irq_desc )
+    irqd = pirq_spin_lock_irq_desc(pirq, NULL);
+    if ( !irqd )
         return;
 
-    msi_desc = irq_desc->msi_desc;
+    msi_desc = irqd->msi_desc;
     if ( !msi_desc )
         goto out;
 
@@ -559,14 +754,14 @@ void msixtbl_pt_unregister(struct domain *d, struct pirq *pirq)
             goto found;
 
 out:
-    spin_unlock_irq(&irq_desc->lock);
+    spin_unlock_irq(&irqd->lock);
     return;
 
 found:
-    if ( !atomic_dec_and_test(&entry->refcnt) )
+    if ( atomic_dec_and_test(&entry->refcnt) )
         del_msixtbl_entry(entry);
 
-    spin_unlock_irq(&irq_desc->lock);
+    spin_unlock_irq(&irqd->lock);
 }
 
 void msixtbl_init(struct domain *d)
@@ -684,7 +879,7 @@ static int vpci_msi_update(const struct pci_dev *pdev, uint32_t data,
 {
     unsigned int i;
 
-    ASSERT(pcidevs_locked());
+    ASSERT_PDEV_LIST_IS_READ_LOCKED(pdev->domain);
 
     if ( (address & MSI_ADDR_BASE_MASK) != MSI_ADDR_HEADER )
     {
@@ -725,8 +920,8 @@ void vpci_msi_arch_update(struct vpci_msi *msi, const struct pci_dev *pdev)
     int rc;
 
     ASSERT(msi->arch.pirq != INVALID_PIRQ);
+    ASSERT_PDEV_LIST_IS_READ_LOCKED(pdev->domain);
 
-    pcidevs_lock();
     for ( i = 0; i < msi->vectors && msi->arch.bound; i++ )
     {
         struct xen_domctl_bind_pt_irq unbind = {
@@ -745,7 +940,6 @@ void vpci_msi_arch_update(struct vpci_msi *msi, const struct pci_dev *pdev)
 
     msi->arch.bound = !vpci_msi_update(pdev, msi->data, msi->address,
                                        msi->vectors, msi->arch.pirq, msi->mask);
-    pcidevs_unlock();
 }
 
 static int vpci_msi_enable(const struct pci_dev *pdev, unsigned int nr,
@@ -778,15 +972,14 @@ int vpci_msi_arch_enable(struct vpci_msi *msi, const struct pci_dev *pdev,
     int rc;
 
     ASSERT(msi->arch.pirq == INVALID_PIRQ);
+    ASSERT_PDEV_LIST_IS_READ_LOCKED(pdev->domain);
     rc = vpci_msi_enable(pdev, vectors, 0);
     if ( rc < 0 )
         return rc;
     msi->arch.pirq = rc;
 
-    pcidevs_lock();
     msi->arch.bound = !vpci_msi_update(pdev, msi->data, msi->address, vectors,
                                        msi->arch.pirq, msi->mask);
-    pcidevs_unlock();
 
     return 0;
 }
@@ -797,8 +990,8 @@ static void vpci_msi_disable(const struct pci_dev *pdev, int pirq,
     unsigned int i;
 
     ASSERT(pirq != INVALID_PIRQ);
+    ASSERT_PDEV_LIST_IS_READ_LOCKED(pdev->domain);
 
-    pcidevs_lock();
     for ( i = 0; i < nr && bound; i++ )
     {
         struct xen_domctl_bind_pt_irq bind = {
@@ -814,7 +1007,6 @@ static void vpci_msi_disable(const struct pci_dev *pdev, int pirq,
     write_lock(&pdev->domain->event_lock);
     unmap_domain_pirq(pdev->domain, pirq);
     write_unlock(&pdev->domain->event_lock);
-    pcidevs_unlock();
 }
 
 void vpci_msi_arch_disable(struct vpci_msi *msi, const struct pci_dev *pdev)
@@ -854,6 +1046,7 @@ int vpci_msix_arch_enable_entry(struct vpci_msix_entry *entry,
     int rc;
 
     ASSERT(entry->arch.pirq == INVALID_PIRQ);
+    ASSERT_PDEV_LIST_IS_READ_LOCKED(pdev->domain);
     rc = vpci_msi_enable(pdev, vmsix_entry_nr(pdev->vpci->msix, entry),
                          table_base);
     if ( rc < 0 )
@@ -861,7 +1054,6 @@ int vpci_msix_arch_enable_entry(struct vpci_msix_entry *entry,
 
     entry->arch.pirq = rc;
 
-    pcidevs_lock();
     rc = vpci_msi_update(pdev, entry->data, entry->addr, 1, entry->arch.pirq,
                          entry->masked);
     if ( rc )
@@ -869,7 +1061,6 @@ int vpci_msix_arch_enable_entry(struct vpci_msix_entry *entry,
         vpci_msi_disable(pdev, entry->arch.pirq, 1, false);
         entry->arch.pirq = INVALID_PIRQ;
     }
-    pcidevs_unlock();
 
     return rc;
 }
@@ -895,6 +1086,15 @@ int vpci_msix_arch_print(const struct vpci_msix *msix)
 {
     unsigned int i;
 
+    /*
+     * Assert that pdev_list doesn't change. ASSERT_PDEV_LIST_IS_READ_LOCKED
+     * is not suitable here because it allows either pcidevs_lock() or
+     * pci_lock to be held, but here we rely on pci_lock being held, not
+     * pcidevs_lock() (see the transient lock dropping further down).
+     */
+    ASSERT(rw_is_locked(&msix->pdev->domain->pci_lock));
+    ASSERT(spin_is_locked(&msix->pdev->vpci->lock));
+
     for ( i = 0; i < msix->max_entries; i++ )
     {
         const struct vpci_msix_entry *entry = &msix->entries[i];
@@ -913,13 +1113,23 @@ int vpci_msix_arch_print(const struct vpci_msix *msix)
             struct pci_dev *pdev = msix->pdev;
 
             spin_unlock(&msix->pdev->vpci->lock);
+            read_unlock(&pdev->domain->pci_lock);
             process_pending_softirqs();
+
+            if ( !read_trylock(&pdev->domain->pci_lock) )
+                return -EBUSY;
+
             /* NB: we assume that pdev cannot go away for an alive domain. */
             if ( !pdev->vpci || !spin_trylock(&pdev->vpci->lock) )
+            {
+                read_unlock(&pdev->domain->pci_lock);
                 return -EBUSY;
+            }
+
             if ( pdev->vpci->msix != msix )
             {
                 spin_unlock(&pdev->vpci->lock);
+                read_unlock(&pdev->domain->pci_lock);
                 return -EAGAIN;
             }
         }

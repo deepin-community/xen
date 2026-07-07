@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 
 /******************************************************************************
  * arch/x86/mm/shadow/hvm.c
@@ -6,19 +7,6 @@
  * Parts of this code are Copyright (c) 2006 by XenSource Inc.
  * Parts of this code are Copyright (c) 2006 by Michael A Fetterman
  * Parts based on earlier work by Michael A Fetterman, Ian Pratt et al.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <xen/domain_page.h>
@@ -98,7 +86,7 @@ static int hvm_translate_virtual_addr(
          */
         if ( is_x86_user_segment(seg) )
             x86_emul_hw_exception(
-                (seg == x86_seg_ss) ? TRAP_stack_error : TRAP_gp_fault,
+                (seg == x86_seg_ss) ? X86_EXC_SS : X86_EXC_GP,
                 0, &sh_ctxt->ctxt);
         return X86EMUL_EXCEPTION;
     }
@@ -299,11 +287,29 @@ hvm_emulate_cmpxchg(enum x86_segment seg,
     return rc;
 }
 
+static int cf_check
+hvm_emulate_read_segment(enum x86_segment seg,
+                         struct segment_register *reg,
+                         struct x86_emulate_ctxt *ctxt)
+{
+    struct sh_emulate_ctxt *sh_ctxt =
+        container_of(ctxt, struct sh_emulate_ctxt, ctxt);
+    const struct segment_register *sreg = hvm_get_seg_reg(seg, sh_ctxt);
+
+    if ( IS_ERR(sreg) )
+        return -PTR_ERR(sreg);
+
+    *reg = *sreg;
+
+    return X86EMUL_OKAY;
+}
+
 static const struct x86_emulate_ops hvm_shadow_emulator_ops = {
     .read       = hvm_emulate_read,
     .insn_fetch = hvm_emulate_insn_fetch,
     .write      = hvm_emulate_write,
     .cmpxchg    = hvm_emulate_cmpxchg,
+    .read_segment = hvm_emulate_read_segment,
 };
 
 const struct x86_emulate_ops *shadow_init_emulation(
@@ -688,6 +694,66 @@ static void sh_emulate_unmap_dest(struct vcpu *v, void *addr,
     atomic_inc(&v->domain->arch.paging.shadow.gtable_dirty_version);
 }
 
+static bool flush_vcpu(const struct vcpu *v, const unsigned long *vcpu_bitmap)
+{
+    return !vcpu_bitmap || test_bit(v->vcpu_id, vcpu_bitmap);
+}
+
+/* Flush TLB of selected vCPUs.  NULL for all. */
+bool cf_check shadow_flush_tlb(const unsigned long *vcpu_bitmap)
+{
+    static DEFINE_PER_CPU(cpumask_t, flush_cpumask);
+    cpumask_t *mask = &this_cpu(flush_cpumask);
+    const struct vcpu *curr = current;
+    struct domain *d = curr->domain;
+    struct vcpu *v;
+
+    /* Avoid deadlock if more than one vcpu tries this at the same time. */
+    if ( !spin_trylock(&d->hypercall_deadlock_mutex) )
+        return false;
+
+    /* Pause all other vcpus. */
+    for_each_vcpu ( d, v )
+        if ( v != curr && flush_vcpu(v, vcpu_bitmap) )
+            vcpu_pause_nosync(v);
+
+    /* Now that all VCPUs are signalled to deschedule, we wait... */
+    for_each_vcpu ( d, v )
+        if ( v != curr && flush_vcpu(v, vcpu_bitmap) )
+            while ( !vcpu_runnable(v) && v->is_running )
+                cpu_relax();
+
+    /* All other vcpus are paused, safe to unlock now. */
+    spin_unlock(&d->hypercall_deadlock_mutex);
+
+    cpumask_clear(mask);
+
+    /* Flush paging-mode soft state (e.g., va->gfn cache; PAE PDPE cache). */
+    for_each_vcpu ( d, v )
+    {
+        unsigned int cpu;
+
+        if ( !flush_vcpu(v, vcpu_bitmap) )
+            continue;
+
+        paging_update_cr3(v, false);
+
+        cpu = read_atomic(&v->dirty_cpu);
+        if ( is_vcpu_dirty_cpu(cpu) )
+            __cpumask_set_cpu(cpu, mask);
+    }
+
+    /* Flush TLBs on all CPUs with dirty vcpu state. */
+    guest_flush_tlb_mask(d, mask);
+
+    /* Done. */
+    for_each_vcpu ( d, v )
+        if ( v != curr && flush_vcpu(v, vcpu_bitmap) )
+            vcpu_unpause(v);
+
+    return true;
+}
+
 mfn_t sh_make_monitor_table(const struct vcpu *v, unsigned int shadow_levels)
 {
     struct domain *d = v->domain;
@@ -809,7 +875,7 @@ static void cf_check sh_unshadow_for_p2m_change(
      * If there are any shadows, update them.  But if shadow_teardown()
      * has already been called then it's not safe to try.
      */
-    if ( unlikely(!d->arch.paging.shadow.total_pages) )
+    if ( unlikely(!d->arch.paging.total_pages) )
         return;
 
     /* Only previously present / valid entries need processing. */

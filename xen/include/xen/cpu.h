@@ -13,6 +13,16 @@ void put_cpu_maps(void);
 void cpu_hotplug_begin(void);
 void cpu_hotplug_done(void);
 
+/*
+ * Returns true when the caller CPU is between a cpu_hotplug_{begin,done}()
+ * region.
+ *
+ * This is required to safely identify hotplug contexts, as get_cpu_maps()
+ * would otherwise succeed because a caller holding the lock in write mode is
+ * allowed to acquire the same lock in read mode.
+ */
+bool cpu_in_hotplug_context(void);
+
 /* Receive notification of CPU hotplug events. */
 void register_cpu_notifier(struct notifier_block *nb);
 
@@ -69,7 +79,7 @@ int disable_nonboot_cpus(void);
 void enable_nonboot_cpus(void);
 
 /* Private arch-dependent helpers for CPU hotplug. */
-int __cpu_up(unsigned int cpunum);
+int __cpu_up(unsigned int cpu);
 void __cpu_disable(void);
 void __cpu_die(unsigned int cpu);
 

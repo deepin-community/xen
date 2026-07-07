@@ -36,13 +36,14 @@
  * caller in schedule_work.
  */
 static DEFINE_SPINLOCK(payload_lock);
+/*
+ * Need RCU in case we crash (and then traps code would iterate via
+ * payload_list) when adding entries on the list.
+ */
+static DEFINE_RCU_READ_LOCK(rcu_payload_lock);
 static LIST_HEAD(payload_list);
 
-/*
- * Patches which have been applied. Need RCU in case we crash (and then
- * traps code would iterate via applied_list) when adding entries on the list.
- */
-static DEFINE_RCU_READ_LOCK(rcu_applied_lock);
+/* Patches which have been applied. Only modified from stop machine context. */
 static LIST_HEAD(applied_list);
 
 static unsigned int payload_cnt;
@@ -55,8 +56,8 @@ struct livepatch_work
                                     check_for_livepatch_work. */
     uint32_t timeout;            /* Timeout to do the operation. */
     struct payload *data;        /* The payload on which to act. */
-    volatile bool_t do_work;     /* Signals work to do. */
-    volatile bool_t ready;       /* Signals all CPUs synchronized. */
+    volatile bool do_work;       /* Signals work to do. */
+    volatile bool ready;         /* Signals all CPUs synchronized. */
     unsigned int cmd;            /* Action request: LIVEPATCH_ACTION_* */
 };
 
@@ -69,7 +70,7 @@ static struct livepatch_work livepatch_work;
  * would hammer a global livepatch_work structure on every guest VMEXIT.
  * Having an per-cpu lessens the load.
  */
-static DEFINE_PER_CPU(bool_t, work_to_do);
+static DEFINE_PER_CPU(bool, work_to_do);
 static DEFINE_PER_CPU(struct tasklet, livepatch_tasklet);
 
 static int get_name(const struct xen_livepatch_name *name, char *n)
@@ -106,17 +107,13 @@ static int verify_payload(const struct xen_sysctl_livepatch_upload *upload, char
     return 0;
 }
 
-bool_t is_patch(const void *ptr)
+bool is_patch(const void *ptr)
 {
     const struct payload *data;
-    bool_t r = 0;
+    bool r = false;
 
-    /*
-     * Only RCU locking since this list is only ever changed during apply
-     * or revert context. And in case it dies there we need an safe list.
-     */
-    rcu_read_lock(&rcu_applied_lock);
-    list_for_each_entry_rcu ( data, &applied_list, applied_list )
+    rcu_read_lock(&rcu_payload_lock);
+    list_for_each_entry_rcu ( data, &payload_list, list )
     {
         if ( (ptr >= data->rw_addr &&
               ptr < (data->rw_addr + data->rw_size)) ||
@@ -130,7 +127,7 @@ bool_t is_patch(const void *ptr)
         }
 
     }
-    rcu_read_unlock(&rcu_applied_lock);
+    rcu_read_unlock(&rcu_payload_lock);
 
     return r;
 }
@@ -166,12 +163,8 @@ static const char *cf_check livepatch_symbols_lookup(
     const void *va = (const void *)addr;
     const char *n = NULL;
 
-    /*
-     * Only RCU locking since this list is only ever changed during apply
-     * or revert context. And in case it dies there we need an safe list.
-     */
-    rcu_read_lock(&rcu_applied_lock);
-    list_for_each_entry_rcu ( data, &applied_list, applied_list )
+    rcu_read_lock(&rcu_payload_lock);
+    list_for_each_entry_rcu ( data, &payload_list, list )
     {
         if ( va < data->text_addr ||
              va >= (data->text_addr + data->text_size) )
@@ -200,7 +193,7 @@ static const char *cf_check livepatch_symbols_lookup(
         n = data->symtab[best].name;
         break;
     }
-    rcu_read_unlock(&rcu_applied_lock);
+    rcu_read_unlock(&rcu_payload_lock);
 
     return n;
 }
@@ -378,18 +371,21 @@ static int move_payload(struct payload *payload, struct livepatch_elf *elf)
 
             ASSERT(offset[i] != UINT_MAX);
 
-            elf->sec[i].load_addr = buf + offset[i];
+            buf += offset[i];
 
             /* Don't copy NOBITS - such as BSS. */
             if ( elf->sec[i].sec->sh_type != SHT_NOBITS )
             {
-                memcpy(elf->sec[i].load_addr, elf->sec[i].data,
+                memcpy(buf, elf->sec[i].addr,
                        elf->sec[i].sec->sh_size);
                 dprintk(XENLOG_DEBUG, LIVEPATCH "%s: Loaded %s at %p\n",
-                        elf->name, elf->sec[i].name, elf->sec[i].load_addr);
+                        elf->name, elf->sec[i].name, buf);
             }
             else
-                memset(elf->sec[i].load_addr, 0, elf->sec[i].sec->sh_size);
+                memset(buf, 0, elf->sec[i].sec->sh_size);
+
+            /* Update sec[] to refer to its final location. */
+            elf->sec[i].addr = buf;
         }
     }
 
@@ -452,22 +448,71 @@ static bool section_ok(const struct livepatch_elf *elf,
     return true;
 }
 
-static int xen_build_id_dep(const struct payload *payload)
+/* Parses build-id sections into the given destination. */
+static int parse_buildid(const struct livepatch_elf_sec *sec,
+                         struct livepatch_build_id *id)
 {
-    const void *id = NULL;
-    unsigned int len = 0;
+    const Elf_Note *n;
     int rc;
 
-    ASSERT(payload->xen_dep.len);
-    ASSERT(payload->xen_dep.p);
+    /* Presence of the sections is ensured by check_special_sections(). */
+    ASSERT(sec);
 
-    rc = xen_build_id(&id, &len);
+    n = sec->addr;
+
+    if ( sec->sec->sh_size <= sizeof(*n) )
+        return -EINVAL;
+
+    rc = xen_build_id_check(n, sec->sec->sh_size, &id->p, &id->len);
     if ( rc )
         return rc;
 
-    if ( payload->xen_dep.len != len || memcmp(id, payload->xen_dep.p, len) ) {
-        printk(XENLOG_ERR LIVEPATCH "%s: check against hypervisor build-id failed\n",
-               payload->name);
+    if ( !id->len || !id->p )
+        return -EINVAL;
+
+   return 0;
+}
+
+static int check_xen_buildid(const struct livepatch_elf *elf)
+{
+    const void *id;
+    unsigned int len;
+    struct livepatch_build_id lp_id;
+    const struct livepatch_elf_sec *sec =
+        livepatch_elf_sec_by_name(elf, ELF_LIVEPATCH_XEN_DEPENDS);
+    int rc;
+
+    if ( !sec )
+    {
+        printk(XENLOG_ERR LIVEPATCH "%s: section %s is missing\n",
+               elf->name, ELF_LIVEPATCH_XEN_DEPENDS);
+        return -EINVAL;
+    }
+
+    rc = parse_buildid(sec, &lp_id);
+    if ( rc )
+    {
+        printk(XENLOG_ERR LIVEPATCH
+               "%s: failed to parse section %s as build-id: %d\n",
+               elf->name, ELF_LIVEPATCH_XEN_DEPENDS, rc);
+        return -EINVAL;
+    }
+
+    rc = xen_build_id(&id, &len);
+    if ( rc )
+    {
+        printk(XENLOG_ERR LIVEPATCH
+               "%s: unable to get running Xen build-id: %d\n",
+               elf->name, rc);
+        return rc;
+    }
+
+    if ( lp_id.len != len || memcmp(id, lp_id.p, len) )
+    {
+        printk(XENLOG_ERR LIVEPATCH "%s: build-id mismatch:\n"
+                                    "  livepatch: %*phN\n"
+                                    "        xen: %*phN\n",
+               elf->name, lp_id.len, lp_id.p, len, id);
         return -EINVAL;
     }
 
@@ -478,9 +523,7 @@ static int check_special_sections(const struct livepatch_elf *elf)
 {
     unsigned int i;
     static const char *const names[] = { ELF_LIVEPATCH_DEPENDS,
-                                         ELF_LIVEPATCH_XEN_DEPENDS,
                                          ELF_BUILD_ID_NOTE};
-    DECLARE_BITMAP(found, ARRAY_SIZE(names)) = { 0 };
 
     for ( i = 0; i < ARRAY_SIZE(names); i++ )
     {
@@ -497,13 +540,6 @@ static int check_special_sections(const struct livepatch_elf *elf)
         if ( !sec->sec->sh_size )
         {
             printk(XENLOG_ERR LIVEPATCH "%s: %s is empty\n",
-                   elf->name, names[i]);
-            return -EINVAL;
-        }
-
-        if ( test_and_set_bit(i, found) )
-        {
-            printk(XENLOG_ERR LIVEPATCH "%s: %s was seen more than once\n",
                    elf->name, names[i]);
             return -EINVAL;
         }
@@ -524,7 +560,7 @@ static int check_patching_sections(const struct livepatch_elf *elf)
                                          ELF_LIVEPATCH_PREREVERT_HOOK,
                                          ELF_LIVEPATCH_REVERT_HOOK,
                                          ELF_LIVEPATCH_POSTREVERT_HOOK};
-    DECLARE_BITMAP(found, ARRAY_SIZE(names)) = { 0 };
+    bool found = false;
 
     /*
      * The patching sections are optional, but at least one
@@ -551,16 +587,11 @@ static int check_patching_sections(const struct livepatch_elf *elf)
             return -EINVAL;
         }
 
-        if ( test_and_set_bit(i, found) )
-        {
-            printk(XENLOG_ERR LIVEPATCH "%s: %s was seen more than once\n",
-                   elf->name, names[i]);
-            return -EINVAL;
-        }
+        found = true;
     }
 
     /* Checking if at least one section is present. */
-    if ( bitmap_empty(found, ARRAY_SIZE(names)) )
+    if ( !found )
     {
         printk(XENLOG_ERR LIVEPATCH "%s: Nothing to patch. Aborting...\n",
                elf->name);
@@ -636,7 +667,7 @@ static inline int livepatch_check_expectations(const struct payload *payload)
         break;                                                                            \
     if ( !section_ok(elf, __sec, sizeof(*hook)) || __sec->sec->sh_size != sizeof(*hook) ) \
         return -EINVAL;                                                                   \
-    hook = __sec->load_addr;                                                              \
+    hook = __sec->addr;                                                                   \
 } while (0)
 
 /*
@@ -650,7 +681,7 @@ static inline int livepatch_check_expectations(const struct payload *payload)
         break;                                                                            \
     if ( !section_ok(elf, __sec, sizeof(*hook)) )                                         \
         return -EINVAL;                                                                   \
-    hook = __sec->load_addr;                                                              \
+    hook = __sec->addr;                                                                   \
     nhooks = __sec->sec->sh_size / sizeof(*hook);                                         \
 } while (0)
 
@@ -658,11 +689,12 @@ static int prepare_payload(struct payload *payload,
                            struct livepatch_elf *elf)
 {
     const struct livepatch_elf_sec *sec;
+    const struct payload *data;
     unsigned int i;
     struct livepatch_func *funcs;
     struct livepatch_func *f;
     struct virtual_region *region;
-    const Elf_Note *n;
+    int rc;
 
     sec = livepatch_elf_sec_by_name(elf, ELF_LIVEPATCH_FUNC);
     if ( sec )
@@ -670,7 +702,7 @@ static int prepare_payload(struct payload *payload,
         if ( !section_ok(elf, sec, sizeof(*payload->funcs)) )
             return -EINVAL;
 
-        payload->funcs = funcs = sec->load_addr;
+        payload->funcs = funcs = sec->addr;
         payload->nfuncs = sec->sec->sh_size / sizeof(*payload->funcs);
 
         payload->fstate = xzalloc_array(typeof(*payload->fstate),
@@ -680,8 +712,6 @@ static int prepare_payload(struct payload *payload,
 
         for ( i = 0; i < payload->nfuncs; i++ )
         {
-            int rc;
-
             f = &(funcs[i]);
 
             if ( f->version != LIVEPATCH_PAYLOAD_VERSION )
@@ -724,76 +754,42 @@ static int prepare_payload(struct payload *payload,
     LIVEPATCH_ASSIGN_SINGLE_HOOK(elf, payload->hooks.revert.action, ELF_LIVEPATCH_REVERT_HOOK);
     LIVEPATCH_ASSIGN_SINGLE_HOOK(elf, payload->hooks.revert.post, ELF_LIVEPATCH_POSTREVERT_HOOK);
 
-    sec = livepatch_elf_sec_by_name(elf, ELF_BUILD_ID_NOTE);
-    if ( sec )
+    rc = parse_buildid(livepatch_elf_sec_by_name(elf, ELF_BUILD_ID_NOTE),
+                       &payload->id);
+    if ( rc )
+        return rc;
+
+    /* Make sure it is not a duplicate. */
+    list_for_each_entry ( data, &payload_list, list )
     {
-        const struct payload *data;
-
-        n = sec->load_addr;
-
-        if ( sec->sec->sh_size <= sizeof(*n) )
-            return -EINVAL;
-
-        if ( xen_build_id_check(n, sec->sec->sh_size,
-                                &payload->id.p, &payload->id.len) )
-            return -EINVAL;
-
-        if ( !payload->id.len || !payload->id.p )
-            return -EINVAL;
-
-        /* Make sure it is not a duplicate. */
-        list_for_each_entry ( data, &payload_list, list )
+        /* No way _this_ payload is on the list. */
+        ASSERT(data != payload);
+        if ( data->id.len == payload->id.len &&
+             !memcmp(data->id.p, payload->id.p, data->id.len) )
         {
-            /* No way _this_ payload is on the list. */
-            ASSERT(data != payload);
-            if ( data->id.len == payload->id.len &&
-                 !memcmp(data->id.p, payload->id.p, data->id.len) )
-            {
-                dprintk(XENLOG_DEBUG, LIVEPATCH "%s: Already loaded as %s!\n",
-                        elf->name, data->name);
-                return -EEXIST;
-            }
+            dprintk(XENLOG_DEBUG, LIVEPATCH "%s: Already loaded as %s!\n",
+                    elf->name, data->name);
+            return -EEXIST;
         }
     }
 
-    sec = livepatch_elf_sec_by_name(elf, ELF_LIVEPATCH_DEPENDS);
-    if ( sec )
-    {
-        n = sec->load_addr;
-
-        if ( sec->sec->sh_size <= sizeof(*n) )
-            return -EINVAL;
-
-        if ( xen_build_id_check(n, sec->sec->sh_size,
-                                &payload->dep.p, &payload->dep.len) )
-            return -EINVAL;
-
-        if ( !payload->dep.len || !payload->dep.p )
-            return -EINVAL;
-    }
-
-    sec = livepatch_elf_sec_by_name(elf, ELF_LIVEPATCH_XEN_DEPENDS);
-    if ( sec )
-    {
-        n = sec->load_addr;
-
-        if ( sec->sec->sh_size <= sizeof(*n) )
-            return -EINVAL;
-
-        if ( xen_build_id_check(n, sec->sec->sh_size,
-                                &payload->xen_dep.p, &payload->xen_dep.len) )
-            return -EINVAL;
-
-        if ( !payload->xen_dep.len || !payload->xen_dep.p )
-            return -EINVAL;
-    }
+    rc = parse_buildid(livepatch_elf_sec_by_name(elf, ELF_LIVEPATCH_DEPENDS),
+                       &payload->dep);
+    if ( rc )
+        return rc;
 
     /* Setup the virtual region with proper data. */
     region = &payload->region;
 
     region->symbols_lookup = livepatch_symbols_lookup;
-    region->start = payload->text_addr;
-    region->end = payload->text_addr + payload->text_size;
+    region->text_start = payload->text_addr;
+    region->text_end = payload->text_addr + payload->text_size;
+
+    if ( payload->ro_size )
+    {
+        region->rodata_start = payload->ro_addr;
+        region->rodata_end = payload->ro_addr + payload->ro_size;
+    }
 
     /* Optional sections. */
     for ( i = 0; i < BUGFRAME_NR; i++ )
@@ -805,40 +801,103 @@ static int prepare_payload(struct payload *payload,
         if ( !sec )
             continue;
 
-        if ( !section_ok(elf, sec, sizeof(*region->frame[i].bugs)) )
+        if ( !section_ok(elf, sec, sizeof(*region->frame[i].start)) )
             return -EINVAL;
 
-        region->frame[i].bugs = sec->load_addr;
-        region->frame[i].n_bugs = sec->sec->sh_size /
-                                  sizeof(*region->frame[i].bugs);
+        region->frame[i].start = sec->addr;
+        region->frame[i].stop  = sec->addr + sec->sec->sh_size;
     }
 
     sec = livepatch_elf_sec_by_name(elf, ".altinstructions");
     if ( sec )
     {
 #ifdef CONFIG_HAS_ALTERNATIVE
+        /*
+         * (As of April 2023), Alternatives are formed of:
+         * - An .altinstructions section with an array of struct alt_instr's.
+         * - An .altinstr_replacement section containing instructions.
+         *
+         * An individual alt_instr contains:
+         * - An orig reference, pointing into .text with a nonzero length
+         * - A repl reference, pointing into .altinstr_replacement
+         *
+         * It is legal to have zero-length replacements, meaning it is legal
+         * for the .altinstr_replacement section to be empty too.  An
+         * implementation detail means that a zero-length replacement's repl
+         * reference will still be in the .altinstr_replacement section.
+         */
+        const struct livepatch_elf_sec *repl_sec;
         struct alt_instr *a, *start, *end;
 
         if ( !section_ok(elf, sec, sizeof(*a)) )
             return -EINVAL;
 
-        start = sec->load_addr;
-        end = sec->load_addr + sec->sec->sh_size;
+        /* Tolerate an empty .altinstructions section... */
+        if ( sec->sec->sh_size == 0 )
+            goto alt_done;
+
+        /* ... but otherwise, there needs to be something to alter... */
+        if ( payload->text_size == 0 )
+        {
+            printk(XENLOG_ERR LIVEPATCH "%s Alternatives provided, but no .text\n",
+                   elf->name);
+            return -EINVAL;
+        }
+
+        /* ... and something to be altered to. */
+        repl_sec = livepatch_elf_sec_by_name(elf, ".altinstr_replacement");
+        if ( !repl_sec )
+        {
+            printk(XENLOG_ERR LIVEPATCH "%s .altinstructions provided, but no .altinstr_replacement\n",
+                   elf->name);
+            return -EINVAL;
+        }
+
+        start = sec->addr;
+        end = sec->addr + sec->sec->sh_size;
 
         for ( a = start; a < end; a++ )
         {
-            const void *instr = ALT_ORIG_PTR(a);
-            const void *replacement = ALT_REPL_PTR(a);
+            const void *orig = ALT_ORIG_PTR(a);
+            const void *repl = ALT_REPL_PTR(a);
 
-            if ( (instr < region->start && instr >= region->end) ||
-                 (replacement < region->start && replacement >= region->end) )
+            /* orig must be fully within .text. */
+            if ( orig               < payload->text_addr ||
+                 a->orig_len        > payload->text_size ||
+                 orig + a->orig_len > payload->text_addr + payload->text_size )
             {
-                printk(XENLOG_ERR LIVEPATCH "%s Alt patching outside payload: %p\n",
-                       elf->name, instr);
+                printk(XENLOG_ERR LIVEPATCH
+                       "%s Alternative orig %p+%#x outside payload text %p+%#zx\n",
+                       elf->name, orig, a->orig_len,
+                       payload->text_addr, payload->text_size);
+                return -EINVAL;
+            }
+
+            /*
+             * repl must be fully within .altinstr_replacement, even if the
+             * replacement and the section happen to both have zero length.
+             */
+            if ( repl               < repl_sec->addr ||
+                 a->repl_len        > repl_sec->sec->sh_size ||
+                 repl + a->repl_len > repl_sec->addr + repl_sec->sec->sh_size )
+            {
+                printk(XENLOG_ERR LIVEPATCH
+                       "%s Alternative repl %p+%#x outside .altinstr_replacement %p+%#"PRIxElfWord"\n",
+                       elf->name, repl, a->repl_len,
+                       repl_sec->addr, repl_sec->sec->sh_size);
                 return -EINVAL;
             }
         }
-        apply_alternatives(start, end);
+
+        rc = apply_alternatives(start, end);
+        if ( rc )
+        {
+            printk(XENLOG_ERR LIVEPATCH "%s applying alternatives failed: %d\n",
+                   elf->name, rc);
+            return rc;
+        }
+
+    alt_done:;
 #else
         printk(XENLOG_ERR LIVEPATCH "%s: We don't support alternative patching\n",
                elf->name);
@@ -855,8 +914,8 @@ static int prepare_payload(struct payload *payload,
         if ( !section_ok(elf, sec, sizeof(*region->ex)) )
             return -EINVAL;
 
-        s = sec->load_addr;
-        e = sec->load_addr + sec->sec->sh_size;
+        s = sec->addr;
+        e = sec->addr + sec->sec->sh_size;
 
         sort_exception_table(s ,e);
 
@@ -875,7 +934,7 @@ static int prepare_payload(struct payload *payload,
         if ( !section_ok(elf, sec, sizeof(*payload->metadata.data)) )
             return -EINVAL;
 
-        payload->metadata.data = sec->load_addr;
+        payload->metadata.data = sec->addr;
         payload->metadata.len = sec->sec->sh_size;
 
         /* The metadata is required to consists of null terminated strings. */
@@ -889,8 +948,8 @@ static int prepare_payload(struct payload *payload,
     return 0;
 }
 
-static bool_t is_payload_symbol(const struct livepatch_elf *elf,
-                                const struct livepatch_elf_sym *sym)
+static bool is_payload_symbol(const struct livepatch_elf *elf,
+                              const struct livepatch_elf_sym *sym)
 {
     if ( sym->sym->st_shndx == SHN_UNDEF ||
          sym->sym->st_shndx >= elf->hdr->e_shnum )
@@ -971,7 +1030,7 @@ static int build_symbol_table(struct payload *payload,
 
     for ( i = 0; i < nsyms; i++ )
     {
-        bool_t found = 0;
+        bool found = 0;
 
         for ( j = 0; j < payload->nfuncs; j++ )
         {
@@ -1015,7 +1074,9 @@ static int build_symbol_table(struct payload *payload,
 static void free_payload(struct payload *data)
 {
     ASSERT(spin_is_locked(&payload_lock));
-    list_del(&data->list);
+    unregister_virtual_region(&data->region);
+    list_del_rcu(&data->list);
+    rcu_barrier();
     payload_cnt--;
     payload_version++;
     free_payload_data(data);
@@ -1032,6 +1093,10 @@ static int load_payload_data(struct payload *payload, void *raw, size_t len)
     rc = livepatch_elf_load(&elf, raw);
     if ( rc )
         goto out;
+
+    rc = check_xen_buildid(&elf);
+    if ( rc )
+       goto out;
 
     rc = move_payload(payload, &elf);
     if ( rc )
@@ -1054,10 +1119,6 @@ static int load_payload_data(struct payload *payload, void *raw, size_t len)
         goto out;
 
     rc = prepare_payload(payload, &elf);
-    if ( rc )
-        goto out;
-
-    rc = xen_build_id_dep(payload);
     if ( rc )
         goto out;
 
@@ -1114,7 +1175,8 @@ static int livepatch_upload(struct xen_sysctl_livepatch_upload *upload)
         INIT_LIST_HEAD(&data->list);
         INIT_LIST_HEAD(&data->applied_list);
 
-        list_add_tail(&data->list, &payload_list);
+        register_virtual_region(&data->region);
+        list_add_tail_rcu(&data->list, &payload_list);
         payload_cnt++;
         payload_version++;
     }
@@ -1195,7 +1257,7 @@ static int livepatch_list(struct xen_sysctl_livepatch_list *list)
     list->metadata_total_size = 0;
     if ( list->nr )
     {
-        uint64_t name_offset = 0, metadata_offset = 0;
+        size_t name_offset = 0, metadata_offset = 0;
 
         list_for_each_entry( data, &payload_list, list )
         {
@@ -1314,7 +1376,22 @@ static int apply_payload(struct payload *data)
     ASSERT(!local_irq_is_enabled());
 
     for ( i = 0; i < data->nfuncs; i++ )
-        common_livepatch_apply(&data->funcs[i], &data->fstate[i]);
+    {
+        const struct livepatch_func *func = &data->funcs[i];
+        struct livepatch_fstate *state = &data->fstate[i];
+
+        /* If the action has been already executed on this function, do nothing. */
+        if ( state->applied == LIVEPATCH_FUNC_APPLIED )
+        {
+            printk(XENLOG_WARNING LIVEPATCH
+                   "%s: %s has been already applied before\n",
+                   __func__, func->name);
+            continue;
+        }
+
+        arch_livepatch_apply(func, state);
+        state->applied = LIVEPATCH_FUNC_APPLIED;
+    }
 
     arch_livepatch_revive();
 
@@ -1325,17 +1402,12 @@ static int apply_payload(struct payload *data)
 
 static inline void apply_payload_tail(struct payload *data)
 {
-    /*
-     * We need RCU variant (which has barriers) in case we crash here.
-     * The applied_list is iterated by the trap code.
-     */
-    list_add_tail_rcu(&data->applied_list, &applied_list);
-    register_virtual_region(&data->region);
+    list_add_tail(&data->applied_list, &applied_list);
 
     data->state = LIVEPATCH_STATE_APPLIED;
 }
 
-static int revert_payload(struct payload *data)
+int revert_payload(struct payload *data)
 {
     unsigned int i;
     int rc;
@@ -1350,7 +1422,25 @@ static int revert_payload(struct payload *data)
     }
 
     for ( i = 0; i < data->nfuncs; i++ )
-        common_livepatch_revert(&data->funcs[i], &data->fstate[i]);
+    {
+        const struct livepatch_func *func = &data->funcs[i];
+        struct livepatch_fstate *state = &data->fstate[i];
+
+        /*
+         * If the apply action hasn't been executed on this function, do
+         * nothing.
+         */
+        if ( !func->old_addr || state->applied == LIVEPATCH_FUNC_NOT_APPLIED )
+        {
+            printk(XENLOG_WARNING LIVEPATCH
+                   "%s: %s has not been applied before\n",
+                   __func__, func->name);
+            continue;
+        }
+
+        arch_livepatch_revert(func, state);
+        state->applied = LIVEPATCH_FUNC_NOT_APPLIED;
+    }
 
     /*
      * Since we are running with IRQs disabled and the hooks may call common
@@ -1368,15 +1458,9 @@ static int revert_payload(struct payload *data)
     return 0;
 }
 
-static inline void revert_payload_tail(struct payload *data)
+void revert_payload_tail(struct payload *data)
 {
-
-    /*
-     * We need RCU variant (which has barriers) in case we crash here.
-     * The applied_list is iterated by the trap code.
-     */
-    list_del_rcu(&data->applied_list);
-    unregister_virtual_region(&data->region);
+    list_del(&data->applied_list);
 
     data->reverted = true;
     data->state = LIVEPATCH_STATE_CHECKED;
@@ -1530,7 +1614,7 @@ static void livepatch_do_action(void)
     data->rc = rc;
 }
 
-static bool_t is_work_scheduled(const struct payload *data)
+static bool is_work_scheduled(const struct payload *data)
 {
     ASSERT(spin_is_locked(&payload_lock));
 
@@ -1637,7 +1721,7 @@ static int livepatch_spin(atomic_t *counter, s_time_t timeout,
  * The main function which manages the work of quiescing the system and
  * patching code.
  */
-void check_for_livepatch_work(void)
+static void noinline do_livepatch_work(void)
 {
 #define ACTION(x) [LIVEPATCH_ACTION_##x] = #x
     static const char *const names[] = {
@@ -1653,10 +1737,6 @@ void check_for_livepatch_work(void)
     /* Only do any work when invoked in truly idle state. */
     if ( system_state != SYS_STATE_active ||
          !is_idle_domain(current->sched_unit->domain) )
-        return;
-
-    /* Fast path: no work to do. */
-    if ( !per_cpu(work_to_do, cpu ) )
         return;
 
     smp_rmb();
@@ -1808,6 +1888,17 @@ void check_for_livepatch_work(void)
     }
 }
 
+void check_for_livepatch_work(void)
+{
+    unsigned int cpu = smp_processor_id();
+
+    /* Fast path: no work to do. */
+    if ( likely(!per_cpu(work_to_do, cpu)) )
+        return;
+
+    do_livepatch_work();
+}
+
 /*
  * Only allow dependent payload is applied on top of the correct
  * build-id.
@@ -1818,7 +1909,7 @@ void check_for_livepatch_work(void)
  * Unless the 'internal' parameter is used - in which case we only
  * check against the hypervisor.
  */
-static int build_id_dep(struct payload *payload, bool_t internal)
+static int build_id_dep(struct payload *payload, bool internal)
 {
     const void *id = NULL;
     unsigned int len = 0;
@@ -2039,7 +2130,8 @@ int livepatch_op(struct xen_sysctl_livepatch_op *livepatch)
 {
     int rc;
 
-    if ( livepatch->pad )
+    if ( (livepatch->flags & ~LIVEPATCH_FLAGS_MASK) &&
+         !(livepatch->flags & LIVEPATCH_FLAG_FORCE) )
         return -EINVAL;
 
     switch ( livepatch->cmd )
@@ -2132,9 +2224,6 @@ static void cf_check livepatch_printall(unsigned char key)
 
         if ( data->dep.len )
             printk("depend-on=%*phN\n", data->dep.len, data->dep.p);
-
-        if ( data->xen_dep.len )
-            printk("depend-on-xen=%*phN\n", data->xen_dep.len, data->xen_dep.p);
     }
 
     spin_unlock(&payload_lock);

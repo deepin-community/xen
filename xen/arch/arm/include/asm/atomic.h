@@ -78,6 +78,7 @@ static always_inline void read_atomic_size(const volatile void *p,
                                            void *res,
                                            unsigned int size)
 {
+    ASSERT(IS_ALIGNED((vaddr_t)p, size));
     switch ( size )
     {
     case 1:
@@ -102,6 +103,7 @@ static always_inline void write_atomic_size(volatile void *p,
                                             void *val,
                                             unsigned int size)
 {
+    ASSERT(IS_ALIGNED((vaddr_t)p, size));
     switch ( size )
     {
     case 1:
@@ -152,7 +154,7 @@ static always_inline void write_atomic_size(volatile void *p,
  */
 static inline int atomic_read(const atomic_t *v)
 {
-    return *(volatile int *)&v->counter;
+    return *(const volatile int *)&v->counter;
 }
 
 static inline int _atomic_read(atomic_t v)

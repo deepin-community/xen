@@ -21,7 +21,7 @@ class State(object):
         self.names = {}  # Value => Name mapping
         self.values = {} # Name => Value mapping
         self.raw = {
-            '!': set(),
+            '!': set(), '|': set(),
             'A': set(), 'S': set(), 'H': set(),
             'a': set(), 's': set(), 'h': set(),
         }
@@ -47,11 +47,11 @@ def parse_definitions(state):
     """
     feat_regex = re.compile(
         r"^XEN_CPUFEATURE\(([A-Z0-9_]+),"
-        "\s+([\s\d]+\*[\s\d]+\+[\s\d]+)\)"
-        "\s+/\*([\w!]*) .*$")
+        r"\s+([\s\d]+\*[\s\d]+\+[\s\d]+)\)"
+        r"\s+/\*([\w!|]*) .*$")
 
     word_regex = re.compile(
-        r"^/\* .* word (\d*) \*/$")
+        r"^/\* .* word (\d*) .*\*/$")
     last_word = -1
 
     this = sys.modules[__name__]
@@ -168,6 +168,10 @@ def crunch_numbers(state):
     state.hvm_shadow_max = state.pv_max         | state.raw['S'] | state.raw['s']
     state.hvm_hap_max =    state.hvm_shadow_max | state.raw['H'] | state.raw['h']
 
+    def feat_range(start, last):
+        """ Select all known features in the given range """
+        return [ x for x in state.names.keys() if start <= x <= last ]
+
     #
     # Feature dependency information.
     #
@@ -252,7 +256,7 @@ def crunch_numbers(state):
         # instruction groups which are specified to require XSAVE for state
         # management.
         XSAVE: [XSAVEOPT, XSAVEC, XGETBV1, XSAVES,
-                AVX, MPX, PKU, LWP],
+                AVX, MPX, PKU, AMX_TILE, LWP],
 
         # AVX is taken to mean hardware support for 256bit registers (which in
         # practice depends on the VEX prefix to encode), and the instructions
@@ -262,7 +266,7 @@ def crunch_numbers(state):
         # for the XOP prefix).  VEX/XOP-encoded GPR instructions, such as
         # those from the BMI{1,2}, TBM and LWP sets function fine in the
         # absence of any enabled xstate.
-        AVX: [FMA, FMA4, F16C, AVX2, XOP],
+        AVX: [FMA, FMA4, F16C, AVX2, XOP, AVX_NE_CONVERT, SM3],
 
         # This dependency exists solely for the shadow pagetable code.  If the
         # host doesn't have NX support, the shadow pagetable code can't handle
@@ -274,7 +278,7 @@ def crunch_numbers(state):
         # superpages, PCID and PKU are only available in 4 level paging.
         # NO_LMSL indicates the absense of Long Mode Segment Limits, which
         # have been dropped in hardware.
-        LM: [CX16, PCID, LAHF_LM, PAGE1GB, PKU, NO_LMSL],
+        LM: [CX16, PCID, LAHF_LM, PAGE1GB, PKU, NO_LMSL, AMX_TILE, CMPCCXADD],
 
         # AMD K6-2+ and K6-III processors shipped with 3DNow+, beyond the
         # standard 3DNow in the earlier K6 processors.
@@ -284,7 +288,8 @@ def crunch_numbers(state):
         # feature flags.  If want to use AVX512, AVX2 must be supported and
         # enabled.  Certain later extensions, acting on 256-bit vectors of
         # integers, better depend on AVX2 than AVX.
-        AVX2: [AVX512F, VAES, VPCLMULQDQ, AVX_VNNI],
+        AVX2: [AVX512F, VAES, VPCLMULQDQ, AVX_VNNI, AVX_IFMA, AVX_VNNI_INT8,
+               AVX_VNNI_INT16, SHA512, SM4],
 
         # AVX512F is taken to mean hardware support for 512bit registers
         # (which in practice depends on the EVEX prefix to encode) as well
@@ -318,8 +323,9 @@ def crunch_numbers(state):
         # IBRSB/IBRS, and we pass this MSR directly to guests.  Treating them
         # as dependent features simplifies Xen's logic, and prevents the guest
         # from seeing implausible configurations.
-        IBRSB: [STIBP, SSBD, INTEL_PSFD, EIBRS],
-        IBRS: [AMD_STIBP, AMD_SSBD, PSFD,
+        IBRSB: [STIBP, SSBD, INTEL_PSFD, EIBRS,
+                IPRED_CTRL, RRSBA_CTRL, BHI_CTRL],
+        IBRS: [AMD_STIBP, AMD_SSBD, PSFD, AUTO_IBRS,
                IBRS_ALWAYS, IBRS_FAST, IBRS_SAME_MODE],
         IBPB: [IBPB_RET, SBPB, IBPB_BRTYPE],
         AMD_STIBP: [STIBP_ALWAYS],
@@ -327,11 +333,20 @@ def crunch_numbers(state):
         # In principle the TSXLDTRK insns could also be considered independent.
         RTM: [TSXLDTRK],
 
+        # Enhanced Predictive Store-Forwarding is a informational note on top
+        # of PSF.
+        PSFD: [EPSF],
+
         # The ARCH_CAPS CPUID bit enumerates the availability of the whole register.
-        ARCH_CAPS: list(range(RDCL_NO, RDCL_NO + 64)),
+        ARCH_CAPS: feat_range(RDCL_NO, RDCL_NO + 63),
 
         # The behaviour described by RRSBA depend on eIBRS being active.
         EIBRS: [RRSBA],
+
+        # AMX-TILE means hardware support for tile registers and general non-
+        # computational instructions.  All further AMX features are built on top
+        # of AMX-TILE.
+        AMX_TILE: [AMX_BF16, AMX_INT8, AMX_FP16, AMX_COMPLEX],
     }
 
     deep_features = tuple(sorted(deps.keys()))
@@ -339,7 +354,7 @@ def crunch_numbers(state):
 
     for feat in deep_features:
 
-        seen = [feat]
+        seen = []
         to_process = list(deps[feat])
 
         while len(to_process):
@@ -347,25 +362,28 @@ def crunch_numbers(state):
             # To debug, uncomment the following lines:
             # def repl(l):
             #     return "[" + ", ".join((state.names[x] for x in l)) + "]"
-            # sys.stderr.write("Feature %s, seen %s, to_process %s \n" % \
+            # sys.stderr.write("Feature %s, seen %s, to_process %s\n" %
             #     (state.names[feat], repl(seen), repl(to_process)))
 
             f = to_process.pop(0)
 
+            if f == feat:
+                raise Fail("ERROR: Cycle found when processing %s" %
+                           (state.names[f], ))
+
             if f in seen:
-                raise Fail("ERROR: Cycle found with %s when processing %s"
-                           % (state.names[f], state.names[feat]))
+                continue
 
             seen.append(f)
             to_process = list(set(to_process + deps.get(f, [])))
 
-        state.deep_deps[feat] = seen[1:]
+        state.deep_deps[feat] = seen
 
     state.deep_features = deps.keys()
     state.nr_deep_deps = len(state.deep_deps.keys())
 
-    # Calculate the bitfield name declarations
-    for word in range(state.nr_entries):
+    # Calculate the bitfield name declarations.  Leave 4 placeholders on the end
+    for word in range(state.nr_entries + 4):
 
         names = []
         for bit in range(32):
@@ -383,7 +401,10 @@ def crunch_numbers(state):
 
             names.append(name.lower())
 
-        state.bitfields.append("bool " + ":1, ".join(names) + ":1")
+        if any(names):
+            state.bitfields.append("bool " + ":1, ".join(names) + ":1")
+        else:
+            state.bitfields.append("uint32_t _placeholder_%u" % (word, ))
 
 
 def write_results(state):
@@ -406,6 +427,8 @@ def write_results(state):
 
 #define INIT_SPECIAL_FEATURES { \\\n%s\n}
 
+#define INIT_SIMPLE_OR { \\\n%s\n}
+
 #define INIT_PV_DEF_FEATURES { \\\n%s\n}
 
 #define INIT_PV_MAX_FEATURES { \\\n%s\n}
@@ -427,6 +450,7 @@ def write_results(state):
        next(featureset_to_uint32s(state.common_1d, 1)),
        format_uint32s(state, state.names.keys(), 4),
        format_uint32s(state, state.raw['!'], 4),
+       format_uint32s(state, state.raw['|'], 4),
        format_uint32s(state, state.pv_def, 4),
        format_uint32s(state, state.pv_max, 4),
        format_uint32s(state, state.hvm_shadow_def, 4),
@@ -447,15 +471,10 @@ def write_results(state):
     state.output.write(
 """}
 
-#define INIT_FEATURE_NAMES { \\
+#define INIT_FEATURE_NAME_TO_VAL { \\
 """)
 
-    try:
-        _tmp = state.values.iteritems()
-    except AttributeError:
-        _tmp = state.values.items()
-
-    for name, bit in sorted(_tmp):
+    for name, bit in sorted(state.values.items()):
         state.output.write(
             '    { "%s", %sU },\\\n' % (name, bit)
             )
@@ -465,7 +484,34 @@ def write_results(state):
 
 """)
 
-    state.bitfields += ["uint32_t :32 /* placeholder */"] * 4
+    state.output.write(
+"""
+#define INIT_FEATURE_VAL_TO_NAME { \\
+""")
+
+    for name, bit in sorted(state.values.items()):
+        state.output.write(
+            '    [%s] = "%s",\\\n' % (bit, name)
+            )
+
+        # Add the other alias for 1d/e1d common bits.  64 is the difference
+        # between 1d and e1d.
+        if bit in state.common_1d:
+            state.output.write(
+                '    [%s] = "%s",\\\n' % (64 + bit, name)
+            )
+
+    # Pad to an exact multiple of FEATURESET_SIZE if necessary
+    pad_feat = state.nr_entries * 32 - 1
+    if not state.names.get(pad_feat):
+        state.output.write(
+            '    [%s] = NULL,\\\n' % (pad_feat, )
+        )
+
+    state.output.write(
+"""}
+
+""")
 
     for idx, text in enumerate(state.bitfields):
         state.output.write(

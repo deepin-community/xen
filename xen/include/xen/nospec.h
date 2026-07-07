@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0-only */
 /* Copyright(c) 2018 Linus Torvalds. All rights reserved. */
 /* Copyright(c) 2018 Alexei Starovoitov. All rights reserved. */
 /* Copyright(c) 2018 Intel Corporation. All rights reserved. */
@@ -7,7 +7,8 @@
 #ifndef XEN_NOSPEC_H
 #define XEN_NOSPEC_H
 
-#include <asm/system.h>
+#include <xen/stdbool.h>
+
 #include <asm/nospec.h>
 
 /**
@@ -69,6 +70,22 @@ static inline unsigned long array_index_mask_nospec(unsigned long index,
  */
 #define array_access_nospec(array, index)                               \
     (array)[array_index_nospec(index, ARRAY_SIZE(array))]
+
+static always_inline void block_lock_speculation(void)
+{
+#ifdef CONFIG_SPECULATIVE_HARDEN_LOCK
+    arch_block_lock_speculation();
+#endif
+}
+
+static always_inline bool lock_evaluate_nospec(bool condition)
+{
+#ifdef CONFIG_SPECULATIVE_HARDEN_LOCK
+    return arch_lock_evaluate_nospec(condition);
+#else
+    return condition;
+#endif
+}
 
 #endif /* XEN_NOSPEC_H */
 

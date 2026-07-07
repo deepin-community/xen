@@ -48,8 +48,11 @@
 #define  PCI_COMMAND_SERR	0x100	/* Enable SERR */
 #define  PCI_COMMAND_FAST_BACK	0x200	/* Enable back-to-back writes */
 #define  PCI_COMMAND_INTX_DISABLE 0x400 /* INTx Emulation Disable */
+#define  PCI_COMMAND_RSVDP_MASK	0xf800
 
 #define PCI_STATUS		0x06	/* 16 bits */
+#define  PCI_STATUS_IMM_READY	0x01	/* Immediate Readiness */
+#define  PCI_STATUS_INTERRUPT	0x08	/* Interrupt status */
 #define  PCI_STATUS_CAP_LIST	0x10	/* Support Capability List */
 #define  PCI_STATUS_66MHZ	0x20	/* Support 66 Mhz PCI 2.1 bus */
 #define  PCI_STATUS_UDF		0x40	/* Support User Definable Features [obsolete] */
@@ -64,6 +67,15 @@
 #define  PCI_STATUS_REC_MASTER_ABORT	0x2000 /* Set on master abort */
 #define  PCI_STATUS_SIG_SYSTEM_ERROR	0x4000 /* Set when we drive SERR */
 #define  PCI_STATUS_DETECTED_PARITY	0x8000 /* Set on parity error */
+#define  PCI_STATUS_RSVDZ_MASK		0x0046 /* Includes PCI_STATUS_UDF */
+
+#define  PCI_STATUS_RO_MASK (PCI_STATUS_IMM_READY | PCI_STATUS_INTERRUPT | \
+    PCI_STATUS_CAP_LIST | PCI_STATUS_66MHZ | PCI_STATUS_FAST_BACK | \
+    PCI_STATUS_DEVSEL_MASK)
+#define  PCI_STATUS_RW1C_MASK (PCI_STATUS_PARITY | \
+    PCI_STATUS_SIG_TARGET_ABORT | PCI_STATUS_REC_TARGET_ABORT | \
+    PCI_STATUS_REC_MASTER_ABORT | PCI_STATUS_SIG_SYSTEM_ERROR | \
+    PCI_STATUS_DETECTED_PARITY)
 
 #define PCI_CLASS_REVISION	0x08	/* High 24 bits are class, low 8 revision */
 #define PCI_REVISION_ID		0x08	/* Revision ID */
@@ -246,13 +258,13 @@
 #define  PCI_PM_CTRL_STATE_MASK	0x0003	/* Current power state (D0 to D3) */
 #define  PCI_PM_CTRL_NO_SOFT_RESET	0x0008	/* No reset for D3hot->D0 */
 #define  PCI_PM_CTRL_PME_ENABLE	0x0100	/* PME pin enable */
-#define  PCI_PM_CTRL_DATA_SEL_MASK	0x1e00	/* Data select (??) */
-#define  PCI_PM_CTRL_DATA_SCALE_MASK	0x6000	/* Data scale (??) */
+#define  PCI_PM_CTRL_DATA_SEL_MASK	0x1e00	/* Data select (?) */
+#define  PCI_PM_CTRL_DATA_SCALE_MASK	0x6000	/* Data scale (?) */
 #define  PCI_PM_CTRL_PME_STATUS	0x8000	/* PME pin status */
-#define PCI_PM_PPB_EXTENSIONS	6	/* PPB support extensions (??) */
-#define  PCI_PM_PPB_B2_B3	0x40	/* Stop clock when in D3hot (??) */
-#define  PCI_PM_BPCC_ENABLE	0x80	/* Bus power/clock control enable (??) */
-#define PCI_PM_DATA_REGISTER	7	/* (??) */
+#define PCI_PM_PPB_EXTENSIONS	6	/* PPB support extensions (?) */
+#define  PCI_PM_PPB_B2_B3	0x40	/* Stop clock when in D3hot (?) */
+#define  PCI_PM_BPCC_ENABLE	0x80	/* Bus power/clock control enable (?) */
+#define PCI_PM_DATA_REGISTER	7	/* (?) */
 #define PCI_PM_SIZEOF		8
 
 /* AGP registers */
@@ -434,9 +446,9 @@
 #define PCI_EXP_RTSTA		32	/* Root Status */
 
 /* Extended Capabilities (PCI-X 2.0 and Express) */
-#define PCI_EXT_CAP_ID(header)		(header & 0x0000ffff)
-#define PCI_EXT_CAP_VER(header)		((header >> 16) & 0xf)
-#define PCI_EXT_CAP_NEXT(header)	((header >> 20) & 0xffc)
+#define PCI_EXT_CAP_ID(header)		((header) & 0x0000ffff)
+#define PCI_EXT_CAP_VER(header)		(((header) >> 16) & 0xf)
+#define PCI_EXT_CAP_NEXT(header)	(((header) >> 20) & 0xffc)
 
 #define PCI_EXT_CAP_ID_ERR	1
 #define PCI_EXT_CAP_ID_VC	2

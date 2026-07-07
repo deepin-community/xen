@@ -8,7 +8,17 @@
 #include <asm/processor.h>
 #include <asm/msr-index.h>
 #include <asm/cpufeature.h>
+#include <asm/trampoline.h>
+
 #include <public/elfnote.h>
+
+#define ENTRY(name)                             \
+  .align CONFIG_FUNCTION_ALIGNMENT, CODE_FILL;  \
+  GLOBAL(name)
+#define GLOBAL(name)                            \
+  .globl name;                                  \
+  .hidden name;                                 \
+  name:
 
         .section .text.header, "ax", @progbits
         .code32
@@ -24,6 +34,8 @@
 
 #define MB2_HT(name)      (MULTIBOOT2_HEADER_TAG_##name)
 #define MB2_TT(name)      (MULTIBOOT2_TAG_TYPE_##name)
+
+#define XEN_HVM_START_MAGIC_VALUE 0x336ec578
 
         .macro mb2ht_args arg:req, args:vararg
         .long \arg
@@ -119,10 +131,9 @@ multiboot2_header:
 .Lbad_cpu_msg: .asciz "ERR: Not a 64-bit CPU!"
 .Lbad_ldr_msg: .asciz "ERR: Not a Multiboot bootloader!"
 .Lbad_ldr_nbs: .asciz "ERR: Bootloader shutdown EFI x64 boot services!"
-.Lbad_ldr_nst: .asciz "ERR: EFI SystemTable is not provided by bootloader!"
-.Lbad_ldr_nih: .asciz "ERR: EFI ImageHandle is not provided by bootloader!"
 .Lbad_efi_msg: .asciz "ERR: EFI IA-32 platforms are not supported!"
-.Lbad_alg_msg: .asciz "ERR: Xen must be loaded at a 2Mb boundary!"
+.Lbag_alg_msg: .asciz "ERR: Xen must be loaded at a 2Mb boundary!"
+.Lno_nx_msg:   .asciz "ERR: Not an NX-capable CPU!"
 
         .section .init.data, "aw", @progbits
         .align 4
@@ -142,26 +153,22 @@ efi_platform:
 
         .section .init.text, "ax", @progbits
 
-bad_cpu:
+early_error: /* Here to improve the disassembly. */
+
+.Lbad_cpu:
         mov     $sym_offs(.Lbad_cpu_msg), %ecx
         jmp     .Lget_vtb
-not_multiboot:
+.Lnot_multiboot:
         mov     $sym_offs(.Lbad_ldr_msg), %ecx
         jmp     .Lget_vtb
 .Lnot_aligned:
-        mov     $sym_offs(.Lbad_alg_msg), %ecx
+        mov     $sym_offs(.Lbag_alg_msg), %ecx
         jmp     .Lget_vtb
-.Lmb2_no_st:
-        /*
-         * Here we are on EFI platform. vga_text_buffer was zapped earlier
-         * because there is pretty good chance that VGA is unavailable.
-         */
-        mov     $sym_offs(.Lbad_ldr_nst), %ecx
+#ifdef CONFIG_REQUIRE_NX
+.Lno_nx:
+        mov     $sym_offs(.Lno_nx_msg), %ecx
         jmp     .Lget_vtb
-.Lmb2_no_ih:
-        /* Ditto. */
-        mov     $sym_offs(.Lbad_ldr_nih), %ecx
-        jmp     .Lget_vtb
+#endif
 .Lmb2_no_bs:
         /*
          * Ditto. Additionally, here there is a chance that Xen was started
@@ -179,8 +186,12 @@ not_multiboot:
         mov     $sym_offs(.Lbad_efi_msg), %ecx
         xor     %edi,%edi                       # No VGA text buffer
         jmp     .Lprint_err
+.Ldirect_error:
+        mov     sym_esi(vga_text_buffer), %edi
+        mov     %eax, %esi
+        jmp     1f
 .Lget_vtb:
-        mov     sym_esi(vga_text_buffer),%edi
+        mov     sym_esi(vga_text_buffer), %edi
 .Lprint_err:
         add     %ecx, %esi     # Add string offset to relocation base.
         # NOTE: No further use of sym_esi() till the end of the "function"!
@@ -205,6 +216,9 @@ not_multiboot:
 .Lhalt: hlt
         jmp     .Lhalt
 
+        .size early_error, . - early_error
+        .type early_error, @function
+
         .code64
 
 __efi64_mb2_start:
@@ -220,127 +234,58 @@ __efi64_mb2_start:
         /* VGA is not available on EFI platforms. */
         movl   $0,vga_text_buffer(%rip)
 
-        /* Check for Multiboot2 bootloader. */
-        cmp     $MULTIBOOT2_BOOTLOADER_MAGIC,%eax
-        je      .Lefi_multiboot2_proto
-
-        /* Jump to not_multiboot after switching CPU to x86_32 mode. */
-        lea     not_multiboot(%rip),%r15
-        jmp     x86_32_switch
-
-.Lefi_multiboot2_proto:
-        /* Zero EFI SystemTable and EFI ImageHandle addresses. */
-        xor     %esi,%esi
-        xor     %edi,%edi
-
-        /* Skip Multiboot2 information fixed part. */
-        lea     (MB2_fixed_sizeof+MULTIBOOT2_TAG_ALIGN-1)(%rbx),%ecx
-        and     $~(MULTIBOOT2_TAG_ALIGN-1),%ecx
-
-.Lefi_mb2_tsize:
-        /* Check Multiboot2 information total size. */
-        mov     %ecx,%r8d
-        sub     %ebx,%r8d
-        cmp     %r8d,MB2_fixed_total_size(%rbx)
-        jbe     .Lrun_bs
-
-        /* Are EFI boot services available? */
-        cmpl    $MULTIBOOT2_TAG_TYPE_EFI_BS,MB2_tag_type(%rcx)
-        jne     .Lefi_mb2_st
-
-        /* We are on EFI platform and EFI boot services are available. */
-        incb    efi_platform(%rip)
-
-        /*
-         * Disable real mode and other legacy stuff which should not
-         * be run on EFI platforms.
-         */
-        incb    skip_realmode(%rip)
-        jmp     .Lefi_mb2_next_tag
-
-.Lefi_mb2_st:
-        /* Get EFI SystemTable address from Multiboot2 information. */
-        cmpl    $MULTIBOOT2_TAG_TYPE_EFI64,MB2_tag_type(%rcx)
-        cmove   MB2_efi64_st(%rcx),%rsi
-        je      .Lefi_mb2_next_tag
-
-        /* Get EFI ImageHandle address from Multiboot2 information. */
-        cmpl    $MULTIBOOT2_TAG_TYPE_EFI64_IH,MB2_tag_type(%rcx)
-        cmove   MB2_efi64_ih(%rcx),%rdi
-        je      .Lefi_mb2_next_tag
-
-        /* Is it the end of Multiboot2 information? */
-        cmpl    $MULTIBOOT2_TAG_TYPE_END,MB2_tag_type(%rcx)
-        je      .Lrun_bs
-
-.Lefi_mb2_next_tag:
-        /* Go to next Multiboot2 information tag. */
-        add     MB2_tag_size(%rcx),%ecx
-        add     $(MULTIBOOT2_TAG_ALIGN-1),%ecx
-        and     $~(MULTIBOOT2_TAG_ALIGN-1),%ecx
-        jmp     .Lefi_mb2_tsize
-
-.Lrun_bs:
-        /* Are EFI boot services available? */
-        cmpb    $0,efi_platform(%rip)
-
-        /* Jump to .Lmb2_no_bs after switching CPU to x86_32 mode. */
-        lea     .Lmb2_no_bs(%rip),%r15
-        jz      x86_32_switch
-
-        /* Is EFI SystemTable address provided by boot loader? */
-        test    %rsi,%rsi
-
-        /* Jump to .Lmb2_no_st after switching CPU to x86_32 mode. */
-        lea     .Lmb2_no_st(%rip),%r15
-        jz      x86_32_switch
-
-        /* Is EFI ImageHandle address provided by boot loader? */
-        test    %rdi,%rdi
-
-        /* Jump to .Lmb2_no_ih after switching CPU to x86_32 mode. */
-        lea     .Lmb2_no_ih(%rip),%r15
-        jz      x86_32_switch
-
         /*
          * Align the stack as UEFI spec requires. Keep it aligned
-         * before efi_multiboot2() call by pushing/popping even
+         * before efi_multiboot2_prelude() call by pushing/popping even
          * numbers of items on it.
          */
-        and     $~15,%rsp
+        and     $~15, %rsp
 
-        /* Save Multiboot2 magic on the stack. */
-        push    %rax
-
-        /* Save EFI ImageHandle on the stack. */
-        push    %rdi
+        /* Save magic number, we need it later but we need to use %eax. */
+        mov     %eax, %edx
 
         /*
          * Initialize BSS (no nasty surprises!).
          * It must be done earlier than in BIOS case
-         * because efi_multiboot2() touches it.
+         * because efi_multiboot2_prelude() touches it.
          */
-        lea     __bss_start(%rip),%edi
-        lea     __bss_end(%rip),%ecx
-        sub     %edi,%ecx
-        shr     $3,%ecx
-        xor     %eax,%eax
+        lea     __bss_start(%rip), %edi
+        lea     __bss_end(%rip), %ecx
+        sub     %edi, %ecx
+        shr     $3, %ecx
+        xor     %eax, %eax
         rep stosq
 
-        /* Keep the stack aligned. Do not pop a single item off it. */
-        mov     (%rsp),%rdi
+        /*
+         * Spill MB2 magic.
+         * Spill the pointer too, to keep the stack aligned.
+         */
+        push    %rdx
+        push    %rbx
 
         /*
-         * efi_multiboot2() is called according to System V AMD64 ABI:
-         *   - IN:  %rdi - EFI ImageHandle, %rsi - EFI SystemTable.
+         * efi_multiboot2_prelude() is called according to System V AMD64 ABI:
+         *   - IN:  %edi - Multiboot2 magic,
+         *          %rsi - Multiboot2 pointer.
+         *   - OUT: %rax - error string.
          */
-        call    efi_multiboot2
+        mov     %edx, %edi
+        mov     %rbx, %rsi
+        call    efi_multiboot2_prelude
+        lea     .Ldirect_error(%rip), %r15
+        test    %rax, %rax
+        jnz     x86_32_switch
 
-        /* Just pop an item from the stack. */
+        /* Restore Multiboot2 pointer and magic. */
+        pop     %rbx
         pop     %rax
 
-        /* Restore Multiboot2 magic. */
-        pop     %rax
+        /*
+         * efi_multiboot2_prelude() is happy that we're on EFI platform.  Skip
+         * the BIOS initialisation path.
+         */
+        movb    $1, efi_platform(%rip)
+        movb    $1, skip_realmode(%rip)
 
         /* Jump to trampoline_setup after switching CPU to x86_32 mode. */
         lea     trampoline_setup(%rip),%r15
@@ -390,30 +335,45 @@ cs32_switch:
 ELFNOTE(Xen, XEN_ELFNOTE_PHYS32_ENTRY, .long sym_offs(__pvh_start))
 
 __pvh_start:
-        cld
+        mov     $XEN_HVM_START_MAGIC_VALUE, %eax
+        /*
+         * Fall through into BIOS code.
+         * We will use %eax to distinguish we came from PVH entry point.
+         */
+#endif /* CONFIG_PVH_GUEST */
+
+__start:
         cli
+        cld
 
         /*
-         * We need one push/pop to determine load address.  Use the same
-         * absolute stack address as the native path, for lack of a better
-         * alternative.
+         * Multiboot (both 1 and 2) and PVH specify the stack pointer as
+         * undefined.  This is unhelpful for relocatable images, where one
+         * call (i.e. push) is required to calculate the image's load address.
+         *
+         * During BIOS boot, there is one area of memory we know about with
+         * reasonable confidence that it isn't overlapped by Xen, and that's
+         * the Multiboot info structure in %ebx.  Use it as a temporary stack.
+         *
+         * During PVH boot use info structure in %ebx.
          */
-        mov     $0x1000, %esp
+
+        /* Preserve the field we're about to clobber. */
+        mov     (%ebx), %edx
+        lea     4(%ebx), %esp
 
         /* Calculate the load base address. */
         call    1f
 1:      pop     %esi
         sub     $sym_offs(1b), %esi
 
+        /* Restore the clobbered field. */
+        mov     %edx, (%ebx)
+
         /* Set up stack. */
         lea     STACK_SIZE - CPUINFO_sizeof + sym_esi(cpu0_stack), %esp
 
-        mov     %ebx, sym_esi(pvh_start_info_pa)
-
-        /* Force xen console.  Will revert to user choice in init code. */
-        movb    $-1, sym_esi(opt_console_xen)
-
-        /* Prepare gdt and segments */
+        /* Initialize GDTR and basic data segments. */
         add     %esi, sym_esi(gdt_boot_base)
         lgdt    sym_esi(gdt_boot_descr)
 
@@ -421,42 +381,39 @@ __pvh_start:
         mov     %ecx, %ds
         mov     %ecx, %es
         mov     %ecx, %ss
+        mov     %ecx, %fs
+        mov     %ecx, %gs
+
+        /* Initialise the BSS.  Preserve %eax (BOOTLOADER_MAGIC). */
+        mov     %eax, %ebp
+
+        lea     sym_esi(__bss_start), %edi
+        lea     sym_esi(__bss_end), %ecx
+        sub     %edi, %ecx
+        xor     %eax, %eax
+        shr     $2, %ecx
+        rep stosl
+
+        mov     %ebp, %eax
+
+#ifdef CONFIG_PVH_GUEST
+        cmp     $XEN_HVM_START_MAGIC_VALUE, %eax
+        jne     1f
+
+        mov     %ebx, sym_esi(pvh_start_info_pa)
+
+        /* Force xen console.  Will revert to user choice in init code. */
+        movb    $-1, sym_esi(opt_console_xen)
 
         /* Skip bootloader setup and bios setup, go straight to trampoline */
         movb    $1, sym_esi(pvh_boot)
         movb    $1, sym_esi(skip_realmode)
 
         /* Set trampoline_phys to use mfn 1 to avoid having a mapping at VA 0 */
-        movw    $0x1000, sym_esi(trampoline_phys)
-        mov     (%ebx), %eax /* mov $XEN_HVM_START_MAGIC_VALUE, %eax */
+        movl    $PAGE_SIZE, sym_esi(trampoline_phys)
         jmp     trampoline_setup
-
+1:
 #endif /* CONFIG_PVH_GUEST */
-
-__start:
-        cld
-        cli
-
-        /*
-         * Multiboot (both 1 and 2) specify the stack pointer as undefined
-         * when entering in BIOS circumstances.  This is unhelpful for
-         * relocatable images, where one push/pop is required to calculate
-         * images load address.
-         *
-         * On a BIOS-based system, the IVT and BDA occupy the first 5/16ths of
-         * the first page of RAM, with the rest free for use.  Use the top of
-         * this page for a temporary stack, being one of the safest locations
-         * to clobber.
-         */
-        mov     $0x1000, %esp
-
-        /* Calculate the load base address. */
-        call    1f
-1:      pop     %esi
-        sub     $sym_offs(1b), %esi
-
-        /* Set up stack. */
-        lea     STACK_SIZE - CPUINFO_sizeof + sym_esi(cpu0_stack), %esp
 
         /* Bootloaders may set multiboot{1,2}.mem_lower to a nonzero value. */
         xor     %edx,%edx
@@ -467,7 +424,7 @@ __start:
 
         /* Check for Multiboot bootloader. */
         cmp     $MULTIBOOT_BOOTLOADER_MAGIC,%eax
-        jne     not_multiboot
+        jne     .Lnot_multiboot
 
         /* Get mem_lower from Multiboot information. */
         testb   $MBI_MEMLIMITS,MB_flags(%ebx)
@@ -515,22 +472,7 @@ __start:
 trampoline_bios_setup:
         /*
          * Called on legacy BIOS platforms only.
-         *
-         * Initialize GDTR and basic data segments.
          */
-        add     %esi,sym_esi(gdt_boot_base)
-        lgdt    sym_esi(gdt_boot_descr)
-
-        mov     $BOOT_DS,%ecx
-        mov     %ecx,%ds
-        mov     %ecx,%es
-        mov     %ecx,%ss
-        /* %esp is initialized later. */
-
-        /* Load null descriptor to unused segment registers. */
-        xor     %ecx,%ecx
-        mov     %ecx,%fs
-        mov     %ecx,%gs
 
         /* Set up trampoline segment 64k below EBDA */
         movzwl  0x40e,%ecx          /* EBDA segment */
@@ -554,7 +496,7 @@ trampoline_bios_setup:
 
 2:
         /* Reserve memory for the trampoline and the low-memory stack. */
-        sub     $((TRAMPOLINE_SPACE+TRAMPOLINE_STACK_SPACE)>>4),%ecx
+        sub     $TRAMPOLINE_SIZE >> 4, %ecx
 
         /* From arch/x86/smpboot.c: start_eip had better be page-aligned! */
         xor     %cl, %cl
@@ -570,22 +512,11 @@ trampoline_setup:
         mov     %esi, sym_esi(xen_phys_start)
         mov     %esi, sym_esi(trampoline_xen_phys_start)
 
-        /* Get bottom-most low-memory stack address. */
-        mov     sym_esi(trampoline_phys), %ecx
-        add     $TRAMPOLINE_SPACE,%ecx
-
-#ifdef CONFIG_VIDEO
-        lea     sym_esi(boot_vid_info), %edx
-#else
-        xor     %edx, %edx
-#endif
-
         /* Save Multiboot / PVH info struct (after relocation) for later use. */
-        push    %edx                /* Boot video info to be filled from MB2. */
-        push    %ecx                /* Bottom-most low-memory stack address. */
-        push    %ebx                /* Multiboot / PVH information address. */
-        push    %eax                /* Magic number. */
+        mov     %ebx, %edx          /* Multiboot / PVH information address. */
+        /*      reloc(magic/eax, info/edx) using fastcall. */
         call    reloc
+
 #ifdef CONFIG_PVH_GUEST
         cmpb    $0, sym_esi(pvh_boot)
         je      1f
@@ -596,43 +527,6 @@ trampoline_setup:
         mov     %eax, sym_esi(multiboot_ptr)
 2:
 
-        /*
-         * Now trampoline_phys points to the following structure (lowest address
-         * is at the bottom):
-         *
-         * +------------------------+
-         * | TRAMPOLINE_STACK_SPACE |
-         * +------------------------+
-         * |     Data (MBI / PVH)   |
-         * +- - - - - - - - - - - - +
-         * |    TRAMPOLINE_SPACE    |
-         * +------------------------+
-         *
-         * Data grows downwards from the highest address of TRAMPOLINE_SPACE
-         * region to the end of the trampoline. The rest of TRAMPOLINE_SPACE is
-         * reserved for trampoline code and data.
-         */
-
-        /*
-         * Do not zero BSS on EFI platform here.
-         * It was initialized earlier.
-         */
-        cmpb    $0, sym_esi(efi_platform)
-        jnz     1f
-
-        /*
-         * Initialise the BSS.
-         *
-         * !!! WARNING - also zeroes the current stack !!!
-         */
-        lea     sym_esi(__bss_start), %edi
-        lea     sym_esi(__bss_end), %ecx
-        sub     %edi,%ecx
-        xor     %eax,%eax
-        shr     $2,%ecx
-        rep stosl
-
-1:
         /* Interrogate CPU extended features via CPUID. */
         mov     $1, %eax
         cpuid
@@ -650,15 +544,59 @@ trampoline_setup:
         cpuid
 1:      mov     %edx, CPUINFO_FEATURE_OFFSET(X86_FEATURE_LM) + sym_esi(boot_cpu_data)
 
-        /* Check for NX. Adjust EFER setting if available. */
-        bt      $cpufeat_bit(X86_FEATURE_NX), %edx
-        jnc     1f
-        orb     $EFER_NXE >> 8, 1 + sym_esi(trampoline_efer)
-1:
-
         /* Check for availability of long mode. */
         bt      $cpufeat_bit(X86_FEATURE_LM),%edx
-        jnc     bad_cpu
+        jnc     .Lbad_cpu
+
+        /*
+         * Check for NX
+         *   - If Xen was compiled requiring it simply assert it's
+         *     supported. The trampoline already has the right constant.
+         *   - Otherwise, update the trampoline EFER mask accordingly.
+         */
+        bt      $cpufeat_bit(X86_FEATURE_NX), %edx
+        jc     .Lgot_nx
+
+        /*
+         * NX appears to be unsupported, but it might be hidden.
+         *
+         * The feature is part of the AMD64 spec, but the very first Intel
+         * 64bit CPUs lacked the feature, and thereafter there was a
+         * firmware knob to disable the feature. Undo the disable if
+         * possible.
+         *
+         * All 64bit Intel CPUs support this MSR. If virtualised, expect
+         * the hypervisor to either emulate the MSR or give us NX.
+         */
+        xor     %eax, %eax
+        cpuid
+        cmp     $X86_VENDOR_INTEL_EBX, %ebx
+        jnz     .Lno_nx
+        cmp     $X86_VENDOR_INTEL_EDX, %edx
+        jnz     .Lno_nx
+        cmp     $X86_VENDOR_INTEL_ECX, %ecx
+        jnz     .Lno_nx
+
+        /* Clear the XD_DISABLE bit */
+        mov     $MSR_IA32_MISC_ENABLE, %ecx
+        rdmsr
+        btr     $2, %edx
+        jnc     .Lno_nx
+        wrmsr
+        orb     $MSR_IA32_MISC_ENABLE_XD_DISABLE >> 32, 4 + sym_esi(trampoline_misc_enable_off)
+
+        /* Check again for NX */
+        mov     $0x80000001, %eax
+        cpuid
+        bt      $cpufeat_bit(X86_FEATURE_NX), %edx
+        jnc     .Lno_nx
+
+.Lgot_nx:
+#ifndef CONFIG_REQUIRE_NX
+        /* Adjust EFER given that NX is present */
+        orb     $EFER_NXE >> 8, 1 + sym_esi(trampoline_efer)
+.Lno_nx:
+#endif
 
         /* Stash TSC to calculate a good approximation of time-since-boot */
         rdtsc
@@ -741,28 +679,7 @@ trampoline_setup:
         mov     %edx, sym_offs(l1_bootmap)(%esi, %ecx, 8)
 
         /* Apply relocations to bootstrap trampoline. */
-        mov     sym_esi(trampoline_phys), %edx
-        lea     sym_esi(__trampoline_rel_start), %edi
-        lea     sym_esi(__trampoline_rel_stop), %ecx
-1:
-        mov     (%edi), %eax
-        add     %edx, (%edi, %eax)
-        add     $4,%edi
-
-        cmp     %ecx, %edi
-        jb      1b
-
-        /* Patch in the trampoline segment. */
-        shr     $4,%edx
-        lea     sym_esi(__trampoline_seg_start), %edi
-        lea     sym_esi(__trampoline_seg_stop), %ecx
-1:
-        mov     (%edi), %eax
-        mov     %dx, (%edi, %eax)
-        add     $4,%edi
-
-        cmp     %ecx, %edi
-        jb      1b
+        call    reloc_trampoline32
 
         /* Do not parse command line on EFI platform here. */
         cmpb    $0, sym_esi(efi_platform)
@@ -773,15 +690,15 @@ trampoline_setup:
         testl   $MBI_CMDLINE,MB_flags(%ebx)
         jz      1f
 
-        lea     sym_esi(early_boot_opts),%eax
-        push    %eax
-        pushl   MB_cmdline(%ebx)
+        lea     sym_esi(early_boot_opts), %edx
+        mov     MB_cmdline(%ebx), %eax
+        /*      cmdline_parse_early(cmdline/eax, opts/edx) using fastcall. */
         call    cmdline_parse_early
 
 1:
         /* Switch to low-memory stack which lives at the end of trampoline region. */
         mov     sym_esi(trampoline_phys), %edi
-        lea     TRAMPOLINE_SPACE+TRAMPOLINE_STACK_SPACE(%edi),%esp
+        lea     TRAMPOLINE_SIZE(%edi), %esp
         lea     trampoline_boot_cpu_entry-trampoline_start(%edi),%eax
         pushl   $BOOT_CS32
         push    %eax
@@ -793,18 +710,6 @@ trampoline_setup:
 
         /* Jump into the relocated trampoline. */
         lret
-
-        /*
-         * cmdline and reloc are written in C, and linked to be 32bit PIC with
-         * entrypoints at 0 and using the stdcall convention.
-         */
-        ALIGN
-cmdline_parse_early:
-        .incbin "cmdline.bin"
-
-        ALIGN
-reloc:
-        .incbin "reloc.bin"
 
 ENTRY(trampoline_start)
 #include "trampoline.S"

@@ -229,7 +229,7 @@ int xc_get_pfn_type_batch(xc_interface *xch, uint32_t dom,
                           unsigned int num, xen_pfn_t *arr)
 {
     int rc;
-    DECLARE_DOMCTL;
+    struct xen_domctl domctl = {};
     DECLARE_HYPERCALL_BOUNCE(arr, sizeof(*arr) * num, XC_HYPERCALL_BUFFER_BOUNCE_BOTH);
     if ( xc_hypercall_bounce_pre(xch, arr) )
         return -1;
@@ -398,7 +398,7 @@ int xc_maximum_ram_page(xc_interface *xch, unsigned long *max_mfn)
 
 long long xc_domain_get_cpu_usage(xc_interface *xch, uint32_t domid, int vcpu)
 {
-    DECLARE_DOMCTL;
+    struct xen_domctl domctl = {};
 
     domctl.cmd = XEN_DOMCTL_getvcpuinfo;
     domctl.domain = domid;
@@ -441,11 +441,12 @@ int xc_machphys_mfn_list(xc_interface *xch,
 
 long xc_get_tot_pages(xc_interface *xch, uint32_t domid)
 {
-    xc_dominfo_t info;
-    if ( (xc_domain_getinfo(xch, domid, 1, &info) != 1) ||
-         (info.domid != domid) )
+    xc_domaininfo_t info;
+
+    if ( xc_domain_getinfo_single(xch, domid, &info) < 0 )
         return -1;
-    return info.nr_pages;
+
+    return info.tot_pages;
 }
 
 int xc_copy_to_domain_page(xc_interface *xch,
@@ -487,72 +488,6 @@ int xc_domctl(xc_interface *xch, struct xen_domctl *domctl)
 int xc_sysctl(xc_interface *xch, struct xen_sysctl *sysctl)
 {
     return do_sysctl(xch, sysctl);
-}
-
-int xc_version(xc_interface *xch, int cmd, void *arg)
-{
-    DECLARE_HYPERCALL_BOUNCE(arg, 0, XC_HYPERCALL_BUFFER_BOUNCE_OUT); /* Size unknown until cmd decoded */
-    size_t sz;
-    int rc;
-
-    switch ( cmd )
-    {
-    case XENVER_version:
-        sz = 0;
-        break;
-    case XENVER_extraversion:
-        sz = sizeof(xen_extraversion_t);
-        break;
-    case XENVER_compile_info:
-        sz = sizeof(xen_compile_info_t);
-        break;
-    case XENVER_capabilities:
-        sz = sizeof(xen_capabilities_info_t);
-        break;
-    case XENVER_changeset:
-        sz = sizeof(xen_changeset_info_t);
-        break;
-    case XENVER_platform_parameters:
-        sz = sizeof(xen_platform_parameters_t);
-        break;
-    case XENVER_get_features:
-        sz = sizeof(xen_feature_info_t);
-        break;
-    case XENVER_pagesize:
-        sz = 0;
-        break;
-    case XENVER_guest_handle:
-        sz = sizeof(xen_domain_handle_t);
-        break;
-    case XENVER_commandline:
-        sz = sizeof(xen_commandline_t);
-        break;
-    case XENVER_build_id:
-        {
-            xen_build_id_t *build_id = (xen_build_id_t *)arg;
-            sz = sizeof(*build_id) + build_id->len;
-            HYPERCALL_BOUNCE_SET_DIR(arg, XC_HYPERCALL_BUFFER_BOUNCE_BOTH);
-            break;
-        }
-    default:
-        ERROR("xc_version: unknown command %d\n", cmd);
-        return -EINVAL;
-    }
-
-    HYPERCALL_BOUNCE_SET_SIZE(arg, sz);
-
-    if ( (sz != 0) && xc_hypercall_bounce_pre(xch, arg) )
-    {
-        PERROR("Could not bounce buffer for version hypercall");
-        return -ENOMEM;
-    }
-
-    rc = do_xen_version(xch, cmd, HYPERCALL_BUFFER(arg));
-
-    if ( sz != 0 )
-        xc_hypercall_bounce_post(xch, arg);
-
-    return rc;
 }
 
 unsigned long xc_make_page_below_4G(

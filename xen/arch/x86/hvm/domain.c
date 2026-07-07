@@ -1,19 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * HVM domain specific functions.
  *
  * Copyright (C) 2017 Citrix Systems R&D
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms and conditions of the GNU General Public
- * License, version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public
- * License along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <xen/domain_page.h>
@@ -111,13 +100,14 @@ static int check_segment(struct segment_register *reg, enum x86_segment seg)
 }
 
 /* Called by VCPUOP_initialise for HVM guests. */
-int arch_set_info_hvm_guest(struct vcpu *v, const vcpu_hvm_context_t *ctx)
+int arch_set_info_hvm_guest(struct vcpu *v, const struct vcpu_hvm_context *ctx)
 {
     const struct domain *d = v->domain;
     struct cpu_user_regs *uregs = &v->arch.user_regs;
     struct segment_register cs, ds, ss, es, tr;
     const char *errstr;
     int rc;
+    unsigned long valid;
 
     if ( ctx->pad != 0 )
         return -EINVAL;
@@ -142,9 +132,9 @@ int arch_set_info_hvm_guest(struct vcpu *v, const vcpu_hvm_context_t *ctx)
     s = (struct segment_register)                                           \
         { 0, { (r)->s ## _ar }, (r)->s ## _limit, (r)->s ## _base };        \
     /* Set accessed / busy bit for present segments. */                     \
-    if ( s.p )                                                              \
-        s.type |= (x86_seg_##s != x86_seg_tr ? 1 : 2);                      \
-    check_segment(&s, x86_seg_ ## s); })
+    if ( (s).p )                                                            \
+        (s).type |= (x86_seg_ ## s != x86_seg_tr ? 1 : 2);                  \
+    check_segment(&(s), x86_seg_ ## s); })
 
         rc = SEG(cs, regs);
         rc |= SEG(ds, regs);
@@ -275,10 +265,12 @@ int arch_set_info_hvm_guest(struct vcpu *v, const vcpu_hvm_context_t *ctx)
     if ( v->arch.hvm.guest_efer & EFER_LME )
         v->arch.hvm.guest_efer |= EFER_LMA;
 
-    if ( v->arch.hvm.guest_cr[4] & ~hvm_cr4_guest_valid_bits(d) )
+    valid = hvm_cr4_guest_valid_bits(d);
+    if ( v->arch.hvm.guest_cr[4] & ~valid )
     {
-        gprintk(XENLOG_ERR, "Bad CR4 value: %#016lx\n",
-                v->arch.hvm.guest_cr[4]);
+        gprintk(XENLOG_ERR, "Bad CR4 %#lx (valid %#lx, rejected %#lx)\n",
+                v->arch.hvm.guest_cr[4], valid,
+                v->arch.hvm.guest_cr[4] & ~valid);
         return -EINVAL;
     }
 

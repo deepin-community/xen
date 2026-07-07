@@ -48,6 +48,7 @@
 #include <xen/platform.h>
 
 #include "xentoollog.h"
+#include "xen-barrier.h"
 
 #if defined(__i386__) || defined(__x86_64__)
 #include <xen/foreign/x86_32.h>
@@ -60,33 +61,6 @@
 #define XC_PAGE_MASK            (~(XC_PAGE_SIZE-1))
 
 #define INVALID_MFN  (~0UL)
-
-/*
- *  DEFINITIONS FOR CPU BARRIERS
- */
-
-#define xen_barrier() asm volatile ( "" : : : "memory")
-
-#if defined(__i386__)
-#define xen_mb()  asm volatile ( "lock addl $0, -4(%%esp)" ::: "memory" )
-#define xen_rmb() xen_barrier()
-#define xen_wmb() xen_barrier()
-#elif defined(__x86_64__)
-#define xen_mb()  asm volatile ( "lock addl $0, -32(%%rsp)" ::: "memory" )
-#define xen_rmb() xen_barrier()
-#define xen_wmb() xen_barrier()
-#elif defined(__arm__)
-#define xen_mb()   asm volatile ("dmb" : : : "memory")
-#define xen_rmb()  asm volatile ("dmb" : : : "memory")
-#define xen_wmb()  asm volatile ("dmb" : : : "memory")
-#elif defined(__aarch64__)
-#define xen_mb()   asm volatile ("dmb sy" : : : "memory")
-#define xen_rmb()  asm volatile ("dmb sy" : : : "memory")
-#define xen_wmb()  asm volatile ("dmb sy" : : : "memory")
-#else
-#error "Define barriers"
-#endif
-
 
 #define XENCTRL_HAS_XC_INTERFACE 1
 /* In Xen 4.0 and earlier, xc_interface_open and xc_evtchn_open would
@@ -444,29 +418,20 @@ typedef struct xc_core_header {
  * DOMAIN MANAGEMENT FUNCTIONS
  */
 
-typedef struct xc_dominfo {
-    uint32_t      domid;
-    uint32_t      ssidref;
-    unsigned int  dying:1, crashed:1, shutdown:1,
-                  paused:1, blocked:1, running:1,
-                  hvm:1, debugged:1, xenstore:1, hap:1;
-    unsigned int  shutdown_reason; /* only meaningful if shutdown==1 */
-    unsigned long nr_pages; /* current number, not maximum */
-    unsigned long nr_outstanding_pages;
-    unsigned long nr_shared_pages;
-    unsigned long nr_paged_pages;
-    unsigned long shared_info_frame;
-    uint64_t      cpu_time;
-    unsigned long max_memkb;
-    unsigned int  nr_online_vcpus;
-    unsigned int  max_vcpu_id;
-    xen_domain_handle_t handle;
-    unsigned int  cpupool;
-    uint8_t       gpaddr_bits;
-    struct xen_arch_domainconfig arch_config;
-} xc_dominfo_t;
-
 typedef xen_domctl_getdomaininfo_t xc_domaininfo_t;
+
+static inline unsigned int dominfo_shutdown_reason(const xc_domaininfo_t *info)
+{
+    return (info->flags >> XEN_DOMINF_shutdownshift) & XEN_DOMINF_shutdownmask;
+}
+
+static inline bool dominfo_shutdown_with(const xc_domaininfo_t *info,
+                                         unsigned int expected_reason)
+{
+    /* The reason doesn't make sense unless the domain is actually shutdown */
+    return (info->flags & XEN_DOMINF_shutdown) &&
+           (dominfo_shutdown_reason(info) == expected_reason);
+}
 
 typedef union 
 {
@@ -691,27 +656,22 @@ int xc_vcpu_getaffinity(xc_interface *xch,
 int xc_domain_get_guest_width(xc_interface *xch, uint32_t domid,
                               unsigned int *guest_width);
 
-
 /**
- * This function will return information about one or more domains. It is
- * designed to iterate over the list of domains. If a single domain is
- * requested, this function will return the next domain in the list - if
- * one exists. It is, therefore, important in this case to make sure the
- * domain requested was the one returned.
+ * This function will return information about a single domain. It looks
+ * up the domain by the provided domid and succeeds if the domain exists
+ * and is accesible by the current domain, or fails otherwise. A buffer
+ * may optionally passed on the `info` parameter in order to retrieve
+ * information about the domain. The buffer is ignored if NULL is
+ * passed instead.
  *
  * @parm xch a handle to an open hypervisor interface
- * @parm first_domid the first domain to enumerate information from.  Domains
- *                   are currently enumerate in order of creation.
- * @parm max_doms the number of elements in info
- * @parm info an array of max_doms size that will contain the information for
- *            the enumerated domains.
- * @return the number of domains enumerated or -1 on error
+ * @parm domid domid to lookup
+ * @parm info Optional domain information buffer (may be NULL)
+ * @return 0 on success, otherwise the call failed and info is undefined
  */
-int xc_domain_getinfo(xc_interface *xch,
-                      uint32_t first_domid,
-                      unsigned int max_doms,
-                      xc_dominfo_t *info);
-
+int xc_domain_getinfo_single(xc_interface *xch,
+                             uint32_t domid,
+                             xc_domaininfo_t *info);
 
 /**
  * This function will set the execution context for the specified vcpu.
@@ -1185,7 +1145,11 @@ typedef uint32_t xc_node_to_node_dist_t;
 int xc_physinfo(xc_interface *xch, xc_physinfo_t *info);
 int xc_cputopoinfo(xc_interface *xch, unsigned *max_cpus,
                    xc_cputopo_t *cputopo);
-int xc_microcode_update(xc_interface *xch, const void *buf, size_t len);
+int xc_microcode_update(xc_interface *xch, const void *buf,
+                        size_t len, unsigned int flags);
+int xc_get_cpu_version(xc_interface *xch, struct xenpf_pcpu_version *cpu_ver);
+int xc_get_ucode_revision(xc_interface *xch,
+                          struct xenpf_ucode_revision *ucode_rev);
 int xc_numainfo(xc_interface *xch, unsigned *max_nodes,
                 xc_meminfo_t *meminfo, uint32_t *distance);
 int xc_pcitopoinfo(xc_interface *xch, unsigned num_devs,
@@ -1392,6 +1356,11 @@ int xc_domain_irq_permission(xc_interface *xch,
                              uint32_t domid,
                              uint32_t pirq,
                              bool allow_access);
+
+int xc_domain_gsi_permission(xc_interface *xch,
+                             uint32_t domid,
+                             uint32_t gsi,
+                             uint32_t flags);
 
 int xc_domain_iomem_permission(xc_interface *xch,
                                uint32_t domid,
@@ -1604,6 +1573,16 @@ long xc_memory_op(xc_interface *xch, unsigned int cmd, void *arg, size_t len);
 
 int xc_version(xc_interface *xch, int cmd, void *arg);
 
+/*
+ * Wrappers around XENVER_* subops.  Callers must pass the returned pointer to
+ * free().
+ */
+char *xc_xenver_extraversion(xc_interface *xch);
+char *xc_xenver_capabilities(xc_interface *xch);
+char *xc_xenver_changeset(xc_interface *xch);
+char *xc_xenver_commandline(xc_interface *xch);
+char *xc_xenver_buildid(xc_interface *xch);
+
 int xc_flask_op(xc_interface *xch, xen_flask_op_t *op);
 
 /*
@@ -1644,13 +1623,20 @@ int xc_physdev_map_pirq_msi(xc_interface *xch,
                             int index,
                             int *pirq,
                             int devfn,
-                            int bus,
+                            int segbus,
                             int entry_nr,
                             uint64_t table_base);
+
+int xc_physdev_map_pirq_gsi(xc_interface *xch,
+                            uint32_t domid,
+                            int gsi,
+                            int *pirq);
 
 int xc_physdev_unmap_pirq(xc_interface *xch,
                           uint32_t domid,
                           int pirq);
+
+int xc_pcidev_get_gsi(xc_interface *xch, uint32_t sbdf);
 
 /*
  *  LOGGING AND ERROR REPORTING
@@ -1920,6 +1906,7 @@ int xc_smt_disable(xc_interface *xch);
  */
 typedef struct xen_userspace xc_userspace_t;
 typedef struct xen_ondemand xc_ondemand_t;
+typedef struct xen_cppc_para xc_cppc_para_t;
 
 struct xc_get_cpufreq_para {
     /* IN/OUT variable */
@@ -1937,26 +1924,35 @@ struct xc_get_cpufreq_para {
     uint32_t cpuinfo_cur_freq;
     uint32_t cpuinfo_max_freq;
     uint32_t cpuinfo_min_freq;
-    uint32_t scaling_cur_freq;
-
-    char scaling_governor[CPUFREQ_NAME_LEN];
-    uint32_t scaling_max_freq;
-    uint32_t scaling_min_freq;
-
-    /* for specific governor */
     union {
-        xc_userspace_t userspace;
-        xc_ondemand_t ondemand;
+        struct {
+            uint32_t scaling_cur_freq;
+
+            char scaling_governor[CPUFREQ_NAME_LEN];
+            uint32_t scaling_max_freq;
+            uint32_t scaling_min_freq;
+
+            /* for specific governor */
+            union {
+                xc_userspace_t userspace;
+                xc_ondemand_t ondemand;
+            } u;
+        } s;
+        xc_cppc_para_t cppc_para;
     } u;
 
     int32_t turbo_enabled;
 };
+
+typedef struct xen_set_cppc_para xc_set_cppc_para_t;
 
 int xc_get_cpufreq_para(xc_interface *xch, int cpuid,
                         struct xc_get_cpufreq_para *user_para);
 int xc_set_cpufreq_gov(xc_interface *xch, int cpuid, char *govname);
 int xc_set_cpufreq_para(xc_interface *xch, int cpuid,
                         int ctrl_type, int ctrl_value);
+int xc_set_cpufreq_cppc(xc_interface *xch, int cpuid,
+                        xc_set_cppc_para_t *set_cppc);
 int xc_get_cpufreq_avgfreq(xc_interface *xch, int cpuid, int *avg_freq);
 
 int xc_set_sched_opt_smt(xc_interface *xch, uint32_t value);
@@ -2119,6 +2115,7 @@ int xc_monitor_emul_unimplemented(xc_interface *xch, uint32_t domain_id,
                                   bool enable);
 int xc_monitor_vmexit(xc_interface *xch, uint32_t domain_id, bool enable,
                       bool sync);
+int xc_monitor_io(xc_interface *xch, uint32_t domain_id, bool enable);
 /**
  * This function enables / disables emulation for each REP for a
  * REP-compatible instruction.
@@ -2215,7 +2212,7 @@ int xc_memshr_domain_resume(xc_interface *xch,
  * May fail with:
  *  EINVAL if the gfn is not populated or not sharable (mmio, etc)
  *  ENOMEM if internal data structures cannot be allocated
- *  E2BIG if the page is being referenced by other subsytems (e.g. qemu)
+ *  E2BIG if the page is being referenced by other subsystems (e.g. qemu)
  *  ENOENT or EEXIST if there are internal hypervisor errors.
  */
 int xc_memshr_nominate_gfn(xc_interface *xch,
@@ -2555,7 +2552,8 @@ int xc_psr_get_hw_info(xc_interface *xch, uint32_t socket,
 #endif
 
 int xc_livepatch_upload(xc_interface *xch,
-                        char *name, unsigned char *payload, uint32_t size);
+                        char *name, unsigned char *payload, uint32_t size,
+                        bool force);
 
 int xc_livepatch_get(xc_interface *xch,
                      char *name,
@@ -2652,6 +2650,23 @@ int xc_livepatch_replace(xc_interface *xch, char *name, uint32_t timeout, uint32
  */
 int xc_domain_cacheflush(xc_interface *xch, uint32_t domid,
                          xen_pfn_t start_pfn, xen_pfn_t nr_pfns);
+
+/*
+ * Set LLC colors for a domain.
+ * It can only be used directly after domain creation. An attempt to use it
+ * afterwards will result in an error.
+ */
+int xc_domain_set_llc_colors(xc_interface *xch, uint32_t domid,
+                             const uint32_t *llc_colors,
+                             uint32_t num_llc_colors);
+
+#if defined(__arm__) || defined(__aarch64__)
+int xc_dt_overlay(xc_interface *xch, void *overlay_fdt,
+                  uint32_t overlay_fdt_size, uint8_t overlay_op);
+int xc_dt_overlay_domain(xc_interface *xch, void *overlay_fdt,
+                         uint32_t overlay_fdt_size, uint8_t overlay_op,
+                         uint32_t domain_id);
+#endif
 
 /* Compat shims */
 #include "xenctrl_compat.h"

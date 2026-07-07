@@ -2,6 +2,7 @@
  * asm-x86/hypercall.h
  */
 
+/* SAF-10-safe direct inclusion guard before */
 #ifndef __XEN_HYPERCALL_H__
 #error "asm/hypercall.h should not be included directly - include xen/hypercall.h instead"
 #endif
@@ -54,7 +55,7 @@ static inline void clobber_regs64(struct cpu_user_regs *regs,
     case 4: regs->r10 = 0xdeadbeefdeadf00dUL; fallthrough;
     case 3: regs->rdx = 0xdeadbeefdeadf00dUL; fallthrough;
     case 2: regs->rsi = 0xdeadbeefdeadf00dUL; fallthrough;
-    case 1: regs->rdi = 0xdeadbeefdeadf00dUL;
+    case 1: regs->rdi = 0xdeadbeefdeadf00dUL; break;
     }
 #endif
 }
@@ -70,7 +71,7 @@ static inline void clobber_regs32(struct cpu_user_regs *regs,
     case 4: regs->esi = 0xdeadf00dU; fallthrough;
     case 3: regs->edx = 0xdeadf00dU; fallthrough;
     case 2: regs->ecx = 0xdeadf00dU; fallthrough;
-    case 1: regs->ebx = 0xdeadf00dU;
+    case 1: regs->ebx = 0xdeadf00dU; break;
     }
 #endif
 }

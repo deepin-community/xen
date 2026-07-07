@@ -60,14 +60,14 @@ static always_inline bool aarch64_insn_is_##abbr(u32 code) \
 static always_inline u32 aarch64_insn_get_##abbr##_value(void) \
 { return (val); }
 
-__AARCH64_INSN_FUNCS(b,		0xFC000000, 0x14000000)
-__AARCH64_INSN_FUNCS(bl,	0xFC000000, 0x94000000)
-__AARCH64_INSN_FUNCS(cbz,	0x7F000000, 0x34000000)
-__AARCH64_INSN_FUNCS(cbnz,	0x7F000000, 0x35000000)
-__AARCH64_INSN_FUNCS(tbz,	0x7F000000, 0x36000000)
-__AARCH64_INSN_FUNCS(tbnz,	0x7F000000, 0x37000000)
-__AARCH64_INSN_FUNCS(bcond,	0xFF000010, 0x54000000)
-__AARCH64_INSN_FUNCS(hint,	0xFFFFF01F, 0xD503201F)
+__AARCH64_INSN_FUNCS(b,		0xFC000000U, 0x14000000U)
+__AARCH64_INSN_FUNCS(bl,	0xFC000000U, 0x94000000U)
+__AARCH64_INSN_FUNCS(cbz,	0x7F000000U, 0x34000000U)
+__AARCH64_INSN_FUNCS(cbnz,	0x7F000000U, 0x35000000U)
+__AARCH64_INSN_FUNCS(tbz,	0x7F000000U, 0x36000000U)
+__AARCH64_INSN_FUNCS(tbnz,	0x7F000000U, 0x37000000U)
+__AARCH64_INSN_FUNCS(bcond,	0xFF000010U, 0x54000000U)
+__AARCH64_INSN_FUNCS(hint,	0xFFFFF01FU, 0xD503201FU)
 
 bool aarch64_insn_is_branch_imm(u32 insn);
 
@@ -75,8 +75,8 @@ u64 aarch64_insn_decode_immediate(enum aarch64_insn_imm_type type, u32 insn);
 u32 aarch64_insn_encode_immediate(enum aarch64_insn_imm_type type,
 				  u32 insn, u64 imm);
 
-s32 aarch64_get_branch_offset(u32 insn);
-u32 aarch64_set_branch_offset(u32 insn, s32 offset);
+int32_t aarch64_get_branch_offset(uint32_t insn);
+uint32_t aarch64_set_branch_offset(uint32_t insn, int32_t offset);
 
 u32 aarch64_insn_gen_branch_imm(unsigned long pc, unsigned long addr,
 				enum aarch64_insn_branch_type type);
@@ -89,12 +89,12 @@ static inline bool insn_is_branch_imm(u32 insn)
     return aarch64_insn_is_branch_imm(insn);
 }
 
-static inline s32 insn_get_branch_offset(u32 insn)
+static inline int32_t insn_get_branch_offset(uint32_t insn)
 {
     return aarch64_get_branch_offset(insn);
 }
 
-static inline u32 insn_set_branch_offset(u32 insn, s32 offset)
+static inline uint32_t insn_set_branch_offset(uint32_t insn, int32_t offset)
 {
     return aarch64_set_branch_offset(insn, offset);
 }

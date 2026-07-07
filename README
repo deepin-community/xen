@@ -1,11 +1,11 @@
-###################################
-__  __            _  _    _ _____
-\ \/ /___ _ __   | || |  / |___  |
- \  // _ \ '_ \  | || |_ | |  / /
- /  \  __/ | | | |__   _|| | / /
-/_/\_\___|_| |_|    |_|(_)_|/_/
+######################################
+__  __            _  _    ____   ___
+\ \/ /___ _ __   | || |  |___ \ / _ \
+ \  // _ \ '_ \  | || |_   __) | | | |
+ /  \  __/ | | | |__   _| / __/| |_| |
+/_/\_\___|_| |_|    |_|(_)_____|\___/
 
-##################################
+######################################
 
 https://www.xen.org/
 
@@ -50,10 +50,8 @@ provided by your OS distributor:
         - GNU Binutils 2.24 or later
     * POSIX compatible awk
     * Development install of zlib (e.g., zlib-dev)
-    * Development install of Python 2.6 or later (e.g., python-dev)
+    * Development install of Python 2.7 or later (e.g., python-dev)
     * Development install of curses (e.g., libncurses-dev)
-    * Development install of openssl (e.g., openssl-dev)
-    * Development install of x11 (e.g. xorg-x11-dev)
     * Development install of uuid (e.g. uuid-dev)
     * Development install of yajl (e.g. libyajl-dev)
     * Development install of libaio (e.g. libaio-dev) version 0.3.107 or
@@ -180,16 +178,9 @@ Python Runtime Libraries
 
 Various tools, such as pygrub, have the following runtime dependencies:
 
-    * Python 2.6 or later.
-          URL:    http://www.python.org/
+    * Python 2.7 or later.
+          URL:    https://www.python.org/
           Debian: python
-
-Note that the build system expects `python` to be available. If your system
-only has `python2` or `python3` but not `python` (as in Linux From Scratch),
-you will need to create a symlink for it, or specify PYTHON= when invoking
-make, like (note the position of PYTHON= matters):
-
-    # make PYTHON=/usr/bin/python3
 
 Intel(R) Trusted Execution Technology Support
 =============================================
@@ -197,7 +188,7 @@ Intel(R) Trusted Execution Technology Support
 Intel's technology for safer computing, Intel(R) Trusted Execution Technology
 (Intel(R) TXT), defines platform-level enhancements that provide the building
 blocks for creating trusted platforms.  For more information, see
-http://www.intel.com/technology/security/.
+https://www.intel.com/technology/security/.
 
 Intel(R) TXT support is provided by the Trusted Boot (tboot) module in
 conjunction with minimal logic in the Xen hypervisor.

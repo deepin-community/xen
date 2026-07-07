@@ -25,8 +25,12 @@
 #include <xen/nospec.h>
 #include <xen/param.h>
 #include <xen/sched.h>
+#include <xen/sections.h>
 #include <xen/time.h>
+
 #include <xsm/xsm.h>
+
+#include <asm/p2m.h>
 
 #include <public/argo.h>
 
@@ -313,14 +317,12 @@ static DEFINE_RWLOCK(L1_global_argo_rwlock); /* L1 */
     ((LOCKING_Read_L1 && spin_is_locked(&(d)->argo->send_L2_lock)) || \
      LOCKING_Write_L1)
 
-/* Change this to #define ARGO_DEBUG here to enable more debug messages */
-#undef ARGO_DEBUG
-
-#ifdef ARGO_DEBUG
-#define argo_dprintk(format, args...) printk("argo: " format, ## args )
-#else
-#define argo_dprintk(format, ... ) ((void)0)
-#endif
+#define ARGO_DEBUG 0
+#define argo_dprintk(fmt, args...)                      \
+    do {                                                \
+        if ( ARGO_DEBUG )                               \
+            printk(XENLOG_DEBUG "argo: " fmt, ##args);  \
+    } while ( 0 )
 
 /*
  * This hash function is used to distribute rings within the per-domain
@@ -1423,17 +1425,27 @@ find_ring_mfn(struct domain *d, gfn_t gfn, mfn_t *mfn)
         return ret;
 
     *mfn = page_to_mfn(page);
-    if ( !mfn_valid(*mfn) )
-        ret = -EINVAL;
-#ifdef CONFIG_X86
-    else if ( p2mt == p2m_ram_logdirty )
-        ret = -EAGAIN;
-#endif
-    else if ( (p2mt != p2m_ram_rw) ||
-              !get_page_and_type(page, d, PGT_writable_page) )
-        ret = -EINVAL;
 
-    put_page(page);
+    switch ( p2mt )
+    {
+    case p2m_ram_rw:
+        if ( !get_page_type(page, PGT_writable_page) )
+            ret = -EINVAL;
+        break;
+
+#ifdef CONFIG_X86
+    case p2m_ram_logdirty:
+        ret = -EAGAIN;
+        break;
+#endif
+
+    default:
+        ret = -EINVAL;
+        break;
+    }
+
+    if ( unlikely(ret) )
+        put_page(page);
 
     return ret;
 }

@@ -18,6 +18,8 @@ struct xen_sysctl_livepatch_op;
 
 #ifdef CONFIG_LIVEPATCH
 
+#include <xen/lib.h>
+
 /*
  * We use alternative and exception table code - which by default are __init
  * only, however we need them during runtime. These macros allows us to build
@@ -51,7 +53,7 @@ struct livepatch_symbol {
     const char *name;
     unsigned long value;
     unsigned int size;
-    bool_t new_symbol;
+    bool new_symbol;
 };
 
 struct livepatch_fstate {
@@ -63,7 +65,7 @@ struct livepatch_fstate {
 int livepatch_op(struct xen_sysctl_livepatch_op *);
 void check_for_livepatch_work(void);
 unsigned long livepatch_symbols_lookup_by_name(const char *symname);
-bool_t is_patch(const void *addr);
+bool is_patch(const void *addr);
 
 /* Arch hooks. */
 int arch_livepatch_verify_elf(const struct livepatch_elf *elf);
@@ -136,35 +138,11 @@ void arch_livepatch_post_action(void);
 void arch_livepatch_mask(void);
 void arch_livepatch_unmask(void);
 
-static inline void common_livepatch_apply(const struct livepatch_func *func,
-                                          struct livepatch_fstate *state)
-{
-    /* If the action has been already executed on this function, do nothing. */
-    if ( state->applied == LIVEPATCH_FUNC_APPLIED )
-    {
-        printk(XENLOG_WARNING LIVEPATCH "%s: %s has been already applied before\n",
-                __func__, func->name);
-        return;
-    }
+/* Only for testing purposes. */
+struct payload;
+int revert_payload(struct payload *data);
+void revert_payload_tail(struct payload *data);
 
-    arch_livepatch_apply(func, state);
-    state->applied = LIVEPATCH_FUNC_APPLIED;
-}
-
-static inline void common_livepatch_revert(const struct livepatch_func *func,
-                                           struct livepatch_fstate *state)
-{
-    /* If the apply action hasn't been executed on this function, do nothing. */
-    if ( !func->old_addr || state->applied == LIVEPATCH_FUNC_NOT_APPLIED )
-    {
-        printk(XENLOG_WARNING LIVEPATCH "%s: %s has not been applied before\n",
-                __func__, func->name);
-        return;
-    }
-
-    arch_livepatch_revert(func, state);
-    state->applied = LIVEPATCH_FUNC_NOT_APPLIED;
-}
 #else
 
 /*
@@ -182,8 +160,8 @@ static inline int livepatch_op(struct xen_sysctl_livepatch_op *op)
     return -ENOSYS;
 }
 
-static inline void check_for_livepatch_work(void) { };
-static inline bool_t is_patch(const void *addr)
+static inline void check_for_livepatch_work(void) {}
+static inline bool is_patch(const void *addr)
 {
     return 0;
 }

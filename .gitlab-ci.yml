@@ -1,7 +1,30 @@
+variables:
+  XEN_REGISTRY: registry.gitlab.com/xen-project/xen
+  SELECTED_JOBS_ONLY:
+    description: "Regex to select only some jobs, must be enclosed with /. For example /job1|job2/"
+
+workflow:
+  rules:
+    - if: $CI_COMMIT_BRANCH =~ /^(master|smoke|^coverity-tested\/.*|stable-.*)$/
+      when: never
+    - when: always
+
 stages:
+  - containers
+  - analyze
   - build
   - test
 
 include:
-  - 'automation/gitlab-ci/build.yaml'
-  - 'automation/gitlab-ci/test.yaml'
+  - local: 'automation/gitlab-ci/containers.yaml'
+    rules:
+      - if: $XEN_CI_REBUILD_CONTAINERS
+  - local: 'automation/gitlab-ci/analyze.yaml'
+    rules:
+      - if: $XEN_CI_REBUILD_CONTAINERS == null
+  - local: 'automation/gitlab-ci/build.yaml'
+    rules:
+      - if: $XEN_CI_REBUILD_CONTAINERS == null
+  - local: 'automation/gitlab-ci/test.yaml'
+    rules:
+      - if: $XEN_CI_REBUILD_CONTAINERS == null

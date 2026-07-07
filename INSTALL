@@ -23,7 +23,7 @@ Xen Hypervisor
 ==============
 
 Xen itself is configured via a `kconfig' system borrowed from Linux.
-See docs/misc/kconfig.txt.
+See https://www.kernel.org/doc/html/v5.4/kbuild/.
 
 Note that unlike with Linux, and contrary to that document, you cannot
 look at Kconfig files, or the default or generated config files etc.,
@@ -88,11 +88,6 @@ linker will either not find the required libraries or it will load them
 from a wrong location. Compiling the tools with rpath will force the
 linker to look in the correct location.
   --enable-rpath
-
-During build in a git checkout the buildsystem needs to download
-additional tools such as qemu. This is done with either the native git
-protocol, or via http if this option is enabled.
-  --enable-githttp
 
 Disable xenstat and xentop monitoring tools.
   --disable-monitors
@@ -168,7 +163,6 @@ Build various stubom components, some are only example code. Its usually
 enough to specify just --enable-stubdom and leave these options alone.
   --enable-ioemu-stubdom
   --enable-c-stubdom
-  --enable-caml-stubdom
   --disable-pv-grub
   --disable-xenstore-stubdom
   --enable-vtpm-stubdom

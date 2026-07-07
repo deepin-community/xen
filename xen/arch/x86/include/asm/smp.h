@@ -22,6 +22,7 @@
 DECLARE_PER_CPU(cpumask_var_t, cpu_sibling_mask);
 DECLARE_PER_CPU(cpumask_var_t, cpu_core_mask);
 DECLARE_PER_CPU(cpumask_var_t, scratch_cpumask);
+DECLARE_PER_CPU(cpumask_var_t, hpet_scratch_cpumask);
 DECLARE_PER_CPU(cpumask_var_t, send_ipi_cpumask);
 
 /*
@@ -32,7 +33,7 @@ extern bool park_offline_cpus;
 
 void smp_send_nmi_allbutself(void);
 
-void send_IPI_mask(const cpumask_t *, int vector);
+void send_IPI_mask(const cpumask_t *mask, int vector);
 void send_IPI_self(int vector);
 
 extern void (*mtrr_hook) (void);
@@ -43,17 +44,9 @@ extern u32 x86_cpu_to_apicid[];
 
 #define cpu_physical_id(cpu)	x86_cpu_to_apicid[cpu]
 
-#define cpu_is_offline(cpu) unlikely(!cpu_online(cpu))
 extern void cpu_exit_clear(unsigned int cpu);
 extern void cpu_uninit(unsigned int cpu);
 int cpu_add(uint32_t apic_id, uint32_t acpi_id, uint32_t pxm);
-
-/*
- * This function is needed by all SMP systems. It must _always_ be valid
- * from the initial startup. We map APIC_BASE very early in page_setup(),
- * so this is correct in the x86 case.
- */
-#define smp_processor_id() get_processor_id()
 
 void __stop_this_cpu(void);
 

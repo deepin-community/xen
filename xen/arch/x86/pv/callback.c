@@ -1,19 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * pv/callback.c
  *
  * hypercall handles and helper functions for guest callback
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms and conditions of the GNU General Public
- * License, version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public
- * License along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <xen/event.h>
@@ -29,12 +18,12 @@ static int register_guest_nmi_callback(unsigned long address)
 {
     struct vcpu *curr = current;
     struct domain *d = curr->domain;
-    struct trap_info *t = &curr->arch.pv.trap_ctxt[TRAP_nmi];
+    struct trap_info *t = &curr->arch.pv.trap_ctxt[X86_EXC_NMI];
 
     if ( !is_canonical_address(address) )
         return -EINVAL;
 
-    t->vector  = TRAP_nmi;
+    t->vector  = X86_EXC_NMI;
     t->flags   = 0;
     t->cs      = (is_pv_32bit_domain(d) ?
                   FLAT_COMPAT_KERNEL_CS : FLAT_KERNEL_CS);
@@ -54,12 +43,12 @@ static int register_guest_nmi_callback(unsigned long address)
 static void unregister_guest_nmi_callback(void)
 {
     struct vcpu *curr = current;
-    struct trap_info *t = &curr->arch.pv.trap_ctxt[TRAP_nmi];
+    struct trap_info *t = &curr->arch.pv.trap_ctxt[X86_EXC_NMI];
 
     memset(t, 0, sizeof(*t));
 }
 
-static long register_guest_callback(struct callback_register *reg)
+static long register_guest_callback(const struct callback_register *reg)
 {
     long ret = 0;
     struct vcpu *curr = current;
@@ -113,7 +102,7 @@ static long register_guest_callback(struct callback_register *reg)
     return ret;
 }
 
-static long unregister_guest_callback(struct callback_unregister *unreg)
+static long unregister_guest_callback(const struct callback_unregister *unreg)
 {
     long ret;
 

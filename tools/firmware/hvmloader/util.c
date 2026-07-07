@@ -42,60 +42,6 @@ bool check_overlap(uint64_t start, uint64_t size,
             (start < reserved_start + reserved_size);
 }
 
-void wrmsr(uint32_t idx, uint64_t v)
-{
-    asm volatile (
-        "wrmsr"
-        : : "c" (idx), "a" ((uint32_t)v), "d" ((uint32_t)(v>>32)) );
-}
-
-uint64_t rdmsr(uint32_t idx)
-{
-    uint32_t lo, hi;
-
-    asm volatile (
-        "rdmsr"
-        : "=a" (lo), "=d" (hi) : "c" (idx) );
-
-    return (lo | ((uint64_t)hi << 32));
-}
-
-void outb(uint16_t addr, uint8_t val)
-{
-    asm volatile ( "outb %%al, %%dx" : : "d" (addr), "a" (val) );
-}
-
-void outw(uint16_t addr, uint16_t val)
-{
-    asm volatile ( "outw %%ax, %%dx" : : "d" (addr), "a" (val) );
-}
-
-void outl(uint16_t addr, uint32_t val)
-{
-    asm volatile ( "outl %%eax, %%dx" : : "d" (addr), "a" (val) );
-}
-
-uint8_t inb(uint16_t addr)
-{
-    uint8_t val;
-    asm volatile ( "inb %%dx,%%al" : "=a" (val) : "d" (addr) );
-    return val;
-}
-
-uint16_t inw(uint16_t addr)
-{
-    uint16_t val;
-    asm volatile ( "inw %%dx,%%ax" : "=a" (val) : "d" (addr) );
-    return val;
-}
-
-uint32_t inl(uint16_t addr)
-{
-    uint32_t val;
-    asm volatile ( "inl %%dx,%%eax" : "=a" (val) : "d" (addr) );
-    return val;
-}
-
 uint8_t cmos_inb(uint8_t idx)
 {
     outb(0x70, idx);
@@ -321,15 +267,6 @@ memcmp(const void *s1, const void *s2, unsigned n)
     return 0;
 }
 
-void
-cpuid(uint32_t idx, uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx)
-{
-    asm volatile (
-        "cpuid"
-        : "=a" (*eax), "=b" (*ebx), "=c" (*ecx), "=d" (*edx)
-        : "0" (idx) );
-}
-
 static const char hex_digits[] = "0123456789abcdef";
 
 /* Write a two-character hex representation of 'byte' to digits[].
@@ -491,28 +428,6 @@ void *scratch_alloc(uint32_t size, uint32_t align)
     scratch_start = e;
 
     return (void *)(unsigned long)s;
-}
-
-uint32_t ioapic_read(uint32_t reg)
-{
-    *(volatile uint32_t *)(ioapic_base_address + 0x00) = reg;
-    return *(volatile uint32_t *)(ioapic_base_address + 0x10);
-}
-
-void ioapic_write(uint32_t reg, uint32_t val)
-{
-    *(volatile uint32_t *)(ioapic_base_address + 0x00) = reg;
-    *(volatile uint32_t *)(ioapic_base_address + 0x10) = val;
-}
-
-uint32_t lapic_read(uint32_t reg)
-{
-    return *(volatile uint32_t *)(LAPIC_BASE_ADDRESS + reg);
-}
-
-void lapic_write(uint32_t reg, uint32_t val)
-{
-    *(volatile uint32_t *)(LAPIC_BASE_ADDRESS + reg) = val;
 }
 
 #define PCI_CONF1_ADDRESS(bus, devfn, reg) \
@@ -920,6 +835,8 @@ void hvmloader_acpi_build_tables(struct acpi_config *config,
 {
     const char *s;
     struct acpi_ctxt ctxt;
+    long long tpm_version;
+    char *end;
 
     /* Allocate and initialise the acpi info area. */
     mem_hole_populate_ram(ACPI_INFO_PHYSICAL_ADDRESS >> PAGE_SHIFT, 1);
@@ -943,7 +860,7 @@ void hvmloader_acpi_build_tables(struct acpi_config *config,
 
     config->lapic_base_address = LAPIC_BASE_ADDRESS;
     config->lapic_id = acpi_lapic_id;
-    config->ioapic_base_address = ioapic_base_address;
+    config->ioapic_base_address = IOAPIC_BASE_ADDRESS;
     config->ioapic_id = IOAPIC_ID;
     config->pci_isa_irq_mask = PCI_ISA_IRQ_MASK; 
 
@@ -967,8 +884,6 @@ void hvmloader_acpi_build_tables(struct acpi_config *config,
     s = xenstore_read("platform/generation-id", "0:0");
     if ( s )
     {
-        char *end;
-
         config->vm_gid[0] = strtoll(s, &end, 0);
         config->vm_gid[1] = 0;
         if ( end && end[0] == ':' )
@@ -994,13 +909,37 @@ void hvmloader_acpi_build_tables(struct acpi_config *config,
     if ( !strncmp(xenstore_read("platform/acpi_laptop_slate", "0"), "1", 1)  )
         config->table_flags |= ACPI_HAS_SSDT_LAPTOP_SLATE;
 
-    config->table_flags |= (ACPI_HAS_TCPA | ACPI_HAS_IOAPIC |
-                            ACPI_HAS_WAET | ACPI_HAS_PMTIMER |
-                            ACPI_HAS_BUTTONS | ACPI_HAS_VGA |
-                            ACPI_HAS_8042 | ACPI_HAS_CMOS_RTC);
+    config->table_flags |= (ACPI_HAS_IOAPIC | ACPI_HAS_WAET |
+                            ACPI_HAS_PMTIMER | ACPI_HAS_BUTTONS |
+                            ACPI_HAS_VGA | ACPI_HAS_8042 |
+                            ACPI_HAS_CMOS_RTC);
     config->acpi_revision = 4;
 
-    config->tis_hdr = (uint16_t *)ACPI_TIS_HDR_ADDRESS;
+    config->tpm_version = 0;
+    s = xenstore_read("platform/tpm_version", "1");
+    tpm_version = strtoll(s, &end, 0);
+
+    if ( end[0] == '\0' )
+    {
+        switch ( tpm_version )
+        {
+        case 1:
+            config->table_flags |= ACPI_HAS_TPM;
+            config->tis_hdr = (uint16_t *)ACPI_TIS_HDR_ADDRESS;
+            config->tpm_version = 1;
+            break;
+
+        case 2:
+            config->table_flags |= ACPI_HAS_TPM;
+            config->crb_id = (uint16_t *)TPM_CRB_INTF_ID;
+
+            mem_hole_populate_ram(TPM_LOG_AREA_ADDRESS >> PAGE_SHIFT,
+                                  TPM_LOG_SIZE >> PAGE_SHIFT);
+            memset((void *)TPM_LOG_AREA_ADDRESS, 0, TPM_LOG_SIZE);
+            config->tpm_version = 2;
+            break;
+        }
+    }
 
     config->numa.nr_vmemranges = nr_vmemranges;
     config->numa.nr_vnodes = nr_vnodes;

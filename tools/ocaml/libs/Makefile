@@ -3,9 +3,8 @@ include $(XEN_ROOT)/tools/Rules.mk
 
 SUBDIRS= \
 	mmap \
-	xentoollog \
-	xc eventchn \
-	xb xs xl
+	eventchn xc \
+	xb xs xsd_glue
 
 .PHONY: all
 all: subdirs-all

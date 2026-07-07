@@ -23,12 +23,12 @@ typedef struct {
 #define rwlock_init(l) (*(l) = (rwlock_t)RW_LOCK_UNLOCKED)
 
 /* Writer states & reader shift and bias. */
-#define    _QW_CPUMASK  0xfffU             /* Writer CPU mask */
-#define    _QW_SHIFT    12                 /* Writer flags shift */
-#define    _QW_WAITING  (1U << _QW_SHIFT)  /* A writer is waiting */
-#define    _QW_LOCKED   (3U << _QW_SHIFT)  /* A writer holds the lock */
-#define    _QW_WMASK    (3U << _QW_SHIFT)  /* Writer mask */
-#define    _QR_SHIFT    14                 /* Reader count shift */
+#define    _QW_SHIFT    14                      /* Writer flags shift */
+#define    _QW_CPUMASK  ((1U << _QW_SHIFT) - 1) /* Writer CPU mask */
+#define    _QW_WAITING  (1U << _QW_SHIFT)       /* A writer is waiting */
+#define    _QW_LOCKED   (3U << _QW_SHIFT)       /* A writer holds the lock */
+#define    _QW_WMASK    (3U << _QW_SHIFT)       /* Writer mask */
+#define    _QR_SHIFT    (_QW_SHIFT + 2)         /* Reader count shift */
 #define    _QR_BIAS     (1U << _QR_SHIFT)
 
 void queue_read_lock_slowpath(rwlock_t *lock);
@@ -36,14 +36,21 @@ void queue_write_lock_slowpath(rwlock_t *lock);
 
 static inline bool _is_write_locked_by_me(unsigned int cnts)
 {
-    BUILD_BUG_ON(_QW_CPUMASK < NR_CPUS);
+    BUILD_BUG_ON((_QW_CPUMASK + 1) < NR_CPUS);
+    BUILD_BUG_ON(NR_CPUS * _QR_BIAS > INT_MAX);
     return (cnts & _QW_WMASK) == _QW_LOCKED &&
            (cnts & _QW_CPUMASK) == smp_processor_id();
 }
 
 static inline bool _can_read_lock(unsigned int cnts)
 {
-    return !(cnts & _QW_WMASK) || _is_write_locked_by_me(cnts);
+    /*
+     * If write locked by the caller, no other readers are possible.
+     * Not allowing the lock holder to read_lock() another
+     * INT_MAX >> _QR_SHIFT times ought to be fine.
+     */
+    return cnts <= INT_MAX &&
+           (!(cnts & _QW_WMASK) || _is_write_locked_by_me(cnts));
 }
 
 /*
@@ -66,7 +73,10 @@ static inline int _read_trylock(rwlock_t *lock)
          * arch_lock_acquire_barrier().
          */
         if ( likely(_can_read_lock(cnts)) )
+        {
+            lock_enter(&lock->lock.debug);
             return 1;
+        }
         atomic_sub(_QR_BIAS, &lock->cnts);
     }
     preempt_enable();
@@ -91,6 +101,7 @@ static inline void _read_lock(rwlock_t *lock)
     {
         /* The slow path calls check_lock() via spin_lock(). */
         check_lock(&lock->lock.debug, false);
+        lock_enter(&lock->lock.debug);
         return;
     }
 
@@ -123,6 +134,8 @@ static inline unsigned long _read_lock_irqsave(rwlock_t *lock)
  */
 static inline void _read_unlock(rwlock_t *lock)
 {
+    lock_exit(&lock->lock.debug);
+
     arch_lock_release_barrier();
     /*
      * Atomically decrement the reader count
@@ -143,7 +156,7 @@ static inline void _read_unlock_irqrestore(rwlock_t *lock, unsigned long flags)
     local_irq_restore(flags);
 }
 
-static inline int _rw_is_locked(rwlock_t *lock)
+static inline int _rw_is_locked(const rwlock_t *lock)
 {
     return atomic_read(&lock->cnts);
 }
@@ -170,6 +183,7 @@ static inline void _write_lock(rwlock_t *lock)
     {
         /* The slow path calls check_lock() via spin_lock(). */
         check_lock(&lock->lock.debug, false);
+        lock_enter(&lock->lock.debug);
         return;
     }
 
@@ -215,6 +229,8 @@ static inline int _write_trylock(rwlock_t *lock)
         return 0;
     }
 
+    lock_enter(&lock->lock.debug);
+
     /*
      * atomic_cmpxchg() is a full barrier so no need for an
      * arch_lock_acquire_barrier().
@@ -225,6 +241,9 @@ static inline int _write_trylock(rwlock_t *lock)
 static inline void _write_unlock(rwlock_t *lock)
 {
     ASSERT(_is_write_locked_by_me(atomic_read(&lock->cnts)));
+
+    lock_exit(&lock->lock.debug);
+
     arch_lock_release_barrier();
     atomic_and(~(_QW_CPUMASK | _QW_WMASK), &lock->cnts);
     preempt_enable();
@@ -242,32 +261,54 @@ static inline void _write_unlock_irqrestore(rwlock_t *lock, unsigned long flags)
     local_irq_restore(flags);
 }
 
-static inline int _rw_is_write_locked(rwlock_t *lock)
+static inline int _rw_is_write_locked(const rwlock_t *lock)
 {
     return (atomic_read(&lock->cnts) & _QW_WMASK) == _QW_LOCKED;
 }
 
-#define read_lock(l)                  _read_lock(l)
-#define read_lock_irq(l)              _read_lock_irq(l)
+static always_inline void read_lock(rwlock_t *l)
+{
+    _read_lock(l);
+    block_lock_speculation();
+}
+
+static always_inline void read_lock_irq(rwlock_t *l)
+{
+    _read_lock_irq(l);
+    block_lock_speculation();
+}
+
 #define read_lock_irqsave(l, f)                                 \
     ({                                                          \
         BUILD_BUG_ON(sizeof(f) != sizeof(unsigned long));       \
         ((f) = _read_lock_irqsave(l));                          \
+        block_lock_speculation();                               \
     })
 
 #define read_unlock(l)                _read_unlock(l)
 #define read_unlock_irq(l)            _read_unlock_irq(l)
 #define read_unlock_irqrestore(l, f)  _read_unlock_irqrestore(l, f)
-#define read_trylock(l)               _read_trylock(l)
+#define read_trylock(l)               lock_evaluate_nospec(_read_trylock(l))
 
-#define write_lock(l)                 _write_lock(l)
-#define write_lock_irq(l)             _write_lock_irq(l)
+static always_inline void write_lock(rwlock_t *l)
+{
+    _write_lock(l);
+    block_lock_speculation();
+}
+
+static always_inline void write_lock_irq(rwlock_t *l)
+{
+    _write_lock_irq(l);
+    block_lock_speculation();
+}
+
 #define write_lock_irqsave(l, f)                                \
     ({                                                          \
         BUILD_BUG_ON(sizeof(f) != sizeof(unsigned long));       \
         ((f) = _write_lock_irqsave(l));                         \
+        block_lock_speculation();                               \
     })
-#define write_trylock(l)              _write_trylock(l)
+#define write_trylock(l)              lock_evaluate_nospec(_write_trylock(l))
 
 #define write_unlock(l)               _write_unlock(l)
 #define write_unlock_irq(l)           _write_unlock_irq(l)
@@ -275,13 +316,15 @@ static inline int _rw_is_write_locked(rwlock_t *lock)
 
 #define rw_is_locked(l)               _rw_is_locked(l)
 #define rw_is_write_locked(l)         _rw_is_write_locked(l)
+#define rw_is_write_locked_by_me(l) \
+    lock_evaluate_nospec(_is_write_locked_by_me(atomic_read(&(l)->cnts)))
 
 
 typedef struct percpu_rwlock percpu_rwlock_t;
 
 struct percpu_rwlock {
     rwlock_t            rwlock;
-    bool_t              writer_activating;
+    bool                writer_activating;
 #ifndef NDEBUG
     percpu_rwlock_t     **percpu_owner;
 #endif
@@ -304,8 +347,8 @@ static inline void _percpu_rwlock_owner_check(percpu_rwlock_t **per_cpudata,
 #define percpu_rwlock_resource_init(l, owner) \
     (*(l) = (percpu_rwlock_t)PERCPU_RW_LOCK_UNLOCKED(&get_per_cpu_var(owner)))
 
-static inline void _percpu_read_lock(percpu_rwlock_t **per_cpudata,
-                                         percpu_rwlock_t *percpu_rwlock)
+static always_inline void _percpu_read_lock(percpu_rwlock_t **per_cpudata,
+                                            percpu_rwlock_t *percpu_rwlock)
 {
     /* Validate the correct per_cpudata variable has been provided. */
     _percpu_rwlock_owner_check(per_cpudata, percpu_rwlock);
@@ -340,9 +383,13 @@ static inline void _percpu_read_lock(percpu_rwlock_t **per_cpudata,
     }
     else
     {
+        /* Other branch already has a speculation barrier in read_lock(). */
+        block_lock_speculation();
         /* All other paths have implicit check_lock() calls via read_lock(). */
         check_lock(&percpu_rwlock->rwlock.lock.debug, false);
     }
+
+    lock_enter(&percpu_rwlock->rwlock.lock.debug);
 }
 
 static inline void _percpu_read_unlock(percpu_rwlock_t **per_cpudata,
@@ -353,6 +400,9 @@ static inline void _percpu_read_unlock(percpu_rwlock_t **per_cpudata,
 
     /* Verify the read lock was taken for this lock */
     ASSERT(this_cpu_ptr(per_cpudata) != NULL);
+
+    lock_exit(&percpu_rwlock->rwlock.lock.debug);
+
     /*
      * Detect using a second percpu_rwlock_t simulatenously and fallback
      * to standard read_unlock.
@@ -379,6 +429,9 @@ static inline void _percpu_write_unlock(percpu_rwlock_t **per_cpudata,
 
     ASSERT(percpu_rwlock->writer_activating);
     percpu_rwlock->writer_activating = 0;
+
+    lock_exit(&percpu_rwlock->rwlock.lock.debug);
+
     write_unlock(&percpu_rwlock->rwlock);
 }
 
@@ -388,8 +441,12 @@ static inline void _percpu_write_unlock(percpu_rwlock_t **per_cpudata,
     _percpu_read_lock(&get_per_cpu_var(percpu), lock)
 #define percpu_read_unlock(percpu, lock) \
     _percpu_read_unlock(&get_per_cpu_var(percpu), lock)
-#define percpu_write_lock(percpu, lock) \
-    _percpu_write_lock(&get_per_cpu_var(percpu), lock)
+
+#define percpu_write_lock(percpu, lock)                 \
+({                                                      \
+    _percpu_write_lock(&get_per_cpu_var(percpu), lock); \
+    block_lock_speculation();                           \
+})
 #define percpu_write_unlock(percpu, lock) \
     _percpu_write_unlock(&get_per_cpu_var(percpu), lock)
 

@@ -20,7 +20,7 @@ SPDX
 New files should start with a single-line SPDX comment to express the
 license, e.g.:
 
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0-only */
 
 See LICENSES/ for a list of licenses and SPDX tags currently used.
 
@@ -46,6 +46,10 @@ void fun(void)
         /* A second level of indent. */
     }
 }
+
+Due to the behavior of GNU diffutils "diff -p", labels should be
+indented by at least one blank.  Non-case labels inside switch() bodies
+are preferred to be indented the same as the block's case labels.
 
 White space
 -----------
@@ -76,8 +80,13 @@ Bracing
 -------
 
 Braces ('{' and '}') are usually placed on a line of their own, except
-for the do/while loop.  This is unlike the Linux coding style and
-unlike K&R.  do/while loops are an exception. e.g.:
+for
+- the do/while loop
+- the opening brace in definitions of enum, struct, and union
+- the opening brace in initializers
+- compound literals
+This is unlike the Linux coding style and unlike K&R.  do/while loops
+are one exception. e.g.:
 
 if ( condition )
 {
@@ -135,6 +144,57 @@ separate lines and each line should begin with a leading '*'.
  * Note beginning and end markers on separate lines and leading '*'.
  */
 
+Naming convention for files and command line options
+----------------------------------------------------
+
+'-' should be used to separate words in commandline options and filenames.
+E.g. timer-works.
+
+Note that some of the options and filenames are using '_'. This is now
+deprecated.
+
+Header inclusion guards
+-----------------------
+
+Unless otherwise specified, all header files should include proper
+guards to prevent multiple inclusions. The following naming conventions
+apply:
+
+- Guard names are derived from directory path underneath xen/ and the
+  actual file name.  Path components are separated by double
+  underscores.  Alphabetic characters are converted to upper case.  Non-
+  alphanumeric characters are replaced by single underscores.
+- Certain directory components are omitted, to keep identifier length
+  bounded:
+  - the top level include/,
+  - architecture-specific private files' arch/,
+  - any architecture's arch/<arch>/include/asm/ collapses to
+    ASM__<ARCH>__.
+
+For example:
+
+- Xen headers: XEN__<filename>_H
+  - include/xen/something.h -> XEN__SOMETHING_H
+
+- asm-generic headers: ASM_GENERIC__<filename>_H
+  - include/asm-generic/something.h -> ASM_GENERIC__SOMETHING_H
+
+- arch-specific headers: ASM__<architecture>__<subdir>__<filename>_H
+  - arch/x86/include/asm/something.h -> ASM__X86__SOMETHING_H
+
+- Private headers: <dir>__<filename>_H
+  - arch/arm/arm64/lib/something.h -> ARM__ARM64__LIB__SOMETHING_H
+  - arch/x86/lib/something.h -> X86__LIB__SOMETHING_H
+  - common/something.h -> COMMON__SOMETHING_H
+
+Note that this requires some discipline on the naming of future new
+sub-directories: There shouldn't be any other asm/ one anywhere, for
+example.  Nor should any new ports be named the same as top-level
+(within xen/) directories.  Which may in turn require some care if any
+new top-level directories were to be added.  Rule of thumb: Whenever
+adding a new subdirectory, check the rules to prevent any potential
+collisions.
+
 Emacs local variables
 ---------------------
 
@@ -149,105 +209,3 @@ the end of files.  It should be:
  * indent-tabs-mode: nil
  * End:
  */
-
-Handling unexpected conditions
-------------------------------
-
-GUIDELINES:
-
-Passing errors up the stack should be used when the caller is already
-expecting to handle errors, and the state when the error was
-discovered isn’t broken, or isn't too hard to fix.
-
-domain_crash() should be used when passing errors up the stack is too
-difficult, and/or when fixing up state of a guest is impractical, but
-where fixing up the state of Xen will allow Xen to continue running.
-This is particularly appropriate when the guest is exhibiting behavior
-well-behaved guests shouldn't.
-
-BUG_ON() should be used when you can’t pass errors up the stack, and
-either continuing or crashing the guest would likely cause an
-information leak or privilege escalation vulnerability.
-
-ASSERT() IS NOT AN ERROR HANDLING MECHANISM.  ASSERT is a way to move
-detection of a bug earlier in the programming cycle; it is a
-more-noticeable printk.  It should only be added after one of the
-other three error-handling mechanisms has been evaluated for
-reliability and security.
-
-RATIONALE:
-
-It's frequently the case that code is written with the assumption that
-certain conditions can never happen.  There are several possible
-actions programmers can take in these situations:
-
-* Programmers can simply not handle those cases in any way, other than
-perhaps to write a comment documenting what the assumption is.
-
-* Programmers can try to handle the case gracefully -- fixing up
-in-progress state and returning an error to the user.
-
-* Programmers can crash the guest.
-
-* Programmers can use ASSERT(), which will cause the check to be
-executed in DEBUG builds, and cause the hypervisor to crash if it's
-violated
-
-* Programmers can use BUG_ON(), which will cause the check to be
-executed in both DEBUG and non-DEBUG builds, and cause the hypervisor
-to crash if it's violated.
-
-In selecting which response to use, we want to achieve several goals:
-
-- To minimize risk of introducing security vulnerabilities,
-  particularly as the code evolves over time
-
-- To efficiently spend programmer time
-
-- To detect violations of assumptions as early as possible
-
-- To minimize the impact of bugs on production use cases
-
-The guidelines above attempt to balance these:
-
-- When the caller is expecting to handle errors, and there is no
-broken state at the time the unexpected condition is discovered, or
-when fixing the state is straightforward, then fixing up the state and
-returning an error is the most robust thing to do.  However, if the
-caller isn't expecting to handle errors, or if the state is difficult
-to fix, then returning an error may require extensive refactoring,
-which is not a good use of programmer time when they're certain that
-this condition cannot occur.
-
-- BUG_ON() will stop all hypervisor action immediately.  In situations
-where continuing might allow an attacker to escalate privilege, a
-BUG_ON() can change a privilege escalation or information leak into a
-denial-of-service (an improvement).  But in situations where
-continuing (say, returning an error) might be safe, then BUG_ON() can
-change a benign failure into denial-of-service (a degradation).
-
-- domain_crash() is similar to BUG_ON(), but with a more limited
-effect: it stops that domain immediately.  In situations where
-continuing might cause guest or hypervisor corruption, but destroying
-the guest allows the hypervisor to continue, this can change a more
-serious bug into a guest denial-of-service.  But in situations where
-returning an error might be safe, then domain_crash() can change a
-benign failure into a guest denial-of-service.
-
-- ASSERT() will stop the hypervisor during development, but allow
-hypervisor action to continue during production.  In situations where
-continuing will at worst result in a denial-of-service, and at best
-may have little effect other than perhaps quirky behavior, using an
-ASSERT() will allow violation of assumptions to be detected as soon as
-possible, while not causing undue degradation in production
-hypervisors.  However, in situations where continuing could cause
-privilege escalation or information leaks, using an ASSERT() can
-introduce security vulnerabilities.
-
-Note however that domain_crash() has its own traps: callers far up the
-call stack may not realize that the domain is now dying as a result of
-an innocuous-looking operation, particularly if somewhere on the
-callstack between the initial function call and the failure, no error
-is returned.  Using domain_crash() requires careful inspection and
-documentation of the code to make sure all callers at the stack handle
-a newly-dead domain gracefully.

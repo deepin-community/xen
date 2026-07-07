@@ -34,7 +34,7 @@
 #include <asm/time.h>
 #include <asm/hvm/hvm.h>
 #include <asm/hvm/io.h>
-#include <asm/hvm/support.h>
+#include <asm/hvm/save.h>
 #include <asm/hvm/vpt.h>
 #include <asm/current.h>
 
@@ -47,26 +47,29 @@
 #define RW_STATE_MSB 2
 #define RW_STATE_WORD0 3
 #define RW_STATE_WORD1 4
-
-static int cf_check handle_pit_io(
-    int dir, unsigned int port, unsigned int bytes, uint32_t *val);
-static int cf_check handle_speaker_io(
-    int dir, unsigned int port, unsigned int bytes, uint32_t *val);
+#define RW_STATE_NUM 5
 
 #define get_guest_time(v) \
    (is_hvm_vcpu(v) ? hvm_get_guest_time(v) : (u64)get_s_time())
 
-static int pit_get_count(PITState *pit, int channel)
+static uint64_t get_count(PITState *pit, unsigned int channel)
 {
-    uint64_t d;
-    int  counter;
-    struct hvm_hw_pit_channel *c = &pit->hw.channels[channel];
-    struct vcpu *v = vpit_vcpu(pit);
+    const struct hvm_hw_pit_channel *c = &pit->hw.channels[channel];
+    uint64_t d = c->gate || (c->mode & 3) == 1
+                 ? get_guest_time(vpit_vcpu(pit))
+                 : pit->count_stop_time[channel];
 
     ASSERT(spin_is_locked(&pit->lock));
 
-    d = muldiv64(get_guest_time(v) - pit->count_load_time[channel],
-                 PIT_FREQ, SYSTEM_TIME_HZ);
+    return muldiv64((d - pit->count_load_time[channel] -
+                     pit->stopped_time[channel]),
+                    PIT_FREQ, SYSTEM_TIME_HZ);
+}
+
+static unsigned int pit_get_count(PITState *pit, int channel)
+{
+    unsigned int d = get_count(pit, channel), counter;
+    struct hvm_hw_pit_channel *c = &pit->hw.channels[channel];
 
     switch ( c->mode )
     {
@@ -87,17 +90,67 @@ static int pit_get_count(PITState *pit, int channel)
     return counter;
 }
 
-static int pit_get_out(PITState *pit, int channel)
+static void cf_check pit_time_fired(struct vcpu *v, void *priv)
 {
+    uint64_t *count_load_time = priv;
+
+    TRACE_TIME(TRC_HVM_EMUL_PIT_TIMER_CB);
+    *count_load_time = get_guest_time(v);
+}
+
+static void pit_load_count(PITState *pit, int channel, int val)
+{
+    uint32_t period;
     struct hvm_hw_pit_channel *s = &pit->hw.channels[channel];
-    uint64_t d;
-    int out;
     struct vcpu *v = vpit_vcpu(pit);
 
     ASSERT(spin_is_locked(&pit->lock));
 
-    d = muldiv64(get_guest_time(v) - pit->count_load_time[channel], 
-                 PIT_FREQ, SYSTEM_TIME_HZ);
+    if ( val == 0 )
+        val = 0x10000;
+
+    if ( v == NULL )
+        pit->count_load_time[channel] = 0;
+    else
+        pit->count_load_time[channel] = get_guest_time(v);
+
+    pit->count_stop_time[channel] = pit->count_load_time[channel];
+    pit->stopped_time[channel] = 0;
+
+    s->count = val;
+    period = DIV_ROUND(val * SYSTEM_TIME_HZ, PIT_FREQ);
+
+    if ( !v || !is_hvm_vcpu(v) || channel )
+        return;
+
+    switch ( s->mode )
+    {
+    case 2:
+    case 3:
+        /* Periodic timer. */
+        TRACE_TIME(TRC_HVM_EMUL_PIT_START_TIMER, period, period);
+        create_periodic_time(v, &pit->pt0, period, period, 0, pit_time_fired,
+                             &pit->count_load_time[channel], false);
+        break;
+    case 1:
+    case 4:
+        /* One-shot timer. */
+        TRACE_TIME(TRC_HVM_EMUL_PIT_START_TIMER, period, 0);
+        create_periodic_time(v, &pit->pt0, period, 0, 0, pit_time_fired,
+                             &pit->count_load_time[channel], false);
+        break;
+    default:
+        TRACE_TIME(TRC_HVM_EMUL_PIT_STOP_TIMER);
+        destroy_periodic_time(&pit->pt0);
+        break;
+    }
+}
+
+static int pit_get_out(PITState *pit, int channel)
+{
+    struct hvm_hw_pit_channel *s = &pit->hw.channels[channel];
+    uint64_t d = get_count(pit, channel);
+    int out;
 
     switch ( s->mode )
     {
@@ -130,22 +183,39 @@ static void pit_set_gate(PITState *pit, int channel, int val)
 
     ASSERT(spin_is_locked(&pit->lock));
 
-    switch ( s->mode )
-    {
-    default:
-    case 0:
-    case 4:
-        /* XXX: just disable/enable counting */
-        break;
-    case 1:
-    case 5:
-    case 2:
-    case 3:
-        /* Restart counting on rising edge. */
-        if ( s->gate < val )
-            pit->count_load_time[channel] = get_guest_time(v);
-        break;
-    }
+    if ( s->gate > val )
+        switch ( s->mode )
+        {
+        case 0:
+        case 2:
+        case 3:
+        case 4:
+            /* Disable counting. */
+            if ( !channel )
+                destroy_periodic_time(&pit->pt0);
+            pit->count_stop_time[channel] = get_guest_time(v);
+            break;
+        }
+
+    if ( s->gate < val )
+        switch ( s->mode )
+        {
+        default:
+        case 0:
+        case 4:
+            /* Enable counting. */
+            pit->stopped_time[channel] += get_guest_time(v) -
+                                          pit->count_stop_time[channel];
+            break;
+
+        case 1:
+        case 5:
+        case 2:
+        case 3:
+            /* Initiate counting on rising edge. */
+            pit_load_count(pit, channel, pit->hw.channels[channel].count);
+            break;
+        }
 
     s->gate = val;
 }
@@ -154,57 +224,6 @@ static int pit_get_gate(PITState *pit, int channel)
 {
     ASSERT(spin_is_locked(&pit->lock));
     return pit->hw.channels[channel].gate;
-}
-
-static void cf_check pit_time_fired(struct vcpu *v, void *priv)
-{
-    uint64_t *count_load_time = priv;
-    TRACE_0D(TRC_HVM_EMUL_PIT_TIMER_CB);
-    *count_load_time = get_guest_time(v);
-}
-
-static void pit_load_count(PITState *pit, int channel, int val)
-{
-    u32 period;
-    struct hvm_hw_pit_channel *s = &pit->hw.channels[channel];
-    struct vcpu *v = vpit_vcpu(pit);
-
-    ASSERT(spin_is_locked(&pit->lock));
-
-    if ( val == 0 )
-        val = 0x10000;
-
-    if ( v == NULL )
-        pit->count_load_time[channel] = 0;
-    else
-        pit->count_load_time[channel] = get_guest_time(v);
-    s->count = val;
-    period = DIV_ROUND(val * SYSTEM_TIME_HZ, PIT_FREQ);
-
-    if ( (v == NULL) || !is_hvm_vcpu(v) || (channel != 0) )
-        return;
-
-    switch ( s->mode )
-    {
-    case 2:
-    case 3:
-        /* Periodic timer. */
-        TRACE_2D(TRC_HVM_EMUL_PIT_START_TIMER, period, period);
-        create_periodic_time(v, &pit->pt0, period, period, 0, pit_time_fired, 
-                             &pit->count_load_time[channel], false);
-        break;
-    case 1:
-    case 4:
-        /* One-shot timer. */
-        TRACE_2D(TRC_HVM_EMUL_PIT_START_TIMER, period, 0);
-        create_periodic_time(v, &pit->pt0, period, 0, 0, pit_time_fired,
-                             &pit->count_load_time[channel], false);
-        break;
-    default:
-        TRACE_0D(TRC_HVM_EMUL_PIT_STOP_TIMER);
-        destroy_periodic_time(&pit->pt0);
-        break;
-    }
 }
 
 static void pit_latch_count(PITState *pit, int channel)
@@ -385,7 +404,7 @@ void pit_stop_channel0_irq(PITState *pit)
     if ( !has_vpit(current->domain) )
         return;
 
-    TRACE_0D(TRC_HVM_EMUL_PIT_STOP_TIMER);
+    TRACE_TIME(TRC_HVM_EMUL_PIT_STOP_TIMER);
     spin_lock(&pit->lock);
     destroy_periodic_time(&pit->pt0);
     spin_unlock(&pit->lock);
@@ -409,6 +428,47 @@ static int cf_check pit_save(struct vcpu *v, hvm_domain_context_t *h)
     return rc;
 }
 
+static int cf_check pit_check(const struct domain *d, hvm_domain_context_t *h)
+{
+    const struct hvm_hw_pit *hw;
+    unsigned int i;
+
+    if ( !has_vpit(d) )
+        return -ENODEV;
+
+    hw = hvm_get_entry(PIT, h);
+    if ( !hw )
+        return -ENODATA;
+
+    /*
+     * Check to-be-loaded values are within valid range, for them to represent
+     * actually reachable state.  Uses of some of the values elsewhere assume
+     * this is the case.  Note that the channels' mode fields aren't checked;
+     * Xen prior to 4.19 might save them as 0xff.
+     */
+    if ( hw->speaker_data_on > 1 || hw->pad0 )
+        return -EDOM;
+
+    for ( i = 0; i < ARRAY_SIZE(hw->channels); ++i )
+    {
+        const struct hvm_hw_pit_channel *ch = &hw->channels[i];
+
+        if ( ch->count > 0x10000 ||
+             ch->count_latched >= RW_STATE_NUM ||
+             ch->read_state >= RW_STATE_NUM ||
+             ch->write_state >= RW_STATE_NUM ||
+             ch->rw_mode > RW_STATE_WORD0 ||
+             ch->gate > 1 ||
+             ch->bcd > 1 )
+            return -EDOM;
+
+        if ( i != 2 && !ch->gate )
+            return -EINVAL;
+    }
+
+    return 0;
+}
+
 static int cf_check pit_load(struct domain *d, hvm_domain_context_t *h)
 {
     PITState *pit = domain_vpit(d);
@@ -425,6 +485,14 @@ static int cf_check pit_load(struct domain *d, hvm_domain_context_t *h)
         goto out;
     }
     
+    for ( i = 0; i < ARRAY_SIZE(pit->hw.channels); ++i )
+    {
+        struct hvm_hw_pit_channel *ch = &pit->hw.channels[i];
+
+        if ( (ch->mode &= 7) > 5 )
+            ch->mode -= 4;
+    }
+
     /*
      * Recreate platform timers from hardware state.  There will be some 
      * time jitter here, but the wall-clock will have jumped massively, so 
@@ -440,71 +508,10 @@ static int cf_check pit_load(struct domain *d, hvm_domain_context_t *h)
     return rc;
 }
 
-HVM_REGISTER_SAVE_RESTORE(PIT, pit_save, pit_load, 1, HVMSR_PER_DOM);
+HVM_REGISTER_SAVE_RESTORE(PIT, pit_save, pit_check, pit_load, 1, HVMSR_PER_DOM);
 #endif
 
-void pit_reset(struct domain *d)
-{
-    PITState *pit = domain_vpit(d);
-    struct hvm_hw_pit_channel *s;
-    int i;
-
-    if ( !has_vpit(d) )
-        return;
-
-    if ( is_hvm_domain(d) )
-    {
-        TRACE_0D(TRC_HVM_EMUL_PIT_STOP_TIMER);
-        destroy_periodic_time(&pit->pt0);
-        pit->pt0.source = PTSRC_isa;
-    }
-
-    spin_lock(&pit->lock);
-
-    for ( i = 0; i < 3; i++ )
-    {
-        s = &pit->hw.channels[i];
-        s->mode = 0xff; /* the init mode */
-        s->gate = (i != 2);
-        pit_load_count(pit, i, 0);
-    }
-
-    spin_unlock(&pit->lock);
-}
-
-void pit_init(struct domain *d, unsigned long cpu_khz)
-{
-    PITState *pit = domain_vpit(d);
-
-    if ( !has_vpit(d) )
-        return;
-
-    spin_lock_init(&pit->lock);
-
-    if ( is_hvm_domain(d) )
-    {
-        register_portio_handler(d, PIT_BASE, 4, handle_pit_io);
-        register_portio_handler(d, 0x61, 1, handle_speaker_io);
-    }
-
-    pit_reset(d);
-}
-
-void pit_deinit(struct domain *d)
-{
-    PITState *pit = domain_vpit(d);
-
-    if ( !has_vpit(d) )
-        return;
-
-    if ( is_hvm_domain(d) )
-    {
-        TRACE_0D(TRC_HVM_EMUL_PIT_STOP_TIMER);
-        destroy_periodic_time(&pit->pt0);
-    }
-}
-
-/* the intercept action for PIT DM retval:0--not handled; 1--handled */  
+/* The intercept action for PIT DM retval: 0--not handled; 1--handled. */
 static int cf_check handle_pit_io(
     int dir, unsigned int port, unsigned int bytes, uint32_t *val)
 {
@@ -595,6 +602,67 @@ int pv_pit_handler(int port, int data, int write)
     }
 
     return !write ? ioreq.data : 0;
+}
+
+void pit_reset(struct domain *d)
+{
+    PITState *pit = domain_vpit(d);
+    struct hvm_hw_pit_channel *s;
+    int i;
+
+    if ( !has_vpit(d) )
+        return;
+
+    if ( is_hvm_domain(d) )
+    {
+        TRACE_TIME(TRC_HVM_EMUL_PIT_STOP_TIMER);
+        destroy_periodic_time(&pit->pt0);
+        pit->pt0.source = PTSRC_isa;
+    }
+
+    spin_lock(&pit->lock);
+
+    for ( i = 0; i < 3; i++ )
+    {
+        s = &pit->hw.channels[i];
+        s->mode = 7; /* unreachable sentinel */
+        s->gate = (i != 2);
+        pit_load_count(pit, i, 0);
+    }
+
+    spin_unlock(&pit->lock);
+}
+
+void pit_init(struct domain *d)
+{
+    PITState *pit = domain_vpit(d);
+
+    if ( !has_vpit(d) )
+        return;
+
+    spin_lock_init(&pit->lock);
+
+    if ( is_hvm_domain(d) )
+    {
+        register_portio_handler(d, PIT_BASE, 4, handle_pit_io);
+        register_portio_handler(d, 0x61, 1, handle_speaker_io);
+    }
+
+    pit_reset(d);
+}
+
+void pit_deinit(struct domain *d)
+{
+    PITState *pit = domain_vpit(d);
+
+    if ( !has_vpit(d) )
+        return;
+
+    if ( is_hvm_domain(d) )
+    {
+        TRACE_TIME(TRC_HVM_EMUL_PIT_STOP_TIMER);
+        destroy_periodic_time(&pit->pt0);
+    }
 }
 
 /*

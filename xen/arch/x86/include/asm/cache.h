@@ -9,8 +9,6 @@
 #define L1_CACHE_SHIFT	(CONFIG_X86_L1_CACHE_SHIFT)
 #define L1_CACHE_BYTES	(1 << L1_CACHE_SHIFT)
 
-#define __read_mostly __section(".data.read_mostly")
-
 #ifndef __ASSEMBLY__
 
 void cache_flush(const void *addr, unsigned int size);

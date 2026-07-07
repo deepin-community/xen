@@ -30,6 +30,10 @@ CHECK_gnttab_unmap_grant_ref;
 CHECK_gnttab_unmap_and_replace;
 #undef xen_gnttab_unmap_and_replace
 
+#define xen_gnttab_query_size gnttab_query_size
+CHECK_gnttab_query_size;
+#undef xen_gnttab_query_size
+
 DEFINE_XEN_GUEST_HANDLE(gnttab_setup_table_compat_t);
 DEFINE_XEN_GUEST_HANDLE(gnttab_transfer_compat_t);
 DEFINE_XEN_GUEST_HANDLE(gnttab_copy_compat_t);
@@ -57,7 +61,7 @@ CHECK_gnttab_cache_flush;
 #undef xen_gnttab_cache_flush
 
 int compat_grant_table_op(
-    unsigned int cmd, XEN_GUEST_HANDLE_PARAM(void) cmp_uop, unsigned int count)
+    unsigned int cmd, XEN_GUEST_HANDLE_PARAM(void) uop, unsigned int count)
 {
     int rc = 0;
     unsigned int i, cmd_op;
@@ -65,7 +69,7 @@ int compat_grant_table_op(
 
 #ifdef CONFIG_PV_SHIM
     if ( unlikely(pv_shim) )
-        return pv_shim_grant_table_op(cmd, cmp_uop, count);
+        return pv_shim_grant_table_op(cmd, uop, count);
 #endif
 
     set_xen_guest_handle(cnt_uop, NULL);
@@ -74,12 +78,15 @@ int compat_grant_table_op(
         cmd_op = cmd;
     switch ( cmd_op )
     {
-#define CASE(name) \
-    case GNTTABOP_##name: \
-        if ( unlikely(!guest_handle_okay(guest_handle_cast(cmp_uop, \
-                                                           gnttab_##name##_compat_t), \
-                                         count)) ) \
-            rc = -EFAULT; \
+#define CASE(name)                                                  \
+    case GNTTABOP_ ## name:                                         \
+    {                                                               \
+        XEN_GUEST_HANDLE_PARAM(gnttab_ ## name ## _compat_t) h =    \
+            guest_handle_cast(uop, gnttab_ ## name ## _compat_t);   \
+                                                                    \
+        if ( unlikely(!guest_handle_okay(h, count)) )               \
+            rc = -EFAULT;                                           \
+    }                                                               \
         break
 
 #ifndef CHECK_gnttab_map_grant_ref
@@ -106,6 +113,10 @@ int compat_grant_table_op(
     CASE(copy);
 #endif
 
+#ifndef CHECK_gnttab_query_size
+    CASE(query_size);
+#endif
+
 #ifndef CHECK_gnttab_dump_table
     CASE(dump_table);
 #endif
@@ -124,7 +135,7 @@ int compat_grant_table_op(
 
 #undef CASE
     default:
-        return do_grant_table_op(cmd, cmp_uop, count);
+        return do_grant_table_op(cmd, uop, count);
     }
 
     if ( (int)count < 0 )
@@ -153,7 +164,7 @@ int compat_grant_table_op(
         case GNTTABOP_setup_table:
             if ( unlikely(count > 1) )
                 rc = -EINVAL;
-            else if ( unlikely(__copy_from_guest(&cmp.setup, cmp_uop, 1)) )
+            else if ( unlikely(__copy_from_guest(&cmp.setup, uop, 1)) )
                 rc = -EFAULT;
             else if ( unlikely(!compat_handle_okay(cmp.setup.frame_list, cmp.setup.nr_frames)) )
                 rc = -EFAULT;
@@ -181,16 +192,24 @@ int compat_grant_table_op(
                     { \
                         for ( i = 0; i < (_s_)->nr_frames; ++i ) \
                         { \
-                            unsigned int frame = (_s_)->frame_list.p[i]; \
+                            compat_pfn_t frame = (_s_)->frame_list.p[i]; \
+                            if ( frame != (_s_)->frame_list.p[i] ) \
+                            { \
+                                (_s_)->status = GNTST_address_too_big; \
+                                break; \
+                            } \
                             if ( __copy_to_compat_offset((_d_)->frame_list, \
                                                          i, &frame, 1) ) \
+                            { \
                                 (_s_)->status = GNTST_bad_virt_addr; \
+                                break; \
+                            } \
                         } \
                     } \
                 } while (0)
                 XLAT_gnttab_setup_table(&cmp.setup, nat.setup);
 #undef XLAT_gnttab_setup_table_HNDL_frame_list
-                if ( unlikely(__copy_to_guest(cmp_uop, &cmp.setup, 1)) )
+                if ( unlikely(__copy_to_guest(uop, &cmp.setup, 1)) )
                     rc = -EFAULT;
                 else
                     i = 1;
@@ -200,7 +219,7 @@ int compat_grant_table_op(
         case GNTTABOP_transfer:
             for ( n = 0; n < COMPAT_ARG_XLAT_SIZE / sizeof(*nat.xfer) && i < count && rc == 0; ++i, ++n )
             {
-                if ( unlikely(__copy_from_guest_offset(&cmp.xfer, cmp_uop, i, 1)) )
+                if ( unlikely(__copy_from_guest_offset(&cmp.xfer, uop, i, 1)) )
                     rc = -EFAULT;
                 else
                 {
@@ -219,12 +238,12 @@ int compat_grant_table_op(
             {
                 XEN_GUEST_HANDLE_PARAM(gnttab_transfer_compat_t) xfer;
 
-                xfer = guest_handle_cast(cmp_uop, gnttab_transfer_compat_t);
+                xfer = guest_handle_cast(uop, gnttab_transfer_compat_t);
                 guest_handle_add_offset(xfer, i);
                 cnt_uop = guest_handle_cast(xfer, void);
                 while ( n-- )
                 {
-                    guest_handle_add_offset(xfer, -1);
+                    guest_handle_subtract_offset(xfer, 1);
                     if ( __copy_field_to_guest(xfer, nat.xfer + n, status) )
                         rc = -EFAULT;
                 }
@@ -234,7 +253,7 @@ int compat_grant_table_op(
         case GNTTABOP_copy:
             for ( n = 0; n < COMPAT_ARG_XLAT_SIZE / sizeof(*nat.copy) && i < count && rc == 0; ++i, ++n )
             {
-                if ( unlikely(__copy_from_guest_offset(&cmp.copy, cmp_uop, i, 1)) )
+                if ( unlikely(__copy_from_guest_offset(&cmp.copy, uop, i, 1)) )
                     rc = -EFAULT;
                 else
                 {
@@ -264,28 +283,25 @@ int compat_grant_table_op(
             {
                 XEN_GUEST_HANDLE_PARAM(gnttab_copy_compat_t) copy;
 
-                copy = guest_handle_cast(cmp_uop, gnttab_copy_compat_t);
+                copy = guest_handle_cast(uop, gnttab_copy_compat_t);
                 guest_handle_add_offset(copy, i);
                 cnt_uop = guest_handle_cast(copy, void);
                 while ( n-- )
                 {
-                    guest_handle_add_offset(copy, -1);
+                    guest_handle_subtract_offset(copy, 1);
                     if ( __copy_field_to_guest(copy, nat.copy + n, status) )
                         rc = -EFAULT;
                 }
             }
             break;
 
-        case GNTTABOP_get_status_frames: {
-            unsigned int max_frame_list_size_in_pages =
-                (COMPAT_ARG_XLAT_SIZE - sizeof(*nat.get_status)) /
-                sizeof(*nat.get_status->frame_list.p);
+        case GNTTABOP_get_status_frames:
             if ( count != 1)
             {
                 rc = -EINVAL;
                 break;
             }
-            if ( unlikely(__copy_from_guest(&cmp.get_status, cmp_uop, 1) ||
+            if ( unlikely(__copy_from_guest(&cmp.get_status, uop, 1) ||
                           !compat_handle_okay(cmp.get_status.frame_list,
                                               cmp.get_status.nr_frames)) )
             {
@@ -294,38 +310,25 @@ int compat_grant_table_op(
             }
 
 #define XLAT_gnttab_get_status_frames_HNDL_frame_list(_d_, _s_) \
-            set_xen_guest_handle((_d_)->frame_list, (uint64_t *)(nat.get_status + 1))
+            guest_from_compat_handle((_d_)->frame_list, (_s_)->frame_list)
             XLAT_gnttab_get_status_frames(nat.get_status, &cmp.get_status);
 #undef XLAT_gnttab_get_status_frames_HNDL_frame_list
 
             rc = gnttab_get_status_frames(
-                guest_handle_cast(nat.uop, gnttab_get_status_frames_t),
-                count, max_frame_list_size_in_pages);
+                guest_handle_cast(nat.uop, gnttab_get_status_frames_t), count);
             if ( rc >= 0 )
             {
-#define XLAT_gnttab_get_status_frames_HNDL_frame_list(_d_, _s_) \
-                do \
-                { \
-                    if ( (_s_)->status == GNTST_okay ) \
-                    { \
-                        for ( i = 0; i < (_s_)->nr_frames; ++i ) \
-                        { \
-                            uint64_t frame = (_s_)->frame_list.p[i]; \
-                            if ( __copy_to_compat_offset((_d_)->frame_list, \
-                                                         i, &frame, 1) ) \
-                                (_s_)->status = GNTST_bad_virt_addr; \
-                        } \
-                    } \
-                } while (0)
-                XLAT_gnttab_get_status_frames(&cmp.get_status, nat.get_status);
-#undef XLAT_gnttab_get_status_frames_HNDL_frame_list
-                if ( unlikely(__copy_to_guest(cmp_uop, &cmp.get_status, 1)) )
+                XEN_GUEST_HANDLE_PARAM(gnttab_get_status_frames_compat_t) get =
+                    guest_handle_cast(uop,
+                                      gnttab_get_status_frames_compat_t);
+
+                if ( unlikely(__copy_field_to_guest(get, nat.get_status,
+                                                    status)) )
                     rc = -EFAULT;
                 else
                     i = 1;
             }
             break;
-        }
 
         default:
             domain_crash(current->domain);

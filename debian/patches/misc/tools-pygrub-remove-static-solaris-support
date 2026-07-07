@@ -8,10 +8,10 @@ Patch-Name: tools-pygrub-remove-static-solaris-support
  1 file changed, 1 insertion(+), 40 deletions(-)
 
 diff --git a/tools/pygrub/src/pygrub b/tools/pygrub/src/pygrub
-index 49e6274..e610b87 100755
+index e1657c4..1756a68 100755
 --- a/tools/pygrub/src/pygrub
 +++ b/tools/pygrub/src/pygrub
-@@ -795,42 +795,6 @@ def run_grub(file, entry, fs, cfg_args):
+@@ -809,42 +809,6 @@ def run_grub(file, entry, fs, cfg_args):
  
      return grubcfg
  
@@ -35,10 +35,10 @@ index 49e6274..e610b87 100755
 -    # Unpleasant. Typically we'll have 'root=foo -k' or 'root=foo /kernel -k',
 -    # and we need to maintain Xen properties (root= and ip=) and the kernel
 -    # before any user args.
--    
+-
 -    xenargs = ""
 -    userargs = ""
--    
+-
 -    if not cfg["args"]:
 -        cfg["args"] = cfg["kernel"]
 -    else:
@@ -50,11 +50,11 @@ index 49e6274..e610b87 100755
 -        cfg["args"] = xenargs + " " + cfg["kernel"] + " " + userargs
 -
 -    return cfg
-- 
+-
  def sniff_netware(fs, cfg):
      if not fs.file_exists("/nwserver/xnloader.sys"):
          return cfg
-@@ -1039,10 +1003,7 @@ if __name__ == "__main__":
+@@ -1053,10 +1017,7 @@ if __name__ == "__main__":
          try:
              fs = xenfsimage.open(file, offset, bootfsoptions)
  

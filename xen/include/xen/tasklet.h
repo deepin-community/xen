@@ -18,16 +18,16 @@ struct tasklet
 {
     struct list_head list;
     int scheduled_on;
-    bool_t is_softirq;
-    bool_t is_running;
-    bool_t is_dead;
-    void (*func)(void *);
+    bool is_softirq;
+    bool is_running;
+    bool is_dead;
+    void (*func)(void *data);
     void *data;
 };
 
 #define _DECLARE_TASKLET(name, func, data, softirq)                     \
     struct tasklet name = {                                             \
-        LIST_HEAD_INIT(name.list), -1, softirq, 0, 0, func, data }
+        LIST_HEAD_INIT((name).list), -1, softirq, 0, 0, func, data }
 #define DECLARE_TASKLET(name, func, data)               \
     _DECLARE_TASKLET(name, func, data, 0)
 #define DECLARE_SOFTIRQ_TASKLET(name, func, data)       \
@@ -37,8 +37,8 @@ struct tasklet
 DECLARE_PER_CPU(unsigned long, tasklet_work_to_do);
 #define _TASKLET_enqueued  0 /* Tasklet work is enqueued for this CPU. */
 #define _TASKLET_scheduled 1 /* Scheduler has scheduled do_tasklet(). */
-#define TASKLET_enqueued   (1ul << _TASKLET_enqueued)
-#define TASKLET_scheduled  (1ul << _TASKLET_scheduled)
+#define TASKLET_enqueued   (1UL << _TASKLET_enqueued)
+#define TASKLET_scheduled  (1UL << _TASKLET_scheduled)
 
 static inline bool tasklet_work_to_do(unsigned int cpu)
 {
@@ -59,8 +59,9 @@ void tasklet_schedule_on_cpu(struct tasklet *t, unsigned int cpu);
 void tasklet_schedule(struct tasklet *t);
 void do_tasklet(void);
 void tasklet_kill(struct tasklet *t);
-void tasklet_init(struct tasklet *t, void (*func)(void *), void *data);
-void softirq_tasklet_init(struct tasklet *t, void (*func)(void *), void *data);
+void tasklet_init(struct tasklet *t, void (*func)(void *data), void *data);
+void softirq_tasklet_init(struct tasklet *t,
+                          void (*func)(void *data), void *data);
 void tasklet_subsys_init(void);
 
 #endif /* __XEN_TASKLET_H__ */

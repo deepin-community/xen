@@ -12,7 +12,7 @@ missing qemu package if we *actually* need qemu for the device model.
  2 files changed, 5 insertions(+)
 
 diff --git a/tools/libs/light/libxl_create.c b/tools/libs/light/libxl_create.c
-index dbee32b..6567e84 100644
+index e03599e..05e585d 100644
 --- a/tools/libs/light/libxl_create.c
 +++ b/tools/libs/light/libxl_create.c
 @@ -110,6 +110,7 @@ int libxl__domain_build_info_setdefault(libxl__gc *gc,
@@ -32,11 +32,11 @@ index dbee32b..6567e84 100644
  
      if (b_info->blkdev_start == NULL)
 diff --git a/tools/libs/light/libxl_dm.c b/tools/libs/light/libxl_dm.c
-index 14b5931..bb2736e 100644
+index b193a5d..fcddea6 100644
 --- a/tools/libs/light/libxl_dm.c
 +++ b/tools/libs/light/libxl_dm.c
-@@ -2897,6 +2897,9 @@ void libxl__spawn_local_dm(libxl__egc *egc, libxl__dm_spawn_state *dmss)
-     }
+@@ -2912,6 +2912,9 @@ void libxl__spawn_local_dm(libxl__egc *egc, libxl__dm_spawn_state *dmss)
+     dmss->dm = dm;
      if (access(dm, X_OK) < 0) {
          LOGED(ERROR, domid, "device model %s is not executable", dm);
 +        if (strcmp(dm, QEMU_XEN_PATH) == 0) {

@@ -49,26 +49,28 @@ void rangeset_limit(
 
 /* Flags for passing to rangeset_new(). */
  /* Pretty-print range limits in hexadecimal. */
-#define _RANGESETF_prettyprint_hex 0
-#define RANGESETF_prettyprint_hex  (1U << _RANGESETF_prettyprint_hex)
+#define RANGESETF_prettyprint_hex   (1U << 0)
+ /* Do not print entries marked with this flag. */
+#define RANGESETF_no_print          (1U << 1)
 
-bool_t __must_check rangeset_is_empty(
+bool __must_check rangeset_is_empty(
     const struct rangeset *r);
 
-/* Add/claim/remove/query a numeric range. */
+/* Add/claim/remove/query/purge a numeric range. */
 int __must_check rangeset_add_range(
     struct rangeset *r, unsigned long s, unsigned long e);
 int __must_check rangeset_claim_range(struct rangeset *r, unsigned long size,
                                       unsigned long *s);
 int __must_check rangeset_remove_range(
     struct rangeset *r, unsigned long s, unsigned long e);
-bool_t __must_check rangeset_contains_range(
+bool __must_check rangeset_contains_range(
     struct rangeset *r, unsigned long s, unsigned long e);
-bool_t __must_check rangeset_overlaps_range(
+bool __must_check rangeset_overlaps_range(
     struct rangeset *r, unsigned long s, unsigned long e);
 int rangeset_report_ranges(
     struct rangeset *r, unsigned long s, unsigned long e,
-    int (*cb)(unsigned long s, unsigned long e, void *), void *ctxt);
+    int (*cb)(unsigned long s, unsigned long e, void *data), void *ctxt);
+void rangeset_purge(struct rangeset *r);
 
 /*
  * Note that the consume function can return an error value apart from
@@ -77,7 +79,7 @@ int rangeset_report_ranges(
  */
 int rangeset_consume_ranges(struct rangeset *r,
                             int (*cb)(unsigned long s, unsigned long e,
-                                      void *, unsigned long *c),
+                                      void *ctxt, unsigned long *c),
                             void *ctxt);
 
 /* Merge rangeset r2 into rangeset r1. */
@@ -88,7 +90,7 @@ int __must_check rangeset_add_singleton(
     struct rangeset *r, unsigned long s);
 int __must_check rangeset_remove_singleton(
     struct rangeset *r, unsigned long s);
-bool_t __must_check rangeset_contains_singleton(
+bool __must_check rangeset_contains_singleton(
     struct rangeset *r, unsigned long s);
 
 /* swap contents */

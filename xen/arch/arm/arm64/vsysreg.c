@@ -18,6 +18,8 @@
 
 #include <xen/sched.h>
 
+#include <asm/arm64/cpufeature.h>
+#include <asm/arm64/sve.h>
 #include <asm/current.h>
 #include <asm/regs.h>
 #include <asm/traps.h>
@@ -74,12 +76,13 @@ TVM_REG(CONTEXTIDR_EL1)
     case HSR_SYSREG_##reg:                                              \
     {                                                                   \
         return handle_ro_read_val(regs, regidx, hsr.sysreg.read, hsr,   \
-                                  1, guest_cpuinfo.field.bits[offset]); \
+                                  1, domain_cpuinfo.field.bits[offset]); \
     }
 
 void do_sysreg(struct cpu_user_regs *regs,
                const union hsr hsr)
 {
+    const struct hsr_sysreg sysreg = hsr.sysreg;
     int regidx = hsr.sysreg.reg;
     struct vcpu *v = current;
 
@@ -157,9 +160,6 @@ void do_sysreg(struct cpu_user_regs *regs,
      *
      * Unhandled:
      *    MDCCINT_EL1
-     *    DBGDTR_EL0
-     *    DBGDTRRX_EL0
-     *    DBGDTRTX_EL0
      *    OSDTRRX_EL1
      *    OSDTRTX_EL1
      *    OSECCR_EL1
@@ -169,12 +169,42 @@ void do_sysreg(struct cpu_user_regs *regs,
      */
     case HSR_SYSREG_MDSCR_EL1:
         return handle_raz_wi(regs, regidx, hsr.sysreg.read, hsr, 1);
+
+    /*
+     * Xen doesn't expose a real (or emulated) Debug Communications Channel
+     * (DCC) to a domain. Yet the Arm ARM implies this is not an optional
+     * feature. So some domains may start to probe it. For instance, the
+     * HVC_DCC driver in Linux (since f377775dc083 and at least up to v6.7),
+     * will try to write some characters and check if the transmit buffer
+     * has emptied.
+     */
     case HSR_SYSREG_MDCCSR_EL0:
         /*
+         * By setting TX status bit (only if partial emulation is enabled) to
+         * indicate the transmit buffer is full, we would hint the OS that the
+         * DCC is probably not working.
+         *
+         * Bit 29: TX full
+         *
          * Accessible at EL0 only if MDSCR_EL1.TDCC is set to 0. We emulate that
          * register as RAZ/WI above. So RO at both EL0 and EL1.
          */
-        return handle_ro_raz(regs, regidx, hsr.sysreg.read, hsr, 0);
+        return handle_ro_read_val(regs, regidx, hsr.sysreg.read, hsr, 0,
+                                  partial_emulation ? (1U << 29) : 0);
+
+    case HSR_SYSREG_DBGDTR_EL0:
+    /* DBGDTR[TR]X_EL0 share the same encoding */
+    case HSR_SYSREG_DBGDTRTX_EL0:
+        /*
+         * Emulate as RAZ/WI (only if partial emulation is enabled) to prevent
+         * injecting undefined exception.
+         * Accessible at EL0 only if MDSCR_EL1.TDCC is set to 0. We emulate that
+         * register as RAZ/WI.
+         */
+        if ( !partial_emulation )
+            goto fail;
+        return handle_raz_wi(regs, regidx, hsr.sysreg.read, hsr, 0);
+
     HSR_SYSREG_DBG_CASES(DBGBVR):
     HSR_SYSREG_DBG_CASES(DBGBCR):
     HSR_SYSREG_DBG_CASES(DBGWVR):
@@ -295,7 +325,28 @@ void do_sysreg(struct cpu_user_regs *regs,
     GENERATE_TID3_INFO(MVFR0_EL1, mvfr, 0)
     GENERATE_TID3_INFO(MVFR1_EL1, mvfr, 1)
     GENERATE_TID3_INFO(MVFR2_EL1, mvfr, 2)
-    GENERATE_TID3_INFO(ID_AA64PFR0_EL1, pfr64, 0)
+
+    case HSR_SYSREG_ID_AA64PFR0_EL1:
+    {
+        register_t guest_reg_value = domain_cpuinfo.pfr64.bits[0];
+
+        if ( is_sve_domain(v->domain) )
+        {
+            /* 4 is the SVE field width in id_aa64pfr0_el1 */
+            uint64_t mask = GENMASK(ID_AA64PFR0_SVE_SHIFT + 4 - 1,
+                                    ID_AA64PFR0_SVE_SHIFT);
+            /* sysval is the sve field on the system */
+            uint64_t sysval = cpuid_feature_extract_unsigned_field_width(
+                                system_cpuinfo.pfr64.bits[0],
+                                ID_AA64PFR0_SVE_SHIFT, 4);
+            guest_reg_value &= ~mask;
+            guest_reg_value |= (sysval << ID_AA64PFR0_SVE_SHIFT) & mask;
+        }
+
+        return handle_ro_read_val(regs, regidx, hsr.sysreg.read, hsr, 1,
+                                  guest_reg_value);
+    }
+
     GENERATE_TID3_INFO(ID_AA64PFR1_EL1, pfr64, 1)
     GENERATE_TID3_INFO(ID_AA64DFR0_EL1, dbg64, 0)
     GENERATE_TID3_INFO(ID_AA64DFR1_EL1, dbg64, 1)
@@ -306,7 +357,21 @@ void do_sysreg(struct cpu_user_regs *regs,
     GENERATE_TID3_INFO(ID_AA64MMFR2_EL1, mm64, 2)
     GENERATE_TID3_INFO(ID_AA64AFR0_EL1, aux64, 0)
     GENERATE_TID3_INFO(ID_AA64AFR1_EL1, aux64, 1)
-    GENERATE_TID3_INFO(ID_AA64ZFR0_EL1, zfr64, 0)
+
+    case HSR_SYSREG_ID_AA64ZFR0_EL1:
+    {
+        /*
+         * When the guest has the SVE feature enabled, the whole id_aa64zfr0_el1
+         * needs to be exposed.
+         */
+        register_t guest_reg_value = domain_cpuinfo.zfr64.bits[0];
+
+        if ( is_sve_domain(v->domain) )
+            guest_reg_value = system_cpuinfo.zfr64.bits[0];
+
+        return handle_ro_read_val(regs, regidx, hsr.sysreg.read, hsr, 1,
+                                  guest_reg_value);
+    }
 
     /*
      * Those cases are catching all Reserved registers trapped by TID3 which
@@ -357,26 +422,25 @@ void do_sysreg(struct cpu_user_regs *regs,
      * And all other unknown registers.
      */
     default:
-        {
-            const struct hsr_sysreg sysreg = hsr.sysreg;
-
-            gdprintk(XENLOG_ERR,
-                     "%s %d, %d, c%d, c%d, %d %s x%d @ 0x%"PRIregister"\n",
-                     sysreg.read ? "mrs" : "msr",
-                     sysreg.op0, sysreg.op1,
-                     sysreg.crn, sysreg.crm,
-                     sysreg.op2,
-                     sysreg.read ? "=>" : "<=",
-                     sysreg.reg, regs->pc);
-            gdprintk(XENLOG_ERR,
-                     "unhandled 64-bit sysreg access %#"PRIregister"\n",
-                     hsr.bits & HSR_SYSREG_REGS_MASK);
-            inject_undef_exception(regs, hsr);
-            return;
-        }
+        goto fail;
     }
 
     regs->pc += 4;
+    return;
+
+ fail:
+    gdprintk(XENLOG_ERR,
+             "%s %d, %d, c%d, c%d, %d %s x%d @ 0x%"PRIregister"\n",
+             sysreg.read ? "mrs" : "msr",
+             sysreg.op0, sysreg.op1,
+             sysreg.crn, sysreg.crm,
+             sysreg.op2,
+             sysreg.read ? "=>" : "<=",
+             sysreg.reg, regs->pc);
+    gdprintk(XENLOG_ERR,
+             "unhandled 64-bit sysreg access %#"PRIregister"\n",
+             hsr.bits & HSR_SYSREG_REGS_MASK);
+    inject_undef_exception(regs, hsr);
 }
 
 /*

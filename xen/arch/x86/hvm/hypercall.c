@@ -1,20 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /******************************************************************************
  * arch/hvm/hypercall.c
  *
  * HVM hypercall dispatching routines
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
  *
  * Copyright (c) 2017 Citrix Systems Ltd.
  */
@@ -37,7 +25,6 @@ long hvm_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
 
     switch ( cmd & MEMOP_CMD_MASK )
     {
-    case XENMEM_machine_memory_map:
     case XENMEM_machphys_mapping:
         return -ENOSYS;
     }
@@ -86,6 +73,8 @@ long hvm_physdev_op(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
     {
     case PHYSDEVOP_map_pirq:
     case PHYSDEVOP_unmap_pirq:
+        break;
+
     case PHYSDEVOP_eoi:
     case PHYSDEVOP_irq_status_query:
     case PHYSDEVOP_get_free_pirq:
@@ -93,9 +82,11 @@ long hvm_physdev_op(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
             return -ENOSYS;
         break;
 
+    case PHYSDEVOP_setup_gsi:
     case PHYSDEVOP_pci_mmcfg_reserved:
     case PHYSDEVOP_pci_device_add:
     case PHYSDEVOP_pci_device_remove:
+    case PHYSDEVOP_pci_device_reset:
     case PHYSDEVOP_dbgp_op:
         if ( !is_hardware_domain(currd) )
             return -ENOSYS;
@@ -121,27 +112,28 @@ int hvm_hypercall(struct cpu_user_regs *regs)
 
     switch ( mode )
     {
-    case 8:
+    case X86_MODE_64BIT:
         eax = regs->rax;
-        /* Fallthrough to permission check. */
-    case 4:
-    case 2:
+        fallthrough;
+    case X86_MODE_32BIT:
+    case X86_MODE_16BIT:
         if ( currd->arch.monitor.guest_request_userspace_enabled &&
-            eax == __HYPERVISOR_hvm_op &&
-            (mode == 8 ? regs->rdi : regs->ebx) == HVMOP_guest_request_vm_event )
+             eax == __HYPERVISOR_hvm_op &&
+             (mode == X86_MODE_64BIT ? regs->rdi : regs->ebx) ==
+             HVMOP_guest_request_vm_event )
             break;
 
-        if ( unlikely(hvm_get_cpl(curr)) )
-        {
-    default:
-            regs->rax = -EPERM;
-            return HVM_HCALL_completed;
-        }
-    case 0:
+        if ( likely(!hvm_get_cpl(curr)) )
+            break;
+        fallthrough;
+    case X86_MODE_VM86:
+        regs->rax = -EPERM;
+        return HVM_HCALL_completed;
+    case X86_MODE_REAL:
         break;
     }
 
-    if ( (eax & 0x80000000) && is_viridian_domain(currd) )
+    if ( (eax & 0x80000000U) && is_viridian_domain(currd) )
     {
         int ret;
 
@@ -207,7 +199,7 @@ enum mc_disposition hvm_do_multicall_call(struct mc_state *state)
 {
     struct vcpu *curr = current;
 
-    if ( hvm_guest_x86_mode(curr) == 8 )
+    if ( hvm_guest_x86_mode(curr) == X86_MODE_64BIT )
     {
         struct multicall_entry *call = &state->call;
 

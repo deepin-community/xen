@@ -1,5 +1,6 @@
 #include "libxl_internal.h"
 #include "libxl_arch.h"
+#include <xen/arch-x86/cpuid.h>
 
 int libxl__arch_domain_prepare_config(libxl__gc *gc,
                                       libxl_domain_config *d_config,
@@ -8,6 +9,8 @@ int libxl__arch_domain_prepare_config(libxl__gc *gc,
     switch(d_config->c_info.type) {
     case LIBXL_DOMAIN_TYPE_HVM:
         config->arch.emulation_flags = (XEN_X86_EMU_ALL & ~XEN_X86_EMU_VPCI);
+        if (!libxl_defbool_val(d_config->b_info.u.hvm.pirq))
+            config->arch.emulation_flags &= ~XEN_X86_EMU_USE_PIRQ;
         break;
     case LIBXL_DOMAIN_TYPE_PVH:
         config->arch.emulation_flags = XEN_X86_EMU_LAPIC;
@@ -404,19 +407,9 @@ static int hvm_set_conf_params(libxl__gc *gc, uint32_t domid,
     libxl_ctx *ctx = libxl__gc_owner(gc);
     xc_interface *xch = ctx->xch;
     int ret = ERROR_FAIL;
-    unsigned int altp2m = info->altp2m;
 
     switch(info->type) {
     case LIBXL_DOMAIN_TYPE_HVM:
-        /* The config parameter "altp2m" replaces the parameter "altp2mhvm". For
-         * legacy reasons, both parameters are accepted on x86 HVM guests.
-         *
-         * If the legacy field info->u.hvm.altp2m is set, activate altp2m.
-         * Otherwise set altp2m based on the field info->altp2m. */
-        if (info->altp2m == LIBXL_ALTP2M_MODE_DISABLED &&
-            libxl_defbool_val(info->u.hvm.altp2m))
-            altp2m = libxl_defbool_val(info->u.hvm.altp2m);
-
         if (xc_hvm_param_set(xch, domid, HVM_PARAM_HPET_ENABLED,
                              libxl_defbool_val(info->u.hvm.hpet))) {
             LOG(ERROR, "Couldn't set HVM_PARAM_HPET_ENABLED");
@@ -439,10 +432,6 @@ static int hvm_set_conf_params(libxl__gc *gc, uint32_t domid,
         if (xc_hvm_param_set(xch, domid, HVM_PARAM_TIMER_MODE,
                              timer_mode(info))) {
             LOG(ERROR, "Couldn't set HVM_PARAM_TIMER_MODE");
-            goto out;
-        }
-        if (xc_hvm_param_set(xch, domid, HVM_PARAM_ALTP2M, altp2m)) {
-            LOG(ERROR, "Couldn't set HVM_PARAM_ALTP2M");
             goto out;
         }
         break;
@@ -486,13 +475,13 @@ int libxl__arch_domain_create(libxl__gc *gc,
 
     switch (d_config->b_info.tsc_mode) {
     case LIBXL_TSC_MODE_DEFAULT:
-        tsc_mode = 0;
+        tsc_mode = XEN_CPUID_TSC_MODE_DEFAULT;
         break;
     case LIBXL_TSC_MODE_ALWAYS_EMULATE:
-        tsc_mode = 1;
+        tsc_mode = XEN_CPUID_TSC_MODE_ALWAYS_EMULATE;
         break;
     case LIBXL_TSC_MODE_NATIVE:
-        tsc_mode = 2;
+        tsc_mode = XEN_CPUID_TSC_MODE_NEVER_EMULATE;
         break;
     case LIBXL_TSC_MODE_NATIVE_PARAVIRT:
         LOGD(ERROR, domid, "TSC Mode native_paravirt (a.k.a PVRDTSCP) has been removed");
@@ -815,6 +804,20 @@ int libxl__arch_domain_build_info_setdefault(libxl__gc *gc,
     libxl_defbool_setdefault(&b_info->acpi, true);
     libxl_defbool_setdefault(&b_info->arch_x86.msr_relaxed, false);
 
+    if (b_info->type == LIBXL_DOMAIN_TYPE_HVM) {
+        /*
+         * The config parameter "altp2m" replaces the parameter "altp2mhvm".
+         * For legacy reasons, both parameters are accepted on x86 HVM guests.
+         *
+         * If the legacy field info->u.hvm.altp2m is set, activate altp2m.
+         * Otherwise set altp2m based on the field info->altp2m.
+         */
+        libxl_defbool_setdefault(&b_info->u.hvm.altp2m, false);
+        if (b_info->altp2m == LIBXL_ALTP2M_MODE_DISABLED &&
+            libxl_defbool_val(b_info->u.hvm.altp2m))
+            b_info->altp2m = libxl_defbool_val(b_info->u.hvm.altp2m);
+    }
+
     return 0;
 }
 
@@ -863,15 +866,97 @@ void libxl__arch_update_domain_config(libxl__gc *gc,
                                       const libxl_domain_config *src)
 {
     /*
-     * Force MSR relaxed to be set (either to true or false) so it's part of
-     * the domain configuration when saving or performing a live-migration.
+     * Force MSR relaxed and HVM pirq to be set (either to true or false) so
+     * it's part of the domain configuration when saving or performing a
+     * live-migration.
      *
-     * Doing so allows the recovery side to figure out whether the flag should
+     * Doing so allows the recovery side to figure out whether the flags should
      * be set to true in order to keep backwards compatibility with already
      * started domains.
      */
     libxl_defbool_setdefault(&dst->b_info.arch_x86.msr_relaxed,
                     libxl_defbool_val(src->b_info.arch_x86.msr_relaxed));
+    if (src->c_info.type == LIBXL_DOMAIN_TYPE_HVM )
+        libxl_defbool_setdefault(&dst->b_info.u.hvm.pirq,
+                                 libxl_defbool_val(src->b_info.u.hvm.pirq));
+}
+
+bool libxl__arch_local_domain_has_pirq_notion(libxl__gc *gc)
+{
+    int r;
+    xc_domaininfo_t info;
+
+    r = xc_domain_getinfo_single(CTX->xch, LIBXL_TOOLSTACK_DOMID, &info);
+    if (r == 0) {
+        if (!(info.flags & XEN_DOMINF_hvm_guest) ||
+            (info.arch_config.emulation_flags & XEN_X86_EMU_USE_PIRQ))
+            return true;
+    } else {
+        LOGE(ERROR, "getdomaininfo failed ret=%d", r);
+    }
+
+    return false;
+}
+
+int libxl__arch_hvm_map_gsi(libxl__gc *gc, uint32_t sbdf, uint32_t domid)
+{
+    int pirq = -1, gsi, r;
+
+    gsi = xc_pcidev_get_gsi(CTX->xch, sbdf);
+    if (gsi < 0 && errno == ENOENT) {
+        LOGD(DEBUG, domid, "xc_pcidev_get_gsi no gsi");
+        return 0;
+    } else if (gsi < 0) {
+        return ERROR_FAIL;
+    }
+
+    r = xc_physdev_map_pirq_gsi(CTX->xch, domid, gsi, &pirq);
+    if (r < 0) {
+        LOGED(ERROR, domid, "xc_physdev_map_pirq_gsi gsi=%d", gsi);
+        return ERROR_FAIL;
+    }
+
+    r = xc_domain_gsi_permission(CTX->xch, domid, gsi, XEN_DOMCTL_GSI_GRANT);
+    if (r < 0) {
+        LOGED(ERROR, domid, "xc_domain_gsi_permission gsi=%d", gsi);
+        return ERROR_FAIL;
+    }
+
+    return 0;
+}
+
+int libxl__arch_hvm_unmap_gsi(libxl__gc *gc, uint32_t sbdf, uint32_t domid)
+{
+    int pirq = -1, gsi, r;
+
+    gsi = xc_pcidev_get_gsi(CTX->xch, sbdf);
+    if (gsi < 0 && errno == ENOENT) {
+        LOGD(DEBUG, domid, "xc_pcidev_get_gsi no gsi");
+        return 0;
+    } else if (gsi < 0) {
+        return ERROR_FAIL;
+    }
+
+    /* Before unmapping, use mapping to get the already mapped pirq first */
+    r = xc_physdev_map_pirq_gsi(CTX->xch, domid, gsi, &pirq);
+    if (r < 0) {
+        LOGED(ERROR, domid, "xc_physdev_map_pirq_gsi gsi=%d", gsi);
+        return ERROR_FAIL;
+    }
+
+    r = xc_physdev_unmap_pirq(CTX->xch, domid, pirq);
+    if (r < 0) {
+        LOGED(ERROR, domid, "xc_physdev_unmap_pirq gsi=%d", gsi);
+        return ERROR_FAIL;
+    }
+
+    r = xc_domain_gsi_permission(CTX->xch, domid, gsi, XEN_DOMCTL_GSI_REVOKE);
+    if (r < 0) {
+        LOGED(ERROR, domid, "xc_domain_gsi_permission gsi=%d", gsi);
+        return ERROR_FAIL;
+    }
+
+    return 0;
 }
 
 /*

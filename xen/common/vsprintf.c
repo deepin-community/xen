@@ -24,108 +24,6 @@
 #include <asm/div64.h>
 #include <asm/page.h>
 
-/**
- * simple_strtoul - convert a string to an unsigned long
- * @cp: The start of the string
- * @endp: A pointer to the end of the parsed string will be placed here
- * @base: The number base to use
- */
-unsigned long simple_strtoul(
-    const char *cp, const char **endp, unsigned int base)
-{
-    unsigned long result = 0,value;
-
-    if (!base) {
-        base = 10;
-        if (*cp == '0') {
-            base = 8;
-            cp++;
-            if ((toupper(*cp) == 'X') && isxdigit(cp[1])) {
-                cp++;
-                base = 16;
-            }
-        }
-    } else if (base == 16) {
-        if (cp[0] == '0' && toupper(cp[1]) == 'X')
-            cp += 2;
-    }
-    while (isxdigit(*cp) &&
-           (value = isdigit(*cp) ? *cp-'0' : toupper(*cp)-'A'+10) < base) {
-        result = result*base + value;
-        cp++;
-    }
-    if (endp)
-        *endp = cp;
-    return result;
-}
-
-EXPORT_SYMBOL(simple_strtoul);
-
-/**
- * simple_strtol - convert a string to a signed long
- * @cp: The start of the string
- * @endp: A pointer to the end of the parsed string will be placed here
- * @base: The number base to use
- */
-long simple_strtol(const char *cp, const char **endp, unsigned int base)
-{
-    if(*cp=='-')
-        return -simple_strtoul(cp+1,endp,base);
-    return simple_strtoul(cp,endp,base);
-}
-
-EXPORT_SYMBOL(simple_strtol);
-
-/**
- * simple_strtoull - convert a string to an unsigned long long
- * @cp: The start of the string
- * @endp: A pointer to the end of the parsed string will be placed here
- * @base: The number base to use
- */
-unsigned long long simple_strtoull(
-    const char *cp, const char **endp, unsigned int base)
-{
-    unsigned long long result = 0,value;
-
-    if (!base) {
-        base = 10;
-        if (*cp == '0') {
-            base = 8;
-            cp++;
-            if ((toupper(*cp) == 'X') && isxdigit(cp[1])) {
-                cp++;
-                base = 16;
-            }
-        }
-    } else if (base == 16) {
-        if (cp[0] == '0' && toupper(cp[1]) == 'X')
-            cp += 2;
-    }
-    while (isxdigit(*cp) && (value = isdigit(*cp) ? *cp-'0' : (islower(*cp)
-                                                               ? toupper(*cp) : *cp)-'A'+10) < base) {
-        result = result*base + value;
-        cp++;
-    }
-    if (endp)
-        *endp = cp;
-    return result;
-}
-
-EXPORT_SYMBOL(simple_strtoull);
-
-/**
- * simple_strtoll - convert a string to a signed long long
- * @cp: The start of the string
- * @endp: A pointer to the end of the parsed string will be placed here
- * @base: The number base to use
- */
-long long simple_strtoll(const char *cp,const char **endp,unsigned int base)
-{
-    if(*cp=='-')
-        return -simple_strtoull(cp+1,endp,base);
-    return simple_strtoull(cp,endp,base);
-}
-
 static int skip_atoi(const char **s)
 {
     int i=0;
@@ -327,7 +225,7 @@ static char *print_bitmap_string(char *str, const char *end,
      */
     for ( i = ROUNDUP(nr_bits, CHUNKSZ) - CHUNKSZ; i >= 0; i -= CHUNKSZ )
     {
-        unsigned int chunkmask = (1ull << chunksz) - 1;
+        unsigned int chunkmask = (1ULL << chunksz) - 1;
         unsigned int word      = i / BITS_PER_LONG;
         unsigned int offset    = i % BITS_PER_LONG;
         unsigned long val      = (bitmap[word] >> offset) & chunkmask;
@@ -479,7 +377,7 @@ static char *pointer(char *str, const char *end, const char **fmt_ptr,
             str = number(str, end, hex_buffer[i], 16, 2, -1, ZEROPAD);
 
             if ( ++i == field_width )
-                return str;
+                break;
 
             if ( sep )
             {
@@ -488,6 +386,8 @@ static char *pointer(char *str, const char *end, const char **fmt_ptr,
                 ++str;
             }
         }
+
+        return str;
     }
 
     case 'p': /* PCI SBDF. */
@@ -721,6 +621,7 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list args)
 
         case 'X':
             flags |= LARGE;
+            fallthrough;
         case 'x':
             base = 16;
             break;
@@ -728,6 +629,7 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list args)
         case 'd':
         case 'i':
             flags |= SIGN;
+            fallthrough;
         case 'u':
             break;
 

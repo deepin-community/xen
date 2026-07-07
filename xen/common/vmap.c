@@ -1,12 +1,12 @@
-#ifdef VMAP_VIRT_START
 #include <xen/bitmap.h>
-#include <xen/cache.h>
+#include <xen/sections.h>
 #include <xen/init.h>
 #include <xen/mm.h>
 #include <xen/pfn.h>
 #include <xen/spinlock.h>
 #include <xen/types.h>
 #include <xen/vmap.h>
+#include <xen/xvmalloc.h>
 #include <asm/page.h>
 
 static DEFINE_SPINLOCK(vm_lock);
@@ -34,9 +34,21 @@ void __init vm_init_type(enum vmap_region type, void *start, void *end)
 
     for ( i = 0, va = (unsigned long)vm_bitmap(type); i < nr; ++i, va += PAGE_SIZE )
     {
-        struct page_info *pg = alloc_domheap_page(NULL, 0);
+        mfn_t mfn;
+        int rc;
 
-        map_pages_to_xen(va, page_to_mfn(pg), 1, PAGE_HYPERVISOR);
+        if ( system_state == SYS_STATE_early_boot )
+            mfn = alloc_boot_pages(1, 1);
+        else
+        {
+            struct page_info *pg = alloc_domheap_page(NULL, 0);
+
+            BUG_ON(!pg);
+            mfn = page_to_mfn(pg);
+        }
+        rc = map_pages_to_xen(va, mfn, 1, PAGE_HYPERVISOR);
+        BUG_ON(rc);
+
         clear_page((void *)va);
     }
     bitmap_fill(vm_bitmap(type), vm_low[type]);
@@ -53,7 +65,7 @@ static void *vm_alloc(unsigned int nr, unsigned int align,
     if ( !align )
         align = 1;
     else if ( align & (align - 1) )
-        align &= -align;
+        align = ISOLATE_LSB(align);
 
     ASSERT((t >= VMAP_DEFAULT) && (t < VMAP_REGION_NR));
     if ( !vm_base[t] )
@@ -62,7 +74,7 @@ static void *vm_alloc(unsigned int nr, unsigned int align,
     spin_lock(&vm_lock);
     for ( ; ; )
     {
-        struct page_info *pg;
+        mfn_t mfn;
 
         ASSERT(vm_low[t] == vm_top[t] || !test_bit(vm_low[t], vm_bitmap(t)));
         for ( start = vm_low[t]; start < vm_top[t]; )
@@ -97,9 +109,16 @@ static void *vm_alloc(unsigned int nr, unsigned int align,
         if ( vm_top[t] >= vm_end[t] )
             return NULL;
 
-        pg = alloc_domheap_page(NULL, 0);
-        if ( !pg )
-            return NULL;
+        if ( system_state == SYS_STATE_early_boot )
+            mfn = alloc_boot_pages(1, 1);
+        else
+        {
+            struct page_info *pg = alloc_domheap_page(NULL, 0);
+
+            if ( !pg )
+                return NULL;
+            mfn = page_to_mfn(pg);
+        }
 
         spin_lock(&vm_lock);
 
@@ -107,7 +126,7 @@ static void *vm_alloc(unsigned int nr, unsigned int align,
         {
             unsigned long va = (unsigned long)vm_bitmap(t) + vm_top[t] / 8;
 
-            if ( !map_pages_to_xen(va, page_to_mfn(pg), 1, PAGE_HYPERVISOR) )
+            if ( !map_pages_to_xen(va, mfn, 1, PAGE_HYPERVISOR) )
             {
                 clear_page((void *)va);
                 vm_top[t] += PAGE_SIZE * 8;
@@ -117,7 +136,10 @@ static void *vm_alloc(unsigned int nr, unsigned int align,
             }
         }
 
-        free_domheap_page(pg);
+        if ( system_state == SYS_STATE_early_boot )
+            init_boot_pages(mfn_to_maddr(mfn), mfn_to_maddr(mfn) + PAGE_SIZE);
+        else
+            free_domheap_page(mfn_to_page(mfn));
 
         if ( start >= vm_top[t] )
         {
@@ -223,13 +245,25 @@ void *vmap(const mfn_t *mfn, unsigned int nr)
     return __vmap(mfn, 1, nr, 1, PAGE_HYPERVISOR, VMAP_DEFAULT);
 }
 
-void vunmap(const void *va)
+void *vmap_contig(mfn_t mfn, unsigned int nr)
 {
-    unsigned long addr = (unsigned long)va;
+    return __vmap(&mfn, nr, 1, 1, PAGE_HYPERVISOR, VMAP_DEFAULT);
+}
+
+unsigned int vmap_size(const void *va)
+{
     unsigned int pages = vm_size(va, VMAP_DEFAULT);
 
     if ( !pages )
         pages = vm_size(va, VMAP_XEN);
+
+    return pages;
+}
+
+void vunmap(const void *va)
+{
+    unsigned long addr = (unsigned long)va;
+    unsigned pages = vmap_size(va);
 
 #ifndef _PAGE_NONE
     destroy_xen_mappings(addr, addr + PAGE_SIZE * pages);
@@ -301,34 +335,94 @@ void *vzalloc(size_t size)
     return p;
 }
 
-void vfree(void *va)
+static void _vfree(const void *va, unsigned int pages)
 {
-    unsigned int i, pages;
+    unsigned int i;
     struct page_info *pg;
     PAGE_LIST_HEAD(pg_list);
-    enum vmap_region type = VMAP_DEFAULT;
 
-    if ( !va )
-        return;
-
-    pages = vm_size(va, type);
-    if ( !pages )
-    {
-        type = VMAP_XEN;
-        pages = vm_size(va, type);
-    }
     ASSERT(pages);
 
     for ( i = 0; i < pages; i++ )
     {
-        struct page_info *page = vmap_to_page(va + i * PAGE_SIZE);
-
-        ASSERT(page);
-        page_list_add(page, &pg_list);
+        pg = vmap_to_page(va + i * PAGE_SIZE);
+        ASSERT(pg);
+        page_list_add(pg, &pg_list);
     }
     vunmap(va);
 
     while ( (pg = page_list_remove_head(&pg_list)) != NULL )
         free_domheap_page(pg);
 }
-#endif
+
+void vfree(void *va)
+{
+    if ( !va )
+        return;
+
+    _vfree(va, vmap_size(va));
+}
+
+void xvfree(void *va)
+{
+    unsigned int pages = vm_size(va, VMAP_DEFAULT);
+
+    if ( pages )
+        _vfree(va, pages);
+    else
+        xfree(va);
+}
+
+void *_xvmalloc(size_t size, unsigned int align)
+{
+    ASSERT(align <= PAGE_SIZE);
+    return size <= PAGE_SIZE ? _xmalloc(size, align) : vmalloc(size);
+}
+
+void *_xvzalloc(size_t size, unsigned int align)
+{
+    ASSERT(align <= PAGE_SIZE);
+    return size <= PAGE_SIZE ? _xzalloc(size, align) : vzalloc(size);
+}
+
+void *_xvrealloc(void *va, size_t size, unsigned int align)
+{
+    size_t pages = vm_size(va, VMAP_DEFAULT);
+    void *ptr;
+
+    ASSERT(align <= PAGE_SIZE);
+
+    if ( !pages )
+    {
+        if ( size <= PAGE_SIZE )
+            return _xrealloc(va, size, align);
+
+        ptr = vmalloc(size);
+        if ( ptr && va && va != ZERO_BLOCK_PTR )
+        {
+            /*
+             * xmalloc-based allocations up to PAGE_SIZE don't cross page
+             * boundaries. Therefore, without needing to know the exact
+             * prior allocation size, simply copy the entire tail of the
+             * page containing the earlier allocation.
+             */
+            memcpy(ptr, va, PAGE_SIZE - PAGE_OFFSET(va));
+            xfree(va);
+        }
+    }
+    else if ( pages == PFN_UP(size) )
+        ptr = va;
+    else
+    {
+        ptr = _xvmalloc(size, align);
+        if ( ptr )
+        {
+            memcpy(ptr, va, min(size, pages << PAGE_SHIFT));
+            vfree(va);
+        }
+        else if ( pages > PFN_UP(size) )
+            ptr = va;
+    }
+
+    return ptr;
+}

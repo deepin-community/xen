@@ -17,8 +17,8 @@
  * Copyright (C) Weidong Han <weidong.han@intel.com>
  */
 
-#ifndef _VTD_H_
-#define _VTD_H_
+#ifndef DRIVERS__PASSTHROUGH__VTD__VTD_H
+#define DRIVERS__PASSTHROUGH__VTD__VTD_H
 
 #include <xen/iommu.h>
 
@@ -28,9 +28,8 @@
  */
 #define MAP_WITH_RMRR         (1u << 0)
 #define MAP_OWNER_DYING       (1u << 1)
-#define MAP_SINGLE_DEVICE     (1u << 2)
-#define MAP_ERROR_RECOVERY    (1u << 3)
-#define UNMAP_ME_PHANTOM_FUNC (1u << 4)
+#define MAP_ERROR_RECOVERY    (1u << 2)
+#define UNMAP_ME_PHANTOM_FUNC (1u << 3)
 
 /* Allow for both IOAPIC and IOSAPIC. */
 #define IO_xAPIC_route_entry IO_APIC_route_entry
@@ -72,4 +71,4 @@ struct msi_msg_remap_entry {
     u32	data;		/* msi message data */
 };
 
-#endif // _VTD_H_
+#endif // DRIVERS__PASSTHROUGH__VTD__VTD_H

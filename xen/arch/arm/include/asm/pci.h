@@ -128,14 +128,10 @@ int pci_host_bridge_mappings(struct domain *d);
 
 bool pci_check_bar(const struct pci_dev *pdev, mfn_t start, mfn_t end);
 
+static inline int pci_sanitize_bar_memory(struct rangeset *r)
+{ return 0; }
+
 #else   /*!CONFIG_HAS_PCI*/
-
-struct arch_pci_dev { };
-
-static always_inline bool is_pci_passthrough_enabled(void)
-{
-    return false;
-}
 
 struct pci_dev;
 

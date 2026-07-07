@@ -20,7 +20,7 @@
 #include <xen/cpu.h>
 
 /* Some subsystems call into us before we are initialised. We ignore them. */
-static bool_t tasklets_initialised;
+static bool tasklets_initialised;
 
 DEFINE_PER_CPU(unsigned long, tasklet_work_to_do);
 
@@ -37,7 +37,7 @@ static void tasklet_enqueue(struct tasklet *t)
     if ( t->is_softirq )
     {
         struct list_head *list = &per_cpu(softirq_tasklet_list, cpu);
-        bool_t was_empty = list_empty(list);
+        bool was_empty = list_empty(list);
         list_add_tail(&t->list, list);
         if ( was_empty )
             cpu_raise_softirq(cpu, TASKLET_SOFTIRQ);
@@ -199,7 +199,7 @@ static void migrate_tasklets_from_cpu(unsigned int cpu, struct list_head *list)
     spin_unlock_irqrestore(&tasklet_lock, flags);
 }
 
-void tasklet_init(struct tasklet *t, void (*func)(void *), void *data)
+void tasklet_init(struct tasklet *t, void (*func)(void *data), void *data)
 {
     memset(t, 0, sizeof(*t));
     INIT_LIST_HEAD(&t->list);
@@ -208,7 +208,8 @@ void tasklet_init(struct tasklet *t, void (*func)(void *), void *data)
     t->data = data;
 }
 
-void softirq_tasklet_init(struct tasklet *t, void (*func)(void *), void *data)
+void softirq_tasklet_init(struct tasklet *t,
+                          void (*func)(void *data), void *data)
 {
     tasklet_init(t, func, data);
     t->is_softirq = 1;

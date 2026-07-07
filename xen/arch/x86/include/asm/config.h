@@ -20,7 +20,6 @@
 #define BITS_PER_XEN_ULONG BITS_PER_LONG
 
 #define CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS 1
-#define CONFIG_DISCONTIGMEM 1
 #define CONFIG_NUMA_EMU 1
 
 #define CONFIG_PAGEALLOC_MAX_ORDER (2 * PAGETABLE_ORDER)
@@ -30,7 +29,6 @@
 /* Intel P4 currently has largest cache line (L2 line size is 128 bytes). */
 #define CONFIG_X86_L1_CACHE_SHIFT 7
 
-#define CONFIG_ACPI_SRAT 1
 #define CONFIG_ACPI_CSTATE 1
 
 #define CONFIG_WATCHDOG 1
@@ -43,14 +41,7 @@
 
 /* Linkage for x86 */
 #ifdef __ASSEMBLY__
-#define ALIGN .align 16,0x90
-#define ENTRY(name)                             \
-  .globl name;                                  \
-  ALIGN;                                        \
-  name:
-#define GLOBAL(name)                            \
-  .globl name;                                  \
-  name:
+#define CODE_FILL 0x90
 #endif
 
 #define NR_hypercalls 64
@@ -59,12 +50,6 @@
 #define STACK_SIZE  (PAGE_SIZE << STACK_ORDER)
 
 #define IST_SHSTK_SIZE 1024
-
-#define TRAMPOLINE_STACK_SPACE  PAGE_SIZE
-#define TRAMPOLINE_SPACE        (KB(64) - TRAMPOLINE_STACK_SPACE)
-#define WAKEUP_STACK_MIN        3072
-
-#define MBI_SPACE_MIN           (2 * PAGE_SIZE)
 
 /* Primary stack is restricted to 8kB by guard pages. */
 #define PRIMARY_STACK_SIZE 8192
@@ -83,25 +68,6 @@
 /* Override include/xen/list.h to make these non-canonical addresses. */
 #define LIST_POISON1  ((void *)0x0100100100100100UL)
 #define LIST_POISON2  ((void *)0x0200200200200200UL)
-
-#ifndef __ASSEMBLY__
-extern unsigned long trampoline_phys;
-#define bootsym_phys(sym)                                 \
-    (((unsigned long)&(sym)-(unsigned long)&trampoline_start)+trampoline_phys)
-#define bootsym(sym)                                      \
-    (*((typeof(sym) *)__va(bootsym_phys(sym))))
-
-extern char trampoline_start[], trampoline_end[];
-extern char trampoline_realmode_entry[];
-extern unsigned int trampoline_xen_phys_start;
-extern unsigned char trampoline_cpu_started;
-extern char wakeup_start[];
-
-extern unsigned char video_flags;
-
-extern unsigned short boot_edid_caps;
-extern unsigned char boot_edid_info[128];
-#endif
 
 #include <xen/const.h>
 
@@ -257,7 +223,7 @@ extern unsigned char boot_edid_info[128];
 #endif /* CONFIG_PV32 */
 
 #define MACH2PHYS_COMPAT_VIRT_START    HYPERVISOR_COMPAT_VIRT_START
-#define MACH2PHYS_COMPAT_VIRT_END      0xFFE00000
+#define MACH2PHYS_COMPAT_VIRT_END      0xFFE00000U
 #define MACH2PHYS_COMPAT_NR_ENTRIES(d) \
     ((MACH2PHYS_COMPAT_VIRT_END-MACH2PHYS_COMPAT_VIRT_START(d))>>2)
 

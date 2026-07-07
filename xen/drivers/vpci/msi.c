@@ -57,6 +57,8 @@ static void cf_check control_write(
 
     if ( new_enabled )
     {
+        bool old_enabled = msi->enabled;
+
         /*
          * If the device is already enabled it means the number of
          * enabled messages has changed. Disable and re-enable the
@@ -70,6 +72,13 @@ static void cf_check control_write(
 
         if ( vpci_msi_arch_enable(msi, pdev, vectors) )
             return;
+
+        /* Make sure domU doesn't enable INTx while enabling MSI. */
+        if ( !old_enabled && !is_hardware_domain(pdev->domain) )
+        {
+            pci_intx(pdev, false);
+            pdev->vpci->header.guest_cmd |= PCI_COMMAND_INTX_DISABLE;
+        }
     }
     else
         vpci_msi_arch_disable(msi, pdev);
@@ -103,7 +112,7 @@ static void cf_check address_write(
     struct vpci_msi *msi = data;
 
     /* Clear low part. */
-    msi->address &= ~0xffffffffull;
+    msi->address &= ~0xffffffffULL;
     msi->address |= val;
 
     update_msi(pdev, msi);
@@ -124,7 +133,7 @@ static void cf_check address_hi_write(
     struct vpci_msi *msi = data;
 
     /* Clear and update high part. */
-    msi->address &= 0xffffffff;
+    msi->address  = (uint32_t)msi->address;
     msi->address |= (uint64_t)val << 32;
 
     update_msi(pdev, msi);
@@ -169,13 +178,15 @@ static void cf_check mask_write(
 
     if ( msi->enabled )
     {
-        unsigned int i;
+        /* Skip changes to vectors which aren't enabled. */
+        dmask &= (~0U >> (32 - msi->vectors));
 
-        for ( i = ffs(dmask) - 1; dmask && i < msi->vectors;
-              i = ffs(dmask) - 1 )
+        while ( dmask )
         {
+            unsigned int i = ffs(dmask) - 1;
+
             vpci_msi_arch_mask(msi, pdev, i, (val >> i) & 1);
-            __clear_bit(i, &dmask);
+            dmask &= (dmask - 1);
         }
     }
 
@@ -184,9 +195,7 @@ static void cf_check mask_write(
 
 static int cf_check init_msi(struct pci_dev *pdev)
 {
-    uint8_t slot = PCI_SLOT(pdev->devfn), func = PCI_FUNC(pdev->devfn);
-    unsigned int pos = pci_find_cap_offset(pdev->seg, pdev->bus, slot, func,
-                                           PCI_CAP_ID_MSI);
+    unsigned int pos = pdev->msi_pos;
     uint16_t control;
     int ret;
 
@@ -265,7 +274,7 @@ REGISTER_VPCI_INIT(init_msi, VPCI_PRIORITY_LOW);
 
 void vpci_dump_msi(void)
 {
-    const struct domain *d;
+    struct domain *d;
 
     rcu_read_lock(&domlist_read_lock);
     for_each_domain ( d )
@@ -276,6 +285,9 @@ void vpci_dump_msi(void)
             continue;
 
         printk("vPCI MSI/MSI-X d%d\n", d->domain_id);
+
+        if ( !read_trylock(&d->pci_lock) )
+            continue;
 
         for_each_pdev ( d, pdev )
         {
@@ -315,17 +327,33 @@ void vpci_dump_msi(void)
                 {
                     /*
                      * On error vpci_msix_arch_print will always return without
-                     * holding the lock.
+                     * holding the locks.
                      */
                     printk("unable to print all MSI-X entries: %d\n", rc);
-                    process_pending_softirqs();
-                    continue;
+                    goto pdev_done;
                 }
             }
 
+            /*
+             * Unlock locks to process pending softirqs. This is
+             * potentially unsafe, as d->pdev_list can be changed in
+             * meantime.
+             */
             spin_unlock(&pdev->vpci->lock);
+            read_unlock(&d->pci_lock);
+
+        pdev_done:
             process_pending_softirqs();
+            if ( !read_trylock(&d->pci_lock) )
+            {
+                printk("unable to access other devices for the domain\n");
+                goto domain_done;
+            }
         }
+        read_unlock(&d->pci_lock);
+
+    domain_done:
+        ;
     }
     rcu_read_unlock(&domlist_read_lock);
 }

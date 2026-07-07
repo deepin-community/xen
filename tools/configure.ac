@@ -83,13 +83,13 @@ AX_XEN_EXPAND_CONFIG()
 # Enable/disable options
 AX_ARG_DEFAULT_ENABLE([werror], [Build tools without -Werror])
 AX_ARG_DEFAULT_DISABLE([rpath], [Build tools with -Wl,-rpath,LIBDIR])
-AX_ARG_DEFAULT_DISABLE([githttp], [Download GIT repositories via HTTP])
 AX_ARG_DEFAULT_ENABLE([monitors], [Disable xenstat and xentop monitoring tools])
 AX_ARG_DEFAULT_ENABLE([ocamltools], [Disable Ocaml tools])
 AX_ARG_DEFAULT_ENABLE([xsmpolicy], [Disable XSM policy compilation])
 AX_ARG_DEFAULT_DISABLE([ovmf], [Enable OVMF])
 AX_ARG_DEFAULT_ENABLE([seabios], [Disable SeaBIOS])
 AX_ARG_DEFAULT_ENABLE([golang], [Disable Go tools])
+AX_ARG_DEFAULT_ENABLE([pygrub], [Disable pygrub])
 
 AC_ARG_WITH([linux-backend-modules],
     AS_HELP_STRING([--with-linux-backend-modules="mod1 mod2"],
@@ -184,6 +184,31 @@ AS_IF([test "x$enable_rombios" = "xyes"], [
     rombios=n
 ])
 AC_SUBST(rombios)
+
+AS_IF([test "x$pygrub" = "xy"], [
+    AC_DEFINE([HAVE_PYGRUB], [1], [pygrub enabled])
+])
+
+AC_ARG_ENABLE([libfsimage],
+    AS_HELP_STRING([--enable-libfsimage],
+                   [Enable libfsimage, (DEFAULT is on if pygrub is enabled,
+                    otherwise off)]),,[
+    AS_IF([test "x$pygrub" = "xn"], [
+        enable_libfsimage="no"
+    ], [
+        enable_libfsimage="yes"
+    ])
+])
+AS_IF([test "x$enable_libfsimage" = "xyes"], [
+    libfsimage=y
+], [
+    AS_IF([test "x$pygrub" = "xy"], [
+        AC_MSG_ERROR([pygrub needs libfsimage])
+    ], [
+        libfsimage=n
+    ])
+])
+AC_SUBST(libfsimage)
 
 AC_ARG_WITH([system-qemu],
     AS_HELP_STRING([--with-system-qemu@<:@=PATH@:>@],
@@ -311,7 +336,7 @@ AS_IF([test "x$ocamltools" = "xy"], [
             AC_MSG_ERROR([Ocaml tools enabled, but missing ocamlopt or ocamlfind])])
         ocamltools="n"
     ], [
-        AX_COMPARE_VERSION([$OCAMLVERSION], [lt], [4.02.0], [
+        AX_COMPARE_VERSION([$OCAMLVERSION], [lt], [4.05.0], [
             AS_IF([test "x$enable_ocamltools" = "xyes"], [
                 AC_MSG_ERROR([Your version of OCaml: $OCAMLVERSION is not supported])])
             ocamltools="n"
@@ -360,7 +385,7 @@ PYTHONPATH=$PYTHON
 PYTHON=`basename $PYTHONPATH`
 
 AX_PATH_PROG_OR_FAIL([PYTHONPATH], [$PYTHON])
-AX_CHECK_PYTHON_VERSION([2], [6])
+AX_CHECK_PYTHON_VERSION([2], [7])
 
 AS_IF([test "$cross_compiling" != yes], [
     AX_CHECK_PYTHON_DEVEL()
@@ -419,8 +444,6 @@ AX_CHECK_PTHREAD
 AC_CHECK_LIB([yajl], [yajl_alloc], [],
     [AC_MSG_ERROR([Could not find yajl])])
 AC_CHECK_LIB([z], [deflateCopy], [], [AC_MSG_ERROR([Could not find zlib])])
-AC_CHECK_LIB([iconv], [libiconv_open], [libiconv="y"], [libiconv="n"])
-AC_SUBST(libiconv)
 AC_CHECK_HEADER([argp.h], [
 AC_CHECK_LIB([argp], [argp_usage], [argp_ldflags="-largp"])
 ], [AC_MSG_ERROR([Could not find argp])])
@@ -517,5 +540,7 @@ AS_IF([test "x$pvshim" = "xy"], [
 ])
 
 AX_FIND_HEADER([INCLUDE_ENDIAN_H], [endian.h sys/endian.h])
+
+AC_CHECK_FUNCS([pipe2])
 
 AC_OUTPUT()

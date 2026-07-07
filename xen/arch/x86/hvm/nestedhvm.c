@@ -1,19 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Nested HVM
  * Copyright (c) 2011, Advanced Micro Devices, Inc.
  * Author: Christoph Egger <Christoph.Egger@amd.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <asm/msr.h>
@@ -27,7 +16,7 @@
 static unsigned long *shadow_io_bitmap[3];
 
 /* Nested VCPU */
-bool_t
+bool
 nestedhvm_vcpu_in_guestmode(struct vcpu *v)
 {
     return vcpu_nestedhvm(v).nv_guestmode;
@@ -136,7 +125,7 @@ static int __init cf_check nestedhvm_setup(void)
     /* shadow_io_bitmaps can't be declared static because
      *   they must fulfill hw requirements (page aligned section)
      *   and doing so triggers the ASSERT(va >= XEN_VIRT_START)
-     *   in __virt_to_maddr()
+     *   in virt_to_maddr()
      *
      * So as a compromise pre-allocate them when xen boots.
      * This function must be called from within start_xen() when
@@ -161,24 +150,34 @@ static int __init cf_check nestedhvm_setup(void)
     __clear_bit(0x80, shadow_io_bitmap[0]);
     __clear_bit(0xed, shadow_io_bitmap[1]);
 
+    /* 
+     * NB this must be called after all command-line processing has been
+     * done, so that if (for example) HAP is disabled, nested virt is
+     * disabled as well.
+     */
+    if ( using_vmx() )
+        start_nested_vmx(&hvm_funcs);
+    else if ( using_svm() )
+        start_nested_svm(&hvm_funcs);
+
     return 0;
 }
 __initcall(nestedhvm_setup);
 
 unsigned long *
-nestedhvm_vcpu_iomap_get(bool_t port_80, bool_t port_ed)
+nestedhvm_vcpu_iomap_get(bool ioport_80, bool ioport_ed)
 {
     int i;
 
     if (!hvm_port80_allowed)
-        port_80 = 1;
+        ioport_80 = 1;
 
-    if (port_80 == 0) {
-        if (port_ed == 0)
+    if (ioport_80 == 0) {
+        if (ioport_ed == 0)
             return hvm_io_bitmap;
         i = 0;
     } else {
-        if (port_ed == 0)
+        if (ioport_ed == 0)
             i = 1;
         else
             i = 2;

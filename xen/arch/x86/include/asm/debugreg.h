@@ -1,6 +1,7 @@
 #ifndef _X86_DEBUGREG_H
 #define _X86_DEBUGREG_H
 
+#include <asm/x86-defns.h>
 
 /* Indicate the register numbers for a number of the specific
    debug registers.  Registers 0-3 contain the addresses we wish to trap on */
@@ -21,8 +22,7 @@
 #define DR_STEP         (0x4000)        /* single-step */
 #define DR_SWITCH       (0x8000)        /* task switch */
 #define DR_NOT_RTM      (0x10000)       /* clear: #BP inside RTM region */
-#define DR_STATUS_RESERVED_ZERO (~0xffffeffful) /* Reserved, read as zero */
-#define DR_STATUS_RESERVED_ONE  0xffff0ff0ul /* Reserved, read as one */
+#define DR_STATUS_RESERVED_ONE  0xffff0ff0UL /* Reserved, read as one */
 
 /* Now define a bunch of things for manipulating the control register.
    The top two bytes of the control register consist of 4 fields of 4
@@ -61,15 +61,13 @@
    We can slow the instruction pipeline for instructions coming via the
    gdt or the ldt if we want to.  I am not sure why this is an advantage */
 
-#define DR_CONTROL_RESERVED_ZERO (~0xffff27fful) /* Reserved, read as zero */
-#define DR_CONTROL_RESERVED_ONE  (0x00000400ul) /* Reserved, read as one */
-#define DR_LOCAL_EXACT_ENABLE    (0x00000100ul) /* Local exact enable */
-#define DR_GLOBAL_EXACT_ENABLE   (0x00000200ul) /* Global exact enable */
-#define DR_RTM_ENABLE            (0x00000800ul) /* RTM debugging enable */
-#define DR_GENERAL_DETECT        (0x00002000ul) /* General detect enable */
+#define DR_LOCAL_EXACT_ENABLE    (0x00000100UL) /* Local exact enable */
+#define DR_GLOBAL_EXACT_ENABLE   (0x00000200UL) /* Global exact enable */
+#define DR_RTM_ENABLE            (0x00000800UL) /* RTM debugging enable */
+#define DR_GENERAL_DETECT        (0x00002000UL) /* General detect enable */
 
 #define write_debugreg(reg, val) do {                       \
-    unsigned long __val = val;                              \
+    unsigned long __val = (val);                            \
     asm volatile ( "mov %0,%%db" #reg : : "r" (__val) );    \
 } while (0)
 #define read_debugreg(reg) ({                               \
@@ -97,7 +95,49 @@
  */
 #define breakpoint_addr_ok(a) __addr_ok(a)
 
-long set_debugreg(struct vcpu *, unsigned int reg, unsigned long value);
-void activate_debugregs(const struct vcpu *);
+struct vcpu;
+long set_debugreg(struct vcpu *v, unsigned int reg, unsigned long value);
+void activate_debugregs(const struct vcpu *curr);
+
+struct cpu_policy;
+
+/*
+ * Architecturally dr6/7 are full GPR-width, but only the bottom 32 bits may
+ * legally be non-zero.  We avoid storing the upper bits when possible.
+ */
+unsigned int x86_adj_dr6_rsvd(const struct cpu_policy *p, unsigned int dr6);
+unsigned int x86_adj_dr7_rsvd(const struct cpu_policy *p, unsigned int dr7);
+
+/*
+ * Merge new bits into dr6.  'new' is always given in positive polarity,
+ * matching the Intel VMCS PENDING_DBG semantics.
+ */
+unsigned int x86_merge_dr6(const struct cpu_policy *p, unsigned int dr6,
+                           unsigned int new);
+
+/*
+ * Calculate the width of a breakpoint from its dr7 encoding.
+ *
+ * The LEN encoding in dr7 is 2 bits wide per breakpoint and encoded as a X-1
+ * (0, 1 and 3) for widths of 1, 2 and 4 respectively in the 32bit days.
+ *
+ * In 64bit, the unused value (2) was given a meaning of width 8, which is
+ * great for efficiency but less great for nicely calculating the width.
+ */
+static inline unsigned int x86_bp_width(unsigned int dr7, unsigned int bp)
+{
+    unsigned int raw = (dr7 >> (DR_CONTROL_SHIFT +
+                                DR_CONTROL_SIZE * bp + 2)) & 3;
+
+    /*
+     * If the top bit is set (i.e. we've got an 4 or 8 byte wide breakpoint),
+     * flip the bottom to reverse their order, making them sorted properly.
+     * Then it's a simple shift to calculate the width.
+     */
+    if ( raw & 2 )
+        raw ^= 1;
+
+    return 1U << raw;
+}
 
 #endif /* _X86_DEBUGREG_H */

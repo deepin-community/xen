@@ -31,6 +31,17 @@
  *   (i.e. all devices assigned to) a guest share a single DMA address space
  *   and, by default, Xen will ensure dfn == pfn.
  *
+ * pdx: Page InDeX
+ *   Indices into the frame table holding the per-page's book-keeping
+ *   metadata. A compression scheme may be used, so there's a possibly non
+ *   identity mapping between valid(mfn) <-> valid(pdx). See the comments
+ *   in pdx.c for an in-depth explanation of that mapping. This may also
+ *   have a knock-on effect on the directmap, as "compressed" pfns may not have
+ *   corresponding mapped frames.
+ *
+ * maddr: Machine Address
+ *   The physical address that corresponds to an mfn
+ *
  * WARNING: Some of these terms have changed over time while others have been
  * used inconsistently, meaning that a lot of existing code does not match the
  * definitions above.  New code should use these terms as described here, and
@@ -50,6 +61,7 @@
 #ifndef __XEN_MM_H__
 #define __XEN_MM_H__
 
+#include <xen/bug.h>
 #include <xen/compiler.h>
 #include <xen/mm-frame.h>
 #include <xen/types.h>
@@ -60,9 +72,12 @@
 
 struct page_info;
 
-void put_page(struct page_info *);
-bool __must_check get_page(struct page_info *, const struct domain *);
-struct domain *__must_check page_get_owner_and_reference(struct page_info *);
+extern bool using_static_heap;
+
+void put_page(struct page_info *page);
+bool __must_check get_page(struct page_info *page,
+                           const struct domain *domain);
+struct domain *__must_check page_get_owner_and_reference(struct page_info *page);
 
 /* Boot-time allocator. Turns into generic allocator after bootstrap. */
 void init_boot_pages(paddr_t ps, paddr_t pe);
@@ -80,8 +95,9 @@ bool scrub_free_pages(void);
 
 /* Free an allocation, and zero the pointer to it. */
 #define FREE_XENHEAP_PAGES(p, o) do { \
-    free_xenheap_pages(p, o);         \
+    void *_ptr_ = (p);                \
     (p) = NULL;                       \
+    free_xenheap_pages(_ptr_, o);     \
 } while ( false )
 #define FREE_XENHEAP_PAGE(p) FREE_XENHEAP_PAGES(p, 0)
 
@@ -99,8 +115,9 @@ int map_pages_to_xen(
     unsigned long nr_mfns,
     unsigned int flags);
 /* Alter the permissions of a range of Xen virtual address space. */
-int modify_xen_mappings(unsigned long s, unsigned long e, unsigned int flags);
-void modify_xen_mappings_lite(unsigned long s, unsigned long e, unsigned int flags);
+int modify_xen_mappings(unsigned long s, unsigned long e, unsigned int nf);
+void modify_xen_mappings_lite(unsigned long s, unsigned long e,
+                              unsigned int nf);
 int destroy_xen_mappings(unsigned long s, unsigned long e);
 /* Retrieve the MFN mapped by VA in Xen virtual address space. */
 mfn_t xen_map_to_mfn(unsigned long va);
@@ -124,9 +141,20 @@ void free_domheap_pages(struct page_info *pg, unsigned int order);
 unsigned long avail_domheap_pages_region(
     unsigned int node, unsigned int min_width, unsigned int max_width);
 unsigned long avail_domheap_pages(void);
-unsigned long avail_node_heap_pages(unsigned int);
+unsigned long avail_node_heap_pages(unsigned int nodeid);
 #define alloc_domheap_page(d,f) (alloc_domheap_pages(d,0,f))
 #define free_domheap_page(p)  (free_domheap_pages(p,0))
+
+/* Free an allocation, and zero the pointer to it. */
+#define FREE_DOMHEAP_PAGES(p, o) do { \
+    void *_ptr_ = (p);                \
+    (p) = NULL;                       \
+    free_domheap_pages(_ptr_, o);     \
+} while ( false )
+#define FREE_DOMHEAP_PAGE(p) FREE_DOMHEAP_PAGES(p, 0)
+
+void scrub_one_page(const struct page_info *pg);
+
 unsigned int online_page(mfn_t mfn, uint32_t *status);
 int offline_page(mfn_t mfn, int broken, uint32_t *status);
 int query_page_offline(mfn_t mfn, uint32_t *status);
@@ -147,6 +175,10 @@ int assign_page(
 
 /* Dump info to serial console */
 void arch_dump_shared_mem_info(void);
+
+extern unsigned long max_page;
+extern unsigned long total_pages;
+extern paddr_t mem_hotplug;
 
 /*
  * Extra fault info types which are used to further describe
@@ -239,7 +271,7 @@ struct page_list_head
 # define INIT_PAGE_LIST_HEAD(head) ((head)->tail = (head)->next = NULL)
 # define INIT_PAGE_LIST_ENTRY(ent) ((ent)->prev = (ent)->next = PAGE_LIST_NULL)
 
-static inline bool_t
+static inline bool
 page_list_empty(const struct page_list_head *head)
 {
     return !head->next;
@@ -298,7 +330,7 @@ page_list_add_tail(struct page_info *page, struct page_list_head *head)
     }
     head->tail = page;
 }
-static inline bool_t
+static inline bool
 __page_list_del_head(struct page_info *page, struct page_list_head *head,
                      struct page_info *next, struct page_info *prev)
 {
@@ -396,15 +428,15 @@ page_list_splice(struct page_list_head *list, struct page_list_head *head)
 }
 
 #define page_list_for_each(pos, head) \
-    for ( pos = (head)->next; pos; pos = page_list_next(pos, head) )
+    for ( (pos) = (head)->next; (pos); (pos) = page_list_next(pos, head) )
 #define page_list_for_each_safe(pos, tmp, head) \
-    for ( pos = (head)->next; \
-          pos ? (tmp = page_list_next(pos, head), 1) : 0; \
-          pos = tmp )
+    for ( (pos) = (head)->next; \
+          (pos) ? ((tmp) = page_list_next(pos, head), 1) : 0; \
+          (pos) = (tmp) )
 #define page_list_for_each_safe_reverse(pos, tmp, head) \
-    for ( pos = (head)->tail; \
-          pos ? (tmp = page_list_prev(pos, head), 1) : 0; \
-          pos = tmp )
+    for ( (pos) = (head)->tail; \
+          (pos) ? ((tmp) = page_list_prev(pos, head), 1) : 0; \
+          (pos) = (tmp) )
 #else
 # define page_list_head                  list_head
 # define PAGE_LIST_HEAD_INIT             LIST_HEAD_INIT
@@ -412,7 +444,7 @@ page_list_splice(struct page_list_head *list, struct page_list_head *head)
 # define INIT_PAGE_LIST_HEAD             INIT_LIST_HEAD
 # define INIT_PAGE_LIST_ENTRY            INIT_LIST_HEAD
 
-static inline bool_t
+static inline bool
 page_list_empty(const struct page_list_head *head)
 {
     return !!list_empty(head);
@@ -512,8 +544,6 @@ static inline unsigned int get_order_from_pages(unsigned long nr_pages)
 
     return order;
 }
-
-void scrub_one_page(struct page_info *);
 
 #ifndef arch_free_heap_page
 #define arch_free_heap_page(d, pg) \

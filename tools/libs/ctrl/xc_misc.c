@@ -138,7 +138,7 @@ int xc_readconsolering(xc_interface *xch,
 {
     int ret;
     unsigned int nr_chars = *pnr_chars;
-    DECLARE_SYSCTL;
+    struct xen_sysctl sysctl = {};
     DECLARE_HYPERCALL_BOUNCE(buffer, nr_chars, XC_HYPERCALL_BUFFER_BOUNCE_OUT);
 
     if ( xc_hypercall_bounce_pre(xch, buffer) )
@@ -170,7 +170,7 @@ int xc_readconsolering(xc_interface *xch,
 int xc_send_debug_keys(xc_interface *xch, const char *keys)
 {
     int ret, len = strlen(keys);
-    DECLARE_SYSCTL;
+    struct xen_sysctl sysctl = {};
     DECLARE_HYPERCALL_BOUNCE_IN(keys, len);
 
     if ( xc_hypercall_bounce_pre(xch, keys) )
@@ -191,7 +191,7 @@ int xc_physinfo(xc_interface *xch,
                 xc_physinfo_t *put_info)
 {
     int ret;
-    DECLARE_SYSCTL;
+    struct xen_sysctl sysctl = {};
 
     sysctl.cmd = XEN_SYSCTL_physinfo;
 
@@ -203,11 +203,12 @@ int xc_physinfo(xc_interface *xch,
     return 0;
 }
 
-int xc_microcode_update(xc_interface *xch, const void *buf, size_t len)
+int xc_microcode_update(xc_interface *xch, const void *buf,
+                        size_t len, unsigned int flags)
 {
     int ret;
-    DECLARE_PLATFORM_OP;
-    DECLARE_HYPERCALL_BUFFER(struct xenpf_microcode_update, uc);
+    struct xen_platform_op platform_op = {};
+    DECLARE_HYPERCALL_BUFFER(struct xenpf_microcode_update2, uc);
 
     uc = xc_hypercall_buffer_alloc(xch, uc, len);
     if ( uc == NULL )
@@ -215,9 +216,10 @@ int xc_microcode_update(xc_interface *xch, const void *buf, size_t len)
 
     memcpy(uc, buf, len);
 
-    platform_op.cmd = XENPF_microcode_update;
-    platform_op.u.microcode.length = len;
-    set_xen_guest_handle(platform_op.u.microcode.data, uc);
+    platform_op.cmd = XENPF_microcode_update2;
+    platform_op.u.microcode2.length = len;
+    platform_op.u.microcode2.flags = flags;
+    set_xen_guest_handle(platform_op.u.microcode2.data, uc);
 
     ret = do_platform_op(xch, &platform_op);
 
@@ -226,11 +228,46 @@ int xc_microcode_update(xc_interface *xch, const void *buf, size_t len)
     return ret;
 }
 
+int xc_get_cpu_version(xc_interface *xch, struct xenpf_pcpu_version *cpu_ver)
+{
+    int ret;
+    struct xen_platform_op op = {
+        .cmd = XENPF_get_cpu_version,
+        .u.pcpu_version.xen_cpuid = cpu_ver->xen_cpuid,
+    };
+
+    ret = do_platform_op(xch, &op);
+    if ( ret != 0 )
+        return ret;
+
+    *cpu_ver = op.u.pcpu_version;
+
+    return 0;
+}
+
+int xc_get_ucode_revision(xc_interface *xch,
+                          struct xenpf_ucode_revision *ucode_rev)
+{
+    int ret;
+    struct xen_platform_op op = {
+        .cmd = XENPF_get_ucode_revision,
+        .u.ucode_revision.cpu = ucode_rev->cpu,
+    };
+
+    ret = do_platform_op(xch, &op);
+    if ( ret != 0 )
+        return ret;
+
+    *ucode_rev = op.u.ucode_revision;
+
+    return 0;
+}
+
 int xc_cputopoinfo(xc_interface *xch, unsigned *max_cpus,
                    xc_cputopo_t *cputopo)
 {
     int ret;
-    DECLARE_SYSCTL;
+    struct xen_sysctl sysctl = {};
     DECLARE_HYPERCALL_BOUNCE(cputopo, *max_cpus * sizeof(*cputopo),
                              XC_HYPERCALL_BUFFER_BOUNCE_OUT);
 
@@ -257,7 +294,7 @@ int xc_numainfo(xc_interface *xch, unsigned *max_nodes,
                 xc_meminfo_t *meminfo, uint32_t *distance)
 {
     int ret;
-    DECLARE_SYSCTL;
+    struct xen_sysctl sysctl = {};
     DECLARE_HYPERCALL_BOUNCE(meminfo, *max_nodes * sizeof(*meminfo),
                              XC_HYPERCALL_BUFFER_BOUNCE_OUT);
     DECLARE_HYPERCALL_BOUNCE(distance,
@@ -293,7 +330,7 @@ int xc_pcitopoinfo(xc_interface *xch, unsigned num_devs,
 {
     int ret = 0;
     unsigned processed = 0;
-    DECLARE_SYSCTL;
+    struct xen_sysctl sysctl = {};
     DECLARE_HYPERCALL_BOUNCE(devs, num_devs * sizeof(*devs),
                              XC_HYPERCALL_BUFFER_BOUNCE_IN);
     DECLARE_HYPERCALL_BOUNCE(nodes, num_devs* sizeof(*nodes),
@@ -331,7 +368,7 @@ int xc_sched_id(xc_interface *xch,
                 int *sched_id)
 {
     int ret;
-    DECLARE_SYSCTL;
+    struct xen_sysctl sysctl = {};
 
     sysctl.cmd = XEN_SYSCTL_sched_id;
 
@@ -416,7 +453,7 @@ out:
 
 int xc_perfc_reset(xc_interface *xch)
 {
-    DECLARE_SYSCTL;
+    struct xen_sysctl sysctl = {};
 
     sysctl.cmd = XEN_SYSCTL_perfc_op;
     sysctl.u.perfc_op.cmd = XEN_SYSCTL_PERFCOP_reset;
@@ -431,7 +468,7 @@ int xc_perfc_query_number(xc_interface *xch,
                           int *nbr_val)
 {
     int rc;
-    DECLARE_SYSCTL;
+    struct xen_sysctl sysctl = {};
 
     sysctl.cmd = XEN_SYSCTL_perfc_op;
     sysctl.u.perfc_op.cmd = XEN_SYSCTL_PERFCOP_query;
@@ -452,7 +489,7 @@ int xc_perfc_query(xc_interface *xch,
                    struct xc_hypercall_buffer *desc,
                    struct xc_hypercall_buffer *val)
 {
-    DECLARE_SYSCTL;
+    struct xen_sysctl sysctl = {};
     DECLARE_HYPERCALL_BUFFER_ARGUMENT(desc);
     DECLARE_HYPERCALL_BUFFER_ARGUMENT(val);
 
@@ -466,7 +503,7 @@ int xc_perfc_query(xc_interface *xch,
 
 int xc_lockprof_reset(xc_interface *xch)
 {
-    DECLARE_SYSCTL;
+    struct xen_sysctl sysctl = {};
 
     sysctl.cmd = XEN_SYSCTL_lockprof_op;
     sysctl.u.lockprof_op.cmd = XEN_SYSCTL_LOCKPROF_reset;
@@ -479,7 +516,7 @@ int xc_lockprof_query_number(xc_interface *xch,
                              uint32_t *n_elems)
 {
     int rc;
-    DECLARE_SYSCTL;
+    struct xen_sysctl sysctl = {};
 
     sysctl.cmd = XEN_SYSCTL_lockprof_op;
     sysctl.u.lockprof_op.max_elem = 0;
@@ -499,7 +536,7 @@ int xc_lockprof_query(xc_interface *xch,
                       struct xc_hypercall_buffer *data)
 {
     int rc;
-    DECLARE_SYSCTL;
+    struct xen_sysctl sysctl = {};
     DECLARE_HYPERCALL_BUFFER_ARGUMENT(data);
 
     sysctl.cmd = XEN_SYSCTL_lockprof_op;
@@ -518,7 +555,7 @@ int xc_getcpuinfo(xc_interface *xch, int max_cpus,
                   xc_cpuinfo_t *info, int *nr_cpus)
 {
     int rc;
-    DECLARE_SYSCTL;
+    struct xen_sysctl sysctl = {};
     DECLARE_HYPERCALL_BOUNCE(info, max_cpus*sizeof(*info), XC_HYPERCALL_BUFFER_BOUNCE_OUT);
 
     if ( xc_hypercall_bounce_pre(xch, info) )
@@ -541,10 +578,11 @@ int xc_getcpuinfo(xc_interface *xch, int max_cpus,
 int xc_livepatch_upload(xc_interface *xch,
                         char *name,
                         unsigned char *payload,
-                        uint32_t size)
+                        uint32_t size,
+                        bool force)
 {
     int rc;
-    DECLARE_SYSCTL;
+    struct xen_sysctl sysctl = {};
     DECLARE_HYPERCALL_BUFFER(char, local);
     DECLARE_HYPERCALL_BOUNCE(name, 0 /* later */, XC_HYPERCALL_BUFFER_BOUNCE_IN);
     struct xen_livepatch_name def_name = { };
@@ -577,7 +615,7 @@ int xc_livepatch_upload(xc_interface *xch,
 
     sysctl.cmd = XEN_SYSCTL_livepatch_op;
     sysctl.u.livepatch.cmd = XEN_SYSCTL_LIVEPATCH_UPLOAD;
-    sysctl.u.livepatch.pad = 0;
+    sysctl.u.livepatch.flags = force ? LIVEPATCH_FLAG_FORCE : 0;
     sysctl.u.livepatch.u.upload.size = size;
     set_xen_guest_handle(sysctl.u.livepatch.u.upload.payload, local);
 
@@ -597,7 +635,7 @@ int xc_livepatch_get(xc_interface *xch,
                      struct xen_livepatch_status *status)
 {
     int rc;
-    DECLARE_SYSCTL;
+    struct xen_sysctl sysctl = {};
     DECLARE_HYPERCALL_BOUNCE(name, 0 /*adjust later */, XC_HYPERCALL_BUFFER_BOUNCE_IN);
     struct xen_livepatch_name def_name = { };
 
@@ -621,7 +659,6 @@ int xc_livepatch_get(xc_interface *xch,
 
     sysctl.cmd = XEN_SYSCTL_livepatch_op;
     sysctl.u.livepatch.cmd = XEN_SYSCTL_LIVEPATCH_GET;
-    sysctl.u.livepatch.pad = 0;
 
     sysctl.u.livepatch.u.get.status.state = 0;
     sysctl.u.livepatch.u.get.status.rc = 0;
@@ -654,7 +691,7 @@ int xc_livepatch_list_get_sizes(xc_interface *xch, unsigned int *nr,
                                 uint32_t *name_total_size,
                                 uint32_t *metadata_total_size)
 {
-    DECLARE_SYSCTL;
+    struct xen_sysctl sysctl = {};
     int rc;
 
     if ( !nr || !name_total_size || !metadata_total_size )
@@ -735,7 +772,7 @@ int xc_livepatch_list(xc_interface *xch, const unsigned int max,
                       unsigned int *done, unsigned int *left)
 {
     int rc;
-    DECLARE_SYSCTL;
+    struct xen_sysctl sysctl = {};
     /* The sizes are adjusted later - hence zero. */
     DECLARE_HYPERCALL_BOUNCE(info, 0, XC_HYPERCALL_BUFFER_BOUNCE_OUT);
     DECLARE_HYPERCALL_BOUNCE(name, 0, XC_HYPERCALL_BUFFER_BOUNCE_OUT);
@@ -930,7 +967,7 @@ static int _xc_livepatch_action(xc_interface *xch,
                                 uint32_t flags)
 {
     int rc;
-    DECLARE_SYSCTL;
+    struct xen_sysctl sysctl = {};
     /* The size is figured out when we strlen(name) */
     DECLARE_HYPERCALL_BOUNCE(name, 0, XC_HYPERCALL_BUFFER_BOUNCE_IN);
     struct xen_livepatch_name def_name = { };
@@ -950,7 +987,6 @@ static int _xc_livepatch_action(xc_interface *xch,
 
     sysctl.cmd = XEN_SYSCTL_livepatch_op;
     sysctl.u.livepatch.cmd = XEN_SYSCTL_LIVEPATCH_ACTION;
-    sysctl.u.livepatch.pad = 0;
     sysctl.u.livepatch.u.action.cmd = action;
     sysctl.u.livepatch.u.action.timeout = timeout;
     sysctl.u.livepatch.u.action.flags = flags;

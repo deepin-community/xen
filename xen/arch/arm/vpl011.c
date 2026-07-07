@@ -1,19 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * arch/arm/vpl011.c
  *
  * Virtual PL011 UART
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #define XEN_WANT_FLEX_CONSOLE_RING 1
@@ -123,8 +112,14 @@ static void vpl011_write_data_xen(struct domain *d, uint8_t data)
         }
     }
 
+    /*
+     * When backend is in Xen, we tell guest we are always ready for new data
+     * to be written. This is fulfilled by having:
+     * - TXI/TXFE -> always set,
+     * - TXFF/BUSY -> never set.
+     */
     vpl011->uartris |= TXI;
-    vpl011->uartfr &= ~TXFE;
+    vpl011->uartfr |= TXFE;
     vpl011_update_interrupt_status(d);
 
     VPL011_UNLOCK(d, flags);
@@ -154,8 +149,8 @@ static uint8_t vpl011_read_data_xen(struct domain *d)
     /*
      * It is expected that there will be data in the ring buffer when this
      * function is called since the guest is expected to read the data register
-     * only if the TXFE flag is not set.
-     * If the guest still does read when TXFE bit is set then 0 will be returned.
+     * only if the RXFE flag is not set.
+     * If the guest still does read when RXFE bit is set then 0 will be returned.
      */
     if ( xencons_queued(in_prod, in_cons, sizeof(intf->in)) > 0 )
     {
@@ -213,8 +208,8 @@ static uint8_t vpl011_read_data(struct domain *d)
     /*
      * It is expected that there will be data in the ring buffer when this
      * function is called since the guest is expected to read the data register
-     * only if the TXFE flag is not set.
-     * If the guest still does read when TXFE bit is set then 0 will be returned.
+     * only if the RXFE flag is not set.
+     * If the guest still does read when RXFE bit is set then 0 will be returned.
      */
     if ( xencons_queued(in_prod, in_cons, sizeof(intf->in)) > 0 )
     {
@@ -265,6 +260,9 @@ static void vpl011_update_tx_fifo_status(struct vpl011 *vpl011,
 {
     struct xencons_interface *intf = vpl011->backend.dom.ring_buf;
     unsigned int fifo_threshold = sizeof(intf->out) - SBSA_UART_FIFO_LEVEL;
+
+    /* No TX FIFO handling when backend is in Xen */
+    ASSERT(vpl011->backend_in_domain);
 
     BUILD_BUG_ON(sizeof(intf->out) < SBSA_UART_FIFO_SIZE);
 
@@ -414,9 +412,14 @@ static int vpl011_mmio_read(struct vcpu *v,
     default:
         gprintk(XENLOG_ERR, "vpl011: unhandled read r%d offset %#08x\n",
                 dabt.reg, vpl011_reg);
-        return 0;
+        goto read_as_zero;
     }
 
+    ASSERT_UNREACHABLE();
+    return 1;
+
+read_as_zero:
+    *r = 0;
     return 1;
 
 bad_width:
@@ -486,7 +489,7 @@ static int vpl011_mmio_write(struct vcpu *v,
     default:
         gprintk(XENLOG_ERR, "vpl011: unhandled write r%d offset %#08x\n",
                 dabt.reg, vpl011_reg);
-        return 0;
+        goto write_ignore;
     }
 
 write_ignore:
@@ -547,7 +550,13 @@ static void vpl011_data_avail(struct domain *d,
          */
         vpl011->uartfr &= ~BUSY;
 
-        vpl011_update_tx_fifo_status(vpl011, out_fifo_level);
+        /*
+         * When backend is in Xen, we are always ready for new data to be
+         * written (i.e. no TX FIFO handling), therefore we do not want
+         * to change the TX FIFO status in such case.
+         */
+        if ( vpl011->backend_in_domain )
+            vpl011_update_tx_fifo_status(vpl011, out_fifo_level);
     }
 
     vpl011_update_interrupt_status(d);
@@ -702,8 +711,8 @@ int domain_vpl011_init(struct domain *d, struct vpl011_init_info *info)
         vpl011->backend.xen = xzalloc(struct vpl011_xen_backend);
         if ( vpl011->backend.xen == NULL )
         {
-            rc = -EINVAL;
-            goto out1;
+            rc = -ENOMEM;
+            goto out;
         }
     }
 
@@ -711,7 +720,7 @@ int domain_vpl011_init(struct domain *d, struct vpl011_init_info *info)
     if ( !rc )
     {
         rc = -EINVAL;
-        goto out2;
+        goto out1;
     }
 
     vpl011->uartfr = TXFE | RXFE;
@@ -723,15 +732,8 @@ int domain_vpl011_init(struct domain *d, struct vpl011_init_info *info)
 
     return 0;
 
-out2:
-    vgic_free_virq(d, vpl011->virq);
-
 out1:
-    if ( vpl011->backend_in_domain )
-        destroy_ring_for_helper(&vpl011->backend.dom.ring_buf,
-                                vpl011->backend.dom.ring_page);
-    else
-        xfree(vpl011->backend.xen);
+    domain_vpl011_deinit(d);
 
 out:
     return rc;
@@ -741,17 +743,37 @@ void domain_vpl011_deinit(struct domain *d)
 {
     struct vpl011 *vpl011 = &d->arch.vpl011;
 
+    if ( vpl011->virq )
+    {
+        vgic_free_virq(d, vpl011->virq);
+
+        /*
+         * Set to invalid irq (we use SPI) to prevent extra free and to avoid
+         * freeing irq that could have already been reserved by someone else.
+         */
+        vpl011->virq = 0;
+    }
+
     if ( vpl011->backend_in_domain )
     {
-        if ( !vpl011->backend.dom.ring_buf )
-            return;
+        if ( vpl011->backend.dom.ring_buf )
+            destroy_ring_for_helper(&vpl011->backend.dom.ring_buf,
+                                    vpl011->backend.dom.ring_page);
 
-        free_xen_event_channel(d, vpl011->evtchn);
-        destroy_ring_for_helper(&vpl011->backend.dom.ring_buf,
-                                vpl011->backend.dom.ring_page);
+        if ( vpl011->evtchn )
+        {
+            free_xen_event_channel(d, vpl011->evtchn);
+
+            /*
+             * Set to invalid event channel port to prevent extra free and to
+             * avoid freeing port that could have already been allocated for
+             * other purposes.
+             */
+            vpl011->evtchn = 0;
+        }
     }
     else
-        xfree(vpl011->backend.xen);
+        XFREE(vpl011->backend.xen);
 }
 
 /*

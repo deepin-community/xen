@@ -8,9 +8,11 @@
 #include <xen/param.h>
 #include <xen/percpu.h>
 #include <xen/sched.h>
+#include <xen/xvmalloc.h>
+
+#include <asm/cpu-policy.h>
 #include <asm/current.h>
 #include <asm/processor.h>
-#include <asm/hvm/support.h>
 #include <asm/i387.h>
 #include <asm/xstate.h>
 #include <asm/asm_defns.h>
@@ -55,16 +57,16 @@ static inline bool xsetbv(u32 index, u64 xfeatures)
     return lo != 0;
 }
 
-bool set_xcr0(u64 val)
+bool set_xcr0(u64 xfeatures)
 {
     uint64_t *this_xcr0 = &this_cpu(xcr0);
 
-    if ( *this_xcr0 != val )
+    if ( *this_xcr0 != xfeatures )
     {
-        if ( !xsetbv(XCR_XFEATURE_ENABLED_MASK, val) )
+        if ( !xsetbv(XCR_XFEATURE_ENABLED_MASK, xfeatures) )
             return false;
 
-        *this_xcr0 = val;
+        *this_xcr0 = xfeatures;
     }
 
     return true;
@@ -151,7 +153,7 @@ static void setup_xstate_comp(uint16_t *comp_offsets,
     offset = comp_offsets[2];
     for ( i = 2; i < xstate_features; i++ )
     {
-        if ( (1ul << i) & xcomp_bv )
+        if ( (1UL << i) & xcomp_bv )
         {
             if ( test_bit(i, &xstate_align) )
                 offset = ROUNDUP(offset, 64);
@@ -173,32 +175,32 @@ static void setup_xstate_comp(uint16_t *comp_offsets,
  * It is the callers responsibility to ensure that there is xsave state to
  * serialise, and that the provided buffer is exactly the right size.
  */
-void expand_xsave_states(struct vcpu *v, void *dest, unsigned int size)
+void expand_xsave_states(const struct vcpu *v, void *dest, unsigned int size)
 {
-    const struct xsave_struct *xsave = v->arch.xsave_area;
+    const struct xsave_struct *xstate = v->arch.xsave_area;
     const void *src;
     uint16_t comp_offsets[sizeof(xfeature_mask)*8];
-    u64 xstate_bv = xsave->xsave_hdr.xstate_bv;
+    u64 xstate_bv = xstate->xsave_hdr.xstate_bv;
     u64 valid;
 
     /* Check there is state to serialise (i.e. at least an XSAVE_HDR) */
     BUG_ON(!v->arch.xcr0_accum);
     /* Check there is the correct room to decompress into. */
-    BUG_ON(size != xstate_ctxt_size(v->arch.xcr0_accum));
+    BUG_ON(size != xstate_uncompressed_size(v->arch.xcr0_accum));
 
-    if ( !(xsave->xsave_hdr.xcomp_bv & XSTATE_COMPACTION_ENABLED) )
+    if ( !(xstate->xsave_hdr.xcomp_bv & XSTATE_COMPACTION_ENABLED) )
     {
-        memcpy(dest, xsave, size);
+        memcpy(dest, xstate, size);
         return;
     }
 
-    ASSERT(xsave_area_compressed(xsave));
-    setup_xstate_comp(comp_offsets, xsave->xsave_hdr.xcomp_bv);
+    ASSERT(xsave_area_compressed(xstate));
+    setup_xstate_comp(comp_offsets, xstate->xsave_hdr.xcomp_bv);
 
     /*
      * Copy legacy XSAVE area and XSAVE hdr area.
      */
-    memcpy(dest, xsave, XSTATE_AREA_MIN_SIZE);
+    memcpy(dest, xstate, XSTATE_AREA_MIN_SIZE);
     memset(dest + XSTATE_AREA_MIN_SIZE, 0, size - XSTATE_AREA_MIN_SIZE);
 
     ((struct xsave_struct *)dest)->xsave_hdr.xcomp_bv =  0;
@@ -207,7 +209,7 @@ void expand_xsave_states(struct vcpu *v, void *dest, unsigned int size)
      * Copy each region from the possibly compacted offset to the
      * non-compacted offset.
      */
-    src = xsave;
+    src = xstate;
     valid = xstate_bv & ~XSTATE_FP_SSE;
     while ( valid )
     {
@@ -240,20 +242,20 @@ void expand_xsave_states(struct vcpu *v, void *dest, unsigned int size)
  */
 void compress_xsave_states(struct vcpu *v, const void *src, unsigned int size)
 {
-    struct xsave_struct *xsave = v->arch.xsave_area;
+    struct xsave_struct *xstate = v->arch.xsave_area;
     void *dest;
     uint16_t comp_offsets[sizeof(xfeature_mask)*8];
     u64 xstate_bv, valid;
 
     BUG_ON(!v->arch.xcr0_accum);
-    BUG_ON(size != xstate_ctxt_size(v->arch.xcr0_accum));
+    BUG_ON(size != xstate_uncompressed_size(v->arch.xcr0_accum));
     ASSERT(!xsave_area_compressed(src));
 
     xstate_bv = ((const struct xsave_struct *)src)->xsave_hdr.xstate_bv;
 
     if ( !(v->arch.xcr0_accum & XSTATE_XSAVES_ONLY) )
     {
-        memcpy(xsave, src, size);
+        memcpy(xstate, src, size);
         return;
     }
 
@@ -261,19 +263,19 @@ void compress_xsave_states(struct vcpu *v, const void *src, unsigned int size)
      * Copy legacy XSAVE area, to avoid complications with CPUID
      * leaves 0 and 1 in the loop below.
      */
-    memcpy(xsave, src, FXSAVE_SIZE);
+    memcpy(xstate, src, FXSAVE_SIZE);
 
     /* Set XSTATE_BV and XCOMP_BV.  */
-    xsave->xsave_hdr.xstate_bv = xstate_bv;
-    xsave->xsave_hdr.xcomp_bv = v->arch.xcr0_accum | XSTATE_COMPACTION_ENABLED;
+    xstate->xsave_hdr.xstate_bv = xstate_bv;
+    xstate->xsave_hdr.xcomp_bv = v->arch.xcr0_accum | XSTATE_COMPACTION_ENABLED;
 
-    setup_xstate_comp(comp_offsets, xsave->xsave_hdr.xcomp_bv);
+    setup_xstate_comp(comp_offsets, xstate->xsave_hdr.xcomp_bv);
 
     /*
      * Copy each region from the non-compacted offset to the
      * possibly compacted offset.
      */
-    dest = xsave;
+    dest = xstate;
     valid = xstate_bv & ~XSTATE_FP_SSE;
     while ( valid )
     {
@@ -312,7 +314,7 @@ void xsave(struct vcpu *v, uint64_t mask)
                            "=m" (*ptr), \
                            "a" (lmask), "d" (hmask), "D" (ptr))
 
-    if ( fip_width == 8 || !(mask & X86_XCR0_FP) )
+    if ( fip_width == 8 || !(mask & X86_XCR0_X87) )
     {
         XSAVE("0x48,");
     }
@@ -365,7 +367,7 @@ void xsave(struct vcpu *v, uint64_t mask)
             fip_width = 8;
     }
 #undef XSAVE
-    if ( mask & X86_XCR0_FP )
+    if ( mask & X86_XCR0_X87 )
         ptr->fpu_sse.x[FPU_WORD_SIZE_OFFSET] = fip_width;
 }
 
@@ -506,9 +508,15 @@ int xstate_alloc_save_area(struct vcpu *v)
     unsigned int size;
 
     if ( !cpu_has_xsave )
-        return 0;
-
-    if ( !is_idle_vcpu(v) || !cpu_has_xsavec )
+    {
+        /*
+         * On non-XSAVE systems, we allocate an XSTATE buffer for simplicity.
+         * XSTATE is backwards compatible to FXSAVE, and only one cacheline
+         * larger.
+         */
+        size = XSTATE_AREA_MIN_SIZE;
+    }
+    else if ( !is_idle_vcpu(v) || !cpu_has_xsavec )
     {
         size = xsave_cntxt_size;
         BUG_ON(size < XSTATE_AREA_MIN_SIZE);
@@ -529,7 +537,7 @@ int xstate_alloc_save_area(struct vcpu *v)
 
     /* XSAVE/XRSTOR requires the save area be 64-byte-boundary aligned. */
     BUILD_BUG_ON(__alignof(*save_area) < 64);
-    save_area = _xzalloc(size, __alignof(*save_area));
+    save_area = _xvzalloc(size, __alignof(*save_area));
     if ( save_area == NULL )
         return -ENOMEM;
 
@@ -550,40 +558,13 @@ int xstate_alloc_save_area(struct vcpu *v)
 
 void xstate_free_save_area(struct vcpu *v)
 {
-    xfree(v->arch.xsave_area);
-    v->arch.xsave_area = NULL;
-}
-
-static unsigned int hw_uncompressed_size(uint64_t xcr0)
-{
-    u64 act_xcr0 = get_xcr0();
-    unsigned int size;
-    bool ok = set_xcr0(xcr0);
-
-    ASSERT(ok);
-    size = cpuid_count_ebx(XSTATE_CPUID, 0);
-    ok = set_xcr0(act_xcr0);
-    ASSERT(ok);
-
-    return size;
-}
-
-/* Fastpath for common xstate size requests, avoiding reloads of xcr0. */
-unsigned int xstate_ctxt_size(u64 xcr0)
-{
-    if ( xcr0 == xfeature_mask )
-        return xsave_cntxt_size;
-
-    if ( xcr0 == 0 )
-        return 0;
-
-    return hw_uncompressed_size(xcr0);
+    XVFREE(v->arch.xsave_area);
 }
 
 static bool valid_xcr0(uint64_t xcr0)
 {
     /* FP must be unconditionally set. */
-    if ( !(xcr0 & X86_XCR0_FP) )
+    if ( !(xcr0 & X86_XCR0_X87) )
         return false;
 
     /* YMM depends on SSE. */
@@ -605,7 +586,256 @@ static bool valid_xcr0(uint64_t xcr0)
     if ( !(xcr0 & X86_XCR0_BNDREGS) != !(xcr0 & X86_XCR0_BNDCSR) )
         return false;
 
+    /* TILECFG and TILEDATA must be the same. */
+    if ( !(xcr0 & X86_XCR0_TILE_CFG) != !(xcr0 & X86_XCR0_TILE_DATA) )
+        return false;
+
     return true;
+}
+
+unsigned int xstate_uncompressed_size(uint64_t xcr0)
+{
+    unsigned int size = XSTATE_AREA_MIN_SIZE;
+
+    /* Non-XCR0 states don't exist in an uncompressed image. */
+    ASSERT((xcr0 & ~X86_XCR0_STATES) == 0);
+
+    if ( xcr0 == 0 )
+        return 0;
+
+    if ( xcr0 <= (X86_XCR0_SSE | X86_XCR0_X87) )
+        return size;
+
+    /*
+     * For the non-legacy states, search all activate states and find the
+     * maximum offset+size.  Some states (e.g. LWP, APX_F) are out-of-order
+     * with respect their index.
+     */
+    xcr0 &= ~(X86_XCR0_SSE | X86_XCR0_X87);
+    for_each_set_bit ( i, xcr0 )
+    {
+        const struct xstate_component *c = &raw_cpu_policy.xstate.comp[i];
+        unsigned int s = c->offset + c->size;
+
+        ASSERT(c->offset && c->size);
+
+        size = max(size, s);
+    }
+
+    return size;
+}
+
+unsigned int xstate_compressed_size(uint64_t xstates)
+{
+    unsigned int size = XSTATE_AREA_MIN_SIZE;
+
+    ASSERT((xstates & ~(X86_XCR0_STATES | X86_XSS_STATES)) == 0);
+
+    if ( xstates == 0 )
+        return 0;
+
+    if ( xstates <= (X86_XCR0_SSE | X86_XCR0_X87) )
+        return size;
+
+    /*
+     * For the compressed size, every non-legacy component matters.  Some
+     * componenets require aligning to 64 first.
+     */
+    xstates &= ~(X86_XCR0_SSE | X86_XCR0_X87);
+    for_each_set_bit ( i, xstates )
+    {
+        const struct xstate_component *c = &raw_cpu_policy.xstate.comp[i];
+
+        ASSERT(c->size);
+
+        if ( c->align )
+            size = ROUNDUP(size, 64);
+
+        size += c->size;
+    }
+
+    return size;
+}
+
+struct xcheck_state {
+    uint64_t states;
+    uint32_t uncomp_size;
+    uint32_t comp_size;
+};
+
+static void __init check_new_xstate(struct xcheck_state *s, uint64_t new)
+{
+    uint32_t hw_size, xen_size;
+
+    BUILD_BUG_ON(X86_XCR0_STATES & X86_XSS_STATES);
+
+    BUG_ON(new <= s->states); /* States strictly increase by index. */
+    BUG_ON(s->states & new);  /* States only accumulate. */
+    BUG_ON(!valid_xcr0(s->states | new)); /* Xen thinks it's a good value. */
+    BUG_ON(new & ~(X86_XCR0_STATES | X86_XSS_STATES)); /* Known state. */
+    BUG_ON((new & X86_XCR0_STATES) &&
+           (new & X86_XSS_STATES)); /* User or supervisor, not both. */
+
+    s->states |= new;
+    if ( new & X86_XCR0_STATES )
+    {
+        if ( !set_xcr0(s->states & X86_XCR0_STATES) )
+            BUG();
+    }
+    else
+        set_msr_xss(s->states & X86_XSS_STATES);
+
+    /*
+     * Check the uncompressed size.  First ask hardware.
+     */
+    hw_size = cpuid_count_ebx(0xd, 0);
+
+    if ( new & X86_XSS_STATES )
+    {
+        /*
+         * Supervisor states don't exist in an uncompressed image, so check
+         * that the uncompressed size doesn't change.  Otherwise...
+         */
+        if ( hw_size != s->uncomp_size )
+            panic("XSTATE 0x%016"PRIx64", new sup bits {%63pbl}, uncompressed hw size %#x != prev size %#x\n",
+                  s->states, &new, hw_size, s->uncomp_size);
+    }
+    else
+    {
+        /*
+         * ... some user XSTATEs are out-of-order and fill in prior holes.
+         * The best check we make is that the size never decreases.
+         */
+        if ( hw_size < s->uncomp_size )
+            panic("XSTATE 0x%016"PRIx64", new bits {%63pbl}, uncompressed hw size %#x < prev size %#x\n",
+                  s->states, &new, hw_size, s->uncomp_size);
+    }
+
+    s->uncomp_size = hw_size;
+
+    /*
+     * Second, check that Xen's calculation always matches hardware's.
+     */
+    xen_size = xstate_uncompressed_size(s->states & X86_XCR0_STATES);
+
+    if ( xen_size != hw_size )
+        panic("XSTATE 0x%016"PRIx64", uncompressed hw size %#x != xen size %#x\n",
+              s->states, hw_size, xen_size);
+
+    /*
+     * Check the compressed size, if available.
+     */
+    hw_size = cpuid_count_ebx(0xd, 1);
+
+    if ( cpu_has_xsavec )
+    {
+        /*
+         * All components strictly appear in index order, irrespective of
+         * whether they're user or supervisor.  As each component also has
+         * non-zero size, the accumulated size should strictly increase.
+         */
+        if ( hw_size <= s->comp_size )
+            panic("XSTATE 0x%016"PRIx64", new bits {%63pbl}, compressed hw size %#x <= prev size %#x\n",
+                  s->states, &new, hw_size, s->comp_size);
+
+        s->comp_size = hw_size;
+
+        /*
+         * Again, check that Xen's calculation always matches hardware's.
+         */
+        xen_size = xstate_compressed_size(s->states);
+
+        if ( xen_size != hw_size )
+            panic("XSTATE 0x%016"PRIx64", compressed hw size %#x != xen size %#x\n",
+                  s->states, hw_size, xen_size);
+    }
+    else if ( hw_size ) /* Compressed size reported, but no XSAVEC ? */
+    {
+        static bool once;
+
+        if ( !once )
+        {
+            WARN();
+            once = true;
+        }
+    }
+}
+
+/*
+ * The {un,}compressed XSTATE sizes are reported by dynamic CPUID value, based
+ * on the current %XCR0 and MSR_XSS values.  The exact layout is also feature
+ * and vendor specific.  Cross-check Xen's understanding against real hardware
+ * on boot.
+ *
+ * Testing every combination is prohibitive, so we use a partial approach.
+ * Starting with nothing active, we add new XSTATEs and check that the CPUID
+ * dynamic values never decreases.
+ */
+static void __init noinline xstate_check_sizes(void)
+{
+    uint64_t old_xcr0 = get_xcr0();
+    uint64_t old_xss = get_msr_xss();
+    struct xcheck_state s = {};
+
+    /*
+     * User and supervisor XSTATEs, increasing by index.
+     *
+     * Chronologically, Intel and AMD had identical layouts for AVX (YMM).
+     * AMD introduced LWP in Fam15h, following immediately on from YMM.  Intel
+     * left an LWP-shaped hole when adding MPX (BND{CSR,REGS}) in Skylake.
+     * AMD removed LWP in Fam17h, putting PKRU in the same space, breaking
+     * layout compatibility with Intel and having a knock-on effect on all
+     * subsequent states.
+     */
+    check_new_xstate(&s, X86_XCR0_SSE | X86_XCR0_X87);
+
+    if ( cpu_has_avx )
+        check_new_xstate(&s, X86_XCR0_YMM);
+
+    if ( cpu_has_mpx )
+        check_new_xstate(&s, X86_XCR0_BNDCSR | X86_XCR0_BNDREGS);
+
+    if ( cpu_has_avx512f )
+        check_new_xstate(&s, X86_XCR0_HI_ZMM | X86_XCR0_ZMM | X86_XCR0_OPMASK);
+
+    /*
+     * Intel Broadwell has Processor Trace but no XSAVES.  There doesn't
+     * appear to have been a new enumeration when X86_XSS_PROC_TRACE was
+     * introduced in Skylake.
+     */
+    if ( cpu_has_xsaves && cpu_has_proc_trace )
+        check_new_xstate(&s, X86_XSS_PROC_TRACE);
+
+    if ( cpu_has_pku )
+        check_new_xstate(&s, X86_XCR0_PKRU);
+
+    if ( cpu_has_xsaves && boot_cpu_has(X86_FEATURE_ENQCMD) )
+        check_new_xstate(&s, X86_XSS_PASID);
+
+    if ( cpu_has_xsaves && (boot_cpu_has(X86_FEATURE_CET_SS) ||
+                            boot_cpu_has(X86_FEATURE_CET_IBT)) )
+    {
+        check_new_xstate(&s, X86_XSS_CET_U);
+        check_new_xstate(&s, X86_XSS_CET_S);
+    }
+
+    if ( cpu_has_xsaves && boot_cpu_has(X86_FEATURE_UINTR) )
+        check_new_xstate(&s, X86_XSS_UINTR);
+
+    if ( cpu_has_xsaves && boot_cpu_has(X86_FEATURE_ARCH_LBR) )
+        check_new_xstate(&s, X86_XSS_LBR);
+
+    if ( boot_cpu_has(X86_FEATURE_AMX_TILE) )
+        check_new_xstate(&s, X86_XCR0_TILE_DATA | X86_XCR0_TILE_CFG);
+
+    if ( boot_cpu_has(X86_FEATURE_LWP) )
+        check_new_xstate(&s, X86_XCR0_LWP);
+
+    /* Restore old state now the test is done. */
+    if ( !set_xcr0(old_xcr0) )
+        BUG();
+    if ( cpu_has_xsaves )
+        set_msr_xss(old_xss);
 }
 
 /* Collect the information of processor's extended state */
@@ -624,7 +854,7 @@ void xstate_init(struct cpuinfo_x86 *c)
 
     if ( bsp )
     {
-        static typeof(current->arch.xsave_area->fpu_sse) __initdata ctxt;
+        static fpusse_t __initdata ctxt;
 
         asm ( "fxsave %0" : "=m" (ctxt) );
         if ( ctxt.mxcsr_mask )
@@ -642,13 +872,6 @@ void xstate_init(struct cpuinfo_x86 *c)
         return;
     }
 
-    /*
-     * Zap the cached values to make set_xcr0() and set_msr_xss() really
-     * write it.
-     */
-    this_cpu(xcr0) = 0;
-    this_cpu(xss) = ~0;
-
     cpuid_count(XSTATE_CPUID, 0, &eax, &ebx, &ecx, &edx);
     feature_mask = (((u64)edx << 32) | eax) & XCNTXT_MASK;
     BUG_ON(!valid_xcr0(feature_mask));
@@ -658,8 +881,19 @@ void xstate_init(struct cpuinfo_x86 *c)
      * Set CR4_OSXSAVE and run "cpuid" to get xsave_cntxt_size.
      */
     set_in_cr4(X86_CR4_OSXSAVE);
+
+    /*
+     * Zap the cached values to make set_xcr0() and set_msr_xss() really write
+     * the hardware register.
+     */
+    this_cpu(xcr0) = 0;
     if ( !set_xcr0(feature_mask) )
         BUG();
+    if ( cpu_has_xsaves )
+    {
+        this_cpu(xss) = ~0;
+        set_msr_xss(0);
+    }
 
     if ( bsp )
     {
@@ -668,18 +902,21 @@ void xstate_init(struct cpuinfo_x86 *c)
          * xsave_cntxt_size is the max size required by enabled features.
          * We know FP/SSE and YMM about eax, and nothing about edx at present.
          */
-        xsave_cntxt_size = hw_uncompressed_size(feature_mask);
+        xsave_cntxt_size = cpuid_count_ebx(0xd, 0);
         printk("xstate: size: %#x and states: %#"PRIx64"\n",
                xsave_cntxt_size, xfeature_mask);
     }
     else
     {
         BUG_ON(xfeature_mask != feature_mask);
-        BUG_ON(xsave_cntxt_size != hw_uncompressed_size(feature_mask));
+        BUG_ON(xsave_cntxt_size != cpuid_count_ebx(0xd, 0));
     }
 
     if ( setup_xstate_features(bsp) && bsp )
         BUG();
+
+    if ( IS_ENABLED(CONFIG_SELF_TESTS) && bsp )
+        xstate_check_sizes();
 }
 
 int validate_xstate(const struct domain *d, uint64_t xcr0, uint64_t xcr0_accum,
@@ -797,7 +1034,7 @@ uint64_t read_bndcfgu(void)
               : "=m" (*xstate)
               : "a" (X86_XCR0_BNDCSR), "d" (0), "D" (xstate) );
 
-        bndcsr = (void *)xstate + xstate_offsets[X86_XCR0_BNDCSR_POS];
+        bndcsr = (void *)xstate + xstate_offsets[ilog2(X86_XCR0_BNDCSR)];
     }
 
     if ( cr0 & X86_CR0_TS )

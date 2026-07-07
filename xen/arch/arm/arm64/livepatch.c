@@ -119,24 +119,24 @@ static u64 do_reloc(enum aarch64_reloc_op reloc_op, void *place, u64 val)
 
 static int reloc_data(enum aarch64_reloc_op op, void *place, u64 val, int len)
 {
-    s64 sval = do_reloc(op, place, val);
+    int64_t sval = do_reloc(op, place, val);
 
     switch ( len )
     {
     case 16:
-        *(s16 *)place = sval;
+        *(int16_t *)place = sval;
         if ( sval < INT16_MIN || sval > UINT16_MAX )
 	        return -EOVERFLOW;
         break;
 
     case 32:
-        *(s32 *)place = sval;
+        *(int32_t *)place = sval;
         if ( sval < INT32_MIN || sval > UINT32_MAX )
 	        return -EOVERFLOW;
         break;
 
     case 64:
-        *(s64 *)place = sval;
+        *(int64_t *)place = sval;
         break;
 
     default:
@@ -155,9 +155,9 @@ enum aarch64_insn_movw_imm_type {
 static int reloc_insn_movw(enum aarch64_reloc_op op, void *dest, u64 val,
                            int lsb, enum aarch64_insn_movw_imm_type imm_type)
 {
-    u64 imm;
-    s64 sval;
-    u32 insn = *(u32 *)dest;
+    uint64_t imm;
+    int64_t sval;
+    uint32_t insn = *(uint32_t *)dest;
 
     sval = do_reloc(op, dest, val);
     imm = sval >> lsb;
@@ -200,9 +200,9 @@ static int reloc_insn_movw(enum aarch64_reloc_op op, void *dest, u64 val,
 static int reloc_insn_imm(enum aarch64_reloc_op op, void *dest, u64 val,
                           int lsb, int len, enum aarch64_insn_imm_type imm_type)
 {
-    u64 imm, imm_mask;
-    s64 sval;
-    u32 insn = *(u32 *)dest;
+    uint64_t imm, imm_mask;
+    int64_t sval;
+    uint32_t insn = *(uint32_t *)dest;
 
     /* Calculate the relocation value. */
     sval = do_reloc(op, dest, val);
@@ -220,7 +220,7 @@ static int reloc_insn_imm(enum aarch64_reloc_op op, void *dest, u64 val,
      * Extract the upper value bits (including the sign bit) and
      * shift them to bit 0.
      */
-    sval = (s64)(sval & ~(imm_mask >> 1)) >> (len - 1);
+    sval = (int64_t)(sval & ~(imm_mask >> 1)) >> (len - 1);
 
     /*
      * Overflow has occurred if the upper bits are not all equal to
@@ -246,9 +246,9 @@ int arch_livepatch_perform_rela(struct livepatch_elf *elf,
 
     for ( i = 0; i < (rela->sec->sh_size / rela->sec->sh_entsize); i++ )
     {
-        const Elf_RelA *r = rela->data + i * rela->sec->sh_entsize;
+        const Elf_RelA *r = rela->addr + i * rela->sec->sh_entsize;
         unsigned int symndx = ELF64_R_SYM(r->r_info);
-        void *dest = base->load_addr + r->r_offset; /* P */
+        void *dest = base->addr + r->r_offset; /* P */
         bool overflow_check = true;
         int ovf = 0;
         uint64_t val;

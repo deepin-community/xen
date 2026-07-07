@@ -1,25 +1,15 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * alternative runtime patching
  * inspired by the x86 version
  *
  * Copyright (C) 2014-2016 ARM Ltd.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <xen/init.h>
 #include <xen/types.h>
 #include <xen/kernel.h>
+#include <xen/llc-coloring.h>
 #include <xen/mm.h>
 #include <xen/vmap.h>
 #include <xen/smp.h>
@@ -55,7 +45,7 @@ static bool branch_insn_requires_update(const struct alt_instr *alt,
         return true;
 
     replptr = (unsigned long)ALT_REPL_PTR(alt);
-    if ( pc >= replptr && pc <= (replptr + alt->alt_len) )
+    if ( pc >= replptr && pc <= (replptr + alt->repl_len) )
         return false;
 
     /*
@@ -74,7 +64,7 @@ static u32 get_alt_insn(const struct alt_instr *alt,
 
     if ( insn_is_branch_imm(insn) )
     {
-        s32 offset = insn_get_branch_offset(insn);
+        int32_t offset = insn_get_branch_offset(insn);
         unsigned long target;
 
         target = (unsigned long)altinsnptr + offset;
@@ -139,9 +129,9 @@ static int __apply_alternatives(const struct alt_region *region,
             continue;
 
         if ( alt->cpufeature == ARM_CB_PATCH )
-            BUG_ON(alt->alt_len != 0);
+            BUG_ON(alt->repl_len != 0);
         else
-            BUG_ON(alt->alt_len != alt->orig_len);
+            BUG_ON(alt->repl_len != alt->orig_len);
 
         origptr = ALT_ORIG_PTR(alt);
         updptr = (void *)origptr + update_offset;
@@ -202,6 +192,25 @@ static int __apply_alternatives_multi_stop(void *xenmap)
     return 0;
 }
 
+static void __init *xen_remap_colored(mfn_t xen_mfn, paddr_t xen_size)
+{
+    unsigned int i;
+    void *xenmap;
+    mfn_t *xen_colored_mfns, mfn;
+
+    xen_colored_mfns = xmalloc_array(mfn_t, xen_size >> PAGE_SHIFT);
+    if ( !xen_colored_mfns )
+        panic("Can't allocate LLC colored MFNs\n");
+
+    for_each_xen_colored_mfn ( xen_mfn, mfn, i )
+        xen_colored_mfns[i] = mfn;
+
+    xenmap = vmap(xen_colored_mfns, xen_size >> PAGE_SHIFT);
+    xfree(xen_colored_mfns);
+
+    return xenmap;
+}
+
 /*
  * This function should only be called during boot and before CPU0 jump
  * into the idle_loop.
@@ -220,8 +229,11 @@ void __init apply_alternatives_all(void)
      * The text and inittext section are read-only. So re-map Xen to
      * be able to patch the code.
      */
-    xenmap = __vmap(&xen_mfn, 1U << xen_order, 1, 1, PAGE_HYPERVISOR,
-                    VMAP_DEFAULT);
+    if ( llc_coloring_enabled )
+        xenmap = xen_remap_colored(xen_mfn, xen_size);
+    else
+        xenmap = vmap_contig(xen_mfn, 1U << xen_order);
+
     /* Re-mapping Xen is not expected to fail during boot. */
     BUG_ON(!xenmap);
 
@@ -234,6 +246,7 @@ void __init apply_alternatives_all(void)
     vunmap(xenmap);
 }
 
+#ifdef CONFIG_LIVEPATCH
 int apply_alternatives(const struct alt_instr *start, const struct alt_instr *end)
 {
     const struct alt_region region = {
@@ -243,6 +256,7 @@ int apply_alternatives(const struct alt_instr *start, const struct alt_instr *en
 
     return __apply_alternatives(&region, 0);
 }
+#endif
 
 /*
  * Local variables:

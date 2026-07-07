@@ -1,20 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /******************************************************************************
  * arch/x86/hypercall.c
  *
  * Common x86 hypercall infrastructure.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
  *
  * Copyright (c) 2015,2016 Citrix Systems Ltd.
  */
@@ -43,6 +31,7 @@ unsigned long hypercall_create_continuation(
     const char *p = format;
     unsigned long arg;
     unsigned int i;
+    /* SAF-4-safe allowed variadic function */
     va_list args;
 
     curr->hcall_preempted = true;
@@ -127,6 +116,7 @@ int hypercall_xlat_continuation(unsigned int *id, unsigned int nr,
     struct cpu_user_regs *regs;
     unsigned int i, cval = 0;
     unsigned long nval = 0;
+    /* SAF-4-safe allowed variadic function */
     va_list args;
 
     ASSERT(nr <= ARRAY_SIZE(mcs->call.args));
@@ -152,8 +142,10 @@ int hypercall_xlat_continuation(unsigned int *id, unsigned int nr,
                 cval = va_arg(args, unsigned int);
                 if ( cval == nval )
                     mask &= ~1U;
-                else
-                    BUG_ON(nval == (unsigned int)nval);
+                else if ( nval == (unsigned int)nval )
+                    domain_crash(current->domain,
+                                 "multicall (op %lu) bogus continuation arg%u (%#lx)\n",
+                                 mcs->call.op, i, nval);
             }
             else if ( id && *id == i )
             {
@@ -165,8 +157,10 @@ int hypercall_xlat_continuation(unsigned int *id, unsigned int nr,
                 mcs->call.args[i] = cval;
                 ++rc;
             }
-            else
-                BUG_ON(mcs->call.args[i] != (unsigned int)mcs->call.args[i]);
+            else if ( mcs->call.args[i] != (unsigned int)mcs->call.args[i] )
+                domain_crash(current->domain,
+                             "multicall (op %lu) bad continuation arg%u (%#lx)\n",
+                             mcs->call.op, i, mcs->call.args[i]);
         }
     }
     else
@@ -192,8 +186,10 @@ int hypercall_xlat_continuation(unsigned int *id, unsigned int nr,
                 cval = va_arg(args, unsigned int);
                 if ( cval == nval )
                     mask &= ~1U;
-                else
-                    BUG_ON(nval == (unsigned int)nval);
+                else if ( nval == (unsigned int)nval )
+                    domain_crash(current->domain,
+                                 "hypercall (op %u) bogus continuation arg%u (%#lx)\n",
+                                 regs->eax, i, nval);
             }
             else if ( id && *id == i )
             {
@@ -205,8 +201,10 @@ int hypercall_xlat_continuation(unsigned int *id, unsigned int nr,
                 *reg = cval;
                 ++rc;
             }
-            else
-                BUG_ON(*reg != (unsigned int)*reg);
+            else if ( *reg != (unsigned int)*reg )
+                domain_crash(current->domain,
+                             "hypercall (op %u) bad continuation arg%u (%#lx)\n",
+                             regs->eax, i, *reg);
         }
     }
 
@@ -215,15 +213,15 @@ int hypercall_xlat_continuation(unsigned int *id, unsigned int nr,
     return rc;
 }
 
-enum mc_disposition arch_do_multicall_call(struct mc_state *state)
+enum mc_disposition arch_do_multicall_call(struct mc_state *mcs)
 {
     const struct domain *currd = current->domain;
 
     if ( is_pv_domain(currd) )
-        return pv_do_multicall_call(state);
+        return pv_do_multicall_call(mcs);
 
     if ( is_hvm_domain(currd) )
-        return hvm_do_multicall_call(state);
+        return hvm_do_multicall_call(mcs);
 
     return mc_exit;
 }

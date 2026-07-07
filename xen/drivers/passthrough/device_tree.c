@@ -31,6 +31,8 @@ int iommu_assign_dt_device(struct domain *d, struct dt_device_node *dev)
     int rc = -EBUSY;
     struct domain_iommu *hd = dom_iommu(d);
 
+    ASSERT(system_state < SYS_STATE_active || rw_is_locked(&dt_host_lock));
+
     if ( !is_iommu_enabled(d) )
         return -EINVAL;
 
@@ -62,6 +64,8 @@ int iommu_deassign_dt_device(struct domain *d, struct dt_device_node *dev)
     const struct domain_iommu *hd = dom_iommu(d);
     int rc;
 
+    ASSERT(rw_is_locked(&dt_host_lock));
+
     if ( !is_iommu_enabled(d) )
         return -EINVAL;
 
@@ -83,16 +87,16 @@ fail:
     return rc;
 }
 
-static bool_t iommu_dt_device_is_assigned(const struct dt_device_node *dev)
+static bool iommu_dt_device_is_assigned_locked(const struct dt_device_node *dev)
 {
-    bool_t assigned = 0;
+    bool assigned = false;
+
+    ASSERT(spin_is_locked(&dtdevs_lock));
 
     if ( !dt_device_is_protected(dev) )
         return 0;
 
-    spin_lock(&dtdevs_lock);
     assigned = !list_empty(&dev->domain_list);
-    spin_unlock(&dtdevs_lock);
 
     return assigned;
 }
@@ -113,6 +117,8 @@ int iommu_release_dt_devices(struct domain *d)
     if ( !is_iommu_enabled(d) )
         return 0;
 
+    read_lock(&dt_host_lock);
+
     list_for_each_entry_safe(dev, _dev, &hd->dt_devices, domain_list)
     {
         rc = iommu_deassign_dt_device(d, dev);
@@ -120,11 +126,60 @@ int iommu_release_dt_devices(struct domain *d)
         {
             dprintk(XENLOG_ERR, "Failed to deassign %s in domain %u\n",
                     dt_node_full_name(dev), d->domain_id);
+            read_unlock(&dt_host_lock);
+
             return rc;
         }
     }
 
+    read_unlock(&dt_host_lock);
+
     return 0;
+}
+
+int iommu_remove_dt_device(struct dt_device_node *np)
+{
+    const struct iommu_ops *ops = iommu_get_ops();
+    struct device *dev = dt_to_dev(np);
+    int rc;
+
+    ASSERT(rw_is_locked(&dt_host_lock));
+
+    if ( !iommu_enabled )
+        return 1;
+
+    if ( !ops )
+        return -EOPNOTSUPP;
+
+    spin_lock(&dtdevs_lock);
+
+    if ( iommu_dt_device_is_assigned_locked(np) )
+    {
+        rc = -EBUSY;
+        goto fail;
+    }
+
+    if ( !ops->remove_device )
+    {
+        rc = -EOPNOTSUPP;
+        goto fail;
+    }
+
+    /*
+     * De-register the device from the IOMMU driver.
+     * The driver is responsible for removing is_protected flag.
+     */
+    rc = ops->remove_device(0, dev);
+
+    if ( !rc )
+    {
+        ASSERT(!dt_device_is_protected(np));
+        iommu_fwspec_free(dev);
+    }
+
+ fail:
+    spin_unlock(&dtdevs_lock);
+    return rc;
 }
 
 int iommu_add_dt_device(struct dt_device_node *np)
@@ -133,6 +188,8 @@ int iommu_add_dt_device(struct dt_device_node *np)
     struct dt_phandle_args iommu_spec;
     struct device *dev = dt_to_dev(np);
     int rc = 1, index = 0;
+
+    ASSERT(system_state < SYS_STATE_active || rw_is_locked(&dt_host_lock));
 
     if ( !iommu_enabled )
         return 1;
@@ -147,6 +204,8 @@ int iommu_add_dt_device(struct dt_device_node *np)
     if ( dev_iommu_fwspec_get(dev) )
         return 0;
 
+    spin_lock(&dtdevs_lock);
+
     /*
      * According to the Documentation/devicetree/bindings/iommu/iommu.txt
      * from Linux.
@@ -159,7 +218,10 @@ int iommu_add_dt_device(struct dt_device_node *np)
          * these callback implemented.
          */
         if ( !ops->add_device || !ops->dt_xlate )
-            return -EINVAL;
+        {
+            rc = -EINVAL;
+            goto fail;
+        }
 
         if ( !dt_device_is_available(iommu_spec.np) )
             break;
@@ -190,6 +252,8 @@ int iommu_add_dt_device(struct dt_device_node *np)
     if ( rc < 0 )
         iommu_fwspec_free(dev);
 
+ fail:
+    spin_unlock(&dtdevs_lock);
     return rc;
 }
 
@@ -198,6 +262,8 @@ int iommu_do_dt_domctl(struct xen_domctl *domctl, struct domain *d,
 {
     int ret;
     struct dt_device_node *dev;
+
+    read_lock(&dt_host_lock);
 
     switch ( domctl->cmd )
     {
@@ -225,17 +291,24 @@ int iommu_do_dt_domctl(struct xen_domctl *domctl, struct domain *d,
 
         if ( domctl->cmd == XEN_DOMCTL_test_assign_device )
         {
-            if ( iommu_dt_device_is_assigned(dev) )
+            spin_lock(&dtdevs_lock);
+
+            if ( iommu_dt_device_is_assigned_locked(dev) )
             {
                 printk(XENLOG_G_ERR "%s already assigned.\n",
                        dt_node_full_name(dev));
                 ret = -EINVAL;
             }
+
+            spin_unlock(&dtdevs_lock);
             break;
         }
 
         if ( d == dom_io )
-            return -EINVAL;
+        {
+            ret = -EINVAL;
+            break;
+        }
 
         ret = iommu_add_dt_device(dev);
         if ( ret < 0 )
@@ -273,7 +346,10 @@ int iommu_do_dt_domctl(struct xen_domctl *domctl, struct domain *d,
             break;
 
         if ( d == dom_io )
-            return -EINVAL;
+        {
+            ret = -EINVAL;
+            break;
+        }
 
         ret = iommu_deassign_dt_device(d, dev);
 
@@ -287,6 +363,8 @@ int iommu_do_dt_domctl(struct xen_domctl *domctl, struct domain *d,
         ret = -ENOSYS;
         break;
     }
+
+    read_unlock(&dt_host_lock);
 
     return ret;
 }

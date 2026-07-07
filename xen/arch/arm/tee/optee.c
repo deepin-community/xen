@@ -268,15 +268,9 @@ static int optee_domain_init(struct domain *d)
     return 0;
 }
 
-static uint64_t regpair_to_uint64(register_t reg0, register_t reg1)
+static int optee_domain_teardown(struct domain *d)
 {
-    return ((uint64_t)reg0 << 32) | (uint32_t)reg1;
-}
-
-static void uint64_to_regpair(register_t *reg0, register_t *reg1, uint64_t val)
-{
-    *reg0 = val >> 32;
-    *reg1 = (uint32_t)val;
+    return 0;
 }
 
 static struct page_info *get_domain_ram_page(gfn_t gfn)
@@ -951,7 +945,7 @@ static bool copy_std_request(struct cpu_user_regs *regs,
 
     map_xen_arg(call);
 
-    if ( access_guest_memory_by_ipa(current->domain, call->guest_arg_ipa,
+    if ( access_guest_memory_by_gpa(current->domain, call->guest_arg_ipa,
                                     call->xen_arg,
                                     OPTEE_MSG_NONCONTIG_PAGE_SIZE, false) )
     {
@@ -1106,7 +1100,7 @@ static int handle_rpc_return(struct optee_domain *ctx,
 
         shm_rpc->xen_arg = __map_domain_page(shm_rpc->xen_arg_pg);
 
-        if ( access_guest_memory_by_ipa(current->domain,
+        if ( access_guest_memory_by_gpa(current->domain,
                         gfn_to_gaddr(shm_rpc->gfn),
                         shm_rpc->xen_arg,
                         OPTEE_MSG_GET_ARG_SIZE(shm_rpc->xen_arg->num_params),
@@ -1329,7 +1323,7 @@ static bool issue_rpc_cmd_free(struct optee_domain *ctx,
     shm_rpc->xen_arg->params[0].u.value.a = call->rpc_buffer_type;
     shm_rpc->xen_arg->params[0].u.value.b = cookie;
 
-    if ( access_guest_memory_by_ipa(current->domain,
+    if ( access_guest_memory_by_gpa(current->domain,
                                     gfn_to_gaddr(shm_rpc->gfn),
                                     shm_rpc->xen_arg,
                                     OPTEE_MSG_GET_ARG_SIZE(1),
@@ -1462,7 +1456,7 @@ static void handle_rpc_cmd(struct optee_domain *ctx, struct cpu_user_regs *regs,
     shm_rpc->xen_arg = __map_domain_page(shm_rpc->xen_arg_pg);
 
     /* First, copy only header to read number of arguments */
-    if ( access_guest_memory_by_ipa(current->domain,
+    if ( access_guest_memory_by_gpa(current->domain,
                                     gfn_to_gaddr(shm_rpc->gfn),
                                     shm_rpc->xen_arg,
                                     sizeof(struct optee_msg_arg),
@@ -1480,7 +1474,7 @@ static void handle_rpc_cmd(struct optee_domain *ctx, struct cpu_user_regs *regs,
     }
 
     /* Read the whole command structure */
-    if ( access_guest_memory_by_ipa(current->domain, gfn_to_gaddr(shm_rpc->gfn),
+    if ( access_guest_memory_by_gpa(current->domain, gfn_to_gaddr(shm_rpc->gfn),
                                     shm_rpc->xen_arg, arg_size, false) )
     {
         shm_rpc->xen_arg->ret = TEEC_ERROR_GENERIC;
@@ -1732,6 +1726,7 @@ static const struct tee_mediator_ops optee_ops =
 {
     .probe = optee_probe,
     .domain_init = optee_domain_init,
+    .domain_teardown = optee_domain_teardown,
     .relinquish_resources = optee_relinquish_resources,
     .handle_call = optee_handle_call,
 };

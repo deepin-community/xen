@@ -1,17 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /******************************************************************************
  * asm-x86/guest/xen-hcall.h
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms and conditions of the GNU General Public
- * License, version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public
- * License along with this program; If not, see <http://www.gnu.org/licenses/>.
  *
  * Copyright (c) 2017 Citrix Systems Ltd.
  */
@@ -41,9 +30,11 @@
     ({                                                                  \
         long res, tmp__;                                                \
         asm volatile (                                                  \
-            "call hypercall_page + %c[offset]"                          \
+            ALTERNATIVE_2("call early_hypercall",                       \
+                          "vmmcall", ALT_NOT(X86_FEATURE_USE_VMCALL),   \
+                          "vmcall", X86_FEATURE_USE_VMCALL)             \
             : "=a" (res), "=D" (tmp__) ASM_CALL_CONSTRAINT              \
-            : [offset] "i" (hcall * 32),                                \
+            : "0" (hcall),                                              \
               "1" ((long)(a1))                                          \
             : "memory" );                                               \
         (type)res;                                                      \
@@ -53,10 +44,12 @@
     ({                                                                  \
         long res, tmp__;                                                \
         asm volatile (                                                  \
-            "call hypercall_page + %c[offset]"                          \
+            ALTERNATIVE_2("call early_hypercall",                       \
+                          "vmmcall", ALT_NOT(X86_FEATURE_USE_VMCALL),   \
+                          "vmcall", X86_FEATURE_USE_VMCALL)             \
             : "=a" (res), "=D" (tmp__), "=S" (tmp__)                    \
               ASM_CALL_CONSTRAINT                                       \
-            : [offset] "i" (hcall * 32),                                \
+            : "0" (hcall),                                              \
               "1" ((long)(a1)), "2" ((long)(a2))                        \
             : "memory" );                                               \
         (type)res;                                                      \
@@ -66,10 +59,12 @@
     ({                                                                  \
         long res, tmp__;                                                \
         asm volatile (                                                  \
-            "call hypercall_page + %c[offset]"                          \
+            ALTERNATIVE_2("call early_hypercall",                       \
+                          "vmmcall", ALT_NOT(X86_FEATURE_USE_VMCALL),   \
+                          "vmcall", X86_FEATURE_USE_VMCALL)             \
             : "=a" (res), "=D" (tmp__), "=S" (tmp__), "=d" (tmp__)      \
               ASM_CALL_CONSTRAINT                                       \
-            : [offset] "i" (hcall * 32),                                \
+            : "0" (hcall),                                              \
               "1" ((long)(a1)), "2" ((long)(a2)), "3" ((long)(a3))      \
             : "memory" );                                               \
         (type)res;                                                      \
@@ -80,10 +75,12 @@
         long res, tmp__;                                                \
         register long _a4 asm ("r10") = ((long)(a4));                   \
         asm volatile (                                                  \
-            "call hypercall_page + %c[offset]"                          \
+            ALTERNATIVE_2("call early_hypercall",                       \
+                          "vmmcall", ALT_NOT(X86_FEATURE_USE_VMCALL),   \
+                          "vmcall", X86_FEATURE_USE_VMCALL)             \
             : "=a" (res), "=D" (tmp__), "=S" (tmp__), "=d" (tmp__),     \
               "=&r" (tmp__) ASM_CALL_CONSTRAINT                         \
-            : [offset] "i" (hcall * 32),                                \
+            : "0" (hcall),                                              \
               "1" ((long)(a1)), "2" ((long)(a2)), "3" ((long)(a3)),     \
               "4" (_a4)                                                 \
             : "memory" );                                               \

@@ -172,8 +172,7 @@ void init_intel_cacheinfo(struct cpuinfo_x86 *c)
 	    c->x86_vendor != X86_VENDOR_SHANGHAI)
 	{
 		/* supports eax=2  call */
-		int i, j, n;
-		int regs[4];
+		unsigned int i, j, n, regs[4];
 		unsigned char *dp = (unsigned char *)regs;
 		int only_trace = 0;
 
@@ -187,8 +186,9 @@ void init_intel_cacheinfo(struct cpuinfo_x86 *c)
 			cpuid(2, &regs[0], &regs[1], &regs[2], &regs[3]);
 
 			/* If bit 31 is set, this is an unknown format */
-			for ( j = 0 ; j < 3 ; j++ ) {
-				if ( regs[j] < 0 ) regs[j] = 0;
+			for ( j = 0; j < ARRAY_SIZE(regs); j++ ) {
+				if ( regs[j] >> 31 )
+					regs[j] = 0;
 			}
 
 			/* Byte 0 is level count, not a descriptor */

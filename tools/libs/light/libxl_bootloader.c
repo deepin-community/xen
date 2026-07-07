@@ -127,10 +127,9 @@ static int make_bootloader_args(libxl__gc *gc, libxl__bootloader_state *bl,
         ARG(GCSPRINTF("--ramdisk=%s", info->ramdisk));
     if (info->cmdline && *info->cmdline != '\0')
         ARG(GCSPRINTF("--args=%s", info->cmdline));
-    if (getenv("LIBXL_BOOTLOADER_RESTRICT") ||
-        getenv("LIBXL_BOOTLOADER_USER")) {
+    if (libxl_defbool_val(info->bootloader_restrict)) {
         uid_t uid = -1;
-        int rc = bootloader_uid(gc, bl->domid, getenv("LIBXL_BOOTLOADER_USER"),
+        int rc = bootloader_uid(gc, bl->domid, info->bootloader_user,
                                 &uid);
 
         if (rc) return rc;
@@ -641,9 +640,9 @@ static void bootloader_gotptys(libxl__egc *egc, libxl__openpty_state *op)
         LOGD(DEBUG, bl->domid, "  bootloader arg: %s", *blarg);
 
     struct termios termattr;
+    const libxl_domain_build_info *info = bl->info;
 
-    if (getenv("LIBXL_BOOTLOADER_RESTRICT") ||
-        getenv("LIBXL_BOOTLOADER_USER")) {
+    if (libxl_defbool_val(info->bootloader_restrict)) {
         const char *timeout_env = getenv("LIBXL_BOOTLOADER_TIMEOUT");
         int timeout = timeout_env ? atoi(timeout_env)
                                   : LIBXL_BOOTLOADER_TIMEOUT;

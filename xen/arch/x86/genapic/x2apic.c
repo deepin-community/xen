@@ -1,19 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * x2APIC driver.
  *
  * Copyright (c) 2008, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <xen/init.h>
@@ -72,26 +61,6 @@ static void cf_check init_apic_ldr_x2apic_cluster(void)
         cluster_cpus_spare = NULL;
 
     cpumask_set_cpu(this_cpu, per_cpu(cluster_cpus, this_cpu));
-}
-
-static const cpumask_t *cf_check vector_allocation_cpumask_x2apic_cluster(
-    int cpu)
-{
-    return per_cpu(cluster_cpus, cpu);
-}
-
-static unsigned int cf_check cpu_mask_to_apicid_x2apic_cluster(
-    const cpumask_t *cpumask)
-{
-    unsigned int cpu = cpumask_any(cpumask);
-    unsigned int dest = per_cpu(cpu_2_logical_apicid, cpu);
-    const cpumask_t *cluster_cpus = per_cpu(cluster_cpus, cpu);
-
-    for_each_cpu ( cpu, cluster_cpus )
-        if ( cpumask_test_cpu(cpu, cpumask) )
-            dest |= per_cpu(cpu_2_logical_apicid, cpu);
-
-    return dest;
 }
 
 static void cf_check send_IPI_self_x2apic(uint8_t vector)
@@ -169,7 +138,7 @@ static void cf_check send_IPI_mask_x2apic_cluster(
     local_irq_restore(flags);
 }
 
-static const struct genapic __initconstrel apic_x2apic_phys = {
+static const struct genapic __initconst_cf_clobber apic_x2apic_phys = {
     APIC_INIT("x2apic_phys", NULL),
     .int_delivery_mode = dest_Fixed,
     .int_dest_mode = 0 /* physical delivery */,
@@ -180,17 +149,6 @@ static const struct genapic __initconstrel apic_x2apic_phys = {
     .send_IPI_self = send_IPI_self_x2apic
 };
 
-static const struct genapic __initconstrel apic_x2apic_cluster = {
-    APIC_INIT("x2apic_cluster", NULL),
-    .int_delivery_mode = dest_LowestPrio,
-    .int_dest_mode = 1 /* logical delivery */,
-    .init_apic_ldr = init_apic_ldr_x2apic_cluster,
-    .vector_allocation_cpumask = vector_allocation_cpumask_x2apic_cluster,
-    .cpu_mask_to_apicid = cpu_mask_to_apicid_x2apic_cluster,
-    .send_IPI_mask = send_IPI_mask_x2apic_cluster,
-    .send_IPI_self = send_IPI_self_x2apic
-};
-
 /*
  * Mixed x2APIC mode: use physical for external (device) interrupts, and
  * cluster for inter processor interrupts.  Such mode has the benefits of not
@@ -198,7 +156,7 @@ static const struct genapic __initconstrel apic_x2apic_cluster = {
  * IPIs to be more efficiently delivered by not having to perform an ICR write
  * for each target CPU.
  */
-static const struct genapic __initconstrel apic_x2apic_mixed = {
+static const struct genapic __initconst_cf_clobber apic_x2apic_mixed = {
     APIC_INIT("x2apic_mixed", NULL),
 
     /*
@@ -239,7 +197,8 @@ static int cf_check update_clusterinfo(
     case CPU_UP_CANCELED:
     case CPU_DEAD:
     case CPU_REMOVE:
-        if ( park_offline_cpus == (action != CPU_REMOVE) )
+        if ( park_offline_cpus == (action != CPU_REMOVE) ||
+             system_state == SYS_STATE_suspend )
             break;
         if ( per_cpu(cluster_cpus, cpu) )
         {
@@ -251,7 +210,7 @@ static int cf_check update_clusterinfo(
         break;
     }
 
-    return !err ? NOTIFY_DONE : notifier_from_errno(err);
+    return notifier_from_errno(err);
 }
 
 static struct notifier_block x2apic_cpu_nfb = {
@@ -262,15 +221,13 @@ static int8_t __initdata x2apic_phys = -1;
 boolean_param("x2apic_phys", x2apic_phys);
 
 enum {
-   unset, physical, cluster, mixed
+   unset, physical, mixed
 } static __initdata x2apic_mode = unset;
 
 static int __init cf_check parse_x2apic_mode(const char *s)
 {
     if ( !cmdline_strcmp(s, "physical") )
         x2apic_mode = physical;
-    else if ( !cmdline_strcmp(s, "cluster") )
-        x2apic_mode = cluster;
     else if ( !cmdline_strcmp(s, "mixed") )
         x2apic_mode = mixed;
     else
@@ -284,7 +241,7 @@ const struct genapic *__init apic_x2apic_probe(void)
 {
     /* Honour the legacy cmdline setting if it's the only one provided. */
     if ( x2apic_mode == unset && x2apic_phys >= 0 )
-        x2apic_mode = x2apic_phys ? physical : cluster;
+        x2apic_mode = x2apic_phys ? physical : mixed;
 
     if ( x2apic_mode == unset )
     {
@@ -296,20 +253,11 @@ const struct genapic *__init apic_x2apic_probe(void)
         else
             x2apic_mode = IS_ENABLED(CONFIG_X2APIC_MIXED) ? mixed
                           : (IS_ENABLED(CONFIG_X2APIC_PHYSICAL) ? physical
-                                                                : cluster);
+                                                                : mixed);
     }
 
     if ( x2apic_mode == physical )
         return &apic_x2apic_phys;
-
-    if ( x2apic_mode == cluster && iommu_intremap != iommu_intremap_full )
-    {
-        printk("WARNING: x2APIC cluster mode is not supported %s interrupt remapping -"
-               " forcing mixed mode\n",
-               iommu_intremap == iommu_intremap_off ? "without"
-                                                    : "with restricted");
-        x2apic_mode = mixed;
-    }
 
     if ( !this_cpu(cluster_cpus) )
     {
@@ -319,7 +267,7 @@ const struct genapic *__init apic_x2apic_probe(void)
         register_cpu_notifier(&x2apic_cpu_nfb);
     }
 
-    return x2apic_mode == cluster ? &apic_x2apic_cluster : &apic_x2apic_mixed;
+    return &apic_x2apic_mixed;
 }
 
 void __init check_x2apic_preenabled(void)

@@ -65,7 +65,7 @@ int shadow_enable(struct domain *d, u32 mode);
 int shadow_track_dirty_vram(struct domain *d,
                             unsigned long first_pfn,
                             unsigned int nr_frames,
-                            XEN_GUEST_HANDLE(void) dirty_bitmap);
+                            XEN_GUEST_HANDLE(void) guest_dirty_bitmap);
 
 /* Handler for shadow control ops: operations from user-space to enable
  * and disable ephemeral shadow modes (test mode and log-dirty mode) and
@@ -77,9 +77,6 @@ int shadow_domctl(struct domain *d,
 /* Call when destroying a vcpu/domain */
 void shadow_vcpu_teardown(struct vcpu *v);
 void shadow_teardown(struct domain *d, bool *preempted);
-
-/* Call once all of the references to the domain have gone away */
-void shadow_final_teardown(struct domain *d);
 
 void sh_remove_shadows(struct domain *d, mfn_t gmfn, int fast, int all);
 
@@ -97,8 +94,6 @@ void shadow_blow_tables_per_domain(struct domain *d);
 int shadow_set_allocation(struct domain *d, unsigned int pages,
                           bool *preempted);
 
-int shadow_get_allocation_bytes(struct domain *d, uint64_t *size);
-
 /* Helper to invoke for deferred releasing of a top-level shadow's reference. */
 void shadow_put_top_level(struct domain *d, pagetable_t old);
 
@@ -112,8 +107,6 @@ void shadow_put_top_level(struct domain *d, pagetable_t old);
 #define shadow_track_dirty_vram(d, begin_pfn, nr, bitmap) \
     ({ ASSERT_UNREACHABLE(); -EOPNOTSUPP; })
 #define shadow_set_allocation(d, pages, preempted) \
-    ({ ASSERT_UNREACHABLE(); -EOPNOTSUPP; })
-#define shadow_get_allocation_bytes(d, size) \
     ({ ASSERT_UNREACHABLE(); -EOPNOTSUPP; })
 
 static inline void sh_remove_shadows(struct domain *d, mfn_t gmfn,
@@ -262,6 +255,12 @@ static inline void pv_l1tf_domain_destroy(struct domain *d)
     tasklet_kill(&d->arch.paging.shadow.pv_l1tf_tasklet);
 #endif
 }
+
+/* Functions that atomically write PV guest PT entries */
+void shadow_write_guest_entry(
+    struct vcpu *v, intpte_t *p, intpte_t new, mfn_t gmfn);
+intpte_t shadow_cmpxchg_guest_entry(
+    struct vcpu *v, intpte_t *p, intpte_t old, intpte_t new, mfn_t gmfn);
 
 #endif /* CONFIG_PV */
 

@@ -38,13 +38,17 @@ DEFINE_PER_CPU_READ_MOSTLY(unsigned int, nr_mce_banks);
 unsigned int __read_mostly firstbank;
 unsigned int __read_mostly ppin_msr;
 uint8_t __read_mostly cmci_apic_vector;
+bool __read_mostly cmci_support;
+
+/* If mce_force_broadcast == 1, lmce_support will be disabled forcibly. */
+bool __read_mostly lmce_support;
 
 DEFINE_PER_CPU_READ_MOSTLY(struct mca_banks *, poll_bankmask);
 DEFINE_PER_CPU_READ_MOSTLY(struct mca_banks *, no_cmci_banks);
 DEFINE_PER_CPU_READ_MOSTLY(struct mca_banks *, mce_clear_banks);
 
 static void intpose_init(void);
-static void mcinfo_clear(struct mc_info *);
+static void mcinfo_clear(struct mc_info *mi);
 struct mca_banks *mca_allbanks;
 
 #define SEG_PL(segsel)   ((segsel) & 0x3)
@@ -82,48 +86,22 @@ static void cf_check unexpected_machine_check(const struct cpu_user_regs *regs)
     fatal_trap(regs, 1);
 }
 
-static x86_mce_vector_t _machine_check_vector = unexpected_machine_check;
-
-void x86_mce_vector_register(x86_mce_vector_t hdlr)
-{
-    _machine_check_vector = hdlr;
-}
+struct mce_callbacks __ro_after_init mce_callbacks = {
+    .handler = unexpected_machine_check,
+};
+static const typeof(mce_callbacks.handler) __initconst_cf_clobber __used
+    default_handler = unexpected_machine_check;
 
 /* Call the installed machine check handler for this CPU setup. */
 
 void do_machine_check(const struct cpu_user_regs *regs)
 {
     mce_enter();
-    _machine_check_vector(regs);
+    alternative_vcall(mce_callbacks.handler, regs);
     mce_exit();
 }
 
-/*
- * Init machine check callback handler
- * It is used to collect additional information provided by newer
- * CPU families/models without the need to duplicate the whole handler.
- * This avoids having many handlers doing almost nearly the same and each
- * with its own tweaks ands bugs.
- */
-static x86_mce_callback_t mc_callback_bank_extended = NULL;
-
-void x86_mce_callback_register(x86_mce_callback_t cbfunc)
-{
-    mc_callback_bank_extended = cbfunc;
-}
-
-/*
- * Machine check recoverable judgement callback handler
- * It is used to judge whether an UC error is recoverable by software
- */
-static mce_recoverable_t mc_recoverable_scan = NULL;
-
-void mce_recoverable_register(mce_recoverable_t cbfunc)
-{
-    mc_recoverable_scan = cbfunc;
-}
-
-struct mca_banks *mcabanks_alloc(unsigned int nr_mce_banks)
+struct mca_banks *mcabanks_alloc(unsigned int nr)
 {
     struct mca_banks *mb;
 
@@ -135,18 +113,17 @@ struct mca_banks *mcabanks_alloc(unsigned int nr_mce_banks)
      * For APs allocations get done by the BSP, i.e. when the bank count may
      * may not be known yet. A zero bank count is a clear indication of this.
      */
-    if ( !nr_mce_banks )
-        nr_mce_banks = MCG_CAP_COUNT;
+    if ( !nr )
+        nr = MCG_CAP_COUNT;
 
-    mb->bank_map = xzalloc_array(unsigned long,
-                                 BITS_TO_LONGS(nr_mce_banks));
+    mb->bank_map = xzalloc_array(unsigned long, BITS_TO_LONGS(nr));
     if ( !mb->bank_map )
     {
         xfree(mb);
         return NULL;
     }
 
-    mb->num = nr_mce_banks;
+    mb->num = nr;
 
     return mb;
 }
@@ -172,19 +149,6 @@ static void mcabank_clear(int banknum)
         mca_wrmsr(MSR_IA32_MCx_MISC(banknum), 0x0ULL);
 
     mca_wrmsr(MSR_IA32_MCx_STATUS(banknum), 0x0ULL);
-}
-
-/*
- * Judging whether to Clear Machine Check error bank callback handler
- * According to Intel latest MCA OS Recovery Writer's Guide,
- * whether the error MCA bank needs to be cleared is decided by the mca_source
- * and MCi_status bit value.
- */
-static mce_need_clearbank_t mc_need_clearbank_scan = NULL;
-
-void mce_need_clearbank_register(mce_need_clearbank_t cbfunc)
-{
-    mc_need_clearbank_scan = cbfunc;
 }
 
 /*
@@ -227,7 +191,8 @@ static void mca_init_bank(enum mca_source who, struct mc_info *mi, int bank)
 
     if ( (mib->mc_status & MCi_STATUS_MISCV) &&
          (mib->mc_status & MCi_STATUS_ADDRV) &&
-         (mc_check_addr(mib->mc_status, mib->mc_misc, MC_ADDR_PHYSICAL)) &&
+         alternative_call(mce_callbacks.check_addr, mib->mc_status,
+                          mib->mc_misc, MC_ADDR_PHYSICAL) &&
          (who == MCA_POLLER || who == MCA_CMCI_HANDLER) &&
          (mfn_valid(_mfn(paddr_to_pfn(mib->mc_addr)))) )
     {
@@ -327,7 +292,7 @@ mcheck_mca_logout(enum mca_source who, struct mca_banks *bankmask,
      * If no mc_recovery_scan callback handler registered,
      * this error is not recoverable
      */
-    recover = mc_recoverable_scan ? 1 : 0;
+    recover = mce_callbacks.recoverable_scan;
 
     for ( i = 0; i < this_cpu(nr_mce_banks); i++ )
     {
@@ -344,8 +309,9 @@ mcheck_mca_logout(enum mca_source who, struct mca_banks *bankmask,
          * decide whether to clear bank by MCi_STATUS bit value such as
          * OVER/UC/EN/PCC/S/AR
          */
-        if ( mc_need_clearbank_scan )
-            need_clear = mc_need_clearbank_scan(who, status);
+        if ( mce_callbacks.need_clearbank_scan )
+            need_clear = alternative_call(mce_callbacks.need_clearbank_scan,
+                                          who, status);
 
         /*
          * If this is the first bank with valid MCA DATA, then
@@ -366,7 +332,8 @@ mcheck_mca_logout(enum mca_source who, struct mca_banks *bankmask,
                 ASSERT(mig);
                 mca_init_global(mc_flags, mig);
                 /* A hook here to get global extended msrs */
-                if ( boot_cpu_data.x86_vendor == X86_VENDOR_INTEL )
+                if ( IS_ENABLED(CONFIG_INTEL) &&
+                     boot_cpu_data.x86_vendor == X86_VENDOR_INTEL )
                     intel_get_extended_msrs(mig, mci);
             }
         }
@@ -381,12 +348,12 @@ mcheck_mca_logout(enum mca_source who, struct mca_banks *bankmask,
 
         if ( recover && uc )
             /* uc = true, recover = true, we need not panic. */
-            recover = mc_recoverable_scan(status);
+            recover = alternative_call(mce_callbacks.recoverable_scan, status);
 
         mca_init_bank(who, mci, i);
 
-        if ( mc_callback_bank_extended )
-            mc_callback_bank_extended(mci, i, status);
+        if ( mce_callbacks.info_collect )
+            alternative_vcall(mce_callbacks.info_collect, mci, i, status);
 
         /* By default, need_clear = true */
         if ( who != MCA_MCE_SCAN && need_clear )
@@ -600,7 +567,7 @@ unsigned int mce_firstbank(struct cpuinfo_x86 *c)
            c->x86_vendor == X86_VENDOR_INTEL && c->x86_model < 0x1a;
 }
 
-int show_mca_info(int inited, struct cpuinfo_x86 *c)
+static int show_mca_info(int inited, struct cpuinfo_x86 *c)
 {
     static enum mcheck_type g_type = mcheck_unset;
 
@@ -696,7 +663,7 @@ static int mca_cap_init(void)
         if ( !all )
             return -ENOMEM;
         for ( i = 0; i < nr; i++ )
-            mcabanks_set(i, mca_allbanks);
+            mcabanks_set(i, all);
         mcabanks_free(xchg(&mca_allbanks, all));
     }
 
@@ -757,7 +724,7 @@ static int cf_check cpu_callback(
         break;
     }
 
-    return !rc ? NOTIFY_DONE : notifier_from_errno(rc);
+    return notifier_from_errno(rc);
 }
 
 static struct notifier_block cpu_nfb = {
@@ -797,11 +764,14 @@ void mcheck_init(struct cpuinfo_x86 *c, bool bsp)
 
     switch ( c->x86_vendor )
     {
+#ifdef CONFIG_AMD
     case X86_VENDOR_AMD:
     case X86_VENDOR_HYGON:
-        inited = amd_mcheck_init(c);
+        inited = amd_mcheck_init(c, bsp);
         break;
+#endif
 
+#ifdef CONFIG_INTEL
     case X86_VENDOR_INTEL:
         switch ( c->x86 )
         {
@@ -811,6 +781,7 @@ void mcheck_init(struct cpuinfo_x86 *c, bool bsp)
             break;
         }
         break;
+#endif
 
     default:
         break;
@@ -961,7 +932,7 @@ void x86_mcinfo_dump(struct mc_info *mi)
     } while ( 1 );
 }
 
-static void cf_check do_mc_get_cpu_info(void *v)
+static void cf_check __maybe_unused do_mc_get_cpu_info(void *v)
 {
     int cpu = smp_processor_id();
     int cindex, cpn;
@@ -1143,7 +1114,7 @@ bool intpose_inval(unsigned int cpu_nr, uint64_t msr)
      (r) <= MSR_IA32_MCx_MISC(per_cpu(nr_mce_banks, cpu) - 1) && \
      ((r) - MSR_IA32_MC0_CTL) % 4) /* excludes MCi_CTL */
 
-static bool x86_mc_msrinject_verify(struct xen_mc_msrinject *mci)
+static bool __maybe_unused x86_mc_msrinject_verify(struct xen_mc_msrinject *mci)
 {
     const struct cpuinfo_x86 *c = &cpu_data[mci->mcinj_cpunr];
     int i, errs = 0;
@@ -1221,7 +1192,7 @@ static bool x86_mc_msrinject_verify(struct xen_mc_msrinject *mci)
     return !errs;
 }
 
-static uint64_t x86_mc_hwcr_wren(void)
+static uint64_t __maybe_unused x86_mc_hwcr_wren(void)
 {
     uint64_t old;
 
@@ -1236,13 +1207,13 @@ static uint64_t x86_mc_hwcr_wren(void)
     return old;
 }
 
-static void x86_mc_hwcr_wren_restore(uint64_t hwcr)
+static void __maybe_unused x86_mc_hwcr_wren_restore(uint64_t hwcr)
 {
     if ( !(hwcr & K8_HWCR_MCi_STATUS_WREN) )
         wrmsrl(MSR_K8_HWCR, hwcr);
 }
 
-static void cf_check x86_mc_msrinject(void *data)
+static void cf_check __maybe_unused x86_mc_msrinject(void *data)
 {
     struct xen_mc_msrinject *mci = data;
     struct mcinfo_msr *msr;
@@ -1273,12 +1244,13 @@ static void cf_check x86_mc_msrinject(void *data)
         x86_mc_hwcr_wren_restore(hwcr);
 }
 
-/*ARGSUSED*/
-static void cf_check x86_mc_mceinject(void *data)
+static void cf_check __maybe_unused x86_mc_mceinject(void *data)
 {
     printk("Simulating #MC on cpu %d\n", smp_processor_id());
     __asm__ __volatile__("int $0x12");
 }
+
+#ifdef CONFIG_PV /* do_mca() hypercall is PV-only */
 
 #if BITS_PER_LONG == 64
 
@@ -1683,13 +1655,16 @@ long do_mca(XEN_GUEST_HANDLE_PARAM(xen_mc_t) u_xen_mc)
     return ret;
 }
 
-int mcinfo_dumpped;
+#endif /* CONFIG_PV */
+
+static int mcinfo_dumped;
+
 static int cf_check x86_mcinfo_dump_panic(mctelem_cookie_t mctc)
 {
     struct mc_info *mcip = mctelem_dataptr(mctc);
 
     x86_mcinfo_dump(mcip);
-    mcinfo_dumpped++;
+    mcinfo_dumped++;
 
     return 0;
 }
@@ -1703,10 +1678,10 @@ static void mc_panic_dump(void)
     for_each_online_cpu(cpu)
         mctelem_process_deferred(cpu, x86_mcinfo_dump_panic,
                                  mctelem_has_deferred_lmce(cpu));
-    dprintk(XENLOG_ERR, "End dump mc_info, %x mcinfo dumped\n", mcinfo_dumpped);
+    dprintk(XENLOG_ERR, "End dump mc_info, %x mcinfo dumped\n", mcinfo_dumped);
 }
 
-void mc_panic(char *s)
+void mc_panic(const char *s)
 {
     is_mc_panic = true;
     console_force_unlock();
@@ -1913,12 +1888,11 @@ static void cf_check mce_softirq(void)
  * will help to collect and log those MCE errors.
  * Round2: Do all MCE processing logic as normal.
  */
-void mce_handler_init(void)
+void __init mce_handler_init(const struct mce_callbacks *cb)
 {
-    if ( smp_processor_id() != 0 )
-        return;
-
     /* callback register, do we really need so many callback? */
+    mce_callbacks = *cb;
+
     /* mce handler data initialization */
     spin_lock_init(&mce_logout_lock);
     open_softirq(MACHINE_CHECK_SOFTIRQ, mce_softirq);

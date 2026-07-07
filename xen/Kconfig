@@ -1,6 +1,6 @@
 #
 # For a description of the syntax of this configuration file,
-# see docs/misc/kconfig-language.txt
+# see https://www.kernel.org/doc/html/v5.4/kbuild/kconfig-language.html
 #
 mainmenu "Xen/$(SRCARCH) $(XEN_FULLVERSION) Configuration"
 
@@ -37,6 +37,23 @@ config CC_HAS_VISIBILITY_ATTRIBUTE
 config CC_SPLIT_SECTIONS
 	bool
 
+# Set code alignment.
+#
+# Allow setting on a boolean basis, and then convert such selection to an
+# integer for the build system and code to consume more easily.
+config FUNCTION_ALIGNMENT_4B
+	bool
+config FUNCTION_ALIGNMENT_8B
+	bool
+config FUNCTION_ALIGNMENT_16B
+	bool
+config FUNCTION_ALIGNMENT
+	int
+	default 16 if FUNCTION_ALIGNMENT_16B
+	default  8 if  FUNCTION_ALIGNMENT_8B
+	default  4 if  FUNCTION_ALIGNMENT_4B
+	default  0
+
 source "arch/$(SRCARCH)/Kconfig"
 
 config DEFCONFIG_LIST
@@ -67,7 +84,7 @@ config UNSUPPORTED
 config LTO
 	bool "Link Time Optimisation"
 	depends on BROKEN
-	---help---
+	help
 	  Enable Link Time Optimisation.
 
 	  If unsure, say N.
@@ -76,6 +93,13 @@ config LTO
 # For architectures that know their compiler __int128 support is sound
 #
 config ARCH_SUPPORTS_INT128
+	bool
+
+#
+# For platforms that require specific handling of per-vCPU ioreq completion
+# events
+#
+config ARCH_VCPU_IOREQ_COMPLETION
 	bool
 
 source "Kconfig.debug"

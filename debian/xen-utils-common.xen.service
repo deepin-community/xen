@@ -1,0 +1,22 @@
+# adapted from systemd-sysv-generator
+
+[Unit]
+SourcePath=/etc/init.d/xen
+Description=Xen daemons
+Before=multi-user.target
+Before=graphical.target
+After=remote-fs.target
+
+[Service]
+Type=forking
+Restart=no
+TimeoutSec=5min
+IgnoreSIGPIPE=no
+KillMode=process
+GuessMainPID=no
+RemainAfterExit=yes
+ExecStart=/etc/init.d/xen start
+ExecStop=/etc/init.d/xen stop
+
+[Install]
+WantedBy=multi-user.target

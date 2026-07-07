@@ -129,7 +129,7 @@ create writable subdirectories as necessary.
 
 ## Per Domain Paths
 
-## General Paths
+### General Paths
 
 #### ~/vm = PATH []
 
@@ -268,6 +268,16 @@ at the guest physical address in HVM_PARAM_VM_GENERATION_ID_ADDR.
 
 See Microsoft's "Virtual Machine Generation ID" specification for the
 circumstances where the generation ID needs to be changed.
+
+
+#### ~/platform/tpm_version = INTEGER [HVM,INTERNAL]
+
+The TPM version to be probed for.
+
+A value of 1 indicates to probe for TPM 1.2, whereas a value of 2
+indicates that a TPM 2.0 using CRB should be probed.
+A value of 0 or an invalid value will result in no TPM being probed.
+If unset, a default of 1 is assumed.
 
 ### Frontend device paths
 
@@ -444,9 +454,8 @@ The precise protocol is not yet documented.
 #### ~/control/feature-suspend = (""|"0"|"1") [w]
 
 These may be initialized to "" by the toolstack and may then be set
-to 0 or 1 by a guest to indicate whether it is capable or incapable,
-respectively, of responding to the corresponding command when written
-to ~/control/shutdown.
+to 0 or 1 by a guest to indicate whether it is capable of responding
+to the corresponding command when written to ~/control/shutdown.
 A toolstack may then sample the feature- value at the point of issuing
 a PV control command and respond accordingly:
 
@@ -497,9 +506,8 @@ string back to the control node.
 #### ~/control/feature-laptop-slate-mode = (""|"0"|"1") [w]
 
 This may be initialized to "" by the toolstack and may then be set
-to 0 or 1 by a guest to indicate whether it is capable or incapable,
-respectively, of responding to a mode value written to
-~/control/laptop-slate-mode.
+to 0 or 1 by a guest to indicate whether it is capable of responding
+to a mode value written to ~/control/laptop-slate-mode.
 
 ### Domain Controlled Paths
 

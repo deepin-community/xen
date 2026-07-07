@@ -21,6 +21,7 @@
 #define _XOPEN_SOURCE 600
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <argp.h>
 #include <inttypes.h>
 #include <limits.h>
@@ -320,11 +321,10 @@ void parse_symbol_file(char *fn) {
             (*p)->next=NULL;
         }
 
-        /* FIXME -- use SYMBOL_NAME_SIZE */
         /* FIXME -- use regexp.  This won't work for symbols with spaces (yes they exist) */
         (*p)->symbols[(*p)->count].addr = 0xDEADBEEF;
-        if ( fscanf(symbol_file, "%llx %128s",
-               &(*p)->symbols[(*p)->count].addr,
+        if ( fscanf(symbol_file, "%llx %" STR(SYMBOL_NAME_SIZE) "s",
+                    &(*p)->symbols[(*p)->count].addr,
                     (*p)->symbols[(*p)->count].name) == 0 )
             break;
 
@@ -447,7 +447,7 @@ struct {
 #define EXIT_REASON_SIPI                4
 #define EXIT_REASON_IO_SMI              5
 #define EXIT_REASON_OTHER_SMI           6
-#define EXIT_REASON_PENDING_INTERRUPT   7
+#define EXIT_REASON_PENDING_VIRT_INTR   7
 #define EXIT_REASON_PENDING_VIRT_NMI    8
 #define EXIT_REASON_TASK_SWITCH         9
 #define EXIT_REASON_CPUID               10
@@ -466,8 +466,8 @@ struct {
 #define EXIT_REASON_VMREAD              23
 #define EXIT_REASON_VMRESUME            24
 #define EXIT_REASON_VMWRITE             25
-#define EXIT_REASON_VMOFF               26
-#define EXIT_REASON_VMON                27
+#define EXIT_REASON_VMXOFF              26
+#define EXIT_REASON_VMXON               27
 #define EXIT_REASON_CR_ACCESS           28
 #define EXIT_REASON_DR_ACCESS           29
 #define EXIT_REASON_IO_INSTRUCTION      30
@@ -479,7 +479,7 @@ struct {
 #define EXIT_REASON_MONITOR_TRAP_FLAG   37
 #define EXIT_REASON_MONITOR_INSTRUCTION 39
 #define EXIT_REASON_PAUSE_INSTRUCTION   40
-#define EXIT_REASON_MACHINE_CHECK       41
+#define EXIT_REASON_MCE_DURING_VMENTRY  41
 #define EXIT_REASON_TPR_BELOW_THRESHOLD 43
 #define EXIT_REASON_APIC_ACCESS         44
 #define EXIT_REASON_ACCESS_GDTR_OR_IDTR 46
@@ -503,7 +503,7 @@ const char * hvm_vmx_exit_reason_name[HVM_VMX_EXIT_REASON_MAX] = {
     [EXIT_REASON_SIPI]="SIPI",
     [EXIT_REASON_IO_SMI]="IO_SMI",
     [EXIT_REASON_OTHER_SMI]="OTHER_SMI",
-    [EXIT_REASON_PENDING_INTERRUPT]="PENDING_INTERRUPT",
+    [EXIT_REASON_PENDING_VIRT_INTR]="PENDING_VIRT_INTR",
     [EXIT_REASON_PENDING_VIRT_NMI]="PENDING_VIRT_NMI",
     [EXIT_REASON_TASK_SWITCH]="TASK_SWITCH",
     [EXIT_REASON_CPUID]="CPUID",
@@ -522,8 +522,8 @@ const char * hvm_vmx_exit_reason_name[HVM_VMX_EXIT_REASON_MAX] = {
     [EXIT_REASON_VMREAD]="VMREAD",
     [EXIT_REASON_VMRESUME]="VMRESUME",
     [EXIT_REASON_VMWRITE]="VMWRITE",
-    [EXIT_REASON_VMOFF]="VMOFF",
-    [EXIT_REASON_VMON]="VMON",
+    [EXIT_REASON_VMXOFF]="VMXOFF",
+    [EXIT_REASON_VMXON]="VMXON",
     [EXIT_REASON_CR_ACCESS]="CR_ACCESS",
     [EXIT_REASON_DR_ACCESS]="DR_ACCESS",
     [EXIT_REASON_IO_INSTRUCTION]="IO_INSTRUCTION",
@@ -535,7 +535,7 @@ const char * hvm_vmx_exit_reason_name[HVM_VMX_EXIT_REASON_MAX] = {
     [EXIT_REASON_MONITOR_TRAP_FLAG]="MONITOR_TRAP_FLAG",
     [EXIT_REASON_MONITOR_INSTRUCTION]="MONITOR_INSTRUCTION",
     [EXIT_REASON_PAUSE_INSTRUCTION]="PAUSE_INSTRUCTION",
-    [EXIT_REASON_MACHINE_CHECK]="MACHINE_CHECK",
+    [EXIT_REASON_MCE_DURING_VMENTRY]="MCE_DURING_VMENTRY",
     [EXIT_REASON_TPR_BELOW_THRESHOLD]="TPR_BELOW_THRESHOLD",
     [EXIT_REASON_APIC_ACCESS]="APIC_ACCESS",
     [EXIT_REASON_EPT_VIOLATION]="EPT_VIOLATION",
@@ -987,6 +987,7 @@ enum {
     HVM_VOL_VMENTRY,
     HVM_VOL_VMEXIT,
     HVM_VOL_HANDLER,
+    HVM_VOL_EMUL,
     HVM_VOL_MAX
 };
 
@@ -1013,6 +1014,7 @@ const char *hvm_vol_name[HVM_VOL_MAX] = {
     [HVM_VOL_VMENTRY]="vmentry",
     [HVM_VOL_VMEXIT] ="vmexit",
     [HVM_VOL_HANDLER]="handler",
+    [HVM_VOL_EMUL]="emul",
 };
 
 enum {
@@ -1435,14 +1437,6 @@ void init_hvm_data(struct hvm_data *h, struct vcpu_data *v) {
 
     h->init = 1;
 
-    if(opt.svm_mode) {
-        h->exit_reason_max = HVM_SVM_EXIT_REASON_MAX;
-        h->exit_reason_name = hvm_svm_exit_reason_name;
-    } else {
-        h->exit_reason_max = HVM_VMX_EXIT_REASON_MAX;
-        h->exit_reason_name = hvm_vmx_exit_reason_name;
-    }
-
     if(opt.histogram_interrupt_eip) {
         int count = ((1ULL<<ADDR_SPACE_BITS)/opt.histogram_interrupt_increment);
         size_t size = count * sizeof(int);
@@ -1458,6 +1452,18 @@ void init_hvm_data(struct hvm_data *h, struct vcpu_data *v) {
     }
     for(i=0; i<GUEST_INTERRUPT_MAX+1; i++)
         h->summary.guest_interrupt[i].count=0;
+}
+
+void set_hvm_exit_reason_data(struct hvm_data *h, unsigned event) {
+    if (((event & ~TRC_64_FLAG) == TRC_HVM_SVM_EXIT) ||
+        opt.svm_mode) {
+        opt.svm_mode = 1;
+        h->exit_reason_max = HVM_SVM_EXIT_REASON_MAX;
+        h->exit_reason_name = hvm_svm_exit_reason_name;
+    } else {
+        h->exit_reason_max = HVM_VMX_EXIT_REASON_MAX;
+        h->exit_reason_name = hvm_vmx_exit_reason_name;
+    }
 }
 
 /* PV data */
@@ -1623,7 +1629,7 @@ struct vlapic_struct {
 struct vcpu_data {
     int vid;
     struct domain_data *d; /* up-pointer */
-    unsigned activated:1;
+    unsigned activated:1, delayed_init:1;
 
     int guest_paging_levels;
 
@@ -2864,7 +2870,7 @@ void dump_eip(struct eip_list_struct *head) {
 
     for(p=head; p; p=p->next)
     {
-        total += p->summary.count;
+        total += p->summary.event_count;
         N++;
     }
 
@@ -2899,8 +2905,8 @@ void dump_eip(struct eip_list_struct *head) {
                           p->eip,
                           find_symbol(p->eip));
             printf(" %7d %5.2lf%%\n",
-                   p->summary.count,
-                   ((double)p->summary.count*100)/total);
+                   p->summary.event_count,
+                   ((double)p->summary.event_count*100)/total);
         }
 
 
@@ -4626,14 +4632,23 @@ void hvm_generic_postprocess(struct hvm_data *h)
         /* Some exits we don't expect a handler; just return */
         if(opt.svm_mode)
         {
+            switch(h->exit_reason)
+            {
+            case VMEXIT_VINTR: /* Equivalent of PENDING_VIRT_INTR */
+            case VMEXIT_PAUSE:
+                return;
+            default:
+                break;
+            }
         }
         else
         {
             switch(h->exit_reason)
             {
                 /* These just need us to go through the return path */
-            case EXIT_REASON_PENDING_INTERRUPT:
+            case EXIT_REASON_PENDING_VIRT_INTR:
             case EXIT_REASON_TPR_BELOW_THRESHOLD:
+            case EXIT_REASON_PAUSE_INSTRUCTION:
                 /* Not much to log now; may need later */
             case EXIT_REASON_WBINVD:
                 return;
@@ -4650,6 +4665,19 @@ void hvm_generic_postprocess(struct hvm_data *h)
                       ? "[clipped]"
                       : h->exit_reason_name[h->exit_reason]);
             warned[h->exit_reason]=1;
+
+            /* 
+             * NB that we don't return here; the result will be that `evt`
+             * will be "0", and there will be a "(no handler)" entry for the
+             * given VMEXIT.
+             * 
+             * This does mean that if two different exits have no HVM
+             * handlers, that only the first one will accumulate data;
+             * if accumulating a separate "(no handler)" data for more
+             * than one exit reason is needed, we'll have to make Yet
+             * Another Array.  But for now, since we try to avoid
+             * it happening, just tolerate it.
+             */ 
         }
     }
 
@@ -4662,18 +4690,19 @@ void hvm_generic_postprocess(struct hvm_data *h)
     }
 
     if(opt.summary_info) {
-        update_cycles(&h->summary.generic[evt],
-                       h->arc_cycles);
-
         /* NB that h->exit_reason may be 0, so we offset by 1 */
         if ( registered[evt] )
         {
             static unsigned warned[HVM_EXIT_REASON_MAX] = { 0 };
-            if ( registered[evt] != h->exit_reason+1 && !warned[h->exit_reason])
+            if ( registered[evt] != h->exit_reason+1 )
             {
-                fprintf(warn, "%s: HVM evt %lx in %x and %x!\n",
-                        __func__, evt, registered[evt]-1, h->exit_reason);
-                warned[h->exit_reason]=1;
+                if ( !warned[h->exit_reason] )
+                {
+                    fprintf(warn, "%s: HVM evt %lx in %x and %x!\n",
+                            __func__, evt, registered[evt]-1, h->exit_reason);
+                    warned[h->exit_reason]=1;
+                }
+                return;
             }
         }
         else
@@ -4684,7 +4713,11 @@ void hvm_generic_postprocess(struct hvm_data *h)
                         __func__, ret);
             registered[evt]=h->exit_reason+1;
         }
-        /* HLT checked at hvm_vmexit_close() */
+
+        update_cycles(&h->summary.generic[evt],
+                       h->arc_cycles);
+
+       /* HLT checked at hvm_vmexit_close() */
     }
 }
 
@@ -5059,13 +5092,13 @@ void hvm_vmexit_process(struct record_info *ri, struct hvm_data *h,
 
     r = (typeof(r))ri->d;
 
-    if(!h->init)
-        init_hvm_data(h, v);
+    if(!h->exit_reason_name)
+        set_hvm_exit_reason_data(h, ri->event);
 
     h->vmexit_valid=1;
     bzero(&h->inflight, sizeof(h->inflight));
 
-    if(ri->event == TRC_HVM_VMEXIT64) {
+    if(ri->event & TRC_64_FLAG) {
         if(v->guest_paging_levels != 4)
         {
             if ( verbosity >= 6 )
@@ -5272,20 +5305,28 @@ void hvm_process(struct pcpu_info *p)
 
     assert(p->current);
 
-    if(vcpu_set_data_type(p->current, VCPU_DATA_HVM))
-        return;
+    /* HVM_EMUL types show up in all contexts */
+    if(ri->evt.sub != 0x4) {
+        if(vcpu_set_data_type(p->current, VCPU_DATA_HVM))
+            return;
+    }
 
-    if(ri->evt.sub == 2)
-    {
+    switch ( ri->evt.sub ) {
+    case 2: /* HVM_HANDLER */
         UPDATE_VOLUME(p, hvm[HVM_VOL_HANDLER], ri->size);
         hvm_handler_process(ri, h);
-    }
-    else
-    {
+        break;
+    case 4: /* HVM_EMUL */
+        UPDATE_VOLUME(p, hvm[HVM_VOL_EMUL], ri->size);
+        warn_once("WARNING: We don't yet analyze HVM_EMUL events.\n");
+        /* FIXME: Collect analysis on this */
+        break;
+    default:
         switch(ri->event) {
-            /* HVM */
-        case TRC_HVM_VMEXIT:
-        case TRC_HVM_VMEXIT64:
+        case TRC_HVM_VMX_EXIT:
+        case TRC_HVM_VMX_EXIT64:
+        case TRC_HVM_SVM_EXIT:
+        case TRC_HVM_SVM_EXIT64:
             UPDATE_VOLUME(p, hvm[HVM_VOL_VMEXIT], ri->size);
             hvm_vmexit_process(ri, h, v);
             break;
@@ -6471,7 +6512,8 @@ static const char *vcpu_op_str[] = {
     "register_runstate_memory_area", "set_periodic_timer",
     "stop_periodic_timer", "set_singleshot_timer", "stop_singleshot_timer",
     "register_vcpu_info", "send_nmi", "get_physid",
-    "register_vcpu_time_memory_area",
+    "register_vcpu_time_memory_area", "register_runstate_phys_area",
+    "register_vcpu_time_phys_area",
 };
 
 static const char *sched_op_str[] = {
@@ -6947,10 +6989,17 @@ void vcpu_start(struct pcpu_info *p, struct vcpu_data *v,
      * bring a vcpu out of INIT until it's seen to be actually
      * running somewhere. */
     if ( new_runstate != RUNSTATE_RUNNING ) {
-        fprintf(warn, "First schedule for d%dv%d doesn't take us into a running state; leaving INIT\n",
-                v->d->did, v->vid);
+        if ( !v->delayed_init ) {
+            fprintf(warn, "First schedule for d%dv%d doesn't take us into a running state; leaving in INIT\n",
+                    v->d->did, v->vid);
+            v->delayed_init = 1;
+        }
 
         return;
+    } else if ( v->delayed_init ) {
+        fprintf(warn, "d%dv%d RUNSTATE_RUNNING detected, leaving INIT",
+                v->d->did, v->vid);
+        v->delayed_init = 0;
     }
 
     tsc = ri_tsc;
@@ -8164,7 +8213,7 @@ void mem_pod_zero_reclaim_process(struct pcpu_info *p)
 
     struct {
         uint64_t gfn, mfn;
-        int d:16,order:16;
+        uint32_t d, order;
     } *r = (typeof(r))ri->d;
 
     if ( v && v->hvm.vmexit_valid )
@@ -8214,7 +8263,7 @@ void mem_pod_populate_process(struct pcpu_info *p)
 
     struct {
         uint64_t gfn, mfn;
-        int d:16,order:16;
+        uint32_t d, order;
     } *r = (typeof(r))ri->d;
 
     if ( opt.dump_all )
@@ -8247,14 +8296,14 @@ void mem_pod_superpage_splinter_process(struct pcpu_info *p)
 
     struct {
         uint64_t gfn;
-        int d:16;
+        uint32_t d, order;
     } *r = (typeof(r))ri->d;
 
     if ( opt.dump_all )
     {
-        printf(" %s pod_spage_splinter d%d g %llx\n",
+        printf(" %s pod_spage_splinter d%d o%d g %"PRIx64"\n",
                ri->dump_header,
-               r->d, (unsigned long long)r->gfn);
+               r->d, r->order, r->gfn);
     }
 }
 
@@ -8298,7 +8347,7 @@ void mem_decrease_reservation_process(struct pcpu_info *p)
 
     struct {
         uint64_t gfn;
-        int d:16,order:16;
+        uint32_t d, order;
     } *r = (typeof(r))ri->d;
 
     if ( opt.dump_all )
@@ -9402,9 +9451,10 @@ static struct tl_assert_mask tl_assert_checks[TOPLEVEL_MAX] = {
 /* There are a lot of common assumptions for the various processing
  * routines.  Check them all in one place, doing something else if
  * they don't pass. */
-int toplevel_assert_check(int toplevel, struct pcpu_info *p)
+int toplevel_assert_check(int toplevel, struct record_info *ri, struct pcpu_info *p)
 {
     struct tl_assert_mask mask;
+    bool is_hvm_emul = (toplevel == TOPLEVEL_HVM) && (ri->evt.sub == 0x4);
 
     mask = tl_assert_checks[toplevel];
 
@@ -9414,7 +9464,7 @@ int toplevel_assert_check(int toplevel, struct pcpu_info *p)
         goto fail;
     }
 
-    if( mask.not_idle_domain )
+    if( mask.not_idle_domain && !is_hvm_emul)
     {
         /* Can't do this check w/o first doing above check */
         assert(mask.p_current);
@@ -9433,7 +9483,8 @@ int toplevel_assert_check(int toplevel, struct pcpu_info *p)
         v = p->current;
 
         if ( ! (v->data_type == VCPU_DATA_NONE
-                || v->data_type == mask.vcpu_data_mode) )
+                || v->data_type == mask.vcpu_data_mode
+                || is_hvm_emul) )
         {
             /* This may happen for track_dirty_vram, which causes a SHADOW_WRMAP_BF trace f/ dom0 */
             fprintf(warn, "WARNING: Unexpected vcpu data type for d%dv%d on proc %d! Expected %d got %d. Not processing\n",
@@ -9480,7 +9531,7 @@ void process_record(struct pcpu_info *p) {
         return;
 
     /* Unify toplevel assertions */
-    if ( toplevel_assert_check(toplevel, p) )
+    if ( toplevel_assert_check(toplevel, ri, p) )
     {
         switch(toplevel) {
         case TRC_GEN_MAIN:
@@ -10845,11 +10896,6 @@ const struct argp_option cmd_opts[] =  {
       .arg = "HZ",
       .doc = "Cpu speed of the tracing host, used to convert tsc into seconds.", },
 
-    { .name = "svm-mode",
-      .key = OPT_SVM_MODE,
-      .group = OPT_GROUP_HARDWARE,
-      .doc = "Assume AMD SVM-style vmexit error codes.  (Default is Intel VMX.)", },
-
     { .name = "progress",
       .key = OPT_PROGRESS,
       .doc = "Progress dialog.  Requires the zenity (GTK+) executable.", },
@@ -10873,9 +10919,6 @@ const struct argp parser_def = {
     .args_doc = "[trace file]",
     .doc = "",
 };
-
-const char *argp_program_bug_address = "George Dunlap <george.dunlap@eu.citrix.com>";
-
 
 int main(int argc, char *argv[]) {
     /* Start with warn at stderr. */

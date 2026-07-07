@@ -1,21 +1,13 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * xen/arch/arm/traps.c
  *
  * ARM Trap handlers
  *
  * Copyright (c) 2011 Citrix Systems.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
+#include <xen/acpi.h>
 #include <xen/domain_page.h>
 #include <xen/errno.h>
 #include <xen/hypercall.h>
@@ -39,17 +31,27 @@
 #include <public/sched.h>
 #include <public/xen.h>
 
-#include <asm/acpi.h>
 #include <asm/cpuerrata.h>
 #include <asm/cpufeature.h>
 #include <asm/event.h>
 #include <asm/hsr.h>
+#include <asm/mem_access.h>
 #include <asm/mmio.h>
 #include <asm/regs.h>
+#include <asm/setup.h>
 #include <asm/smccc.h>
 #include <asm/traps.h>
 #include <asm/vgic.h>
 #include <asm/vtimer.h>
+
+/*
+ * partial_emulation: If true, partial emulation for system/coprocessor
+ * registers will be enabled.
+ */
+#ifdef CONFIG_PARTIAL_EMULATION
+bool __ro_after_init partial_emulation = false;
+boolean_param("partial-emulation", partial_emulation);
+#endif
 
 /* The base of the stack must always be double-word aligned, which means
  * that both the kernel half of struct cpu_user_regs (which is pushed in
@@ -102,6 +104,21 @@ register_t get_default_hcr_flags(void)
              HCR_TID3|HCR_TSC|HCR_TAC|HCR_SWIO|HCR_TIDCP|HCR_FB|HCR_TSW);
 }
 
+register_t get_default_cptr_flags(void)
+{
+    /*
+     * Trap all coprocessor registers (0-13) except cp10 and
+     * cp11 for VFP.
+     *
+     * /!\ All coprocessors except cp10 and cp11 cannot be used in Xen.
+     *
+     * On ARM64 the TCPx bits which we set here (0..9,12,13) are all
+     * RES1, i.e. they would trap whether we did this write or not.
+     */
+    return  ((HCPTR_CP_MASK & ~(HCPTR_CP(10) | HCPTR_CP(11))) |
+             HCPTR_TTA | HCPTR_TAM);
+}
+
 static enum {
     SERRORS_DIVERSE,
     SERRORS_PANIC,
@@ -144,17 +161,7 @@ void init_traps(void)
     /* Trap CP15 c15 used for implementation defined registers */
     WRITE_SYSREG(HSTR_T(15), HSTR_EL2);
 
-    /* Trap all coprocessor registers (0-13) except cp10 and
-     * cp11 for VFP.
-     *
-     * /!\ All coprocessors except cp10 and cp11 cannot be used in Xen.
-     *
-     * On ARM64 the TCPx bits which we set here (0..9,12,13) are all
-     * RES1, i.e. they would trap whether we did this write or not.
-     */
-    WRITE_SYSREG((HCPTR_CP_MASK & ~(HCPTR_CP(10) | HCPTR_CP(11))) |
-                 HCPTR_TTA | HCPTR_TAM,
-                 CPTR_EL2);
+    WRITE_SYSREG(get_default_cptr_flags(), CPTR_EL2);
 
     /*
      * Configure HCR_EL2 with the bare minimum to run Xen until a guest
@@ -165,7 +172,7 @@ void init_traps(void)
     isb();
 }
 
-void __div0(void)
+void asmlinkage __div0(void)
 {
     printk("Division by zero in hypervisor.\n");
     BUG();
@@ -402,7 +409,7 @@ static vaddr_t exception_handler32(vaddr_t offset)
     register_t sctlr = READ_SYSREG(SCTLR_EL1);
 
     if ( sctlr & SCTLR_A32_EL1_V )
-        return 0xffff0000 + offset;
+        return 0xffff0000U + offset;
     else /* always have security exceptions */
         return READ_SYSREG(VBAR_EL1) + offset;
 }
@@ -713,8 +720,10 @@ struct reg_ctxt {
     uint32_t ifsr32_el2;
 #endif
 
+#ifdef CONFIG_MMU
     /* Hypervisor-side state */
     uint64_t vttbr_el2;
+#endif
 };
 
 static const char *mode_string(register_t cpsr)
@@ -749,7 +758,7 @@ static const char *mode_string(register_t cpsr)
 
 static void show_registers_32(const struct cpu_user_regs *regs,
                               const struct reg_ctxt *ctxt,
-                              bool guest_mode,
+                              bool guest_mode_on,
                               const struct vcpu *v)
 {
 
@@ -758,7 +767,7 @@ static void show_registers_32(const struct cpu_user_regs *regs,
     printk("PC:     %08"PRIx32"\n", regs->pc32);
 #else
     printk("PC:     %08"PRIx32, regs->pc);
-    if ( !guest_mode )
+    if ( !guest_mode_on )
         printk(" %pS", _p(regs->pc));
     printk("\n");
 #endif
@@ -777,7 +786,7 @@ static void show_registers_32(const struct cpu_user_regs *regs,
 #endif
            regs->r12);
 
-    if ( guest_mode )
+    if ( guest_mode_on )
     {
         printk("USR: SP: %08"PRIx32" LR: %"PRIregister"\n",
                regs->sp_usr, regs->lr);
@@ -802,7 +811,7 @@ static void show_registers_32(const struct cpu_user_regs *regs,
 #endif
     printk("\n");
 
-    if ( guest_mode )
+    if ( guest_mode_on )
     {
         printk("     SCTLR: %"PRIregister"\n", ctxt->sctlr_el1);
         printk("       TCR: %"PRIregister"\n", ctxt->tcr_el1);
@@ -813,7 +822,7 @@ static void show_registers_32(const struct cpu_user_regs *regs,
 #ifdef CONFIG_ARM_64
                (uint32_t)(ctxt->far >> 32),
                ctxt->ifsr32_el2,
-               (uint32_t)(ctxt->far & 0xffffffff),
+               (uint32_t)(ctxt->far & 0xffffffffU),
                ctxt->esr_el1
 #else
                ctxt->ifar, ctxt->ifsr, ctxt->dfar, ctxt->dfsr
@@ -826,18 +835,18 @@ static void show_registers_32(const struct cpu_user_regs *regs,
 #ifdef CONFIG_ARM_64
 static void show_registers_64(const struct cpu_user_regs *regs,
                               const struct reg_ctxt *ctxt,
-                              bool guest_mode,
+                              bool guest_mode_on,
                               const struct vcpu *v)
 {
 
     BUG_ON( (regs->cpsr & PSR_MODE_BIT) );
 
     printk("PC:     %016"PRIx64, regs->pc);
-    if ( !guest_mode )
+    if ( !guest_mode_on )
         printk(" %pS", _p(regs->pc));
     printk("\n");
     printk("LR:     %016"PRIx64"\n", regs->lr);
-    if ( guest_mode )
+    if ( guest_mode_on )
     {
         printk("SP_EL0: %016"PRIx64"\n", regs->sp_el0);
         printk("SP_EL1: %016"PRIx64"\n", regs->sp_el1);
@@ -870,7 +879,7 @@ static void show_registers_64(const struct cpu_user_regs *regs,
            regs->x27, regs->x28, regs->fp);
     printk("\n");
 
-    if ( guest_mode )
+    if ( guest_mode_on )
     {
         printk("   ELR_EL1: %016"PRIx64"\n", regs->elr_el1);
         printk("   ESR_EL1: %08"PRIx32"\n", ctxt->esr_el1);
@@ -887,37 +896,41 @@ static void show_registers_64(const struct cpu_user_regs *regs,
 
 static void _show_registers(const struct cpu_user_regs *regs,
                             const struct reg_ctxt *ctxt,
-                            bool guest_mode,
+                            bool guest_mode_on,
                             const struct vcpu *v)
 {
     print_xen_info();
 
     printk("CPU:    %d\n", smp_processor_id());
 
-    if ( guest_mode )
+    if ( guest_mode_on )
     {
         if ( regs_mode_is_32bit(regs) )
-            show_registers_32(regs, ctxt, guest_mode, v);
+            show_registers_32(regs, ctxt, guest_mode_on, v);
 #ifdef CONFIG_ARM_64
         else
-            show_registers_64(regs, ctxt, guest_mode, v);
+            show_registers_64(regs, ctxt, guest_mode_on, v);
 #endif
     }
     else
     {
 #ifdef CONFIG_ARM_64
-        show_registers_64(regs, ctxt, guest_mode, v);
+        show_registers_64(regs, ctxt, guest_mode_on, v);
 #else
-        show_registers_32(regs, ctxt, guest_mode, v);
+        show_registers_32(regs, ctxt, guest_mode_on, v);
 #endif
     }
     printk("  VTCR_EL2: %"PRIregister"\n", READ_SYSREG(VTCR_EL2));
+#ifdef CONFIG_MMU
     printk(" VTTBR_EL2: %016"PRIx64"\n", ctxt->vttbr_el2);
+#endif
     printk("\n");
 
     printk(" SCTLR_EL2: %"PRIregister"\n", READ_SYSREG(SCTLR_EL2));
     printk("   HCR_EL2: %"PRIregister"\n", READ_SYSREG(HCR_EL2));
+#ifdef CONFIG_MMU
     printk(" TTBR0_EL2: %016"PRIx64"\n", READ_SYSREG64(TTBR0_EL2));
+#endif
     printk("\n");
     printk("   ESR_EL2: %"PRIregister"\n", regs->hsr);
     printk(" HPFAR_EL2: %"PRIregister"\n", READ_SYSREG(HPFAR_EL2));
@@ -949,7 +962,9 @@ void show_registers(const struct cpu_user_regs *regs)
     if ( guest_mode(regs) && is_32bit_domain(current->domain) )
         ctxt.ifsr32_el2 = READ_SYSREG(IFSR32_EL2);
 #endif
+#ifdef CONFIG_MMU
     ctxt.vttbr_el2 = READ_SYSREG64(VTTBR_EL2);
+#endif
 
     _show_registers(regs, &ctxt, guest_mode(regs), current);
 }
@@ -972,7 +987,9 @@ void vcpu_show_registers(const struct vcpu *v)
     ctxt.ifsr32_el2 = v->arch.ifsr;
 #endif
 
+#ifdef CONFIG_MMU
     ctxt.vttbr_el2 = v->domain->arch.p2m.vttbr;
+#endif
 
     _show_registers(&v->arch.cpu_info->guest_cpu_user_regs, &ctxt, 1, v);
 }
@@ -1220,10 +1237,9 @@ int do_bug_frame(const struct cpu_user_regs *regs, vaddr_t pc)
         for ( id = 0; id < BUGFRAME_NR; id++ )
         {
             const struct bug_frame *b;
-            unsigned int i;
 
-            for ( i = 0, b = region->frame[id].bugs;
-                  i < region->frame[id].n_bugs; b++, i++ )
+            for ( b = region->frame[id].start;
+                  b < region->frame[id].stop; b++ )
             {
                 if ( ((vaddr_t)bug_loc(b)) == pc )
                 {
@@ -1239,7 +1255,7 @@ int do_bug_frame(const struct cpu_user_regs *regs, vaddr_t pc)
 
     if ( id == BUGFRAME_run_fn )
     {
-        void (*fn)(const struct cpu_user_regs *) = (void *)regs->BUG_FN_REG;
+        bug_fn_t *fn = (void *)regs->BUG_FN_REG;
 
         fn(regs);
         return 0;
@@ -1418,16 +1434,24 @@ static void do_trap_hypercall(struct cpu_user_regs *regs, register_t *nr,
     {
         /* Deliberately corrupt parameter regs used by this hypercall. */
         switch ( hypercall_args[*nr] ) {
-        case 5: HYPERCALL_ARG5(regs) = 0xDEADBEEF;
-        case 4: HYPERCALL_ARG4(regs) = 0xDEADBEEF;
-        case 3: HYPERCALL_ARG3(regs) = 0xDEADBEEF;
-        case 2: HYPERCALL_ARG2(regs) = 0xDEADBEEF;
+        case 5:
+            HYPERCALL_ARG5(regs) = 0xDEADBEEFU;
+            fallthrough;
+        case 4:
+            HYPERCALL_ARG4(regs) = 0xDEADBEEFU;
+            fallthrough;
+        case 3:
+            HYPERCALL_ARG3(regs) = 0xDEADBEEFU;
+            fallthrough;
+        case 2:
+            HYPERCALL_ARG2(regs) = 0xDEADBEEFU;
+            fallthrough;
         case 1: /* Don't clobber x0/r0 -- it's the return value */
         case 0: /* -ENOSYS case */
             break;
         default: BUG();
         }
-        *nr = 0xDEADBEEF;
+        *nr = 0xDEADBEEFU;
     }
 #endif
 
@@ -1474,9 +1498,9 @@ static bool check_multicall_32bit_clean(struct multicall_entry *multi)
     return true;
 }
 
-enum mc_disposition arch_do_multicall_call(struct mc_state *state)
+enum mc_disposition arch_do_multicall_call(struct mc_state *mcs)
 {
-    struct multicall_entry *multi = &state->call;
+    struct multicall_entry *multi = &mcs->call;
 
     if ( multi->op >= ARRAY_SIZE(hypercall_args) )
     {
@@ -1681,70 +1705,13 @@ void handle_ro_read_val(struct cpu_user_regs *regs,
 }
 
 /* Read only as read as zero */
-inline void handle_ro_raz(struct cpu_user_regs *regs,
-                          int regidx,
-                          bool read,
-                          const union hsr hsr,
-                          int min_el)
+void handle_ro_raz(struct cpu_user_regs *regs,
+                   int regidx,
+                   bool read,
+                   const union hsr hsr,
+                   int min_el)
 {
     handle_ro_read_val(regs, regidx, read, hsr, min_el, 0);
-}
-
-void dump_guest_s1_walk(struct domain *d, vaddr_t addr)
-{
-    register_t ttbcr = READ_SYSREG(TCR_EL1);
-    uint64_t ttbr0 = READ_SYSREG64(TTBR0_EL1);
-    uint32_t offset;
-    uint32_t *first = NULL, *second = NULL;
-    mfn_t mfn;
-
-    mfn = gfn_to_mfn(d, gaddr_to_gfn(ttbr0));
-
-    printk("dom%d VA 0x%08"PRIvaddr"\n", d->domain_id, addr);
-    printk("    TTBCR: 0x%"PRIregister"\n", ttbcr);
-    printk("    TTBR0: 0x%016"PRIx64" = 0x%"PRIpaddr"\n",
-           ttbr0, mfn_to_maddr(mfn));
-
-    if ( ttbcr & TTBCR_EAE )
-    {
-        printk("Cannot handle LPAE guest PT walk\n");
-        return;
-    }
-    if ( (ttbcr & TTBCR_N_MASK) != 0 )
-    {
-        printk("Cannot handle TTBR1 guest walks\n");
-        return;
-    }
-
-    if ( mfn_eq(mfn, INVALID_MFN) )
-    {
-        printk("Failed TTBR0 maddr lookup\n");
-        goto done;
-    }
-    first = map_domain_page(mfn);
-
-    offset = addr >> (12+8);
-    printk("1ST[0x%"PRIx32"] (0x%"PRIpaddr") = 0x%08"PRIx32"\n",
-           offset, mfn_to_maddr(mfn), first[offset]);
-    if ( !(first[offset] & 0x1) ||
-          (first[offset] & 0x2) )
-        goto done;
-
-    mfn = gfn_to_mfn(d, gaddr_to_gfn(first[offset]));
-
-    if ( mfn_eq(mfn, INVALID_MFN) )
-    {
-        printk("Failed L1 entry maddr lookup\n");
-        goto done;
-    }
-    second = map_domain_page(mfn);
-    offset = (addr >> 12) & 0x3FF;
-    printk("2ND[0x%"PRIx32"] (0x%"PRIpaddr") = 0x%08"PRIx32"\n",
-           offset, mfn_to_maddr(mfn), second[offset]);
-
-done:
-    if ( second ) unmap_domain_page(second);
-    if ( first ) unmap_domain_page(first);
 }
 
 /*
@@ -1796,9 +1763,12 @@ static inline bool hpfar_is_valid(bool s1ptw, uint8_t fsc)
 }
 
 /*
- * When using ACPI, most of the MMIO regions will be mapped on-demand
- * in stage-2 page tables for the hardware domain because Xen is not
- * able to know from the EFI memory map the MMIO regions.
+ * Try to map the MMIO regions for some special cases:
+ * 1. When using ACPI, most of the MMIO regions will be mapped on-demand
+ *    in stage-2 page tables for the hardware domain because Xen is not
+ *    able to know from the EFI memory map the MMIO regions.
+ * 2. For guests using GICv2, the GICv2 CPU interface mapping is created
+ *    on the first access of the MMIO region.
  */
 static bool try_map_mmio(gfn_t gfn)
 {
@@ -1806,6 +1776,16 @@ static bool try_map_mmio(gfn_t gfn)
 
     /* For the hardware domain, all MMIOs are mapped with GFN == MFN */
     mfn_t mfn = _mfn(gfn_x(gfn));
+
+    /*
+     * Map the GICv2 virtual CPU interface in the GIC CPU interface
+     * region of the guest on the first access of the MMIO region.
+     */
+    if ( d->arch.vgic.version == GIC_V2 &&
+         gfn_to_gaddr(gfn) >= d->arch.vgic.cbase &&
+         (gfn_to_gaddr(gfn) - d->arch.vgic.cbase) < d->arch.vgic.csize )
+        return !map_mmio_regions(d, gfn, d->arch.vgic.csize / PAGE_SIZE,
+                                 maddr_to_mfn(d->arch.vgic.vbase));
 
     /*
      * Device-Tree should already have everything mapped when building
@@ -1977,6 +1957,7 @@ static void do_trap_stage2_abort_guest(struct cpu_user_regs *regs,
         gprintk(XENLOG_WARNING,
                 "Unsupported FSC: HSR=%#"PRIregister" DFSC=%#x\n",
                 hsr.bits, xabt.fsc);
+        break;
     }
 
 inject_abt:
@@ -2002,7 +1983,7 @@ static inline bool needs_ssbd_flip(struct vcpu *v)
  * Actions that needs to be done after entering the hypervisor from the
  * guest and before the interrupts are unmasked.
  */
-void enter_hypervisor_from_guest_preirq(void)
+void asmlinkage enter_hypervisor_from_guest_preirq(void)
 {
     struct vcpu *v = current;
 
@@ -2016,7 +1997,7 @@ void enter_hypervisor_from_guest_preirq(void)
  * guest and before we handle any request. Depending on the exception trap,
  * this may be called with interrupts unmasked.
  */
-void enter_hypervisor_from_guest(void)
+void asmlinkage enter_hypervisor_from_guest(void)
 {
     struct vcpu *v = current;
 
@@ -2044,7 +2025,7 @@ void enter_hypervisor_from_guest(void)
     vgic_sync_from_lrs(v);
 }
 
-void do_trap_guest_sync(struct cpu_user_regs *regs)
+void asmlinkage do_trap_guest_sync(struct cpu_user_regs *regs)
 {
     const union hsr hsr = { .bits = regs->hsr };
 
@@ -2163,6 +2144,11 @@ void do_trap_guest_sync(struct cpu_user_regs *regs)
         perfc_incr(trap_sysreg);
         do_sysreg(regs, hsr);
         break;
+    case HSR_EC_SVE:
+        GUEST_BUG_ON(regs_mode_is_32bit(regs));
+        gprintk(XENLOG_WARNING, "Domain tried to use SVE while not allowed\n");
+        inject_undef_exception(regs, hsr);
+        break;
 #endif
 
     case HSR_EC_INSTR_ABORT_LOWER_EL:
@@ -2179,6 +2165,7 @@ void do_trap_guest_sync(struct cpu_user_regs *regs)
                 "Unknown Guest Trap. HSR=%#"PRIregister" EC=0x%x IL=%x Syndrome=0x%"PRIx32"\n",
                 hsr.bits, hsr.ec, hsr.len, hsr.iss);
         inject_undef_exception(regs, hsr);
+        break;
     }
 }
 
@@ -2191,6 +2178,11 @@ void do_trap_hyp_sync(struct cpu_user_regs *regs)
 #ifdef CONFIG_ARM_64
     case HSR_EC_BRK:
         do_trap_brk(regs, hsr);
+        break;
+    case HSR_EC_SVE:
+        /* An SVE exception is a bug somewhere in hypervisor code */
+        do_unexpected_trap("SVE trap at EL2", regs);
+        ASSERT_UNREACHABLE();
         break;
 #endif
     case HSR_EC_DATA_ABORT_CURR_EL:
@@ -2210,7 +2202,7 @@ void do_trap_hyp_sync(struct cpu_user_regs *regs)
             dump_hyp_walk(get_hfar(is_data));
 
         do_unexpected_trap(fault, regs);
-
+        ASSERT_UNREACHABLE();
         break;
     }
     default:
@@ -2230,12 +2222,12 @@ void do_trap_guest_serror(struct cpu_user_regs *regs)
     __do_trap_serror(regs, true);
 }
 
-void do_trap_irq(struct cpu_user_regs *regs)
+void asmlinkage do_trap_irq(struct cpu_user_regs *regs)
 {
     gic_interrupt(regs, 0);
 }
 
-void do_trap_fiq(struct cpu_user_regs *regs)
+void asmlinkage do_trap_fiq(struct cpu_user_regs *regs)
 {
     gic_interrupt(regs, 1);
 }
@@ -2308,7 +2300,7 @@ static bool check_for_vcpu_work(void)
  *
  * The function will return with IRQ masked.
  */
-void leave_hypervisor_to_guest(void)
+void asmlinkage leave_hypervisor_to_guest(void)
 {
     local_irq_disable();
 

@@ -1,19 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * io.h: HVM IO support
  *
  * Copyright (c) 2004, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef __ASM_X86_HVM_IO_H__
@@ -57,23 +46,21 @@ struct hvm_io_handler {
     uint8_t type;
 };
 
-typedef int (*hvm_io_read_t)(const struct hvm_io_handler *,
+typedef int (*hvm_io_read_t)(const struct hvm_io_handler *handler,
                              uint64_t addr,
                              uint32_t size,
                              uint64_t *data);
-typedef int (*hvm_io_write_t)(const struct hvm_io_handler *,
+typedef int (*hvm_io_write_t)(const struct hvm_io_handler *handler,
                               uint64_t addr,
                               uint32_t size,
                               uint64_t data);
-typedef bool_t (*hvm_io_accept_t)(const struct hvm_io_handler *,
-                                  const ioreq_t *p);
-typedef void (*hvm_io_complete_t)(const struct hvm_io_handler *);
+typedef bool (*hvm_io_accept_t)(const struct hvm_io_handler *handler,
+                                const ioreq_t *p);
 
 struct hvm_io_ops {
     hvm_io_accept_t   accept;
     hvm_io_read_t     read;
     hvm_io_write_t    write;
-    hvm_io_complete_t complete;
 };
 
 int hvm_process_io_intercept(const struct hvm_io_handler *handler,
@@ -83,7 +70,7 @@ int hvm_io_intercept(ioreq_t *p);
 
 struct hvm_io_handler *hvm_next_io_handler(struct domain *d);
 
-bool_t hvm_mmio_internal(paddr_t gpa);
+bool hvm_mmio_internal(paddr_t gpa);
 
 void register_mmio_handler(struct domain *d,
                            const struct hvm_mmio_ops *ops);
@@ -98,11 +85,11 @@ bool relocate_portio_handler(
 
 void send_timeoffset_req(unsigned long timeoff);
 bool handle_mmio_with_translation(unsigned long gla, unsigned long gpfn,
-                                  struct npfec);
+                                  struct npfec access);
 bool handle_pio(uint16_t port, unsigned int size, int dir);
 void hvm_interrupt_post(struct vcpu *v, int vector, int type);
-void hvm_dpci_eoi(struct domain *d, unsigned int guest_irq);
-void msix_write_completion(struct vcpu *);
+void hvm_dpci_eoi(struct domain *d, unsigned int guest_gsi);
+void msix_write_completion(struct vcpu *v);
 
 #ifdef CONFIG_HVM
 void msixtbl_init(struct domain *d);
@@ -121,26 +108,7 @@ struct vpci_arch_msix_entry {
     int pirq;
 };
 
-enum stdvga_cache_state {
-    STDVGA_CACHE_UNINITIALIZED,
-    STDVGA_CACHE_ENABLED,
-    STDVGA_CACHE_DISABLED
-};
-
-struct hvm_hw_stdvga {
-    uint8_t sr_index;
-    uint8_t sr[8];
-    uint8_t gr_index;
-    uint8_t gr[9];
-    bool_t stdvga;
-    enum stdvga_cache_state cache;
-    uint32_t latch;
-    struct page_info *vram_page[64];  /* shadow of 0xa0000-0xaffff */
-    spinlock_t lock;
-};
-
 void stdvga_init(struct domain *d);
-void stdvga_deinit(struct domain *d);
 
 extern void hvm_dpci_msi_eoi(struct domain *d, int vector);
 
@@ -164,8 +132,8 @@ int register_vpci_mmcfg_handler(struct domain *d, paddr_t addr,
 /* Destroy tracked MMCFG areas. */
 void destroy_vpci_mmcfg(struct domain *d);
 
-/* Check if an address is between a MMCFG region for a domain. */
-bool vpci_is_mmcfg_address(const struct domain *d, paddr_t addr);
+/* Remove MMCFG regions from a domain ->iomem_caps. */
+int vpci_mmcfg_deny_access(struct domain *d);
 
 #endif /* __ASM_X86_HVM_IO_H__ */
 

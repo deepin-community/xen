@@ -1,24 +1,17 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * xen/arch/arm/smpboot.c
  *
  * Dummy smpboot support
  *
  * Copyright (c) 2011 Citrix Systems.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
+#include <xen/acpi.h>
 #include <xen/cpu.h>
 #include <xen/cpumask.h>
 #include <xen/delay.h>
+#include <xen/device_tree.h>
 #include <xen/domain_page.h>
 #include <xen/errno.h>
 #include <xen/init.h>
@@ -36,6 +29,11 @@
 #include <asm/procinfo.h>
 #include <asm/psci.h>
 #include <asm/acpi.h>
+#include <asm/tee/tee.h>
+
+/* Override macros from asm/page.h to make them work with mfn_t */
+#undef virt_to_mfn
+#define virt_to_mfn(va) _mfn(__virt_to_mfn(va))
 
 cpumask_t cpu_online_map;
 cpumask_t cpu_present_map;
@@ -50,7 +48,7 @@ integer_param("maxcpus", max_cpus);
 /* CPU logical map: map xen cpuid to an MPIDR */
 register_t __cpu_logical_map[NR_CPUS] = { [0 ... NR_CPUS-1] = MPIDR_INVALID };
 
-/* Fake one node for now. See also asm/numa.h */
+/* Fake one node for now. See also xen/numa.h */
 nodemask_t __read_mostly node_online_map = { { [0] = 1UL } };
 
 /* Xen stack for bringing up the first CPU. */
@@ -64,13 +62,17 @@ struct init_info init_data =
 };
 
 /* Shared state for coordinating CPU bringup */
-unsigned long smp_up_cpu = MPIDR_INVALID;
+unsigned long __section(".data.idmap") smp_up_cpu = MPIDR_INVALID;
 /* Shared state for coordinating CPU teardown */
 static bool cpu_is_dead;
 
 /* ID of the PCPU we're running on */
 DEFINE_PER_CPU(unsigned int, cpu_id);
-/* XXX these seem awfully x86ish... */
+/*
+ * Although multithread is part of the Arm spec, there are not many
+ * processors supporting multithread and current Xen on Arm assumes there
+ * is no multithread.
+ */
 /* representing HT siblings of each logical CPU */
 DEFINE_PER_CPU_READ_MOSTLY(cpumask_var_t, cpu_sibling_mask);
 /* representing HT and core siblings of each logical CPU */
@@ -89,9 +91,13 @@ static int setup_cpu_sibling_map(int cpu)
          !zalloc_cpumask_var(&per_cpu(cpu_core_mask, cpu)) )
         return -ENOMEM;
 
-    /* A CPU is a sibling with itself and is always on its own core. */
+    /*
+     * Currently we assume there is no multithread and NUMA, so
+     * a CPU is a sibling with itself, and the all possible CPUs
+     * are supposed to belong to the same socket (NUMA node).
+     */
     cpumask_set_cpu(cpu, per_cpu(cpu_sibling_mask, cpu));
-    cpumask_set_cpu(cpu, per_cpu(cpu_core_mask, cpu));
+    cpumask_copy(per_cpu(cpu_core_mask, cpu), &cpu_possible_map);
 
     return 0;
 }
@@ -168,7 +174,7 @@ static void __init dt_smp_init_cpus(void)
             continue;
         }
 
-        addr = dt_read_number(prop, dt_n_addr_cells(cpu));
+        addr = dt_read_paddr(prop, dt_n_addr_cells(cpu));
 
         hwid = addr;
         if ( hwid != addr )
@@ -281,6 +287,10 @@ void __init smp_init_cpus(void)
         warning_add("WARNING: HMP COMPUTING HAS BEEN ENABLED.\n"
                     "It has implications on the security and stability of the system,\n"
                     "unless the cpu affinity of all domains is specified.\n");
+
+    if ( system_cpuinfo.mpidr.mt == 1 )
+        warning_add("WARNING: MULTITHREADING HAS BEEN DETECTED ON THE PROCESSOR.\n"
+                    "It might impact the security of the system.\n");
 }
 
 unsigned int __init smp_get_max_cpus(void)
@@ -311,7 +321,7 @@ smp_prepare_cpus(void)
 }
 
 /* Boot the current CPU */
-void start_secondary(void)
+void asmlinkage start_secondary(void)
 {
     unsigned int cpuid = init_data.cpuid;
 
@@ -368,8 +378,6 @@ void start_secondary(void)
      */
     update_system_features(&current_cpu_data);
 
-    mmu_init_secondary_cpu();
-
     gic_init_secondary_cpu();
 
     set_current(idle_vcpu[cpuid]);
@@ -394,6 +402,7 @@ void start_secondary(void)
      */
     init_maintenance_interrupt();
     init_timer_interrupt();
+    init_tee_secondary();
 
     local_abort_enable();
 
@@ -408,7 +417,7 @@ void start_secondary(void)
 /* Shut down the current CPU */
 void __cpu_disable(void)
 {
-    unsigned int cpu = get_processor_id();
+    unsigned int cpu = smp_processor_id();
 
     local_irq_disable();
     gic_disable_cpu();
@@ -439,6 +448,28 @@ void stop_cpu(void)
         wfi();
 }
 
+static void set_smp_up_cpu(unsigned long mpidr)
+{
+    /*
+     * smp_up_cpu is part of the identity mapping which is read-only. So
+     * We need to re-map the region so it can be updated.
+     */
+    void *ptr = map_domain_page(virt_to_mfn(&smp_up_cpu));
+
+    ptr += PAGE_OFFSET(&smp_up_cpu);
+
+    *(unsigned long *)ptr = mpidr;
+
+    /*
+     * smp_up_cpu will be accessed with the MMU off, so ensure the update
+     * is visible by cleaning the cache.
+     */
+    clean_dcache_va_range(ptr, sizeof(unsigned long));
+
+    unmap_domain_page(ptr);
+
+}
+
 int __init cpu_up_send_sgi(int cpu)
 {
     /* We don't know the GIC ID of the CPU until it has woken up, so just
@@ -457,7 +488,7 @@ int __cpu_up(unsigned int cpu)
 
     printk("Bringing up CPU%d\n", cpu);
 
-    rc = init_secondary_pagetables(cpu);
+    rc = prepare_secondary_mm(cpu);
     if ( rc < 0 )
         return rc;
 
@@ -470,8 +501,7 @@ int __cpu_up(unsigned int cpu)
     init_data.cpuid = cpu;
 
     /* Open the gate for this CPU */
-    smp_up_cpu = cpu_logical_map(cpu);
-    clean_dcache(smp_up_cpu);
+    set_smp_up_cpu(cpu_logical_map(cpu));
 
     rc = arch_cpu_up(cpu);
 
@@ -507,8 +537,10 @@ int __cpu_up(unsigned int cpu)
      */
     init_data.stack = NULL;
     init_data.cpuid = ~0;
-    smp_up_cpu = MPIDR_INVALID;
-    clean_dcache(smp_up_cpu);
+
+    set_smp_up_cpu(MPIDR_INVALID);
+
+    arch_cpu_up_finish();
 
     if ( !cpu_online(cpu) )
     {
@@ -562,7 +594,7 @@ static int cpu_smpboot_callback(struct notifier_block *nfb,
         break;
     }
 
-    return !rc ? NOTIFY_DONE : notifier_from_errno(rc);
+    return notifier_from_errno(rc);
 }
 
 static struct notifier_block cpu_smpboot_nfb = {

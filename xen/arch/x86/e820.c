@@ -27,7 +27,7 @@ static unsigned long long __initdata opt_availmem;
 size_param("availmem", opt_availmem);
 
 /* opt_nomtrr_check: Don't clip ram to highest cacheable MTRR. */
-static s8 __initdata e820_mtrr_clip = -1;
+static int8_t __initdata e820_mtrr_clip = -1;
 boolean_param("e820-mtrr-clip", e820_mtrr_clip);
 
 /* opt_e820_verbose: Be verbose about clipping, the original e820, &c */
@@ -363,7 +363,7 @@ static unsigned long __init find_max_pfn(void)
     return max_pfn;
 }
 
-static void __init clip_to_limit(uint64_t limit, char *warnmsg)
+static void __init clip_to_limit(uint64_t limit, const char *warnmsg)
 {
     unsigned int i;
     char _warnmsg[160];
@@ -450,7 +450,7 @@ static uint64_t __init mtrr_top_of_ram(void)
 
     /* paddr_bits must have been set at this point */
     ASSERT(paddr_bits);
-    addr_mask = ((1ull << paddr_bits) - 1) & PAGE_MASK;
+    addr_mask = ((1ULL << paddr_bits) - 1) & PAGE_MASK;
 
     rdmsrl(MSR_MTRRcap, mtrr_cap);
     rdmsrl(MSR_MTRRdefType, mtrr_def);
@@ -459,7 +459,7 @@ static uint64_t __init mtrr_top_of_ram(void)
         printk(" MTRR cap: %"PRIx64" type: %"PRIx64"\n", mtrr_cap, mtrr_def);
 
     /* MTRRs enabled, and default memory type is not writeback? */
-    if ( !test_bit(11, &mtrr_def) || ((uint8_t)mtrr_def == MTRR_TYPE_WRBACK) )
+    if ( !test_bit(11, &mtrr_def) || ((uint8_t)mtrr_def == X86_MT_WB) )
         return 0;
 
     /*
@@ -476,7 +476,7 @@ static uint64_t __init mtrr_top_of_ram(void)
             printk(" MTRR[%d]: base %"PRIx64" mask %"PRIx64"\n",
                    i, base, mask);
 
-        if ( !test_bit(11, &mask) || ((uint8_t)base != MTRR_TYPE_WRBACK) )
+        if ( !test_bit(11, &mask) || ((uint8_t)base != X86_MT_WB) )
             continue;
         base &= addr_mask;
         mask &= addr_mask;
@@ -543,27 +543,27 @@ static void __init machine_specific_memory_setup(struct e820map *raw)
         clip_to_limit(top_of_ram, "MTRRs do not cover all of memory.");
 }
 
-/* This function relies on the passed in e820->map[] being sorted. */
-int __init e820_add_range(
-    struct e820map *e820, uint64_t s, uint64_t e, uint32_t type)
+/* This function relies on the global e820->map[] being sorted. */
+int __init e820_add_range(uint64_t s, uint64_t e, uint32_t type)
 {
     unsigned int i;
+    struct e820entry *ei = e820.map;
 
-    for ( i = 0; i < e820->nr_map; ++i )
+    for ( i = 0; i < e820.nr_map; ++i )
     {
-        uint64_t rs = e820->map[i].addr;
-        uint64_t re = rs + e820->map[i].size;
+        uint64_t rs = ei[i].addr;
+        uint64_t re = rs + ei[i].size;
 
-        if ( rs == e && e820->map[i].type == type )
+        if ( rs == e && ei[i].type == type )
         {
-            e820->map[i].addr = s;
+            ei[i].addr = s;
             return 1;
         }
 
-        if ( re == s && e820->map[i].type == type &&
-             (i + 1 == e820->nr_map || e820->map[i + 1].addr >= e) )
+        if ( re == s && ei[i].type == type &&
+             (i + 1 == e820.nr_map || ei[i + 1].addr >= e) )
         {
-            e820->map[i].size += e - s;
+            ei[i].size += e - s;
             return 1;
         }
 
@@ -574,98 +574,98 @@ int __init e820_add_range(
             return 0;
     }
 
-    if ( e820->nr_map >= ARRAY_SIZE(e820->map) )
+    if ( e820.nr_map >= ARRAY_SIZE(e820.map) )
     {
         printk(XENLOG_WARNING "E820: overflow while adding region"
                " %"PRIx64"-%"PRIx64"\n", s, e);
         return 0;
     }
 
-    memmove(e820->map + i + 1, e820->map + i,
-            (e820->nr_map - i) * sizeof(*e820->map));
+    memmove(ei + i + 1, ei + i,
+            (e820.nr_map - i) * sizeof(*e820.map));
 
-    e820->nr_map++;
-    e820->map[i].addr = s;
-    e820->map[i].size = e - s;
-    e820->map[i].type = type;
+    e820.nr_map++;
+    ei[i].addr = s;
+    ei[i].size = e - s;
+    ei[i].type = type;
 
     return 1;
 }
 
 int __init e820_change_range_type(
-    struct e820map *e820, uint64_t s, uint64_t e,
+    struct e820map *map, uint64_t s, uint64_t e,
     uint32_t orig_type, uint32_t new_type)
 {
     uint64_t rs = 0, re = 0;
     unsigned int i;
 
-    for ( i = 0; i < e820->nr_map; i++ )
+    for ( i = 0; i < map->nr_map; i++ )
     {
         /* Have we found the e820 region that includes the specified range? */
-        rs = e820->map[i].addr;
-        re = rs + e820->map[i].size;
+        rs = map->map[i].addr;
+        re = rs + map->map[i].size;
         if ( (s >= rs) && (e <= re) )
             break;
     }
 
-    if ( (i == e820->nr_map) || (e820->map[i].type != orig_type) )
+    if ( (i == map->nr_map) || (map->map[i].type != orig_type) )
         return 0;
 
     if ( (s == rs) && (e == re) )
     {
-        e820->map[i].type = new_type;
+        map->map[i].type = new_type;
     }
     else if ( (s == rs) || (e == re) )
     {
-        if ( (e820->nr_map + 1) > ARRAY_SIZE(e820->map) )
+        if ( (map->nr_map + 1) > ARRAY_SIZE(map->map) )
             goto overflow;
 
-        memmove(&e820->map[i+1], &e820->map[i],
-                (e820->nr_map-i) * sizeof(e820->map[0]));
-        e820->nr_map++;
+        memmove(&map->map[i+1], &map->map[i],
+                (map->nr_map-i) * sizeof(map->map[0]));
+        map->nr_map++;
 
         if ( s == rs )
         {
-            e820->map[i].size = e - s;
-            e820->map[i].type = new_type;
-            e820->map[i+1].addr = e;
-            e820->map[i+1].size = re - e;
+            map->map[i].size = e - s;
+            map->map[i].type = new_type;
+            map->map[i+1].addr = e;
+            map->map[i+1].size = re - e;
         }
         else
         {
-            e820->map[i].size = s - rs;
-            e820->map[i+1].addr = s;
-            e820->map[i+1].size = e - s;
-            e820->map[i+1].type = new_type;
+            map->map[i].size = s - rs;
+            map->map[i+1].addr = s;
+            map->map[i+1].size = e - s;
+            map->map[i+1].type = new_type;
         }
     }
     else
     {
-        if ( (e820->nr_map + 2) > ARRAY_SIZE(e820->map) )
+        if ( (map->nr_map + 2) > ARRAY_SIZE(map->map) )
             goto overflow;
 
-        memmove(&e820->map[i+2], &e820->map[i],
-                (e820->nr_map-i) * sizeof(e820->map[0]));
-        e820->nr_map += 2;
+        memmove(&map->map[i+2], &map->map[i],
+                (map->nr_map-i) * sizeof(map->map[0]));
+        map->nr_map += 2;
 
-        e820->map[i].size = s - rs;
-        e820->map[i+1].addr = s;
-        e820->map[i+1].size = e - s;
-        e820->map[i+1].type = new_type;
-        e820->map[i+2].addr = e;
-        e820->map[i+2].size = re - e;
+        map->map[i].size = s - rs;
+        map->map[i+1].addr = s;
+        map->map[i+1].size = e - s;
+        map->map[i+1].type = new_type;
+        map->map[i+2].addr = e;
+        map->map[i+2].size = re - e;
     }
 
     /* Finally, look for any opportunities to merge adjacent e820 entries. */
-    for ( i = 0; i < (e820->nr_map - 1); i++ )
+    for ( i = 0; i < (map->nr_map - 1); i++ )
     {
-        if ( (e820->map[i].type != e820->map[i+1].type) ||
-             ((e820->map[i].addr + e820->map[i].size) != e820->map[i+1].addr) )
+        if ( (map->map[i].type != map->map[i+1].type) ||
+             ((map->map[i].addr + map->map[i].size) != map->map[i+1].addr) )
             continue;
-        e820->map[i].size += e820->map[i+1].size;
-        memmove(&e820->map[i+1], &e820->map[i+2],
-                (e820->nr_map-i-2) * sizeof(e820->map[0]));
-        e820->nr_map--;
+        map->map[i].size += map->map[i+1].size;
+        memmove(&map->map[i+1], &map->map[i+2],
+                (map->nr_map-i-2) * sizeof(map->map[0]));
+        map->nr_map--;
         i--;
     }
 
@@ -678,9 +678,9 @@ int __init e820_change_range_type(
 }
 
 /* Set E820_RAM area (@s,@e) as RESERVED in specified e820 map. */
-int __init reserve_e820_ram(struct e820map *e820, uint64_t s, uint64_t e)
+int __init reserve_e820_ram(struct e820map *map, uint64_t s, uint64_t e)
 {
-    return e820_change_range_type(e820, s, e, E820_RAM, E820_RESERVED);
+    return e820_change_range_type(map, s, e, E820_RAM, E820_RESERVED);
 }
 
 unsigned long __init init_e820(const char *str, struct e820map *raw)
@@ -694,7 +694,7 @@ unsigned long __init init_e820(const char *str, struct e820map *raw)
     machine_specific_memory_setup(raw);
 
     if ( cpu_has_hypervisor )
-        hypervisor_e820_fixup(&e820);
+        hypervisor_e820_fixup();
 
     printk("%s RAM map:\n", str);
     print_e820_memory_map(e820.map, e820.nr_map);

@@ -10,6 +10,7 @@
  * @author Graydon Hoare
  */
 
+#include <xen/sched.h>
 #include <xen/types.h>
 #include <asm/msr.h>
 #include <asm/io.h>
@@ -18,7 +19,6 @@
 #include <xen/xenoprof.h>
 #include <asm/regs.h>
 #include <asm/current.h>
-#include <asm/hvm/support.h>
 #include <xen/pci_regs.h>
 #include <xen/pci_ids.h>
 
@@ -157,7 +157,7 @@ static inline u64 op_amd_randomize_ibs_op(u64 val)
          * IbsOpMaxCnt must fit in the range from 0x0081 to
          * 0xff80.
          */
-        val += (s8)(random >> 4);
+        val += (int8_t)(random >> 4);
     else
         val |= (u64)(random & IBS_RANDOM_MASK) << 32;
 
@@ -320,7 +320,7 @@ static int cf_check athlon_check_ctrs(
 	struct vcpu *v = current;
 	unsigned int const nr_ctrs = model->num_counters;
 
-#if CONFIG_HVM
+#ifdef CONFIG_AMD_SVM
 	struct cpu_user_regs *guest_regs = guest_cpu_user_regs();
 
 	if (!guest_mode(regs) &&

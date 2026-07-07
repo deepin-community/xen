@@ -14,6 +14,8 @@
 #include <asm/e820.h>
 #include <asm/tboot.h>
 #include <asm/setup.h>
+#include <asm/trampoline.h>
+
 #include <crypto/vmac.h>
 
 /* tboot=<physical address of shared page> */
@@ -30,6 +32,8 @@ static vmac_t frametable_mac; /* MAC for frame table during S3 */
 /* used by tboot_protect_mem_regions() and/or tboot_parse_dmar_table() */
 static uint64_t __initdata txt_heap_base, __initdata txt_heap_size;
 static uint64_t __initdata sinit_base, __initdata sinit_size;
+
+static bool __ro_after_init is_vtd;
 
 /*
  * TXT configuration registers (offsets from TXT_{PUB, PRIV}_CONFIG_REGS_BASE)
@@ -177,29 +181,17 @@ static void update_iommu_mac(vmac_ctx_t *ctx, uint64_t pt_maddr, int level)
 #define is_page_in_use(page) \
     (page_state_is(page, inuse) || page_state_is(page, offlining))
 
-static void update_pagetable_mac(vmac_ctx_t *ctx)
+/* Wipe ctx to ensure key is not left in memory. */
+static void wipe_ctx(vmac_ctx_t *ctx)
 {
-    unsigned long mfn;
-
-    for ( mfn = 0; mfn < max_page; mfn++ )
-    {
-        struct page_info *page = mfn_to_page(_mfn(mfn));
-
-        if ( !mfn_valid(_mfn(mfn)) )
-            continue;
-        if ( is_page_in_use(page) && !is_special_page(page) )
-        {
-            if ( page->count_info & PGC_page_table )
-            {
-                void *pg = map_domain_page(_mfn(mfn));
-
-                vmac_update(pg, PAGE_SIZE, ctx);
-                unmap_domain_page(pg);
-            }
-        }
-    }
+    memset(ctx, 0, sizeof(*ctx));
+    /*
+     * Make sure the compiler won't optimize out the memset(), for the local
+     * variable (at the call sites) going out of scope right afterwards.
+     */
+    asm volatile ( "" :: "m" (*ctx) );
 }
- 
+
 static void tboot_gen_domain_integrity(const uint8_t key[TB_KEY_SIZE],
                                        vmac_t *mac)
 {
@@ -215,16 +207,16 @@ static void tboot_gen_domain_integrity(const uint8_t key[TB_KEY_SIZE],
             continue;
         printk("MACing Domain %u\n", d->domain_id);
 
-        spin_lock(&d->page_alloc_lock);
+        nrspin_lock(&d->page_alloc_lock);
         page_list_for_each(page, &d->page_list)
         {
             void *pg = __map_domain_page(page);
             vmac_update(pg, PAGE_SIZE, &ctx);
             unmap_domain_page(pg);
         }
-        spin_unlock(&d->page_alloc_lock);
+        nrspin_unlock(&d->page_alloc_lock);
 
-        if ( !is_idle_domain(d) )
+        if ( is_iommu_enabled(d) && is_vtd )
         {
             const struct domain_iommu *dio = dom_iommu(d);
 
@@ -233,36 +225,11 @@ static void tboot_gen_domain_integrity(const uint8_t key[TB_KEY_SIZE],
         }
     }
 
-    /* MAC all shadow page tables */
-    update_pagetable_mac(&ctx);
+    /* TODO: MAC all shadow / HAP page tables */
 
     *mac = vmac(NULL, 0, nonce, NULL, &ctx);
 
-    /* wipe ctx to ensure key is not left in memory */
-    memset(&ctx, 0, sizeof(ctx));
-}
-
-/*
- * For stack overflow detection in debug build, a guard page is set up.
- * This fn is used to detect whether a page is in the guarded pages for
- * the above reason.
- */
-static int mfn_in_guarded_stack(unsigned long mfn)
-{
-    void *p;
-    int i;
-
-    for ( i = 0; i < nr_cpu_ids; i++ )
-    {
-        if ( !stack_base[i] )
-            continue;
-        p = (void *)((unsigned long)stack_base[i] + STACK_SIZE -
-                     PRIMARY_STACK_SIZE - PAGE_SIZE);
-        if ( mfn == virt_to_mfn(p) )
-            return -1;
-    }
-
-    return 0;
+    wipe_ctx(&ctx);
 }
 
 static void tboot_gen_xenheap_integrity(const uint8_t key[TB_KEY_SIZE],
@@ -288,20 +255,11 @@ static void tboot_gen_xenheap_integrity(const uint8_t key[TB_KEY_SIZE],
             continue; /* skip tboot and its page tables */
 
         if ( is_page_in_use(page) && is_special_page(page) )
-        {
-            void *pg;
-
-            if ( mfn_in_guarded_stack(mfn) )
-                continue; /* skip guard stack, see memguard_guard_stack() in mm.c */
-
-            pg = mfn_to_virt(mfn);
-            vmac_update((uint8_t *)pg, PAGE_SIZE, &ctx);
-        }
+            vmac_update(mfn_to_virt(mfn), PAGE_SIZE, &ctx);
     }
     *mac = vmac(NULL, 0, nonce, NULL, &ctx);
 
-    /* wipe ctx to ensure key is not left in memory */
-    memset(&ctx, 0, sizeof(ctx));
+    wipe_ctx(&ctx);
 }
 
 static void tboot_gen_frametable_integrity(const uint8_t key[TB_KEY_SIZE],
@@ -329,8 +287,7 @@ static void tboot_gen_frametable_integrity(const uint8_t key[TB_KEY_SIZE],
 
     *mac = vmac(NULL, 0, nonce, NULL, &ctx);
 
-    /* wipe ctx to ensure key is not left in memory */
-    memset(&ctx, 0, sizeof(ctx));
+    wipe_ctx(&ctx);
 }
 
 void tboot_shutdown(uint32_t shutdown_type)
@@ -366,7 +323,7 @@ void tboot_shutdown(uint32_t shutdown_type)
 
         /*
          * Xen regions for tboot to MAC. This needs to remain in sync with
-         * xen_in_range().
+         * remove_xen_ranges().
          */
         g_tboot_shared->num_mac_regions = 3;
         /* S3 resume code (and other real mode trampoline code) */
@@ -477,6 +434,8 @@ int __init cf_check tboot_parse_dmar_table(acpi_table_handler dmar_handler)
 
     if ( txt_heap_base == 0 )
         return 1;
+
+    is_vtd = true;
 
     /* walk heap to SinitMleData */
     pa = txt_heap_base;

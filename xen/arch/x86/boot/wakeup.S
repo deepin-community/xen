@@ -1,5 +1,12 @@
         .code16
 
+/*
+ * The first page of trampoline is permanent, the rest boot-time only.  Reuse
+ * the boot logic in the first trampoline page as the stack for S3 wakeup.
+ */
+        .equ    wakeup_stack, trampoline_start + PAGE_SIZE
+        .local  wakeup_stack
+
 #define wakesym(sym) (sym - wakeup_start)
 
 /*
@@ -77,8 +84,11 @@ check_vesaw:
         ret
 
 bogus_real_magic:
+        movw    $0xb800, %ax
+        movw    %ax, %fs
+1:
         movw    $0x0e00 + 'B', %fs:(0x12)
-        jmp     bogus_real_magic
+        jmp     1b
 
         .align 4
 real_magic:     .long 0x12345678
@@ -153,15 +163,13 @@ wakeup_32:
         /* Now in compatibility mode. Long-jump to 64-bit mode */
         ljmp    $BOOT_CS64, $bootsym_rel(wakeup_64,6)
 
+FUNC_LOCAL(bogus_saved_magic, 0)
+        movw    $0x0e00 + 'S', 0xb8014
+        jmp     bogus_saved_magic
+END(bogus_saved_magic)
+
         .code64
 wakeup_64:
         /* Jump to high mappings and the higher-level wakeup code. */
         movabs  $s3_resume, %rbx
         jmp     *%rbx
-
-bogus_saved_magic:
-        movw    $0x0e00 + 'S', 0xb8014
-        jmp     bogus_saved_magic
-
-/* Stack for wakeup: rest of first trampoline page. */
-ENTRY(wakeup_stack_start)

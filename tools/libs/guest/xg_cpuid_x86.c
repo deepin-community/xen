@@ -24,7 +24,7 @@
 #include <limits.h>
 #include "xg_private.h"
 #include <xen/hvm/params.h>
-#include <xen-tools/libs.h>
+#include <xen-tools/common-macros.h>
 
 enum {
 #define XEN_CPUFEATURE(name, value) X86_FEATURE_##name = value,
@@ -38,7 +38,7 @@ enum {
 
 int xc_get_cpu_levelling_caps(xc_interface *xch, uint32_t *caps)
 {
-    DECLARE_SYSCTL;
+    struct xen_sysctl sysctl = {};
     int ret;
 
     sysctl.cmd = XEN_SYSCTL_get_cpu_levelling_caps;
@@ -53,7 +53,7 @@ int xc_get_cpu_levelling_caps(xc_interface *xch, uint32_t *caps)
 int xc_get_cpu_featureset(xc_interface *xch, uint32_t index,
                           uint32_t *nr_features, uint32_t *featureset)
 {
-    DECLARE_SYSCTL;
+    struct xen_sysctl sysctl = {};
     DECLARE_HYPERCALL_BOUNCE(featureset,
                              *nr_features * sizeof(*featureset),
                              XC_HYPERCALL_BUFFER_BOUNCE_OUT);
@@ -167,7 +167,7 @@ static int get_domain_cpu_policy(xc_interface *xch, uint32_t domid,
                                  uint32_t *nr_leaves, xen_cpuid_leaf_t *leaves,
                                  uint32_t *nr_msrs, xen_msr_entry_t *msrs)
 {
-    DECLARE_DOMCTL;
+    struct xen_domctl domctl = {};
     DECLARE_HYPERCALL_BOUNCE(leaves,
                              *nr_leaves * sizeof(*leaves),
                              XC_HYPERCALL_BUFFER_BOUNCE_OUT);
@@ -207,7 +207,7 @@ int xc_set_domain_cpu_policy(xc_interface *xch, uint32_t domid,
                              uint32_t *err_leaf_p, uint32_t *err_subleaf_p,
                              uint32_t *err_msr_p)
 {
-    DECLARE_DOMCTL;
+    struct xen_domctl domctl = {};
     DECLARE_HYPERCALL_BOUNCE(leaves,
                              nr_leaves * sizeof(*leaves),
                              XC_HYPERCALL_BUFFER_BOUNCE_IN);
@@ -273,7 +273,8 @@ static int xc_cpuid_xend_policy(
     xc_interface *xch, uint32_t domid, const struct xc_xend_cpuid *xend)
 {
     int rc;
-    xc_dominfo_t di;
+    bool hvm;
+    xc_domaininfo_t di;
     unsigned int nr_leaves, nr_msrs;
     uint32_t err_leaf = -1, err_subleaf = -1, err_msr = -1;
     /*
@@ -283,13 +284,13 @@ static int xc_cpuid_xend_policy(
     xen_cpuid_leaf_t *host = NULL, *def = NULL, *cur = NULL;
     unsigned int nr_host, nr_def, nr_cur;
 
-    if ( xc_domain_getinfo(xch, domid, 1, &di) != 1 ||
-         di.domid != domid )
+    if ( (rc = xc_domain_getinfo_single(xch, domid, &di)) < 0 )
     {
-        ERROR("Failed to obtain d%d info", domid);
-        rc = -ESRCH;
+        PERROR("Failed to obtain d%d info", domid);
+        rc = -errno;
         goto fail;
     }
+    hvm = di.flags & XEN_DOMINF_hvm_guest;
 
     rc = xc_cpu_policy_get_size(xch, &nr_leaves, &nr_msrs);
     if ( rc )
@@ -322,12 +323,12 @@ static int xc_cpuid_xend_policy(
     /* Get the domain type's default policy. */
     nr_msrs = 0;
     nr_def = nr_leaves;
-    rc = get_system_cpu_policy(xch, di.hvm ? XEN_SYSCTL_cpu_policy_hvm_default
-                                           : XEN_SYSCTL_cpu_policy_pv_default,
+    rc = get_system_cpu_policy(xch, hvm ? XEN_SYSCTL_cpu_policy_hvm_default
+                                        : XEN_SYSCTL_cpu_policy_pv_default,
                                &nr_def, def, &nr_msrs, NULL);
     if ( rc )
     {
-        PERROR("Failed to obtain %s def policy", di.hvm ? "hvm" : "pv");
+        PERROR("Failed to obtain %s def policy", hvm ? "hvm" : "pv");
         rc = -errno;
         goto fail;
     }
@@ -440,7 +441,7 @@ static int xc_msr_policy(xc_interface *xch, domid_t domid,
 {
     int rc;
     bool hvm;
-    xc_dominfo_t di;
+    xc_domaininfo_t di;
     unsigned int nr_leaves, nr_msrs;
     uint32_t err_leaf = -1, err_subleaf = -1, err_msr = -1;
     /*
@@ -450,14 +451,13 @@ static int xc_msr_policy(xc_interface *xch, domid_t domid,
     xen_msr_entry_t *host = NULL, *def = NULL, *cur = NULL;
     unsigned int nr_host, nr_def, nr_cur;
 
-    if ( xc_domain_getinfo(xch, domid, 1, &di) != 1 ||
-         di.domid != domid )
+    if ( (rc = xc_domain_getinfo_single(xch, domid, &di)) < 0 )
     {
-        ERROR("Failed to obtain d%d info", domid);
-        rc = -ESRCH;
+        PERROR("Failed to obtain d%d info", domid);
+        rc = -errno;
         goto out;
     }
-    hvm = di.hvm;
+    hvm = di.flags & XEN_DOMINF_hvm_guest;
 
     rc = xc_cpu_policy_get_size(xch, &nr_leaves, &nr_msrs);
     if ( rc )
@@ -581,64 +581,48 @@ int xc_cpuid_apply_policy(xc_interface *xch, uint32_t domid, bool restore,
                           const struct xc_msr *msr)
 {
     int rc;
-    xc_dominfo_t di;
-    unsigned int i, nr_leaves, nr_msrs;
-    xen_cpuid_leaf_t *leaves = NULL;
-    struct cpu_policy *p = NULL;
+    bool hvm;
+    xc_domaininfo_t di;
+    struct xc_cpu_policy *p = xc_cpu_policy_init();
+    unsigned int i, nr_leaves = ARRAY_SIZE(p->leaves), nr_msrs = 0;
     uint32_t err_leaf = -1, err_subleaf = -1, err_msr = -1;
     uint32_t host_featureset[FEATURESET_NR_ENTRIES] = {};
     uint32_t len = ARRAY_SIZE(host_featureset);
 
-    if ( xc_domain_getinfo(xch, domid, 1, &di) != 1 ||
-         di.domid != domid )
-    {
-        ERROR("Failed to obtain d%d info", domid);
-        rc = -ESRCH;
-        goto out;
-    }
+    if ( !p )
+        return -ENOMEM;
 
-    rc = xc_cpu_policy_get_size(xch, &nr_leaves, &nr_msrs);
-    if ( rc )
+    if ( (rc = xc_domain_getinfo_single(xch, domid, &di)) < 0 )
     {
-        PERROR("Failed to obtain policy info size");
+        PERROR("Failed to obtain d%d info", domid);
         rc = -errno;
         goto out;
     }
-
-    rc = -ENOMEM;
-    if ( (leaves = calloc(nr_leaves, sizeof(*leaves))) == NULL ||
-         (p = calloc(1, sizeof(*p))) == NULL )
-        goto out;
+    hvm = di.flags & XEN_DOMINF_hvm_guest;
 
     /* Get the host policy. */
     rc = xc_get_cpu_featureset(xch, XEN_SYSCTL_cpu_featureset_host,
                                &len, host_featureset);
-    if ( rc )
+    /* Tolerate "buffer too small", as we've got the bits we need. */
+    if ( rc && errno != ENOBUFS )
     {
-        /* Tolerate "buffer too small", as we've got the bits we need. */
-        if ( errno == ENOBUFS )
-            rc = 0;
-        else
-        {
-            PERROR("Failed to obtain host featureset");
-            rc = -errno;
-            goto out;
-        }
-    }
-
-    /* Get the domain's default policy. */
-    nr_msrs = 0;
-    rc = get_system_cpu_policy(xch, di.hvm ? XEN_SYSCTL_cpu_policy_hvm_default
-                                           : XEN_SYSCTL_cpu_policy_pv_default,
-                               &nr_leaves, leaves, &nr_msrs, NULL);
-    if ( rc )
-    {
-        PERROR("Failed to obtain %s default policy", di.hvm ? "hvm" : "pv");
+        PERROR("Failed to obtain host featureset");
         rc = -errno;
         goto out;
     }
 
-    rc = x86_cpuid_copy_from_buffer(p, leaves, nr_leaves,
+    /* Get the domain's default policy. */
+    rc = get_system_cpu_policy(xch, hvm ? XEN_SYSCTL_cpu_policy_hvm_default
+                                        : XEN_SYSCTL_cpu_policy_pv_default,
+                               &nr_leaves, p->leaves, &nr_msrs, NULL);
+    if ( rc )
+    {
+        PERROR("Failed to obtain %s default policy", hvm ? "hvm" : "pv");
+        rc = -errno;
+        goto out;
+    }
+
+    rc = x86_cpuid_copy_from_buffer(&p->policy, p->leaves, nr_leaves,
                                     &err_leaf, &err_subleaf);
     if ( rc )
     {
@@ -656,25 +640,26 @@ int xc_cpuid_apply_policy(xc_interface *xch, uint32_t domid, bool restore,
          *
          * This restore path is used for incoming VMs with no CPUID data
          * i.e. originated on Xen 4.13 or earlier.  We must invent a policy
-         * compatible with what Xen 4.13 would have done on the same hardware.
+         * compatible with what a security-patched Xen 4.13 would have done on
+         * the same hardware.
          *
          * Specifically:
          * - Clamp max leaves.
          * - Re-enable features which have become (possibly) off by default.
          */
 
-        p->basic.rdrand = test_bit(X86_FEATURE_RDRAND, host_featureset);
-        p->feat.hle = test_bit(X86_FEATURE_HLE, host_featureset);
-        p->feat.rtm = test_bit(X86_FEATURE_RTM, host_featureset);
+        p->policy.basic.rdrand = test_bit(X86_FEATURE_RDRAND, host_featureset);
+        p->policy.feat.hle = test_bit(X86_FEATURE_HLE, host_featureset);
+        p->policy.feat.rtm = test_bit(X86_FEATURE_RTM, host_featureset);
 
-        if ( di.hvm )
+        if ( hvm )
         {
-            p->feat.mpx = test_bit(X86_FEATURE_MPX, host_featureset);
+            p->policy.feat.mpx = test_bit(X86_FEATURE_MPX, host_featureset);
         }
 
-        p->basic.max_leaf = min(p->basic.max_leaf, 0xdu);
-        p->feat.max_subleaf = 0;
-        p->extd.max_leaf = min(p->extd.max_leaf, 0x8000001c);
+        p->policy.basic.max_leaf = min(p->policy.basic.max_leaf, 0xdu);
+        p->policy.feat.max_subleaf = min(p->policy.feat.max_subleaf, 0x2u);
+        p->policy.extd.max_leaf = min(p->policy.extd.max_leaf, 0x80000021);
     }
 
     if ( featureset )
@@ -718,28 +703,28 @@ int xc_cpuid_apply_policy(xc_interface *xch, uint32_t domid, bool restore,
             }
         }
 
-        x86_cpu_featureset_to_policy(feat, p);
+        x86_cpu_featureset_to_policy(feat, &p->policy);
     }
     else
     {
-        p->extd.itsc = itsc;
+        p->policy.extd.itsc = itsc;
 
-        if ( di.hvm )
+        if ( hvm )
         {
-            p->basic.pae = pae;
-            p->basic.vmx = nested_virt;
-            p->extd.svm = nested_virt;
+            p->policy.basic.pae = pae;
+            p->policy.basic.vmx = nested_virt;
+            p->policy.extd.svm = nested_virt;
         }
     }
 
-    if ( !di.hvm )
+    if ( !hvm )
     {
         /*
          * On hardware without CPUID Faulting, PV guests see real topology.
          * As a consequence, they also need to see the host htt/cmp fields.
          */
-        p->basic.htt       = test_bit(X86_FEATURE_HTT, host_featureset);
-        p->extd.cmp_legacy = test_bit(X86_FEATURE_CMP_LEGACY, host_featureset);
+        p->policy.basic.htt       = test_bit(X86_FEATURE_HTT, host_featureset);
+        p->policy.extd.cmp_legacy = test_bit(X86_FEATURE_CMP_LEGACY, host_featureset);
     }
     else
     {
@@ -747,28 +732,28 @@ int xc_cpuid_apply_policy(xc_interface *xch, uint32_t domid, bool restore,
          * Topology for HVM guests is entirely controlled by Xen.  For now, we
          * hardcode APIC_ID = vcpu_id * 2 to give the illusion of no SMT.
          */
-        p->basic.htt = true;
-        p->extd.cmp_legacy = false;
+        p->policy.basic.htt = true;
+        p->policy.extd.cmp_legacy = false;
 
         /*
          * Leaf 1 EBX[23:16] is Maximum Logical Processors Per Package.
          * Update to reflect vLAPIC_ID = vCPU_ID * 2, but make sure to avoid
          * overflow.
          */
-        if ( !p->basic.lppp )
-            p->basic.lppp = 2;
-        else if ( !(p->basic.lppp & 0x80) )
-            p->basic.lppp *= 2;
+        if ( !p->policy.basic.lppp )
+            p->policy.basic.lppp = 2;
+        else if ( !(p->policy.basic.lppp & 0x80) )
+            p->policy.basic.lppp *= 2;
 
-        switch ( p->x86_vendor )
+        switch ( p->policy.x86_vendor )
         {
         case X86_VENDOR_INTEL:
-            for ( i = 0; (p->cache.subleaf[i].type &&
-                          i < ARRAY_SIZE(p->cache.raw)); ++i )
+            for ( i = 0; (p->policy.cache.subleaf[i].type &&
+                          i < ARRAY_SIZE(p->policy.cache.raw)); ++i )
             {
-                p->cache.subleaf[i].cores_per_package =
-                    (p->cache.subleaf[i].cores_per_package << 1) | 1;
-                p->cache.subleaf[i].threads_per_cache = 0;
+                p->policy.cache.subleaf[i].cores_per_package =
+                    (p->policy.cache.subleaf[i].cores_per_package << 1) | 1;
+                p->policy.cache.subleaf[i].threads_per_cache = 0;
             }
             break;
 
@@ -788,25 +773,26 @@ int xc_cpuid_apply_policy(xc_interface *xch, uint32_t domid, bool restore,
              * apic_id_size values greater than 7.  Limit the value to
              * 7 for now.
              */
-            if ( p->extd.nc < 0x7f )
+            if ( p->policy.extd.nc < 0x7f )
             {
-                if ( p->extd.apic_id_size != 0 && p->extd.apic_id_size < 0x7 )
-                    p->extd.apic_id_size++;
+                if ( p->policy.extd.apic_id_size != 0 && p->policy.extd.apic_id_size < 0x7 )
+                    p->policy.extd.apic_id_size++;
 
-                p->extd.nc = (p->extd.nc << 1) | 1;
+                p->policy.extd.nc = (p->policy.extd.nc << 1) | 1;
             }
             break;
         }
     }
 
-    rc = x86_cpuid_copy_to_buffer(p, leaves, &nr_leaves);
+    nr_leaves = ARRAY_SIZE(p->leaves);
+    rc = x86_cpuid_copy_to_buffer(&p->policy, p->leaves, &nr_leaves);
     if ( rc )
     {
         ERROR("Failed to serialise CPUID (%d = %s)", -rc, strerror(-rc));
         goto out;
     }
 
-    rc = xc_set_domain_cpu_policy(xch, domid, nr_leaves, leaves, 0, NULL,
+    rc = xc_set_domain_cpu_policy(xch, domid, nr_leaves, p->leaves, 0, NULL,
                                   &err_leaf, &err_subleaf, &err_msr);
     if ( rc )
     {
@@ -829,8 +815,7 @@ int xc_cpuid_apply_policy(xc_interface *xch, uint32_t domid, bool restore,
     rc = 0;
 
 out:
-    free(p);
-    free(leaves);
+    xc_cpu_policy_destroy(p);
 
     return rc;
 }
@@ -843,7 +828,11 @@ xc_cpu_policy_t *xc_cpu_policy_init(void)
 void xc_cpu_policy_destroy(xc_cpu_policy_t *policy)
 {
     if ( policy )
+    {
+        int err = errno;
         free(policy);
+        errno = err;
+    }
 }
 
 static int deserialize_policy(xc_interface *xch, xc_cpu_policy_t *policy,

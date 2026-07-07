@@ -81,13 +81,6 @@ endif
 # include any CFLAGS or LDLIBS relating to libbar or libbaz unless
 # they use those libraries directly (not via libfoo) too.
 
-# Give the list of Xen library that the libraries in $(1) are linked against,
-# directly or indirectly.
-define xenlibs-dependencies
-    $(sort $(foreach lib,$(1), \
-        $(USELIBS_$(lib)) $(call xenlibs-dependencies,$(USELIBS_$(lib)))))
-endef
-
 # Flags for linking recursive dependencies of Xen libraries in $(1)
 define xenlibs-rpath
     $(addprefix -Wl$(comma)-rpath-link=$(XEN_ROOT)/tools/libs/,$(call xenlibs-dependencies,$(1)))
@@ -179,7 +172,7 @@ CFLAGS += $(CFLAGS-y)
 CFLAGS += $(EXTRA_CFLAGS_XEN_TOOLS)
 
 INSTALL_PYTHON_PROG = \
-	$(XEN_ROOT)/tools/python/install-wrap "$(PYTHON_PATH)" $(INSTALL_PROG)
+	$(XEN_ROOT)/tools/python/install-wrap "$(PYTHON_PATH) -s" $(INSTALL_PROG)
 
 %.opic: %.c
 	$(CC) $(CPPFLAGS) -DPIC $(CFLAGS) $(CFLAGS_$*.opic) -fPIC -c -o $@ $< $(APPEND_CFLAGS)
@@ -206,7 +199,7 @@ subdir-all-% subdir-clean-% subdir-install-% subdir-uninstall-%: .phony
 subdir-distclean-%: .phony
 	$(MAKE) -C $* distclean
 
-no-configure-targets := distclean subdir-distclean% clean subdir-clean% subtree-force-update-all %-dir-force-update
+no-configure-targets := distclean subdir-distclean% clean subdir-clean% %-dir-force-update
 ifeq (,$(filter $(no-configure-targets),$(MAKECMDGOALS)))
 $(XEN_ROOT)/config/Tools.mk:
 	$(error You have to run ./configure before building or installing the tools)

@@ -53,16 +53,20 @@ kind of development environment.
    hypervisor-guide/index
 
 
-MISRA C coding guidelines
--------------------------
+Unsorted documents
+------------------
 
-MISRA C rules and directive to be used as coding guidelines when writing
-Xen hypervisor code.
+Documents in need of some rearranging.
 
 .. toctree::
    :maxdepth: 2
 
-   misra/rules
+   designs/launch/hyperlaunch
+   designs/launch/hyperlaunch-devicetree
+   misc/xen-makefiles/makefiles
+   misra/index
+   fusa/index
+   misc/cache-coloring
 
 
 Miscellanea
@@ -70,4 +74,5 @@ Miscellanea
 
 .. toctree::
 
+   faq
    glossary

@@ -1,21 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * io.c: Handling I/O and interrupts.
  *
  * Copyright (c) 2004, Intel Corporation.
  * Copyright (c) 2005, International Business Machines Corporation.
  * Copyright (c) 2008, Citrix Systems, Inc.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <xen/init.h>
@@ -36,11 +25,9 @@
 #include <asm/shadow.h>
 #include <asm/p2m.h>
 #include <asm/hvm/hvm.h>
-#include <asm/hvm/support.h>
 #include <asm/hvm/vpt.h>
 #include <asm/hvm/vpic.h>
 #include <asm/hvm/vlapic.h>
-#include <asm/hvm/trace.h>
 #include <asm/hvm/emulate.h>
 #include <public/sched.h>
 #include <xen/iocap.h>
@@ -79,7 +66,7 @@ bool hvm_emulate_one_insn(hvm_emulate_validate_t *validate, const char *descr)
 
     case X86EMUL_UNRECOGNIZED:
         hvm_dump_emulation_state(XENLOG_G_WARNING, descr, &ctxt, rc);
-        hvm_inject_hw_exception(TRAP_invalid_op, X86_EVENT_NO_EC);
+        hvm_inject_hw_exception(X86_EXC_UD, X86_EVENT_NO_EC);
         break;
 
     case X86EMUL_EXCEPTION:
@@ -376,9 +363,20 @@ static const struct hvm_mmcfg *vpci_mmcfg_find(const struct domain *d,
     return NULL;
 }
 
-bool vpci_is_mmcfg_address(const struct domain *d, paddr_t addr)
+int __hwdom_init vpci_mmcfg_deny_access(struct domain *d)
 {
-    return vpci_mmcfg_find(d, addr);
+    const struct hvm_mmcfg *mmcfg;
+
+    list_for_each_entry ( mmcfg, &d->arch.hvm.mmcfg_regions, next )
+    {
+        int rc = iomem_deny_access(d, PFN_DOWN(mmcfg->addr),
+                                   PFN_DOWN(mmcfg->addr + mmcfg->size - 1));
+
+        if ( rc )
+            return rc;
+    }
+
+    return 0;
 }
 
 static unsigned int vpci_mmcfg_decode_addr(const struct hvm_mmcfg *mmcfg,
@@ -412,7 +410,7 @@ static int cf_check vpci_mmcfg_read(
     unsigned int reg;
     pci_sbdf_t sbdf;
 
-    *data = ~0ul;
+    *data = ~0UL;
 
     read_lock(&d->arch.hvm.mmcfg_lock);
     mmcfg = vpci_mmcfg_find(d, addr);

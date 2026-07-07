@@ -32,14 +32,14 @@
 #include <acpi/acpi.h>
 #include <acpi/cpufreq/cpufreq.h>
 
-#define HW_PSTATE_MASK          0x00000007
-#define HW_PSTATE_VALID_MASK    0x80000000
-#define HW_PSTATE_MAX_MASK      0x000000f0
+#define HW_PSTATE_MASK          0x00000007U
+#define HW_PSTATE_VALID_MASK    0x80000000U
+#define HW_PSTATE_MAX_MASK      0x000000f0U
 #define HW_PSTATE_MAX_SHIFT     4
-#define MSR_PSTATE_DEF_BASE     0xc0010064 /* base of Pstate MSRs */
-#define MSR_PSTATE_STATUS       0xc0010063 /* Pstate Status MSR */
-#define MSR_PSTATE_CTRL         0xc0010062 /* Pstate control MSR */
-#define MSR_PSTATE_CUR_LIMIT    0xc0010061 /* pstate current limit MSR */
+#define MSR_PSTATE_DEF_BASE     0xc0010064U /* base of Pstate MSRs */
+#define MSR_PSTATE_STATUS       0xc0010063U /* Pstate Status MSR */
+#define MSR_PSTATE_CTRL         0xc0010062U /* Pstate control MSR */
+#define MSR_PSTATE_CUR_LIMIT    0xc0010061U /* pstate current limit MSR */
 #define MSR_HWCR_CPBDIS_MASK    0x02000000ULL
 
 #define ARCH_CPU_FLAG_RESUME	1
@@ -68,12 +68,12 @@ static void cf_check update_cpb(void *data)
 }
 
 static int cf_check powernow_cpufreq_update(
-    int cpuid, struct cpufreq_policy *policy)
+    unsigned int cpu, struct cpufreq_policy *policy)
 {
-    if (!cpumask_test_cpu(cpuid, &cpu_online_map))
+    if ( !cpu_online(cpu) )
         return -EINVAL;
 
-    on_selected_cpus(cpumask_of(cpuid), update_cpb, policy, 1);
+    on_selected_cpus(cpumask_of(cpu), update_cpb, policy, 1);
 
     return 0;
 }
@@ -317,7 +317,8 @@ static int cf_check powernow_cpufreq_cpu_exit(struct cpufreq_policy *policy)
     return 0;
 }
 
-static const struct cpufreq_driver __initconstrel powernow_cpufreq_driver = {
+static const struct cpufreq_driver __initconst_cf_clobber
+powernow_cpufreq_driver = {
     .name   = "powernow",
     .verify = powernow_cpufreq_verify,
     .target = powernow_cpufreq_target,

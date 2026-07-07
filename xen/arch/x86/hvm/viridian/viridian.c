@@ -16,7 +16,6 @@
 #include <asm/paging.h>
 #include <asm/p2m.h>
 #include <asm/apic.h>
-#include <asm/hvm/support.h>
 #include <public/sched.h>
 #include <public/hvm/hvm_op.h>
 
@@ -254,7 +253,7 @@ static void dump_guest_os_id(const struct domain *d)
     goi = &d->arch.hvm.viridian->guest_os_id;
 
     printk(XENLOG_G_INFO
-           "d%d: VIRIDIAN GUEST_OS_ID: vendor: %x os: %x major: %x minor: %x sp: %x build: %x\n",
+           "d%d: VIRIDIAN GUEST_OS_ID: vendor: %#x os: %#x major: %#x minor: %#x sp: %#x build: %#x\n",
            d->domain_id, goi->vendor, goi->os, goi->major, goi->minor,
            goi->service_pack, goi->build_number);
 }
@@ -265,7 +264,7 @@ static void dump_hypercall(const struct domain *d)
 
     hg = &d->arch.hvm.viridian->hypercall_gpa;
 
-    printk(XENLOG_G_INFO "d%d: VIRIDIAN HYPERCALL: enabled: %x pfn: %lx\n",
+    printk(XENLOG_G_INFO "d%d: VIRIDIAN HYPERCALL: enabled: %u pfn: %#lx\n",
            d->domain_id,
            hg->enabled, (unsigned long)hg->pfn);
 }
@@ -292,7 +291,7 @@ static void enable_hypercall_page(struct domain *d)
      * calling convention) to differentiate Xen and Viridian hypercalls.
      */
     *(u8  *)(p + 0) = 0x0d; /* orl $0x80000000, %eax */
-    *(u32 *)(p + 1) = 0x80000000;
+    *(u32 *)(p + 1) = 0x80000000U;
     *(u8  *)(p + 5) = 0x0f; /* vmcall/vmmcall */
     *(u8  *)(p + 6) = 0x01;
     *(u8  *)(p + 7) = (cpu_has_vmx ? 0xc1 : 0xd9);
@@ -373,7 +372,8 @@ int guest_wrmsr_viridian(struct vcpu *v, uint32_t idx, uint64_t val)
         d->shutdown_code = SHUTDOWN_crash;
         spin_unlock(&d->shutdown_lock);
 
-        gprintk(XENLOG_WARNING, "VIRIDIAN CRASH: %lx %lx %lx %lx %lx\n",
+        gprintk(XENLOG_WARNING,
+                "VIRIDIAN GUEST_CRASH: %#lx %#lx %#lx %#lx %#lx\n",
                 vv->crash_param[0], vv->crash_param[1], vv->crash_param[2],
                 vv->crash_param[3], vv->crash_param[4]);
         break;
@@ -494,6 +494,8 @@ int viridian_domain_init(struct domain *d)
     if ( !d->arch.hvm.viridian )
         return -ENOMEM;
 
+    spin_lock_init(&d->arch.hvm.viridian->lock);
+
     rc = viridian_synic_domain_init(d);
     if ( rc )
         goto fail;
@@ -560,7 +562,8 @@ static void vpmask_set(struct hypercall_vpmask *vpmask, unsigned int vp,
 
         if ( mask & 1 )
         {
-            ASSERT(vp < HVM_MAX_VCPUS);
+            if ( vp >= HVM_MAX_VCPUS )
+                break;
             __set_bit(vp, vpmask->mask);
         }
 
@@ -573,26 +576,6 @@ static void vpmask_fill(struct hypercall_vpmask *vpmask)
 {
     bitmap_fill(vpmask->mask, HVM_MAX_VCPUS);
 }
-
-static unsigned int vpmask_first(const struct hypercall_vpmask *vpmask)
-{
-    return find_first_bit(vpmask->mask, HVM_MAX_VCPUS);
-}
-
-static unsigned int vpmask_next(const struct hypercall_vpmask *vpmask,
-                                unsigned int vp)
-{
-    /*
-     * If vp + 1 > HVM_MAX_VCPUS then find_next_bit() will return
-     * HVM_MAX_VCPUS, ensuring the for_each_vp ( ... ) loop terminates.
-     */
-    return find_next_bit(vpmask->mask, HVM_MAX_VCPUS, vp + 1);
-}
-
-#define for_each_vp(vpmask, vp) \
-	for ( (vp) = vpmask_first(vpmask); \
-	      (vp) < HVM_MAX_VCPUS; \
-	      (vp) = vpmask_next(vpmask, vp) )
 
 static unsigned int vpmask_nr(const struct hypercall_vpmask *vpmask)
 {
@@ -810,7 +793,7 @@ static void send_ipi(struct hypercall_vpmask *vpmask, uint8_t vector)
     if ( nr > 1 )
         cpu_raise_softirq_batch_begin();
 
-    for_each_vp ( vpmask, vp )
+    bitmap_for_each ( vp, vpmask->mask, currd->max_vcpus )
     {
         struct vlapic *vlapic = vcpu_vlapic(currd->vcpu[vp]);
 
@@ -933,13 +916,13 @@ int viridian_hypercall(struct cpu_user_regs *regs)
 
     switch ( mode )
     {
-    case 8:
+    case X86_MODE_64BIT:
         input.raw = regs->rcx;
         input_params_gpa = regs->rdx;
         output_params_gpa = regs->r8;
         break;
 
-    case 4:
+    case X86_MODE_32BIT:
         input.raw = (regs->rdx << 32) | regs->eax;
         input_params_gpa = (regs->rbx << 32) | regs->ecx;
         output_params_gpa = (regs->rdi << 32) | regs->esi;
@@ -1038,11 +1021,11 @@ int viridian_hypercall(struct cpu_user_regs *regs)
 
     switch ( mode )
     {
-    case 8:
+    case X86_MODE_64BIT:
         regs->rax = output.raw;
         break;
 
-    case 4:
+    case X86_MODE_32BIT:
         regs->rdx = output.raw >> 32;
         regs->rax = (uint32_t)output.raw;
         break;
@@ -1057,7 +1040,7 @@ void viridian_dump_guest_page(const struct vcpu *v, const char *name,
     if ( !vp->msr.enabled )
         return;
 
-    printk(XENLOG_G_INFO "%pv: VIRIDIAN %s: pfn: %lx\n",
+    printk(XENLOG_G_INFO "%pv: VIRIDIAN %s: pfn: %#lx\n",
            v, name, (unsigned long)vp->msr.pfn);
 }
 
@@ -1146,7 +1129,7 @@ static int cf_check viridian_load_domain_ctxt(
     return 0;
 }
 
-HVM_REGISTER_SAVE_RESTORE(VIRIDIAN_DOMAIN, viridian_save_domain_ctxt,
+HVM_REGISTER_SAVE_RESTORE(VIRIDIAN_DOMAIN, viridian_save_domain_ctxt, NULL,
                           viridian_load_domain_ctxt, 1, HVMSR_PER_DOM);
 
 static int cf_check viridian_save_vcpu_ctxt(
@@ -1189,7 +1172,7 @@ static int cf_check viridian_load_vcpu_ctxt(
     return 0;
 }
 
-HVM_REGISTER_SAVE_RESTORE(VIRIDIAN_VCPU, viridian_save_vcpu_ctxt,
+HVM_REGISTER_SAVE_RESTORE(VIRIDIAN_VCPU, viridian_save_vcpu_ctxt, NULL,
                           viridian_load_vcpu_ctxt, 1, HVMSR_PER_VCPU);
 
 static int __init cf_check parse_viridian_version(const char *arg)

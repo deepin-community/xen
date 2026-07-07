@@ -332,7 +332,7 @@ struct ehci_dbgp {
     unsigned long timeout;
     struct timer timer;
     spinlock_t *lock;
-    bool_t reset_run;
+    bool reset_run;
     u8 bus, slot, func, bar;
     u16 pci_cr;
     u32 bar_val;
@@ -341,7 +341,7 @@ struct ehci_dbgp {
     struct ehci_caps __iomem *ehci_caps;
 };
 
-static int ehci_dbgp_external_startup(struct ehci_dbgp *);
+static int ehci_dbgp_external_startup(struct ehci_dbgp *dbgp);
 
 static void ehci_dbgp_status(struct ehci_dbgp *dbgp, const char *str)
 {
@@ -375,12 +375,12 @@ static inline u32 dbgp_pid_write_update(u32 x, u32 tok)
     static u8 data0 = USB_PID_DATA1;
 
     data0 ^= USB_PID_DATA0 ^ USB_PID_DATA1;
-    return (x & 0xffff0000) | (data0 << 8) | (tok & 0xff);
+    return (x & 0xffff0000U) | (data0 << 8) | (tok & 0xffU);
 }
 
 static inline u32 dbgp_pid_read_update(u32 x, u32 tok)
 {
-    return (x & 0xffffff00) | (tok & 0xff);
+    return (x & 0xffffff00U) | (tok & 0xffU);
 }
 
 static inline void dbgp_set_data(struct ehci_dbg_port __iomem *ehci_debug,
@@ -424,9 +424,7 @@ static void dbgp_issue_command(struct ehci_dbgp *dbgp, u32 ctrl,
          * checks to see if ACPI or some other initialization also
          * reset the EHCI debug port.
          */
-        u32 ctrl = readl(&dbgp->ehci_debug->control);
-
-        if ( ctrl & DBGP_ENABLED )
+        if ( readl(&dbgp->ehci_debug->control) & DBGP_ENABLED )
         {
             cmd |= CMD_RUN;
             writel(cmd, &dbgp->ehci_regs->command);
@@ -641,7 +639,7 @@ static int dbgp_control_msg(struct ehci_dbgp *dbgp, unsigned int devnum,
 {
     u32 addr, pids, ctrl;
     struct usb_ctrlrequest req;
-    bool_t read = (requesttype & USB_DIR_IN) != 0;
+    bool read = (requesttype & USB_DIR_IN) != 0;
     int ret;
 
     if ( size > (read ? DBGP_MAX_PACKET : 0) )
@@ -689,7 +687,8 @@ static unsigned int __init __find_dbgp(u8 bus, u8 slot, u8 func)
     if ( (class >> 8) != PCI_CLASS_SERIAL_USB_EHCI )
         return 0;
 
-    return pci_find_cap_offset(0, bus, slot, func, PCI_CAP_ID_EHCI_DEBUG);
+    return pci_find_cap_offset(PCI_SBDF(0, bus, slot, func),
+                               PCI_CAP_ID_EHCI_DEBUG);
 }
 
 static unsigned int __init find_dbgp(struct ehci_dbgp *dbgp,
@@ -874,7 +873,7 @@ static int ehci_dbgp_external_startup(struct ehci_dbgp *dbgp)
     unsigned int dbg_port = dbgp->phys_port;
     unsigned int tries = 3;
     unsigned int reset_port_tries = 1;
-    bool_t try_hard_once = 1;
+    bool try_hard_once = true;
 
 try_port_reset_again:
     ret = ehci_dbgp_startup(dbgp);
@@ -998,7 +997,7 @@ err:
     return -ENODEV;
 }
 
-typedef void (*set_debug_port_t)(struct ehci_dbgp *, unsigned int);
+typedef void (*set_debug_port_t)(struct ehci_dbgp *dbgp, unsigned int port);
 
 static void cf_check default_set_debug_port(
     struct ehci_dbgp *dbgp, unsigned int port)
@@ -1247,13 +1246,14 @@ static int cf_check ehci_dbgp_getc(struct serial_port *port, char *pc)
 /* Safe: ehci_dbgp_poll() runs as timer handler, so not reentrant. */
 static struct serial_port *poll_port;
 
-static void cf_check _ehci_dbgp_poll(struct cpu_user_regs *regs)
+static void cf_check _ehci_dbgp_poll(const struct cpu_user_regs *regs)
 {
     struct serial_port *port = poll_port;
     struct ehci_dbgp *dbgp = port->uart;
     unsigned long flags;
     unsigned int timeout = MICROSECS(DBGP_CHECK_INTERVAL);
-    bool_t empty = 0;
+    bool empty = false;
+    const struct cpu_user_regs *old_regs;
 
     if ( !dbgp->ehci_debug )
         return;
@@ -1269,11 +1269,16 @@ static void cf_check _ehci_dbgp_poll(struct cpu_user_regs *regs)
         spin_unlock_irqrestore(&port->tx_lock, flags);
     }
 
+    /* Mimic interrupt context. */
+    old_regs = set_irq_regs(regs);
+
     if ( dbgp->in.chunk )
-        serial_rx_interrupt(port, regs);
+        serial_rx_interrupt(port);
 
     if ( empty )
-        serial_tx_interrupt(port, regs);
+        serial_tx_interrupt(port);
+
+    set_irq_regs(old_regs);
 
     if ( spin_trylock_irqsave(&port->tx_lock, flags) )
     {
@@ -1294,14 +1299,10 @@ static void cf_check _ehci_dbgp_poll(struct cpu_user_regs *regs)
 static void cf_check ehci_dbgp_poll(void *data)
 {
     poll_port = data;
-#ifdef run_in_exception_handler
     run_in_exception_handler(_ehci_dbgp_poll);
-#else
-    _ehci_dbgp_poll(guest_cpu_user_regs());
-#endif
 }
 
-static bool_t ehci_dbgp_setup_preirq(struct ehci_dbgp *dbgp)
+static bool ehci_dbgp_setup_preirq(struct ehci_dbgp *dbgp)
 {
     if ( !ehci_dbgp_setup(dbgp) )
         return 1;

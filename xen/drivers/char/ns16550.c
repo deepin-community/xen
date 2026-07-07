@@ -22,6 +22,7 @@
 #include <xen/irq.h>
 #include <xen/param.h>
 #include <xen/sched.h>
+#include <xen/sections.h>
 #include <xen/timer.h>
 #include <xen/serial.h>
 #include <xen/iocap.h>
@@ -58,12 +59,12 @@ static struct ns16550 {
     struct timer timer;
     struct timer resume_timer;
     unsigned int timeout_ms;
-    bool_t intr_works;
-    bool_t dw_usr_bsy;
+    bool intr_works;
+    bool dw_usr_bsy;
 #ifdef NS16550_PCI
     /* PCI card parameters. */
-    bool_t pb_bdf_enable;   /* if =1, pb-bdf effective, port behind bridge */
-    bool_t ps_bdf_enable;   /* if =1, ps_bdf effective, port on pci card */
+    bool pb_bdf_enable;     /* if =1, pb-bdf effective, port behind bridge */
+    bool ps_bdf_enable;     /* if =1, ps_bdf effective, port on pci card */
     unsigned int pb_bdf[3]; /* pci bridge BDF */
     unsigned int ps_bdf[3]; /* pci serial port BDF */
     u32 bar;
@@ -73,7 +74,7 @@ static struct ns16550 {
     bool msi;
     const struct ns16550_config_param *param; /* Points into .init.*! */
 #endif
-} ns16550_com[2] = { { 0 } };
+} ns16550_com[2] = {};
 
 #ifdef NS16550_PCI
 struct ns16550_config {
@@ -101,8 +102,8 @@ struct ns16550_config_param {
     unsigned int reg_width;
     unsigned int fifo_size;
     u8 lsr_mask;
-    bool_t mmio;
-    bool_t bar0;
+    bool mmio;
+    bool bar0;
     unsigned int max_ports;
     unsigned int base_baud;
     unsigned int uart_offset;
@@ -175,8 +176,7 @@ static void handle_dw_usr_busy_quirk(struct ns16550 *uart)
     }
 }
 
-static void cf_check ns16550_interrupt(
-    int irq, void *dev_id, struct cpu_user_regs *regs)
+static void cf_check ns16550_interrupt(int irq, void *dev_id)
 {
     struct serial_port *port = dev_id;
     struct ns16550 *uart = port->uart;
@@ -188,9 +188,9 @@ static void cf_check ns16550_interrupt(
         u8 lsr = ns_read_reg(uart, UART_LSR);
 
         if ( (lsr & uart->lsr_mask) == uart->lsr_mask )
-            serial_tx_interrupt(port, regs);
+            serial_tx_interrupt(port);
         if ( lsr & UART_LSR_DR )
-            serial_rx_interrupt(port, regs);
+            serial_rx_interrupt(port);
 
         /* A "busy-detect" condition is observed on Allwinner/sunxi UART
          * after LCR is written during setup. It needs to be cleared at
@@ -207,37 +207,38 @@ static void cf_check ns16550_interrupt(
 /* Safe: ns16550_poll() runs as softirq so not reentrant on a given CPU. */
 static DEFINE_PER_CPU(struct serial_port *, poll_port);
 
-static void cf_check __ns16550_poll(struct cpu_user_regs *regs)
+static void cf_check __ns16550_poll(const struct cpu_user_regs *regs)
 {
     struct serial_port *port = this_cpu(poll_port);
     struct ns16550 *uart = port->uart;
+    const struct cpu_user_regs *old_regs;
 
     if ( uart->intr_works )
         return; /* Interrupts work - no more polling */
+
+    /* Mimic interrupt context. */
+    old_regs = set_irq_regs(regs);
 
     while ( ns_read_reg(uart, UART_LSR) & UART_LSR_DR )
     {
         if ( ns16550_ioport_invalid(uart) )
             goto out;
 
-        serial_rx_interrupt(port, regs);
+        serial_rx_interrupt(port);
     }
 
     if ( ( ns_read_reg(uart, UART_LSR) & uart->lsr_mask ) == uart->lsr_mask )
-        serial_tx_interrupt(port, regs);
+        serial_tx_interrupt(port);
 
 out:
+    set_irq_regs(old_regs);
     set_timer(&uart->timer, NOW() + MILLISECS(uart->timeout_ms));
 }
 
 static void cf_check ns16550_poll(void *data)
 {
     this_cpu(poll_port) = data;
-#ifdef run_in_exception_handler
     run_in_exception_handler(__ns16550_poll);
-#else
-    __ns16550_poll(guest_cpu_user_regs());
-#endif
 }
 
 static int cf_check ns16550_tx_ready(struct serial_port *port)
@@ -445,17 +446,22 @@ static void __init cf_check ns16550_init_postirq(struct serial_port *port)
             struct msi_info msi = {
                 .sbdf = PCI_SBDF(0, uart->ps_bdf[0], uart->ps_bdf[1],
                                  uart->ps_bdf[2]),
-                .irq = rc = uart->irq,
+                .irq = uart->irq,
                 .entry_nr = 1
             };
+
+            rc = uart->irq;
 
             if ( rc > 0 )
             {
                 struct msi_desc *msi_desc = NULL;
+                struct pci_dev *pdev;
 
                 pcidevs_lock();
 
-                rc = pci_enable_msi(&msi, &msi_desc);
+                pdev = pci_get_pdev(NULL, msi.sbdf);
+                rc = pdev ? pci_enable_msi(pdev, &msi, &msi_desc) : -ENODEV;
+
                 if ( !rc )
                 {
                     struct irq_desc *desc = irq_to_desc(msi.irq);
@@ -1172,7 +1178,7 @@ static const struct ns16550_config __initconst uart_config[] =
 };
 
 static int __init
-pci_uart_config(struct ns16550 *uart, bool_t skip_amt, unsigned int idx)
+pci_uart_config(struct ns16550 *uart, bool skip_amt, unsigned int idx)
 {
     u64 orig_base = uart->io_base;
     unsigned int b, d, f, nextf, i;
@@ -1388,7 +1394,7 @@ string_param("com1", opt_com1);
 string_param("com2", opt_com2);
 
 enum serial_param_type {
-    baud,
+    baud_rate,
     clock_hz,
     data_bits,
     io_base,
@@ -1416,7 +1422,7 @@ struct serial_param_var {
  * com_console_options for serial port com1 and com2.
  */
 static const struct serial_param_var __initconst sp_vars[] = {
-    {"baud", baud},
+    {"baud", baud_rate},
     {"clock-hz", clock_hz},
     {"data-bits", data_bits},
     {"io-base", io_base},
@@ -1540,7 +1546,7 @@ static bool __init parse_positional(struct ns16550 *uart, char **str)
         else
 #endif
         {
-            uart->io_base = simple_strtoul(conf, &conf, 0);
+            uart->io_base = simple_strtoull(conf, &conf, 0);
         }
     }
 
@@ -1596,7 +1602,7 @@ static bool __init parse_namevalue_pairs(char *str, struct ns16550 *uart)
 
         switch ( get_token(token, &param_value) )
         {
-        case baud:
+        case baud_rate:
             uart->baud = simple_strtoul(param_value, NULL, 0);
             break;
 
@@ -1611,7 +1617,7 @@ static bool __init parse_namevalue_pairs(char *str, struct ns16550 *uart)
                        "Can't use io_base with dev=pci or dev=amt options\n");
                 break;
             }
-            uart->io_base = simple_strtoul(param_value, NULL, 0);
+            uart->io_base = simple_strtoull(param_value, NULL, 0);
             break;
 
         case irq:
@@ -1755,7 +1761,6 @@ static int __init ns16550_uart_dt_init(struct dt_device_node *dev,
     struct ns16550 *uart;
     int res;
     u32 reg_shift, reg_width;
-    u64 io_size;
 
     uart = &ns16550_com[0];
 
@@ -1766,13 +1771,9 @@ static int __init ns16550_uart_dt_init(struct dt_device_node *dev,
     uart->parity    = UART_PARITY_NONE;
     uart->stop_bits = 1;
 
-    res = dt_device_get_address(dev, 0, &uart->io_base, &io_size);
+    res = dt_device_get_address(dev, 0, &uart->io_base, &uart->io_size);
     if ( res )
         return res;
-
-    uart->io_size = io_size;
-
-    ASSERT(uart->io_size == io_size); /* Detect truncation */
 
     res = dt_property_read_u32(dev, "reg-shift", &reg_shift);
     if ( !res )
@@ -1802,11 +1803,13 @@ static int __init ns16550_uart_dt_init(struct dt_device_node *dev,
 
     uart->dw_usr_bsy = dt_device_is_compatible(dev, "snps,dw-apb-uart");
 
+#ifdef CONFIG_ARM
     uart->vuart.base_addr = uart->io_base;
     uart->vuart.size = uart->io_size;
     uart->vuart.data_off = UART_THR <<uart->reg_shift;
     uart->vuart.status_off = UART_LSR<<uart->reg_shift;
     uart->vuart.status = UART_LSR_THRE|UART_LSR_TEMT;
+#endif
 
     /* Register with generic serial driver. */
     serial_register_uart(uart - ns16550_com, &ns16550_driver, uart);

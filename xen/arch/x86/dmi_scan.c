@@ -3,7 +3,6 @@
 #include <xen/kernel.h>
 #include <xen/string.h>
 #include <xen/init.h>
-#include <xen/cache.h>
 #include <xen/acpi.h>
 #include <asm/io.h>
 #include <asm/system.h>
@@ -113,6 +112,7 @@ static const void *__init bt_ioremap(paddr_t addr, unsigned int len)
 {
     mfn_t mfn = _mfn(PFN_DOWN(addr));
     unsigned int offs = PAGE_OFFSET(addr);
+    void *va;
 
     if ( addr + len <= MB(1) )
         return __va(addr);
@@ -120,8 +120,10 @@ static const void *__init bt_ioremap(paddr_t addr, unsigned int len)
     if ( system_state < SYS_STATE_boot )
         return __acpi_map_table(addr, len);
 
-    return __vmap(&mfn, PFN_UP(offs + len), 1, 1, PAGE_HYPERVISOR_RO,
-                  VMAP_DEFAULT) + offs;
+    va = __vmap(&mfn, PFN_UP(offs + len), 1, 1, PAGE_HYPERVISOR_RO,
+                VMAP_DEFAULT);
+
+    return va ? va + offs : NULL;
 }
 
 static void __init bt_iounmap(const void *ptr, unsigned int len)
@@ -499,13 +501,6 @@ static int __init cf_check ich10_bios_quirk(const struct dmi_system_id *d)
     return 0;
 }
 
-static __init int cf_check reset_videomode_after_s3(const struct dmi_blacklist *d)
-{
-	/* See wakeup.S */
-	acpi_video_flags |= 2;
-	return 0;
-}
-
 static __init int cf_check dmi_disable_acpi(const struct dmi_blacklist *d)
 { 
 	if (!acpi_force) { 
@@ -545,11 +540,6 @@ static __init int cf_check force_acpi_ht(const struct dmi_blacklist *d)
  */
  
 static const struct dmi_blacklist __initconstrel dmi_blacklist[] = {
-
-	{ reset_videomode_after_s3, "Toshiba Satellite 4030cdt", { /* Reset video mode after returning from ACPI S3 sleep */
-			MATCH(DMI_PRODUCT_NAME, "S4030CDT/4.3"),
-			NO_MATCH, NO_MATCH, NO_MATCH
-			} },
 
 	{ ich10_bios_quirk, "Intel board & BIOS",
 		/*

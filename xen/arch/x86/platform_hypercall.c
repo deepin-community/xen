@@ -14,7 +14,6 @@
 #include <xen/event.h>
 #include <xen/domain_page.h>
 #include <xen/trace.h>
-#include <xen/console.h>
 #include <xen/iocap.h>
 #include <xen/guest_access.h>
 #include <xen/hypercall.h>
@@ -24,6 +23,7 @@
 #include <xen/pmstat.h>
 #include <xen/irq.h>
 #include <xen/symbols.h>
+#include <xen/vga.h>
 #include <asm/current.h>
 #include <public/platform.h>
 #include <acpi/cpufreq/processor_perf.h>
@@ -32,6 +32,8 @@
 #include <asm/mtrr.h>
 #include <asm/io_apic.h>
 #include <asm/setup.h>
+#include <asm/trampoline.h>
+
 #include "cpu/mcheck/mce.h"
 #include "cpu/mtrr/mtrr.h"
 #include <xsm/xsm.h>
@@ -46,9 +48,9 @@ struct resource_access {
     xenpf_resource_entry_t *entries;
 };
 
-long cf_check cpu_frequency_change_helper(void *);
-void check_resource_access(struct resource_access *);
-void cf_check resource_access(void *);
+long cf_check cpu_frequency_change_helper(void *data);
+void check_resource_access(struct resource_access *ra);
+void cf_check resource_access(void *info);
 
 #ifndef COMPAT
 typedef long ret_t;
@@ -258,7 +260,6 @@ ret_t do_platform_op(
         break;
 
     case XENPF_add_memtype:
-    {
         ret = mtrr_add_page(
             op->u.add_memtype.mfn,
             op->u.add_memtype.nr_mfns,
@@ -273,11 +274,9 @@ ret_t do_platform_op(
             if ( ret != 0 )
                 mtrr_del_page(ret, 0, 0);
         }
-    }
-    break;
+        break;
 
     case XENPF_del_memtype:
-    {
         if (op->u.del_memtype.handle == 0
             /* mtrr/main.c otherwise does a lookup */
             && (int)op->u.del_memtype.reg >= 0)
@@ -288,8 +287,7 @@ ret_t do_platform_op(
         }
         else
             ret = -EINVAL;
-    }
-    break;
+        break;
 
     case XENPF_read_memtype:
     {
@@ -299,15 +297,15 @@ ret_t do_platform_op(
         ret = -EINVAL;
         if ( op->u.read_memtype.reg < num_var_ranges )
         {
-            mtrr_if->get(op->u.read_memtype.reg, &mfn, &nr_mfns, &type);
+            mtrr_get(op->u.read_memtype.reg, &mfn, &nr_mfns, &type);
             op->u.read_memtype.mfn     = mfn;
             op->u.read_memtype.nr_mfns = nr_mfns;
             op->u.read_memtype.type    = type;
             ret = __copy_field_to_guest(u_xenpf_op, op, u.read_memtype)
                   ? -EFAULT : 0;
         }
+        break;
     }
-    break;
 
     case XENPF_microcode_update:
     {
@@ -315,9 +313,20 @@ ret_t do_platform_op(
 
         guest_from_compat_handle(data, op->u.microcode.data);
 
-        ret = microcode_update(data, op->u.microcode.length);
+        ret = microcode_update(data, op->u.microcode.length, 0);
+        break;
     }
-    break;
+
+    case XENPF_microcode_update2:
+    {
+        XEN_GUEST_HANDLE(const_void) data;
+
+        guest_from_compat_handle(data, op->u.microcode2.data);
+
+        ret = microcode_update(data, op->u.microcode2.length,
+                               op->u.microcode2.flags);
+        break;
+    }
 
     case XENPF_platform_quirk:
     {
@@ -340,8 +349,8 @@ ret_t do_platform_op(
             ret = -EINVAL;
             break;
         }
+        break;
     }
-    break;
 
     case XENPF_firmware_info:
         switch ( op->u.firmware_info.type )
@@ -364,7 +373,7 @@ ret_t do_platform_op(
             if ( length > info->edd_device_params.length )
                 length = info->edd_device_params.length;
             if ( copy_to_compat(op->u.firmware_info.u.disk_info.edd_params,
-                                (u8 *)&info->edd_device_params,
+                                (const uint8_t *)&info->edd_device_params,
                                 length) )
                 break;
             if ( copy_to_compat(op->u.firmware_info.u.disk_info.edd_params,
@@ -521,8 +530,8 @@ ret_t do_platform_op(
 
         if ( ret == 0 && __copy_field_to_guest(u_xenpf_op, op, u.getidletime) )
             ret = -EFAULT;
+        break;
     }
-    break;
 
     case XENPF_set_processor_pminfo:
         switch ( op->u.set_pminfo.type )
@@ -560,8 +569,8 @@ ret_t do_platform_op(
 
             guest_from_compat_handle(pdc, op->u.set_pminfo.u.pdc);
             ret = acpi_set_pdc_bits(op->u.set_pminfo.id, pdc);
+            break;
         }
-        break;
 
         default:
             ret = -EINVAL;
@@ -601,8 +610,8 @@ ret_t do_platform_op(
         put_cpu_maps();
 
         ret = __copy_field_to_guest(u_xenpf_op, op, u.pcpu_info) ? -EFAULT : 0;
+        break;
     }
-    break;
 
     case XENPF_get_cpu_version:
     {
@@ -637,8 +646,37 @@ ret_t do_platform_op(
 
         if ( __copy_field_to_guest(u_xenpf_op, op, u.pcpu_version) )
             ret = -EFAULT;
+        break;
     }
-    break;
+
+    case XENPF_get_ucode_revision:
+    {
+        struct xenpf_ucode_revision *rev = &op->u.ucode_revision;
+
+        if ( !get_cpu_maps() )
+        {
+            ret = -EBUSY;
+            break;
+        }
+
+        /* TODO: make it possible to know ucode revisions for parked CPUs */
+        if ( (rev->cpu >= nr_cpu_ids) || !cpu_online(rev->cpu) )
+            ret = -ENOENT;
+        else
+        {
+            const struct cpu_signature *sig = &per_cpu(cpu_sig, rev->cpu);
+
+            rev->signature = sig->sig;
+            rev->pf = sig->pf;
+            rev->revision = sig->rev;
+        }
+
+        put_cpu_maps();
+
+        if ( __copy_field_to_guest(u_xenpf_op, op, u.ucode_revision) )
+            ret = -EFAULT;
+        break;
+    }
 
     case XENPF_cpu_online:
     {
@@ -696,7 +734,6 @@ ret_t do_platform_op(
             0, cpu_down_helper, (void *)(unsigned long)cpu);
         break;
     }
-    break;
 
     case XENPF_cpu_hotadd:
         ret = xsm_resource_plug_core(XSM_HOOK);
@@ -706,7 +743,7 @@ ret_t do_platform_op(
         ret = cpu_add(op->u.cpu_add.apic_id,
                       op->u.cpu_add.acpi_id,
                       op->u.cpu_add.pxm);
-    break;
+        break;
 
     case XENPF_mem_hotadd:
         ret = xsm_resource_plug_core(XSM_HOOK);
@@ -746,8 +783,8 @@ ret_t do_platform_op(
             ret = -EINVAL;
             break;
         }
+        break;
     }
-    break;
 
     case XENPF_resource_op:
     {
@@ -813,8 +850,8 @@ ret_t do_platform_op(
             ret = ra.nr_done;
 
         xfree(ra.entries);
+        break;
     }
-    break;
 
     case XENPF_get_symbol:
     {
@@ -841,8 +878,23 @@ ret_t do_platform_op(
             ret = -EFAULT;
         if ( !ret && __copy_field_to_guest(u_xenpf_op, op, u.symdata) )
             ret = -EFAULT;
+        break;
     }
-    break;
+
+#ifdef CONFIG_VIDEO
+    case XENPF_get_dom0_console:
+        BUILD_BUG_ON(sizeof(op->u.dom0_console) > sizeof(op->u.pad));
+        ret = sizeof(op->u.dom0_console);
+        if ( !fill_console_start_info(&op->u.dom0_console) )
+        {
+            ret = -ENODEV;
+            break;
+        }
+
+        if ( copy_field_to_guest(u_xenpf_op, op, u.dom0_console) )
+            ret = -EFAULT;
+        break;
+#endif
 
     default:
         ret = -ENOSYS;

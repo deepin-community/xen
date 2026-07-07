@@ -20,17 +20,22 @@ enum dmi_field {
  */
 struct dmi_strmatch {
 	u8 slot;
-	char *substr;
+	const char *substr;
 };
 
 struct dmi_system_id {
-	int (*callback)(const struct dmi_system_id *);
-	char *ident;
+	int (*callback)(const struct dmi_system_id *d);
+	const char *ident;
 	struct dmi_strmatch matches[4];
 	void *driver_data;
 };
 
 #define DMI_MATCH(a,b)	{ a, b }
+
+#define DMI_MATCH4(m1, m2, m3, m4) .matches = { m1, m2, m3, m4 }
+#define DMI_MATCH3(m1, m2, m3)     .matches = { [0] = m1, [1] = m2, [2] = m3 }
+#define DMI_MATCH2(m1, m2)         .matches = { [0] = m1, [1] = m2 }
+#define DMI_MATCH1(m1)             .matches = { [0] = m1 }
 
 extern int dmi_check_system(const struct dmi_system_id *list);
 extern void dmi_scan_machine(void);

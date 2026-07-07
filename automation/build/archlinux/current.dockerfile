@@ -1,16 +1,14 @@
-FROM archlinux/base
+# syntax=docker/dockerfile:1
+FROM --platform=linux/amd64 archlinux:base-devel
 LABEL maintainer.name="The Xen Project" \
       maintainer.email="xen-devel@lists.xenproject.org"
 
-# Enable multilib repo, for dev86 package
-RUN echo $'[multilib]\nInclude = /etc/pacman.d/mirrorlist' >> /etc/pacman.conf
+RUN pacman-key --init
 
 RUN pacman -S --refresh --sysupgrade --noconfirm --noprogressbar --needed \
-        base-devel \
-        bin86 \
         bridge-utils \
         bzip2 \
-        dev86 \
+        discount \
         dtc \
         e2fsprogs \
         ghostscript \
@@ -20,8 +18,6 @@ RUN pacman -S --refresh --sysupgrade --noconfirm --noprogressbar --needed \
         iasl \
         inetutils \
         iproute \
-        # lib32-glibc for Xen < 4.15
-        lib32-glibc \
         libaio \
         libcacard \
         libgl \
@@ -29,24 +25,26 @@ RUN pacman -S --refresh --sysupgrade --noconfirm --noprogressbar --needed \
         libnl \
         libpng \
         libseccomp \
-        markdown \
         net-tools \
         nss \
         perl \
         pixman \
         pkgconfig \
         python \
+        python-setuptools \
         sdl \
         sdl2 \
         spice \
         spice-protocol \
+        # systemd for Xen < 4.19
         systemd \
         transfig \
         usbredir \
         wget \
         xz \
         yajl \
-        zlib
+        zlib \
+    && yes | pacman -S --clean --clean
 
 ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/bin/site_perl:/usr/bin/vendor_perl:/usr/bin/core_perl
 

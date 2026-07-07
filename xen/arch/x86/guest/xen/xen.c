@@ -1,20 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /******************************************************************************
  * arch/x86/guest/xen.c
  *
  * Support for detecting and running under Xen.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
  *
  * Copyright (c) 2017 Citrix Systems Ltd.
  */
@@ -38,7 +26,6 @@
 bool __read_mostly xen_guest;
 
 uint32_t __read_mostly xen_cpuid_base;
-extern char hypercall_page[];
 static struct rangeset *mem;
 
 DEFINE_PER_CPU(unsigned int, vcpu_id);
@@ -46,6 +33,50 @@ DEFINE_PER_CPU(unsigned int, vcpu_id);
 static struct vcpu_info *vcpu_info;
 static unsigned long vcpu_info_mapped[BITS_TO_LONGS(NR_CPUS)];
 DEFINE_PER_CPU(struct vcpu_info *, vcpu_info);
+
+/*
+ * Which instruction to use for early hypercalls:
+ *   < 0 setup
+ *     0 vmcall
+ *   > 0 vmmcall
+ */
+int8_t __initdata early_hypercall_insn = -1;
+
+/*
+ * Called once during the first hypercall to figure out which instruction to
+ * use.  Error handling options are limited.
+ */
+void asmlinkage __init early_hypercall_setup(void)
+{
+    BUG_ON(early_hypercall_insn != -1);
+
+    if ( !boot_cpu_data.x86_vendor )
+    {
+        unsigned int eax, ebx, ecx, edx;
+
+        cpuid(0, &eax, &ebx, &ecx, &edx);
+
+        boot_cpu_data.x86_vendor = x86_cpuid_lookup_vendor(ebx, ecx, edx);
+    }
+
+    switch ( boot_cpu_data.x86_vendor )
+    {
+    case X86_VENDOR_INTEL:
+    case X86_VENDOR_CENTAUR:
+    case X86_VENDOR_SHANGHAI:
+        early_hypercall_insn = 0;
+        setup_force_cpu_cap(X86_FEATURE_USE_VMCALL);
+        break;
+
+    case X86_VENDOR_AMD:
+    case X86_VENDOR_HYGON:
+        early_hypercall_insn = 1;
+        break;
+
+    default:
+        BUG();
+    }
+}
 
 static void __init find_xen_leaves(void)
 {
@@ -85,7 +116,7 @@ static void map_shared_info(void)
     if ( rc )
         panic("failed to map shared_info page: %ld\n", rc);
 
-    set_fixmap(FIX_XEN_SHARED_INFO, mfn_x(mfn) << PAGE_SHIFT);
+    set_fixmap(FIX_XEN_SHARED_INFO, mfn_to_maddr(mfn));
 
     /* Mask all upcalls */
     for ( i = 0; i < ARRAY_SIZE(XEN_shared_info->evtchn_mask); i++ )
@@ -170,7 +201,7 @@ static void __init init_memmap(void)
     }
 }
 
-static void cf_check xen_evtchn_upcall(struct cpu_user_regs *regs)
+static void cf_check xen_evtchn_upcall(void)
 {
     struct vcpu_info *vcpu_info = this_cpu(vcpu_info);
     unsigned long pending;
@@ -180,20 +211,20 @@ static void cf_check xen_evtchn_upcall(struct cpu_user_regs *regs)
 
     while ( pending )
     {
-        unsigned int l1 = find_first_set_bit(pending);
+        unsigned int l1 = ffsl(pending) - 1;
         unsigned long evtchn = xchg(&XEN_shared_info->evtchn_pending[l1], 0);
 
         __clear_bit(l1, &pending);
         evtchn &= ~XEN_shared_info->evtchn_mask[l1];
         while ( evtchn )
         {
-            unsigned int port = find_first_set_bit(evtchn);
+            unsigned int port = ffsl(evtchn) - 1;
 
             __clear_bit(port, &evtchn);
             port += l1 * BITS_PER_LONG;
 
             if ( pv_console && port == pv_console_evtchn() )
-                pv_console_rx(regs);
+                pv_console_rx();
             else if ( pv_shim )
                 pv_shim_inject_evtchn(port);
         }
@@ -318,10 +349,10 @@ static void cf_check resume(void)
         pv_console_init();
 }
 
-static void __init cf_check e820_fixup(struct e820map *e820)
+static void __init cf_check e820_fixup(void)
 {
     if ( pv_shim )
-        pv_shim_fixup_e820(e820);
+        pv_shim_fixup_e820();
 }
 
 static int cf_check flush_tlb(
@@ -330,7 +361,7 @@ static int cf_check flush_tlb(
     return xen_hypercall_hvm_op(HVMOP_flush_tlbs, NULL);
 }
 
-static const struct hypervisor_ops __initconstrel ops = {
+static const struct hypervisor_ops __initconst_cf_clobber ops = {
     .name = "Xen",
     .setup = setup,
     .ap_setup = ap_setup,
@@ -348,9 +379,6 @@ const struct hypervisor_ops *__init xg_probe(void)
 
     if ( !xen_cpuid_base )
         return NULL;
-
-    /* Fill the hypercall page. */
-    wrmsrl(cpuid_ebx(xen_cpuid_base + 2), __pa(hypercall_page));
 
     xen_guest = true;
 

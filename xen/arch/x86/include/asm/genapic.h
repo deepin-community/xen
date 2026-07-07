@@ -1,6 +1,8 @@
 #ifndef _ASM_GENAPIC_H
 #define _ASM_GENAPIC_H 1
 
+#include <xen/cpumask.h>
+
 /*
  * Generic APIC driver interface.
  *
@@ -35,6 +37,23 @@ struct genapic {
 	.name = aname, \
 	.probe = aprobe
 
+#define INT_DELIVERY_MODE (genapic.int_delivery_mode)
+#define INT_DEST_MODE (genapic.int_dest_mode)
+#define TARGET_CPUS ((const typeof(cpu_online_map) *)&cpu_online_map)
+#define init_apic_ldr() alternative_vcall(genapic.init_apic_ldr)
+#define cpu_mask_to_apicid(mask) ({ \
+	/* \
+	 * There are a number of places where the address of a local variable \
+	 * gets passed here. The use of ?: in alternative_call<N>() triggers an \
+	 * "address of ... is always true" warning in such a case with at least \
+	 * gcc 7 and 8. Hence the seemingly pointless local variable here. \
+	 */ \
+	const cpumask_t *m_ = (mask); \
+	alternative_call(genapic.cpu_mask_to_apicid, m_); \
+})
+#define vector_allocation_cpumask(cpu) \
+	alternative_call(genapic.vector_allocation_cpumask, cpu)
+
 extern struct genapic genapic;
 extern const struct genapic apic_default;
 extern const struct genapic apic_bigsmp;
@@ -42,29 +61,14 @@ extern const struct genapic apic_bigsmp;
 void cf_check send_IPI_self_legacy(uint8_t vector);
 
 void cf_check init_apic_ldr_flat(void);
-unsigned int cf_check cpu_mask_to_apicid_flat(const cpumask_t *cpumask);
-void cf_check send_IPI_mask_flat(const cpumask_t *mask, int vector);
-const cpumask_t *cf_check vector_allocation_cpumask_flat(int cpu);
-#define GENAPIC_FLAT \
-	.int_delivery_mode = dest_LowestPrio, \
-	.int_dest_mode = 1 /* logical delivery */, \
-	.init_apic_ldr = init_apic_ldr_flat, \
-	.vector_allocation_cpumask = vector_allocation_cpumask_flat, \
-	.cpu_mask_to_apicid = cpu_mask_to_apicid_flat, \
-	.send_IPI_mask = send_IPI_mask_flat, \
-	.send_IPI_self = send_IPI_self_legacy
+void cf_check send_IPI_mask_flat(const cpumask_t *cpumask, int vector);
 
 void cf_check init_apic_ldr_phys(void);
 unsigned int cf_check cpu_mask_to_apicid_phys(const cpumask_t *cpumask);
 void cf_check send_IPI_mask_phys(const cpumask_t *mask, int vector);
 const cpumask_t *cf_check vector_allocation_cpumask_phys(int cpu);
-#define GENAPIC_PHYS \
-	.int_delivery_mode = dest_Fixed, \
-	.int_dest_mode = 0 /* physical delivery */, \
-	.init_apic_ldr = init_apic_ldr_phys, \
-	.vector_allocation_cpumask = vector_allocation_cpumask_phys, \
-	.cpu_mask_to_apicid = cpu_mask_to_apicid_phys, \
-	.send_IPI_mask = send_IPI_mask_phys, \
-	.send_IPI_self = send_IPI_self_legacy
+
+void generic_apic_probe(void);
+void generic_bigsmp_probe(void);
 
 #endif

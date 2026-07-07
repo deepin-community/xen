@@ -409,6 +409,7 @@ int libxl_get_physinfo(libxl_ctx *ctx, libxl_physinfo *physinfo)
         !!(xcphysinfo.capabilities & XEN_SYSCTL_PHYSCAP_gnttab_v1);
     physinfo->cap_gnttab_v2 =
         !!(xcphysinfo.capabilities & XEN_SYSCTL_PHYSCAP_gnttab_v2);
+    physinfo->arch_capabilities = xcphysinfo.arch_capabilities;
 
     GC_FREE;
     return 0;
@@ -545,52 +546,15 @@ libxl_numainfo *libxl_get_numainfo(libxl_ctx *ctx, int *nr)
     return ret;
 }
 
-static int libxl__xc_version_wrap(libxl__gc *gc, libxl_version_info *info,
-                                  xen_build_id_t *build)
-{
-    int r;
-
-    r = xc_version(CTX->xch, XENVER_build_id, build);
-    switch (r) {
-    case -EPERM:
-    case -ENODATA:
-    case 0:
-        info->build_id = libxl__strdup(NOGC, "");
-        break;
-
-    case -ENOBUFS:
-        break;
-
-    default:
-        if (r > 0) {
-            unsigned int i;
-
-            info->build_id = libxl__zalloc(NOGC, (r * 2) + 1);
-
-            for (i = 0; i < r ; i++)
-                snprintf(&info->build_id[i * 2], 3, "%02hhx", build->buf[i]);
-
-            r = 0;
-        }
-        break;
-    }
-    return r;
-}
-
 const libxl_version_info* libxl_get_version_info(libxl_ctx *ctx)
 {
     GC_INIT(ctx);
     union {
-        xen_extraversion_t xen_extra;
         xen_compile_info_t xen_cc;
-        xen_changeset_info_t xen_chgset;
-        xen_capabilities_info_t xen_caps;
         xen_platform_parameters_t p_parms;
-        xen_commandline_t xen_commandline;
         xen_build_id_t build_id;
     } u;
     long xen_version;
-    int r;
     libxl_version_info *info = &ctx->version_info;
 
     if (info->xen_version_extra != NULL)
@@ -600,8 +564,7 @@ const libxl_version_info* libxl_get_version_info(libxl_ctx *ctx)
     info->xen_version_major = xen_version >> 16;
     info->xen_version_minor = xen_version & 0xFF;
 
-    xc_version(ctx->xch, XENVER_extraversion, &u.xen_extra);
-    info->xen_version_extra = libxl__strdup(NOGC, u.xen_extra);
+    info->xen_version_extra = xc_xenver_extraversion(ctx->xch);
 
     xc_version(ctx->xch, XENVER_compile_info, &u.xen_cc);
     info->compiler = libxl__strdup(NOGC, u.xen_cc.compiler);
@@ -609,30 +572,17 @@ const libxl_version_info* libxl_get_version_info(libxl_ctx *ctx)
     info->compile_domain = libxl__strdup(NOGC, u.xen_cc.compile_domain);
     info->compile_date = libxl__strdup(NOGC, u.xen_cc.compile_date);
 
-    xc_version(ctx->xch, XENVER_capabilities, &u.xen_caps);
-    info->capabilities = libxl__strdup(NOGC, u.xen_caps);
-
-    xc_version(ctx->xch, XENVER_changeset, &u.xen_chgset);
-    info->changeset = libxl__strdup(NOGC, u.xen_chgset);
+    info->capabilities = xc_xenver_capabilities(ctx->xch);
+    info->changeset = xc_xenver_changeset(ctx->xch);
 
     xc_version(ctx->xch, XENVER_platform_parameters, &u.p_parms);
     info->virt_start = u.p_parms.virt_start;
 
     info->pagesize = xc_version(ctx->xch, XENVER_pagesize, NULL);
 
-    xc_version(ctx->xch, XENVER_commandline, &u.xen_commandline);
-    info->commandline = libxl__strdup(NOGC, u.xen_commandline);
+    info->commandline = xc_xenver_commandline(ctx->xch);
+    info->build_id = xc_xenver_buildid(ctx->xch);
 
-    u.build_id.len = sizeof(u) - sizeof(u.build_id);
-    r = libxl__xc_version_wrap(gc, info, &u.build_id);
-    if (r == -ENOBUFS) {
-            xen_build_id_t *build_id;
-
-            build_id = libxl__zalloc(gc, info->pagesize);
-            build_id->len = info->pagesize - sizeof(*build_id);
-            r = libxl__xc_version_wrap(gc, info, build_id);
-            if (r) LOGEV(ERROR, r, "getting build_id");
-    }
  out:
     GC_FREE;
     return info;

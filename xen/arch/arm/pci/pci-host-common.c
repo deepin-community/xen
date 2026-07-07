@@ -93,7 +93,7 @@ gen_pci_init(struct dt_device_node *dev, const struct pci_ecam_ops *ops)
         cfg_reg_idx = 0;
 
     /* Parse our PCI ecam register address */
-    err = dt_device_get_address(dev, cfg_reg_idx, &addr, &size);
+    err = dt_device_get_paddr(dev, cfg_reg_idx, &addr, &size);
     if ( err )
         goto err_exit;
 
@@ -214,6 +214,7 @@ int pci_host_common_probe(struct dt_device_node *dev,
     struct pci_host_bridge *bridge;
     struct pci_config_window *cfg;
     int err;
+    int domain;
 
     if ( dt_device_for_passthrough(dev) )
         return 0;
@@ -234,12 +235,13 @@ int pci_host_common_probe(struct dt_device_node *dev,
     bridge->cfg = cfg;
     bridge->ops = &ops->pci_ops;
 
-    bridge->segment = pci_bus_find_domain_nr(dev);
-    if ( bridge->segment < 0 )
+    domain = pci_bus_find_domain_nr(dev);
+    if ( domain < 0 )
     {
         printk(XENLOG_ERR "Inconsistent \"linux,pci-domain\" property in DT\n");
         BUG();
     }
+    bridge->segment = domain;
     pci_add_host_bridge(bridge);
 
     return 0;
@@ -349,10 +351,10 @@ int __init pci_host_bridge_mappings(struct domain *d)
 
         for ( i = 0; i < dt_number_of_address(dev); i++ )
         {
-            uint64_t addr, size;
+            paddr_t addr, size;
             int err;
 
-            err = dt_device_get_address(dev, i, &addr, &size);
+            err = dt_device_get_paddr(dev, i, &addr, &size);
             if ( err )
             {
                 printk(XENLOG_ERR
@@ -379,7 +381,7 @@ int __init pci_host_bridge_mappings(struct domain *d)
  * right place for alignment check.
  */
 static int is_bar_valid(const struct dt_device_node *dev,
-                        paddr_t addr, paddr_t len, void *data)
+                        uint64_t addr, uint64_t len, void *data)
 {
     struct pdev_bar_check *bar_data = data;
     paddr_t s = bar_data->start;
@@ -391,20 +393,24 @@ static int is_bar_valid(const struct dt_device_node *dev,
     return 0;
 }
 
-/* TODO: Revisit this function when ACPI PCI passthrough support is added. */
+/*
+ * The MFN range [start, end] is inclusive.
+ *
+ * TODO: Revisit this function when ACPI PCI passthrough support is added.
+ */
 bool pci_check_bar(const struct pci_dev *pdev, mfn_t start, mfn_t end)
 {
     int ret;
     const struct dt_device_node *dt_node;
     paddr_t s = mfn_to_maddr(start);
-    paddr_t e = mfn_to_maddr(end);
+    paddr_t e = mfn_to_maddr(mfn_add(end, 1)) - 1; /* inclusive */
     struct pdev_bar_check bar_data =  {
         .start = s,
         .end = e,
         .is_valid = false
     };
 
-    if ( s >= e )
+    if ( s > e )
         return false;
 
     dt_node = pci_find_host_bridge_node(pdev);

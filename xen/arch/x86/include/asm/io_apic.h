@@ -1,7 +1,8 @@
 #ifndef __ASM_IO_APIC_H
 #define __ASM_IO_APIC_H
 
-#include <asm/types.h>
+#include <xen/types.h>
+
 #include <asm/mpspec.h>
 #include <asm/apicdef.h>
 #include <asm/fixmap.h>
@@ -13,9 +14,10 @@
  * Copyright (C) 1997, 1998, 1999, 2000 Ingo Molnar
  */
 
-#define IO_APIC_BASE(idx)                                               \
-    ((volatile uint32_t *)(__fix_to_virt(FIX_IO_APIC_BASE_0 + (idx))    \
-                           + (mp_ioapics[idx].mpc_apicaddr & ~PAGE_MASK)))
+#define IO_APIC_BASE(idx)                                         \
+    ((volatile uint32_t *)                                        \
+     (__fix_to_virt((unsigned int)FIX_IO_APIC_BASE_0 + (idx)) +   \
+                    (mp_ioapics[idx].mpc_apicaddr & ~PAGE_MASK)))
 
 #define IO_APIC_ID(idx) (mp_ioapics[idx].mpc_apicid)
 
@@ -99,7 +101,7 @@ struct IO_APIC_route_entry {
                                            */
             unsigned int dest_mode:1;     /* 0: physical, 1: logical */
             unsigned int delivery_status:1;
-            unsigned int polarity:1;      /* 0: low, 1: high */
+            unsigned int polarity:1;      /* 0: high, 1: low */
             unsigned int irr:1;
             unsigned int trigger:1;       /* 0: edge, 1: level */
             unsigned int mask:1;          /* 0: enabled, 1: disabled */
@@ -198,7 +200,7 @@ extern struct IO_APIC_route_entry __ioapic_read_entry(
     unsigned int apic, unsigned int pin, bool raw);
 void __ioapic_write_entry(
     unsigned int apic, unsigned int pin, bool raw,
-    struct IO_APIC_route_entry);
+    struct IO_APIC_route_entry e);
 
 extern struct IO_APIC_route_entry **alloc_ioapic_entries(void);
 extern void free_ioapic_entries(struct IO_APIC_route_entry **ioapic_entries);
@@ -210,6 +212,8 @@ extern int restore_IO_APIC_setup(struct IO_APIC_route_entry **ioapic_entries,
 unsigned highest_gsi(void);
 
 int ioapic_guest_read( unsigned long physbase, unsigned int reg, u32 *pval);
-int ioapic_guest_write(unsigned long physbase, unsigned int reg, u32 pval);
+int ioapic_guest_write(unsigned long physbase, unsigned int reg, u32 val);
+int mp_find_ioapic(unsigned int gsi);
+int gsi_2_irq(unsigned int gsi);
 
 #endif

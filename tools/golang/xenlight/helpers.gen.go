@@ -589,6 +589,38 @@ xc.build_id = C.CString(x.BuildId)}
  return nil
  }
 
+// NewSmbios returns an instance of Smbios initialized with defaults.
+func NewSmbios() (*Smbios, error) {
+var (
+x Smbios
+xc C.libxl_smbios)
+
+C.libxl_smbios_init(&xc)
+defer C.libxl_smbios_dispose(&xc)
+
+if err := x.fromC(&xc); err != nil {
+return nil, err }
+
+return &x, nil}
+
+func (x *Smbios) fromC(xc *C.libxl_smbios) error {
+ x.Key = SmbiosType(xc.key)
+x.Value = C.GoString(xc.value)
+
+ return nil}
+
+func (x *Smbios) toC(xc *C.libxl_smbios) (err error){defer func(){
+if err != nil{
+C.libxl_smbios_dispose(xc)}
+}()
+
+xc.key = C.libxl_smbios_type(x.Key)
+if x.Value != "" {
+xc.value = C.CString(x.Value)}
+
+ return nil
+ }
+
 // NewDomainCreateInfo returns an instance of DomainCreateInfo initialized with defaults.
 func NewDomainCreateInfo() (*DomainCreateInfo, error) {
 var (
@@ -1065,6 +1097,14 @@ if err := x.Iomem[i].fromC(&v); err != nil {
 return fmt.Errorf("converting field Iomem: %v", err) }
 }
 }
+x.LlcColors = nil
+if n := int(xc.num_llc_colors); n > 0 {
+cLlcColors := (*[1<<28]C.uint32_t)(unsafe.Pointer(xc.llc_colors))[:n:n]
+x.LlcColors = make([]uint32, n)
+for i, v := range cLlcColors {
+x.LlcColors[i] = uint32(v)
+}
+}
 if err := x.ClaimMode.fromC(&xc.claim_mode);err != nil {
 return fmt.Errorf("converting field ClaimMode: %v", err)
 }
@@ -1080,6 +1120,10 @@ x.Bootloader = C.GoString(xc.bootloader)
 if err := x.BootloaderArgs.fromC(&xc.bootloader_args);err != nil {
 return fmt.Errorf("converting field BootloaderArgs: %v", err)
 }
+if err := x.BootloaderRestrict.fromC(&xc.bootloader_restrict);err != nil {
+return fmt.Errorf("converting field BootloaderRestrict: %v", err)
+}
+x.BootloaderUser = C.GoString(xc.bootloader_user)
 x.TimerMode = TimerMode(xc.timer_mode)
 if err := x.NestedHvm.fromC(&xc.nested_hvm);err != nil {
 return fmt.Errorf("converting field NestedHvm: %v", err)
@@ -1117,6 +1161,8 @@ default:
 return fmt.Errorf("invalid union key '%v'", x.Type)}
 x.ArchArm.GicVersion = GicVersion(xc.arch_arm.gic_version)
 x.ArchArm.Vuart = VuartType(xc.arch_arm.vuart)
+x.ArchArm.SveVl = SveType(xc.arch_arm.sve_vl)
+x.ArchArm.NrSpis = uint32(xc.arch_arm.nr_spis)
 if err := x.ArchX86.MsrRelaxed.fromC(&xc.arch_x86.msr_relaxed);err != nil {
 return fmt.Errorf("converting field ArchX86.MsrRelaxed: %v", err)
 }
@@ -1183,6 +1229,15 @@ return fmt.Errorf("converting field Altp2M: %v", err)
 }
 x.SystemFirmware = C.GoString(tmp.system_firmware)
 x.SmbiosFirmware = C.GoString(tmp.smbios_firmware)
+x.Smbios = nil
+if n := int(tmp.num_smbios); n > 0 {
+cSmbios := (*[1<<28]C.libxl_smbios)(unsafe.Pointer(tmp.smbios))[:n:n]
+x.Smbios = make([]Smbios, n)
+for i, v := range cSmbios {
+if err := x.Smbios[i].fromC(&v); err != nil {
+return fmt.Errorf("converting field Smbios: %v", err) }
+}
+}
 x.AcpiFirmware = C.GoString(tmp.acpi_firmware)
 x.Hdtype = Hdtype(tmp.hdtype)
 if err := x.Nographic.fromC(&tmp.nographic);err != nil {
@@ -1234,6 +1289,9 @@ return fmt.Errorf("converting field Rdm: %v", err)
 }
 x.RdmMemBoundaryMemkb = uint64(tmp.rdm_mem_boundary_memkb)
 x.McaCaps = uint64(tmp.mca_caps)
+if err := x.Pirq.fromC(&tmp.pirq);err != nil {
+return fmt.Errorf("converting field Pirq: %v", err)
+}
 return nil
 }
 
@@ -1403,6 +1461,14 @@ return fmt.Errorf("converting field Iomem: %v", err)
 }
 }
 }
+if numLlcColors := len(x.LlcColors); numLlcColors > 0 {
+xc.llc_colors = (*C.uint32_t)(C.malloc(C.size_t(numLlcColors*numLlcColors)))
+xc.num_llc_colors = C.int(numLlcColors)
+cLlcColors := (*[1<<28]C.uint32_t)(unsafe.Pointer(xc.llc_colors))[:numLlcColors:numLlcColors]
+for i,v := range x.LlcColors {
+cLlcColors[i] = C.uint32_t(v)
+}
+}
 if err := x.ClaimMode.toC(&xc.claim_mode); err != nil {
 return fmt.Errorf("converting field ClaimMode: %v", err)
 }
@@ -1423,6 +1489,11 @@ xc.bootloader = C.CString(x.Bootloader)}
 if err := x.BootloaderArgs.toC(&xc.bootloader_args); err != nil {
 return fmt.Errorf("converting field BootloaderArgs: %v", err)
 }
+if err := x.BootloaderRestrict.toC(&xc.bootloader_restrict); err != nil {
+return fmt.Errorf("converting field BootloaderRestrict: %v", err)
+}
+if x.BootloaderUser != "" {
+xc.bootloader_user = C.CString(x.BootloaderUser)}
 xc.timer_mode = C.libxl_timer_mode(x.TimerMode)
 if err := x.NestedHvm.toC(&xc.nested_hvm); err != nil {
 return fmt.Errorf("converting field NestedHvm: %v", err)
@@ -1495,6 +1566,16 @@ if tmp.SystemFirmware != "" {
 hvm.system_firmware = C.CString(tmp.SystemFirmware)}
 if tmp.SmbiosFirmware != "" {
 hvm.smbios_firmware = C.CString(tmp.SmbiosFirmware)}
+if numSmbios := len(tmp.Smbios); numSmbios > 0 {
+hvm.smbios = (*C.libxl_smbios)(C.malloc(C.ulong(numSmbios)*C.sizeof_libxl_smbios))
+hvm.num_smbios = C.int(numSmbios)
+cSmbios := (*[1<<28]C.libxl_smbios)(unsafe.Pointer(hvm.smbios))[:numSmbios:numSmbios]
+for i,v := range tmp.Smbios {
+if err := v.toC(&cSmbios[i]); err != nil {
+return fmt.Errorf("converting field Smbios: %v", err)
+}
+}
+}
 if tmp.AcpiFirmware != "" {
 hvm.acpi_firmware = C.CString(tmp.AcpiFirmware)}
 hvm.hdtype = C.libxl_hdtype(tmp.Hdtype)
@@ -1552,6 +1633,9 @@ return fmt.Errorf("converting field Rdm: %v", err)
 }
 hvm.rdm_mem_boundary_memkb = C.uint64_t(tmp.RdmMemBoundaryMemkb)
 hvm.mca_caps = C.uint64_t(tmp.McaCaps)
+if err := tmp.Pirq.toC(&hvm.pirq); err != nil {
+return fmt.Errorf("converting field Pirq: %v", err)
+}
 hvmBytes := C.GoBytes(unsafe.Pointer(&hvm),C.sizeof_libxl_domain_build_info_type_union_hvm)
 copy(xc.u[:],hvmBytes)
 case DomainTypePv:
@@ -1602,6 +1686,8 @@ default:
 return fmt.Errorf("invalid union key '%v'", x.Type)}
 xc.arch_arm.gic_version = C.libxl_gic_version(x.ArchArm.GicVersion)
 xc.arch_arm.vuart = C.libxl_vuart_type(x.ArchArm.Vuart)
+xc.arch_arm.sve_vl = C.libxl_sve_type(x.ArchArm.SveVl)
+xc.arch_arm.nr_spis = C.uint32_t(x.ArchArm.NrSpis)
 if err := x.ArchX86.MsrRelaxed.toC(&xc.arch_x86.msr_relaxed); err != nil {
 return fmt.Errorf("converting field ArchX86.MsrRelaxed: %v", err)
 }
@@ -1722,6 +1808,55 @@ xc.multi_touch_num_contacts = C.uint32_t(x.MultiTouchNumContacts)
  return nil
  }
 
+// NewDeviceVirtio returns an instance of DeviceVirtio initialized with defaults.
+func NewDeviceVirtio() (*DeviceVirtio, error) {
+var (
+x DeviceVirtio
+xc C.libxl_device_virtio)
+
+C.libxl_device_virtio_init(&xc)
+defer C.libxl_device_virtio_dispose(&xc)
+
+if err := x.fromC(&xc); err != nil {
+return nil, err }
+
+return &x, nil}
+
+func (x *DeviceVirtio) fromC(xc *C.libxl_device_virtio) error {
+ x.BackendDomid = Domid(xc.backend_domid)
+x.BackendDomname = C.GoString(xc.backend_domname)
+x.Type = C.GoString(xc._type)
+x.Transport = VirtioTransport(xc.transport)
+if err := x.GrantUsage.fromC(&xc.grant_usage);err != nil {
+return fmt.Errorf("converting field GrantUsage: %v", err)
+}
+x.Devid = Devid(xc.devid)
+x.Irq = uint32(xc.irq)
+x.Base = uint64(xc.base)
+
+ return nil}
+
+func (x *DeviceVirtio) toC(xc *C.libxl_device_virtio) (err error){defer func(){
+if err != nil{
+C.libxl_device_virtio_dispose(xc)}
+}()
+
+xc.backend_domid = C.libxl_domid(x.BackendDomid)
+if x.BackendDomname != "" {
+xc.backend_domname = C.CString(x.BackendDomname)}
+if x.Type != "" {
+xc._type = C.CString(x.Type)}
+xc.transport = C.libxl_virtio_transport(x.Transport)
+if err := x.GrantUsage.toC(&xc.grant_usage); err != nil {
+return fmt.Errorf("converting field GrantUsage: %v", err)
+}
+xc.devid = C.libxl_devid(x.Devid)
+xc.irq = C.uint32_t(x.Irq)
+xc.base = C.uint64_t(x.Base)
+
+ return nil
+ }
+
 // NewDeviceDisk returns an instance of DeviceDisk initialized with defaults.
 func NewDeviceDisk() (*DeviceDisk, error) {
 var (
@@ -1768,6 +1903,9 @@ x.ActiveDisk = C.GoString(xc.active_disk)
 x.HiddenDisk = C.GoString(xc.hidden_disk)
 if err := x.Trusted.fromC(&xc.trusted);err != nil {
 return fmt.Errorf("converting field Trusted: %v", err)
+}
+if err := x.GrantUsage.fromC(&xc.grant_usage);err != nil {
+return fmt.Errorf("converting field GrantUsage: %v", err)
 }
 
  return nil}
@@ -1817,6 +1955,9 @@ xc.hidden_disk = C.CString(x.HiddenDisk)}
 if err := x.Trusted.toC(&xc.trusted); err != nil {
 return fmt.Errorf("converting field Trusted: %v", err)
 }
+if err := x.GrantUsage.toC(&xc.grant_usage); err != nil {
+return fmt.Errorf("converting field GrantUsage: %v", err)
+}
 
  return nil
  }
@@ -1840,6 +1981,7 @@ func (x *DeviceNic) fromC(xc *C.libxl_device_nic) error {
 x.BackendDomname = C.GoString(xc.backend_domname)
 x.Devid = Devid(xc.devid)
 x.Mtu = int(xc.mtu)
+x.Vlan = C.GoString(xc.vlan)
 x.Model = C.GoString(xc.model)
 if err := x.Mac.fromC(&xc.mac);err != nil {
 return fmt.Errorf("converting field Mac: %v", err)
@@ -1917,6 +2059,8 @@ if x.BackendDomname != "" {
 xc.backend_domname = C.CString(x.BackendDomname)}
 xc.devid = C.libxl_devid(x.Devid)
 xc.mtu = C.int(x.Mtu)
+if x.Vlan != "" {
+xc.vlan = C.CString(x.Vlan)}
 if x.Model != "" {
 xc.model = C.CString(x.Model)}
 if err := x.Mac.toC(&xc.mac); err != nil {
@@ -2323,6 +2467,11 @@ x.Tag = C.GoString(xc.tag)
 x.Path = C.GoString(xc.path)
 x.SecurityModel = C.GoString(xc.security_model)
 x.Devid = Devid(xc.devid)
+x.Type = P9Type(xc._type)
+x.MaxSpace = int(xc.max_space)
+x.MaxFiles = int(xc.max_files)
+x.MaxOpenFiles = int(xc.max_open_files)
+x.AutoDelete = bool(xc.auto_delete)
 
  return nil}
 
@@ -2341,6 +2490,11 @@ xc.path = C.CString(x.Path)}
 if x.SecurityModel != "" {
 xc.security_model = C.CString(x.SecurityModel)}
 xc.devid = C.libxl_devid(x.Devid)
+xc._type = C.libxl_p9_type(x.Type)
+xc.max_space = C.int(x.MaxSpace)
+xc.max_files = C.int(x.MaxFiles)
+xc.max_open_files = C.int(x.MaxOpenFiles)
+xc.auto_delete = C.bool(x.AutoDelete)
 
  return nil
  }
@@ -2855,6 +3009,15 @@ if err := x.Vkbs[i].fromC(&v); err != nil {
 return fmt.Errorf("converting field Vkbs: %v", err) }
 }
 }
+x.Virtios = nil
+if n := int(xc.num_virtios); n > 0 {
+cVirtios := (*[1<<28]C.libxl_device_virtio)(unsafe.Pointer(xc.virtios))[:n:n]
+x.Virtios = make([]DeviceVirtio, n)
+for i, v := range cVirtios {
+if err := x.Virtios[i].fromC(&v); err != nil {
+return fmt.Errorf("converting field Virtios: %v", err) }
+}
+}
 x.Vtpms = nil
 if n := int(xc.num_vtpms); n > 0 {
 cVtpms := (*[1<<28]C.libxl_device_vtpm)(unsafe.Pointer(xc.vtpms))[:n:n]
@@ -3013,6 +3176,16 @@ cVkbs := (*[1<<28]C.libxl_device_vkb)(unsafe.Pointer(xc.vkbs))[:numVkbs:numVkbs]
 for i,v := range x.Vkbs {
 if err := v.toC(&cVkbs[i]); err != nil {
 return fmt.Errorf("converting field Vkbs: %v", err)
+}
+}
+}
+if numVirtios := len(x.Virtios); numVirtios > 0 {
+xc.virtios = (*C.libxl_device_virtio)(C.malloc(C.ulong(numVirtios)*C.sizeof_libxl_device_virtio))
+xc.num_virtios = C.int(numVirtios)
+cVirtios := (*[1<<28]C.libxl_device_virtio)(unsafe.Pointer(xc.virtios))[:numVirtios:numVirtios]
+for i,v := range x.Virtios {
+if err := v.toC(&cVirtios[i]); err != nil {
+return fmt.Errorf("converting field Virtios: %v", err)
 }
 }
 }
@@ -3393,6 +3566,7 @@ x.CapVmtrace = bool(xc.cap_vmtrace)
 x.CapVpmu = bool(xc.cap_vpmu)
 x.CapGnttabV1 = bool(xc.cap_gnttab_v1)
 x.CapGnttabV2 = bool(xc.cap_gnttab_v2)
+x.ArchCapabilities = uint32(xc.arch_capabilities)
 
  return nil}
 
@@ -3427,6 +3601,7 @@ xc.cap_vmtrace = C.bool(x.CapVmtrace)
 xc.cap_vpmu = C.bool(x.CapVpmu)
 xc.cap_gnttab_v1 = C.bool(x.CapGnttabV1)
 xc.cap_gnttab_v2 = C.bool(x.CapGnttabV2)
+xc.arch_capabilities = C.uint32_t(x.ArchCapabilities)
 
  return nil
  }

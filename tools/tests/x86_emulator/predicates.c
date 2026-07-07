@@ -340,6 +340,7 @@ static const struct {
     /*{ 0x01, 0xc3 }, { 2, 2 }, F, R }, vmresume */
     { { 0x01, 0xc4 }, { 2, 2 }, F, N }, /* vmxoff */
     { { 0x01, 0xc5 }, { 2, 2 }, F, N }, /* pconfig */
+    { { 0x01, 0xc6 }, { 2, 2 }, F, N }, /* wrmsrns */
     { { 0x01, 0xc8 }, { 2, 2 }, F, N }, /* monitor */
     { { 0x01, 0xc9 }, { 2, 2 }, F, N }, /* mwait */
     { { 0x01, 0xca }, { 2, 2 }, F, N }, /* clac */
@@ -1335,13 +1336,20 @@ static const struct vex {
     { { 0x45 }, 2, T, R, pfx_66, Wn, Ln }, /* vpsrlv{d,q} */
     { { 0x46 }, 2, T, R, pfx_66, W0, Ln }, /* vpsravd */
     { { 0x47 }, 2, T, R, pfx_66, Wn, Ln }, /* vpsllv{d,q} */
+    { { 0x50 }, 2, T, R, pfx_no, W0, Ln }, /* vpdpbuud */
     { { 0x50 }, 2, T, R, pfx_66, W0, Ln }, /* vpdpbusd */
+    { { 0x50 }, 2, T, R, pfx_f3, W0, Ln }, /* vpdpbsud */
+    { { 0x50 }, 2, T, R, pfx_f2, W0, Ln }, /* vpdpbssd */
+    { { 0x51 }, 2, T, R, pfx_no, W0, Ln }, /* vpdpbuuds */
     { { 0x51 }, 2, T, R, pfx_66, W0, Ln }, /* vpdpbusds */
+    { { 0x51 }, 2, T, R, pfx_f3, W0, Ln }, /* vpdpbsuds */
+    { { 0x51 }, 2, T, R, pfx_f2, W0, Ln }, /* vpdpbssds */
     { { 0x52 }, 2, T, R, pfx_66, W0, Ln }, /* vpdpwssd */
     { { 0x53 }, 2, T, R, pfx_66, W0, Ln }, /* vpdpwssds */
     { { 0x58 }, 2, T, R, pfx_66, W0, Ln }, /* vpbroadcastd */
     { { 0x59 }, 2, T, R, pfx_66, W0, Ln }, /* vpbroadcastq */
     { { 0x5a }, 2, F, R, pfx_66, W0, L1 }, /* vbroadcasti128 */
+    { { 0x72 }, 2, T, R, pfx_f3, W0, Ln }, /* vcvtneps2bf16 */
     { { 0x78 }, 2, T, R, pfx_66, W0, Ln }, /* vpbroadcastb */
     { { 0x79 }, 2, T, R, pfx_66, W0, Ln }, /* vpbroadcastw */
     { { 0x8c }, 2, F, R, pfx_66, Wn, Ln }, /* vpmaskmov{d,q} */
@@ -1370,6 +1378,14 @@ static const struct vex {
     { { 0xad }, 2, T, R, pfx_66, Wn, LIG }, /* vnmadd213s{s,d} */
     { { 0xae }, 2, T, R, pfx_66, Wn, Ln }, /* vnmsub213p{s,d} */
     { { 0xaf }, 2, T, R, pfx_66, Wn, LIG }, /* vnmsub213s{s,d} */
+    { { 0xb0 }, 2, F, R, pfx_no, W0, Ln }, /* vcvtneoph2ps */
+    { { 0xb0 }, 2, F, R, pfx_66, W0, Ln }, /* vcvtneeph2ps */
+    { { 0xb0 }, 2, F, R, pfx_f3, W0, Ln }, /* vcvtneebf162ps */
+    { { 0xb0 }, 2, F, R, pfx_f2, W0, Ln }, /* vcvtneobf162ps */
+    { { 0xb1 }, 2, F, R, pfx_66, W0, Ln }, /* vbcstnesh2ps */
+    { { 0xb1 }, 2, F, R, pfx_f3, W0, Ln }, /* vbcstnebf162ps */
+    { { 0xb4 }, 2, T, R, pfx_66, W1, Ln }, /* vpmadd52luq */
+    { { 0xb5 }, 2, T, R, pfx_66, W1, Ln }, /* vpmadd52huq */
     { { 0xb6 }, 2, T, R, pfx_66, Wn, Ln }, /* vmaddsub231p{s,d} */
     { { 0xb7 }, 2, T, R, pfx_66, Wn, Ln }, /* vmsubadd231p{s,d} */
     { { 0xb8 }, 2, T, R, pfx_66, Wn, Ln }, /* vmadd231p{s,d} */
@@ -1380,12 +1396,41 @@ static const struct vex {
     { { 0xbd }, 2, T, R, pfx_66, Wn, LIG }, /* vnmadd231s{s,d} */
     { { 0xbe }, 2, T, R, pfx_66, Wn, Ln }, /* vnmsub231p{s,d} */
     { { 0xbf }, 2, T, R, pfx_66, Wn, LIG }, /* vnmsub231s{s,d} */
+    { { 0xcb, 0xc0 }, 2, F, N, pfx_f2, W0, L1 }, /* vsha512rnds2 */
+    { { 0xcc, 0xc0 }, 2, F, N, pfx_f2, W0, L1 }, /* vsha512msg1 */
+    { { 0xcd, 0xc0 }, 2, F, N, pfx_f2, W0, L1 }, /* vsha512msg2 */
     { { 0xcf }, 2, T, R, pfx_66, W0, Ln }, /* vgf2p8mulb */
+    { { 0xd2 }, 2, T, R, pfx_no, W0, Ln }, /* vpdpwuud */
+    { { 0xd2 }, 2, T, R, pfx_66, W0, Ln }, /* vpdpwusd */
+    { { 0xd2 }, 2, T, R, pfx_f3, W0, Ln }, /* vpdpwsud */
+    { { 0xd3 }, 2, T, R, pfx_no, W0, Ln }, /* vpdpwuuds */
+    { { 0xd3 }, 2, T, R, pfx_66, W0, Ln }, /* vpdpwusds */
+    { { 0xd3 }, 2, T, R, pfx_f3, W0, Ln }, /* vpdpwsuds */
+    { { 0xda }, 2, T, R, pfx_no, W0, L0 }, /* vsm3msg1 */
+    { { 0xda }, 2, T, R, pfx_66, W0, L0 }, /* vsm3msg2 */
+    { { 0xda }, 2, T, R, pfx_f3, W0, Ln }, /* vsm4key4 */
+    { { 0xda }, 2, T, R, pfx_f2, W0, Ln }, /* vsm4rnds4 */
     { { 0xdb }, 2, T, R, pfx_66, WIG, L0 }, /* vaesimc */
     { { 0xdc }, 2, T, R, pfx_66, WIG, Ln }, /* vaesenc */
     { { 0xdd }, 2, T, R, pfx_66, WIG, Ln }, /* vaesenclast */
     { { 0xde }, 2, T, R, pfx_66, WIG, Ln }, /* vaesdec */
     { { 0xdf }, 2, T, R, pfx_66, WIG, Ln }, /* vaesdeclast */
+    { { 0xe0 }, 2, F, W, pfx_66, Wn, L0 }, /* cmpoxadd */
+    { { 0xe1 }, 2, F, W, pfx_66, Wn, L0 }, /* cmpnoxadd */
+    { { 0xe2 }, 2, F, W, pfx_66, Wn, L0 }, /* cmpbxadd */
+    { { 0xe3 }, 2, F, W, pfx_66, Wn, L0 }, /* cmpnbxadd */
+    { { 0xe4 }, 2, F, W, pfx_66, Wn, L0 }, /* cmpexadd */
+    { { 0xe5 }, 2, F, W, pfx_66, Wn, L0 }, /* cmpnexadd */
+    { { 0xe6 }, 2, F, W, pfx_66, Wn, L0 }, /* cmpbexadd */
+    { { 0xe7 }, 2, F, W, pfx_66, Wn, L0 }, /* cmpaxadd */
+    { { 0xe8 }, 2, F, W, pfx_66, Wn, L0 }, /* cmpsxadd */
+    { { 0xe9 }, 2, F, W, pfx_66, Wn, L0 }, /* cmpnsxadd */
+    { { 0xea }, 2, F, W, pfx_66, Wn, L0 }, /* cmppxadd */
+    { { 0xeb }, 2, F, W, pfx_66, Wn, L0 }, /* cmpnpxadd */
+    { { 0xec }, 2, F, W, pfx_66, Wn, L0 }, /* cmplxadd */
+    { { 0xed }, 2, F, W, pfx_66, Wn, L0 }, /* cmpgexadd */
+    { { 0xee }, 2, F, W, pfx_66, Wn, L0 }, /* cmplexadd */
+    { { 0xef }, 2, F, W, pfx_66, Wn, L0 }, /* cmpgxadd */
     { { 0xf2 }, 2, T, R, pfx_no, Wn, L0 }, /* andn */
     { { 0xf3, 0x08 }, 2, T, R, pfx_no, Wn, L0 }, /* blsr */
     { { 0xf3, 0x10 }, 2, T, R, pfx_no, Wn, L0 }, /* blsmsk */
@@ -1465,6 +1510,7 @@ static const struct vex {
     { { 0x7f }, 3, T, R, pfx_66, Wn, LIG }, /* vfnmsubsd */
     { { 0xce }, 3, T, R, pfx_66, W1, Ln }, /* vgf2p8affineqb */
     { { 0xcf }, 3, T, R, pfx_66, W1, Ln }, /* vgf2p8affineinvqb */
+    { { 0xde }, 3, T, R, pfx_66, W0, L0 }, /* vsm3rnds2 */
     { { 0xdf }, 3, T, R, pfx_66, WIG, Ln }, /* vaeskeygenassist */
     { { 0xf0 }, 3, T, R, pfx_f2, Wn, L0 }, /* rorx */
 };
@@ -1843,7 +1889,7 @@ static const struct evex {
     { { 0x39 }, 2, T, R, pfx_66, Wn, Ln }, /* vpmins{d,q} */
     { { 0x39, 0xc0 }, 2, F, N, pfx_f3, Wn, Ln }, /* vpmov{d,q}2m */
     { { 0x3a }, 2, T, R, pfx_66, WIG, Ln }, /* vpminuw */
-    { { 0x2a, 0xc0 }, 2, F, N, pfx_f3, W0, Ln }, /* vpbroadcastmw2d */
+    { { 0x3a, 0xc0 }, 2, F, N, pfx_f3, W0, Ln }, /* vpbroadcastmw2d */
     { { 0x3b }, 2, T, R, pfx_66, Wn, Ln }, /* vpminu{d,q} */
     { { 0x3c }, 2, T, R, pfx_66, WIG, Ln }, /* vpmaxsb */
     { { 0x3d }, 2, T, R, pfx_66, Wn, Ln }, /* vpmaxs{d,q} */
@@ -1972,8 +2018,10 @@ static const struct evex {
     { { 0x03 }, 3, T, R, pfx_66, Wn, Ln }, /* valign{d,q} */
     { { 0x04 }, 3, T, R, pfx_66, W0, Ln }, /* vpermilps */
     { { 0x05 }, 3, T, R, pfx_66, W1, Ln }, /* vpermilpd */
+    { { 0x08 }, 3, T, R, pfx_no, W0, Ln }, /* vrndscaleph */
     { { 0x08 }, 3, T, R, pfx_66, W0, Ln }, /* vrndscaleps */
     { { 0x09 }, 3, T, R, pfx_66, W1, Ln }, /* vrndscalepd */
+    { { 0x0a }, 3, T, R, pfx_no, W0, LIG }, /* vrndscalesh */
     { { 0x0a }, 3, T, R, pfx_66, W0, LIG }, /* vrndscaless */
     { { 0x0b }, 3, T, R, pfx_66, W1, LIG }, /* vrndscalesd */
     { { 0x0f }, 3, T, R, pfx_66, WIG, Ln }, /* vpalignr */
@@ -1993,7 +2041,9 @@ static const struct evex {
     { { 0x22 }, 3, T, R, pfx_66, Wn, L0 }, /* vpinsr{d,q} */
     { { 0x23 }, 3, T, R, pfx_66, Wn, L1|L2 }, /* vshuff{32x4,64x2} */
     { { 0x25 }, 3, T, R, pfx_66, Wn, Ln }, /* vpternlog{d,q} */
+    { { 0x26 }, 3, T, R, pfx_no, W0, Ln }, /* vgetmantph */
     { { 0x26 }, 3, T, R, pfx_66, Wn, Ln }, /* vgetmantp{s,d} */
+    { { 0x27 }, 3, T, R, pfx_no, W0, LIG }, /* vgetmantsh */
     { { 0x27 }, 3, T, R, pfx_66, Wn, LIG }, /* vgetmants{s,d} */
     { { 0x38 }, 3, T, R, pfx_66, Wn, L1|L2 }, /* vinserti{32x4,64x2} */
     { { 0x39 }, 3, T, W, pfx_66, Wn, L1|L2 }, /* vextracti{32x4,64x2} */
@@ -2008,16 +2058,122 @@ static const struct evex {
     { { 0x51 }, 3, T, R, pfx_66, Wn, LIG }, /* vranges{s,d} */
     { { 0x54 }, 3, T, R, pfx_66, Wn, Ln }, /* vfixupimmp{s,d} */
     { { 0x55 }, 3, T, R, pfx_66, Wn, LIG }, /* vfixumpimms{s,d} */
+    { { 0x56 }, 3, T, R, pfx_no, W0, Ln }, /* vreduceph */
     { { 0x56 }, 3, T, R, pfx_66, Wn, Ln }, /* vreducep{s,d} */
+    { { 0x57 }, 3, T, R, pfx_no, W0, LIG }, /* vreducesh */
     { { 0x57 }, 3, T, R, pfx_66, Wn, LIG }, /* vreduces{s,d} */
+    { { 0x66 }, 3, T, R, pfx_no, W0, Ln }, /* vfpclassph */
     { { 0x66 }, 3, T, R, pfx_66, Wn, Ln }, /* vfpclassp{s,d} */
+    { { 0x67 }, 3, T, R, pfx_no, W0, LIG }, /* vfpclasssh */
     { { 0x67 }, 3, T, R, pfx_66, Wn, LIG }, /* vfpclasss{s,d} */
     { { 0x70 }, 3, T, R, pfx_66, W1, Ln }, /* vshldw */
     { { 0x71 }, 3, T, R, pfx_66, Wn, Ln }, /* vshld{d,q} */
     { { 0x72 }, 3, T, R, pfx_66, W1, Ln }, /* vshrdw */
     { { 0x73 }, 3, T, R, pfx_66, Wn, Ln }, /* vshrd{d,q} */
+    { { 0xc2 }, 3, T, R, pfx_no, W0, Ln }, /* vcmpph */
+    { { 0xc2 }, 3, T, R, pfx_f3, W0, LIG }, /* vcmpsh */
     { { 0xce }, 3, T, R, pfx_66, W1, Ln }, /* vgf2p8affineqb */
     { { 0xcf }, 3, T, R, pfx_66, W1, Ln }, /* vgf2p8affineinvqb */
+}, evex_map5[] = {
+    { { 0x10 }, 2, T, R, pfx_f3, W0, LIG }, /* vmovsh */
+    { { 0x11 }, 2, T, W, pfx_f3, W0, LIG }, /* vmovsh */
+    { { 0x1d }, 2, T, R, pfx_66, W0, Ln }, /* vcvtps2phx */
+    { { 0x1d }, 2, T, R, pfx_no, W0, LIG }, /* vcvtss2sh */
+    { { 0x2a }, 2, T, R, pfx_f3, Wn, LIG }, /* vcvtsi2sh */
+    { { 0x2c }, 2, T, R, pfx_f3, Wn, LIG }, /* vcvttsh2si */
+    { { 0x2d }, 2, T, R, pfx_f3, Wn, LIG }, /* vcvtsh2si */
+    { { 0x2e }, 2, T, R, pfx_no, W0, LIG }, /* vucomish */
+    { { 0x2f }, 2, T, R, pfx_no, W0, LIG }, /* vcomish */
+    { { 0x51 }, 2, T, R, pfx_no, W0, Ln }, /* vsqrtph */
+    { { 0x51 }, 2, T, R, pfx_f3, W0, LIG }, /* vsqrtsh */
+    { { 0x58 }, 2, T, R, pfx_no, W0, Ln }, /* vaddph */
+    { { 0x58 }, 2, T, R, pfx_f3, W0, LIG }, /* vaddsh */
+    { { 0x59 }, 2, T, R, pfx_no, W0, Ln }, /* vmulph */
+    { { 0x59 }, 2, T, R, pfx_f3, W0, LIG }, /* vmulsh */
+    { { 0x5a }, 2, T, R, pfx_no, W0, Ln }, /* vcvtph2pd */
+    { { 0x5a }, 2, T, R, pfx_66, W1, Ln }, /* vcvtpd2ph */
+    { { 0x5a }, 2, T, R, pfx_f3, W0, LIG }, /* vcvtsh2sd */
+    { { 0x5a }, 2, T, R, pfx_f2, W1, LIG }, /* vcvtsd2sh */
+    { { 0x5b }, 2, T, R, pfx_no, W0, Ln }, /* vcvtdq2ph */
+    { { 0x5b }, 2, T, R, pfx_no, W1, Ln }, /* vcvtqq2ph */
+    { { 0x5b }, 2, T, R, pfx_66, W0, Ln }, /* vcvtph2dq */
+    { { 0x5b }, 2, T, R, pfx_f3, W0, Ln }, /* vcvttph2dq */
+    { { 0x5c }, 2, T, R, pfx_no, W0, Ln }, /* vsubph */
+    { { 0x5c }, 2, T, R, pfx_f3, W0, LIG }, /* vsubsh */
+    { { 0x5d }, 2, T, R, pfx_no, W0, Ln }, /* vminph */
+    { { 0x5d }, 2, T, R, pfx_f3, W0, LIG }, /* vminsh */
+    { { 0x5e }, 2, T, R, pfx_no, W0, Ln }, /* vdivph */
+    { { 0x5e }, 2, T, R, pfx_f3, W0, LIG }, /* vdivsh */
+    { { 0x5f }, 2, T, R, pfx_no, W0, Ln }, /* vmaxph */
+    { { 0x5f }, 2, T, R, pfx_f3, W0, LIG }, /* vmaxsh */
+    { { 0x6e }, 2, T, R, pfx_66, WIG, L0 }, /* vmovw */
+    { { 0x78 }, 2, T, R, pfx_no, W0, Ln }, /* vcvttph2udq */
+    { { 0x78 }, 2, T, R, pfx_66, W0, Ln }, /* vcvttph2uqq */
+    { { 0x78 }, 2, T, R, pfx_f3, Wn, LIG }, /* vcvttsh2usi */
+    { { 0x79 }, 2, T, R, pfx_no, W0, Ln }, /* vcvtph2udq */
+    { { 0x79 }, 2, T, R, pfx_66, W0, Ln }, /* vcvtph2uqq */
+    { { 0x79 }, 2, T, R, pfx_f3, Wn, LIG }, /* vcvtsh2usi */
+    { { 0x7a }, 2, T, R, pfx_66, W0, Ln }, /* vcvttph2qq */
+    { { 0x7a }, 2, T, R, pfx_f2, W0, Ln }, /* vcvtudq2ph */
+    { { 0x7a }, 2, T, R, pfx_f2, W1, Ln }, /* vcvtuqq2ph */
+    { { 0x7b }, 2, T, R, pfx_66, W0, Ln }, /* vcvtph2qq */
+    { { 0x7b }, 2, T, R, pfx_f3, Wn, LIG }, /* vcvtusi2sh */
+    { { 0x7c }, 2, T, R, pfx_no, W0, Ln }, /* vcvttph2uw */
+    { { 0x7c }, 2, T, R, pfx_66, W0, Ln }, /* vcvttph2w */
+    { { 0x7d }, 2, T, R, pfx_no, W0, Ln }, /* vcvtph2uw */
+    { { 0x7d }, 2, T, R, pfx_66, W0, Ln }, /* vcvtph2w */
+    { { 0x7d }, 2, T, R, pfx_f3, W0, Ln }, /* vcvtw2ph */
+    { { 0x7d }, 2, T, R, pfx_f2, W0, Ln }, /* vcvtuwph */
+    { { 0x7e }, 2, T, W, pfx_66, WIG, L0 }, /* vmovw */
+}, evex_map6[] = {
+    { { 0x13 }, 2, T, R, pfx_66, W0, Ln }, /* vcvtph2psx */
+    { { 0x13 }, 2, T, R, pfx_no, W0, LIG }, /* vcvtsh2ss */
+    { { 0x2c }, 2, T, R, pfx_66, W0, Ln }, /* vscalefph */
+    { { 0x2d }, 2, T, R, pfx_66, W0, LIG }, /* vscalefsh */
+    { { 0x42 }, 2, T, R, pfx_66, W0, Ln }, /* vgetexpph */
+    { { 0x43 }, 2, T, R, pfx_66, W0, LIG }, /* vgetexpsh */
+    { { 0x4c }, 2, T, R, pfx_66, W0, Ln }, /* vrcpph */
+    { { 0x4d }, 2, T, R, pfx_66, W0, LIG }, /* vrcpsh */
+    { { 0x4e }, 2, T, R, pfx_66, W0, Ln }, /* vrsqrtph */
+    { { 0x4f }, 2, T, R, pfx_66, W0, LIG }, /* vrsqrtsh */
+    { { 0x56 }, 2, T, R, pfx_f3, W0, Ln }, /* vfmaddcph */
+    { { 0x56 }, 2, T, R, pfx_f2, W0, Ln }, /* vfcmaddcph */
+    { { 0x57 }, 2, T, R, pfx_f3, W0, LIG }, /* vfmaddcsh */
+    { { 0x57 }, 2, T, R, pfx_f2, W0, LIG }, /* vfcmaddcsh */
+    { { 0x96 }, 2, T, R, pfx_66, W0, Ln }, /* vfmaddsub132ph */
+    { { 0x97 }, 2, T, R, pfx_66, W0, Ln }, /* vfmsubadd132ph */
+    { { 0x98 }, 2, T, R, pfx_66, W0, Ln }, /* vfmadd132ph */
+    { { 0x99 }, 2, T, R, pfx_66, W0, LIG }, /* vfmadd132sh */
+    { { 0x9a }, 2, T, R, pfx_66, W0, Ln }, /* vfmsub132ph */
+    { { 0x9b }, 2, T, R, pfx_66, W0, LIG }, /* vfmsub132sh */
+    { { 0x9c }, 2, T, R, pfx_66, W0, Ln }, /* vfnmadd132ph */
+    { { 0x9d }, 2, T, R, pfx_66, W0, LIG }, /* vfnmadd132sh */
+    { { 0x9e }, 2, T, R, pfx_66, W0, Ln }, /* vfnmsub132ph */
+    { { 0x9f }, 2, T, R, pfx_66, W0, LIG }, /* vfnmsub132sh */
+    { { 0xa6 }, 2, T, R, pfx_66, W0, Ln }, /* vfmaddsub213ph */
+    { { 0xa7 }, 2, T, R, pfx_66, W0, Ln }, /* vfmsubadd213ph */
+    { { 0xa8 }, 2, T, R, pfx_66, W0, Ln }, /* vfmadd213ph */
+    { { 0xa9 }, 2, T, R, pfx_66, W0, LIG }, /* vfmadd213sh */
+    { { 0xaa }, 2, T, R, pfx_66, W0, Ln }, /* vfmsub213ph */
+    { { 0xab }, 2, T, R, pfx_66, W0, LIG }, /* vfmsub213sh */
+    { { 0xac }, 2, T, R, pfx_66, W0, Ln }, /* vfnmadd213ph */
+    { { 0xad }, 2, T, R, pfx_66, W0, LIG }, /* vfnmadd213sh */
+    { { 0xae }, 2, T, R, pfx_66, W0, Ln }, /* vfnmsub213ph */
+    { { 0xaf }, 2, T, R, pfx_66, W0, LIG }, /* vfnmsub213sh */
+    { { 0xb6 }, 2, T, R, pfx_66, W0, Ln }, /* vfmaddsub231ph */
+    { { 0xb7 }, 2, T, R, pfx_66, W0, Ln }, /* vfmsubadd231ph */
+    { { 0xb8 }, 2, T, R, pfx_66, W0, Ln }, /* vfmadd231ph */
+    { { 0xb9 }, 2, T, R, pfx_66, W0, LIG }, /* vfmadd231sh */
+    { { 0xba }, 2, T, R, pfx_66, W0, Ln }, /* vfmsub231ph */
+    { { 0xbb }, 2, T, R, pfx_66, W0, LIG }, /* vfmsub231sh */
+    { { 0xbc }, 2, T, R, pfx_66, W0, Ln }, /* vfnmadd231ph */
+    { { 0xbd }, 2, T, R, pfx_66, W0, LIG }, /* vfnmadd231sh */
+    { { 0xbe }, 2, T, R, pfx_66, W0, Ln }, /* vfnmsub231ph */
+    { { 0xbf }, 2, T, R, pfx_66, W0, LIG }, /* vfnmsub231sh */
+    { { 0xd6 }, 2, T, R, pfx_f3, W0, Ln }, /* vfmulcph */
+    { { 0xd6 }, 2, T, R, pfx_f2, W0, Ln }, /* vfcmulcph */
+    { { 0xd7 }, 2, T, R, pfx_f3, W0, LIG }, /* vfmulcsh */
+    { { 0xd7 }, 2, T, R, pfx_f2, W0, LIG }, /* vfcmulcsh */
 };
 
 static const struct {
@@ -2027,6 +2183,9 @@ static const struct {
     { evex_0f,   ARRAY_SIZE(evex_0f) },
     { evex_0f38, ARRAY_SIZE(evex_0f38) },
     { evex_0f3a, ARRAY_SIZE(evex_0f3a) },
+    { NULL,      0 },
+    { evex_map5, ARRAY_SIZE(evex_map5) },
+    { evex_map6, ARRAY_SIZE(evex_map6) },
 };
 
 #undef Wn
@@ -2054,40 +2213,49 @@ void do_test(uint8_t *instr, unsigned int len, unsigned int modrm,
                           unsigned int bytes,
                           struct x86_emulate_ctxt *ctxt))
 {
-    struct x86_emulate_state *s;
+    struct x86_emulate_state *s = x86_decode_insn(ctxt, fetch);
 
-    if ( !modrm || mem != mem_none )
+    if ( !s )
     {
-        s = x86_decode_insn(ctxt, fetch);
-
-        if ( x86_insn_length(s, ctxt) != len )
-        {
-            print_insn(instr, len);
-            printf(" length %u (expected %u)\n", x86_insn_length(s, ctxt), len);
-        }
-
-        if ( x86_insn_is_mem_access(s, ctxt) != (mem != mem_none) )
-        {
-            print_insn(instr, len);
-            printf(" mem access %d (expected %d)\n",
-                   x86_insn_is_mem_access(s, ctxt), mem != mem_none);
-        }
-
-        if ( x86_insn_is_mem_write(s, ctxt) != (mem == mem_write) )
-        {
-            print_insn(instr, len);
-            printf(" mem write %d (expected %d)\n",
-                   x86_insn_is_mem_write(s, ctxt), mem == mem_write);
-        }
-
-        x86_emulate_free_state(s);
+        print_insn(instr, len);
+        printf(" failed to decode\n");
+        return;
     }
+
+    if ( x86_insn_length(s, ctxt) != len )
+    {
+        print_insn(instr, len);
+        printf(" length %u (expected %u)\n", x86_insn_length(s, ctxt), len);
+    }
+
+    if ( x86_insn_is_mem_access(s, ctxt) != (mem != mem_none) )
+    {
+        print_insn(instr, len);
+        printf(" mem access %d (expected %d)\n",
+               x86_insn_is_mem_access(s, ctxt), mem != mem_none);
+    }
+
+    if ( x86_insn_is_mem_write(s, ctxt) != (mem == mem_write) )
+    {
+        print_insn(instr, len);
+        printf(" mem write %d (expected %d)\n",
+               x86_insn_is_mem_write(s, ctxt), mem == mem_write);
+    }
+
+    x86_emulate_free_state(s);
 
     if ( modrm )
     {
         instr[modrm] |= 0xc0;
 
         s = x86_decode_insn(ctxt, fetch);
+
+        if ( !s )
+        {
+            print_insn(instr, len);
+            printf(" failed to decode\n");
+            return;
+        }
 
         if ( x86_insn_length(s, ctxt) != len )
         {

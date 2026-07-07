@@ -1,5 +1,7 @@
 usr/lib/xen-@version@/bin
 usr/lib/xen-@version@/lib/python
+# this contains xenctrl_plugin/domain_getinfo_v1.cmxs used by oxenstored
+usr/lib/xen-@version@/ocaml/xsd_glue
 
 ? flavour = amd64
 usr/lib/xen-@version@/boot

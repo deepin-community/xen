@@ -1,24 +1,14 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * asid.c: handling ASIDs in SVM.
  * Copyright (c) 2007, Advanced Micro Devices, Inc.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <asm/amd.h>
 #include <asm/hvm/nestedhvm.h>
-#include <asm/hvm/svm/asid.h>
 #include <asm/hvm/svm/svm.h>
+
+#include "svm.h"
 
 void svm_asid_init(const struct cpuinfo_x86 *c)
 {
@@ -26,7 +16,7 @@ void svm_asid_init(const struct cpuinfo_x86 *c)
 
     /* Check for erratum #170, and leave ASIDs disabled if it's present. */
     if ( !cpu_has_amd_erratum(c, AMD_ERRATUM_170) )
-        nasids = cpuid_ebx(0x8000000A);
+        nasids = cpuid_ebx(0x8000000aU);
 
     hvm_asid_init(nasids);
 }
@@ -47,18 +37,17 @@ void svm_asid_handle_vmrun(void)
     /* ASID 0 indicates that ASIDs are disabled. */
     if ( p_asid->asid == 0 )
     {
-        vmcb_set_guest_asid(vmcb, 1);
+        vmcb_set_asid(vmcb, true);
         vmcb->tlb_control =
             cpu_has_svm_flushbyasid ? TLB_CTRL_FLUSH_ASID : TLB_CTRL_FLUSH_ALL;
         return;
     }
 
-    if ( vmcb_get_guest_asid(vmcb) != p_asid->asid )
-        vmcb_set_guest_asid(vmcb, p_asid->asid);
+    if ( vmcb_get_asid(vmcb) != p_asid->asid )
+        vmcb_set_asid(vmcb, p_asid->asid);
 
-    vmcb->tlb_control =
-        !need_flush ? TLB_CTRL_NO_FLUSH :
-        cpu_has_svm_flushbyasid ? TLB_CTRL_FLUSH_ASID : TLB_CTRL_FLUSH_ALL;
+    /* We can't rely on TLB_CTRL_FLUSH_ASID as all ASIDs are stale here. */
+    vmcb->tlb_control = need_flush ? TLB_CTRL_FLUSH_ALL : TLB_CTRL_NO_FLUSH;
 }
 
 /*

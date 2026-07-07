@@ -21,7 +21,7 @@ squash! pygrub: Set sys.path and rpath
  1 file changed, 2 insertions(+)
 
 diff --git a/tools/pygrub/src/pygrub b/tools/pygrub/src/pygrub
-index e610b87..c8927e8 100755
+index 1756a68..a817126 100755
 --- a/tools/pygrub/src/pygrub
 +++ b/tools/pygrub/src/pygrub
 @@ -25,6 +25,8 @@ import subprocess

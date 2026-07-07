@@ -1,14 +1,4 @@
-/*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include <xen/bitops.h>
 #include <xen/errno.h>
 #include <xen/grant_table.h>
@@ -23,6 +13,7 @@
 #include <xen/wait.h>
 
 #include <asm/alternative.h>
+#include <asm/arm64/sve.h>
 #include <asm/cpuerrata.h>
 #include <asm/cpufeature.h>
 #include <asm/current.h>
@@ -105,6 +96,9 @@ static void ctxt_switch_from(struct vcpu *p)
     /* CP 15 */
     p->arch.csselr = READ_SYSREG(CSSELR_EL1);
 
+    /* VFP */
+    vfp_save_state(p);
+
     /* Control Registers */
     p->arch.cpacr = READ_SYSREG(CPACR_EL1);
 
@@ -165,9 +159,6 @@ static void ctxt_switch_from(struct vcpu *p)
 
     /* XXX MPU */
 
-    /* VFP */
-    vfp_save_state(p);
-
     /* VGIC */
     gic_save_state(p);
 
@@ -190,9 +181,6 @@ static void ctxt_switch_to(struct vcpu *n)
 
     /* VGIC */
     gic_restore_state(n);
-
-    /* VFP */
-    vfp_restore_state(n);
 
     /* XXX MPU */
 
@@ -266,7 +254,16 @@ static void ctxt_switch_to(struct vcpu *n)
     WRITE_CP32(n->arch.joscr, JOSCR);
     WRITE_CP32(n->arch.jmcr, JMCR);
 #endif
+
+    /*
+     * CPTR_EL2 needs to be written before calling vfp_restore_state, a
+     * synchronization instruction is expected after the write (isb)
+     */
+    WRITE_SYSREG(n->arch.cptr_el2, CPTR_EL2);
     isb();
+
+    /* VFP - call vfp_restore_state after writing on CPTR_EL2 + isb */
+    vfp_restore_state(n);
 
     /* CP 15 */
     WRITE_SYSREG(n->arch.csselr, CSSELR_EL1);
@@ -279,38 +276,6 @@ static void ctxt_switch_to(struct vcpu *n)
     virt_timer_restore(n);
 
     WRITE_SYSREG(n->arch.mdcr_el2, MDCR_EL2);
-}
-
-/* Update per-VCPU guest runstate shared memory area (if registered). */
-static void update_runstate_area(struct vcpu *v)
-{
-    void __user *guest_handle = NULL;
-    struct vcpu_runstate_info runstate;
-
-    if ( guest_handle_is_null(runstate_guest(v)) )
-        return;
-
-    memcpy(&runstate, &v->runstate, sizeof(runstate));
-
-    if ( VM_ASSIST(v->domain, runstate_update_flag) )
-    {
-        guest_handle = &v->runstate_guest.p->state_entry_time + 1;
-        guest_handle--;
-        runstate.state_entry_time |= XEN_RUNSTATE_UPDATE;
-        __raw_copy_to_guest(guest_handle,
-                            (void *)(&runstate.state_entry_time + 1) - 1, 1);
-        smp_wmb();
-    }
-
-    __copy_to_guest(runstate_guest(v), &runstate, 1);
-
-    if ( guest_handle )
-    {
-        runstate.state_entry_time &= ~XEN_RUNSTATE_UPDATE;
-        smp_wmb();
-        __raw_copy_to_guest(guest_handle,
-                            (void *)(&runstate.state_entry_time + 1) - 1, 1);
-    }
 }
 
 static void schedule_tail(struct vcpu *prev)
@@ -417,6 +382,7 @@ unsigned long hypercall_create_continuation(
     const char *p = format;
     unsigned long arg, rc;
     unsigned int i;
+    /* SAF-4-safe allowed variadic function */
     va_list args;
 
     current->hcall_preempted = true;
@@ -590,6 +556,14 @@ int arch_vcpu_create(struct vcpu *v)
 
     v->arch.vmpidr = MPIDR_SMP | vcpuid_to_vaffinity(v->vcpu_id);
 
+    v->arch.cptr_el2 = get_default_cptr_flags();
+    if ( is_sve_domain(v->domain) )
+    {
+        if ( (rc = sve_context_init(v)) != 0 )
+            goto fail;
+        v->arch.cptr_el2 &= ~HCPTR_CP(8);
+    }
+
     v->arch.hcr_el2 = get_default_hcr_flags();
 
     v->arch.mdcr_el2 = HDCR_TDRA | HDCR_TDOSA | HDCR_TDA;
@@ -618,6 +592,8 @@ fail:
 
 void arch_vcpu_destroy(struct vcpu *v)
 {
+    if ( is_sve_domain(v->domain) )
+        sve_context_free(v);
     vcpu_timer_destroy(v);
     vcpu_vgic_free(v);
     free_xenheap_pages(v->arch.stack, STACK_ORDER);
@@ -633,12 +609,33 @@ int arch_sanitise_domain_config(struct xen_domctl_createdomain *config)
     unsigned int max_vcpus;
     unsigned int flags_required = (XEN_DOMCTL_CDF_hvm | XEN_DOMCTL_CDF_hap);
     unsigned int flags_optional = (XEN_DOMCTL_CDF_iommu | XEN_DOMCTL_CDF_vpmu);
+    unsigned int sve_vl_bits = sve_decode_vl(config->arch.sve_vl);
 
     if ( (config->flags & ~flags_optional) != flags_required )
     {
         dprintk(XENLOG_INFO, "Unsupported configuration %#x\n",
                 config->flags);
         return -EINVAL;
+    }
+
+    /* Check feature flags */
+    if ( sve_vl_bits > 0 )
+    {
+        unsigned int zcr_max_bits = get_sys_vl_len();
+
+        if ( !zcr_max_bits )
+        {
+            dprintk(XENLOG_INFO, "SVE is unsupported on this machine.\n");
+            return -EINVAL;
+        }
+
+        if ( sve_vl_bits > zcr_max_bits )
+        {
+            dprintk(XENLOG_INFO,
+                    "Requested SVE vector length (%u) > supported length (%u)\n",
+                    sve_vl_bits, zcr_max_bits);
+            return -EINVAL;
+        }
     }
 
     /* The P2M table must always be shared between the CPU and the IOMMU */
@@ -691,6 +688,12 @@ int arch_sanitise_domain_config(struct xen_domctl_createdomain *config)
         return -EINVAL;
     }
 
+    if ( config->altp2m_opts )
+    {
+        dprintk(XENLOG_INFO, "Altp2m not supported\n");
+        return -EINVAL;
+    }
+
     return 0;
 }
 
@@ -698,15 +701,10 @@ int arch_domain_create(struct domain *d,
                        struct xen_domctl_createdomain *config,
                        unsigned int flags)
 {
-    int rc, count = 0;
+    unsigned int count = 0;
+    int rc;
 
     BUILD_BUG_ON(GUEST_MAX_VCPUS < MAX_VIRT_CPUS);
-
-    /* Idle domains do not need this setup */
-    if ( is_idle_domain(d) )
-        return 0;
-
-    ASSERT(config != NULL);
 
 #ifdef CONFIG_IOREQ_SERVER
     ioreq_domain_init(d);
@@ -783,6 +781,11 @@ int arch_domain_create(struct domain *d,
     if ( (rc = domain_vpci_init(d)) != 0 )
         goto fail;
 
+#ifdef CONFIG_ARM64_SVE
+    /* Copy the encoded vector length sve_vl from the domain configuration */
+    d->arch.sve_vl = config->arch.sve_vl;
+#endif
+
     return 0;
 
 fail:
@@ -792,8 +795,49 @@ fail:
     return rc;
 }
 
+int arch_domain_teardown(struct domain *d)
+{
+    int ret = 0;
+
+    BUG_ON(!d->is_dying);
+
+    /* See domain_teardown() for an explanation of all of this magic. */
+    switch ( d->teardown.arch_val )
+    {
+#define PROGRESS(x)                             \
+        d->teardown.arch_val = PROG_ ## x;      \
+        fallthrough;                            \
+    case PROG_ ## x
+
+        enum {
+            PROG_none,
+            PROG_tee,
+            PROG_done,
+        };
+
+    case PROG_none:
+        BUILD_BUG_ON(PROG_none != 0);
+
+    PROGRESS(tee):
+        ret = tee_domain_teardown(d);
+        if ( ret )
+            return ret;
+
+    PROGRESS(done):
+        break;
+
+#undef PROGRESS
+
+    default:
+        BUG();
+    }
+
+    return 0;
+}
+
 void arch_domain_destroy(struct domain *d)
 {
+    tee_free_domain_ctx(d);
     /* IOMMU page table is shared with P2M, always call
      * iommu_domain_destroy() before p2m_final_teardown().
      */
@@ -828,16 +872,7 @@ int arch_domain_soft_reset(struct domain *d)
 
 void arch_domain_creation_finished(struct domain *d)
 {
-    /*
-     * To avoid flushing the whole guest RAM on the first Set/Way, we
-     * invalidate the P2M to track what has been accessed.
-     *
-     * This is only turned when IOMMU is not used or the page-table are
-     * not shared because bit[0] (e.g valid bit) unset will result
-     * IOMMU fault that could be not fixed-up.
-     */
-    if ( !iommu_use_hap_pt(d) )
-        p2m_invalidate_root(p2m_get_hostp2m(d));
+    p2m_domain_creation_finished(d);
 }
 
 static int is_guest_pv32_psr(uint32_t psr)
@@ -954,7 +989,7 @@ static int relinquish_memory(struct domain *d, struct page_list_head *list)
     int               ret = 0;
 
     /* Use a recursive lock, as we may enter 'free_domheap_page'. */
-    spin_lock_recursive(&d->page_alloc_lock);
+    rspin_lock(&d->page_alloc_lock);
 
     page_list_for_each_safe( page, tmp, list )
     {
@@ -981,7 +1016,7 @@ static int relinquish_memory(struct domain *d, struct page_list_head *list)
     }
 
   out:
-    spin_unlock_recursive(&d->page_alloc_lock);
+    rspin_unlock(&d->page_alloc_lock);
     return ret;
 }
 
@@ -1001,6 +1036,7 @@ enum {
     PROG_xen,
     PROG_page,
     PROG_mapping,
+    PROG_p2m_root,
     PROG_p2m,
     PROG_p2m_pool,
     PROG_done,
@@ -1063,8 +1099,15 @@ int domain_relinquish_resources(struct domain *d)
         if ( ret )
             return ret;
 
+    PROGRESS(p2m_root):
+        /*
+         * We are about to free the intermediate page-tables, so clear the
+         * root to prevent any walk to use them.
+         */
+        p2m_clear_root_pages(&d->arch.p2m);
+
     PROGRESS(p2m):
-        ret = p2m_teardown(d, true);
+        ret = p2m_teardown(d);
         if ( ret )
             return ret;
 
@@ -1146,15 +1189,15 @@ void vcpu_block_unless_event_pending(struct vcpu *v)
         vcpu_unblock(current);
 }
 
-void vcpu_kick(struct vcpu *vcpu)
+void vcpu_kick(struct vcpu *v)
 {
-    bool running = vcpu->is_running;
+    bool running = v->is_running;
 
-    vcpu_unblock(vcpu);
-    if ( running && vcpu != current )
+    vcpu_unblock(v);
+    if ( running && v != current )
     {
         perfc_incr(vcpu_kick);
-        smp_send_event_check_mask(cpumask_of(vcpu->processor));
+        smp_send_event_check_mask(cpumask_of(v->processor));
     }
 }
 

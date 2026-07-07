@@ -75,6 +75,8 @@
 #define DBGDIDR         p14,0,c0,c0,0   /* Debug ID Register */
 #define DBGDSCRINT      p14,0,c0,c1,0   /* Debug Status and Control Internal */
 #define DBGDSCREXT      p14,0,c0,c2,2   /* Debug Status and Control External */
+#define DBGDTRRXINT     p14,0,c0,c5,0   /* Debug Data Transfer Register, Receive */
+#define DBGDTRTXINT     p14,0,c0,c5,0   /* Debug Data Transfer Register, Transmit */
 #define DBGVCR          p14,0,c0,c7,0   /* Vector Catch */
 #define DBGBVR0         p14,0,c0,c0,4   /* Breakpoint Value 0 */
 #define DBGBCR0         p14,0,c0,c0,5   /* Breakpoint Control 0 */
@@ -161,6 +163,7 @@
 #define DACR            p15,0,c3,c0,0   /* Domain Access Control Register */
 
 /* CP15 CR4: */
+#define ICC_PMR         p15,0,c4,c6,0   /* Interrupt Priority Mask Register */
 
 /* CP15 CR5: Fault Status Registers */
 #define DFSR            p15,0,c5,c0,0   /* Data Fault Status Register */
@@ -257,7 +260,84 @@
 #define ICC_ASGI1R      p15,1,c12       /* Interrupt Controller Alias SGI Group 1 Register */
 #define ICC_SGI0R       p15,2,c12       /* Interrupt Controller SGI Group 0 */
 #define VBAR            p15,0,c12,c0,0  /* Vector Base Address Register */
+#define ICC_DIR         p15,0,c12,c11,1 /* Interrupt Controller Deactivate Interrupt Register */
 #define HVBAR           p15,4,c12,c0,0  /* Hyp. Vector Base Address Register */
+
+/*
+ * CP15 CR12: Interrupt Controller Hyp Active Priorities Group 0 Registers,
+ * n = 0 - 3
+ */
+#define __AP0Rx(x)      p15, 4, c12, c8, x
+#define ICH_AP0R0       __AP0Rx(0)
+#define ICH_AP0R1       __AP0Rx(1)
+#define ICH_AP0R2       __AP0Rx(2)
+#define ICH_AP0R3       __AP0Rx(3)
+
+/*
+ * CP15 CR12: Interrupt Controller Hyp Active Priorities Group 1 Registers,
+ * n = 0 - 3
+ */
+#define __AP1Rx(x)      p15, 4, c12, c9, x
+#define ICH_AP1R0       __AP1Rx(0)
+#define ICH_AP1R1       __AP1Rx(1)
+#define ICH_AP1R2       __AP1Rx(2)
+#define ICH_AP1R3       __AP1Rx(3)
+
+#define ICC_IAR1        p15,0,c12,c12,0  /* Interrupt Controller Interrupt Acknowledge Register 1 */
+#define ICC_EOIR1       p15,0,c12,c12,1  /* Interrupt Controller End Of Interrupt Register 1 */
+#define ICC_BPR1        p15,0,c12,c12,3  /* Interrupt Controller Binary Point Register 1 */
+#define ICC_CTLR        p15,0,c12,c12,4  /* Interrupt Controller Control Register */
+#define ICC_SRE         p15,0,c12,c12,5  /* Interrupt Controller System Register Enable register */
+#define ICC_IGRPEN1     p15,0,c12,c12,7  /* Interrupt Controller Interrupt Group 1 Enable register */
+#define ICC_HSRE        p15,4,c12,c9,5   /* Interrupt Controller Hyp System Register Enable register */
+#define ICH_HCR         p15,4,c12,c11,0  /* Interrupt Controller Hyp Control Register */
+#define ICH_VTR         p15,4,c12,c11,1  /* Interrupt Controller VGIC Type Register */
+#define ICH_MISR        p15,4,c12,c11,2  /* Interrupt Controller Maintenance Interrupt State Register */
+#define ICH_EISR        p15,4,c12,c11,3  /* Interrupt Controller End of Interrupt Status Register */
+#define ICH_ELRSR       p15,4,c12,c11,5  /* Interrupt Controller Empty List Register Status Register */
+#define ICH_VMCR        p15,4,c12,c11,7  /* Interrupt Controller Virtual Machine Control Register */
+
+/* CP15 CR12: Interrupt Controller List Registers, n = 0 - 15 */
+#define __LR0(x)        p15, 4, c12, c12, x
+#define __LR8(x)        p15, 4, c12, c13, x
+
+#define ICH_LR0         __LR0(0)
+#define ICH_LR1         __LR0(1)
+#define ICH_LR2         __LR0(2)
+#define ICH_LR3         __LR0(3)
+#define ICH_LR4         __LR0(4)
+#define ICH_LR5         __LR0(5)
+#define ICH_LR6         __LR0(6)
+#define ICH_LR7         __LR0(7)
+#define ICH_LR8         __LR8(0)
+#define ICH_LR9         __LR8(1)
+#define ICH_LR10        __LR8(2)
+#define ICH_LR11        __LR8(3)
+#define ICH_LR12        __LR8(4)
+#define ICH_LR13        __LR8(5)
+#define ICH_LR14        __LR8(6)
+#define ICH_LR15        __LR8(7)
+
+/* CP15 CR12: Interrupt Controller List Registers, n = 0 - 15 */
+#define __LRC0(x)       p15, 4, c12, c14, x
+#define __LRC8(x)       p15, 4, c12, c15, x
+
+#define ICH_LRC0        __LRC0(0)
+#define ICH_LRC1        __LRC0(1)
+#define ICH_LRC2        __LRC0(2)
+#define ICH_LRC3        __LRC0(3)
+#define ICH_LRC4        __LRC0(4)
+#define ICH_LRC5        __LRC0(5)
+#define ICH_LRC6        __LRC0(6)
+#define ICH_LRC7        __LRC0(7)
+#define ICH_LRC8        __LRC8(0)
+#define ICH_LRC9        __LRC8(1)
+#define ICH_LRC10       __LRC8(2)
+#define ICH_LRC11       __LRC8(3)
+#define ICH_LRC12       __LRC8(4)
+#define ICH_LRC13       __LRC8(5)
+#define ICH_LRC14       __LRC8(6)
+#define ICH_LRC15       __LRC8(7)
 
 /* CP15 CR13:  */
 #define FCSEIDR         p15,0,c13,c0,0  /* FCSE Process ID Register */
@@ -317,6 +397,62 @@
 #define HCR_EL2                 HCR
 #define HPFAR_EL2               HPFAR
 #define HSTR_EL2                HSTR
+#define ICC_BPR1_EL1            ICC_BPR1
+#define ICC_CTLR_EL1            ICC_CTLR
+#define ICC_DIR_EL1             ICC_DIR
+#define ICC_EOIR1_EL1           ICC_EOIR1
+#define ICC_IGRPEN1_EL1         ICC_IGRPEN1
+#define ICC_PMR_EL1             ICC_PMR
+#define ICC_SGI1R_EL1           ICC_SGI1R
+#define ICC_SRE_EL1             ICC_SRE
+#define ICC_SRE_EL2             ICC_HSRE
+#define ICH_AP0R0_EL2           ICH_AP0R0
+#define ICH_AP0R1_EL2           ICH_AP0R1
+#define ICH_AP0R2_EL2           ICH_AP0R2
+#define ICH_AP0R3_EL2           ICH_AP0R3
+#define ICH_AP1R0_EL2           ICH_AP1R0
+#define ICH_AP1R1_EL2           ICH_AP1R1
+#define ICH_AP1R2_EL2           ICH_AP1R2
+#define ICH_AP1R3_EL2           ICH_AP1R3
+#define ICH_EISR_EL2            ICH_EISR
+#define ICH_ELRSR_EL2           ICH_ELRSR
+#define ICH_HCR_EL2             ICH_HCR
+#define ICC_IAR1_EL1            ICC_IAR1
+#define ICH_LR0_EL2             ICH_LR0
+#define ICH_LR1_EL2             ICH_LR1
+#define ICH_LR2_EL2             ICH_LR2
+#define ICH_LR3_EL2             ICH_LR3
+#define ICH_LR4_EL2             ICH_LR4
+#define ICH_LR5_EL2             ICH_LR5
+#define ICH_LR6_EL2             ICH_LR6
+#define ICH_LR7_EL2             ICH_LR7
+#define ICH_LR8_EL2             ICH_LR8
+#define ICH_LR9_EL2             ICH_LR9
+#define ICH_LR10_EL2            ICH_LR10
+#define ICH_LR11_EL2            ICH_LR11
+#define ICH_LR12_EL2            ICH_LR12
+#define ICH_LR13_EL2            ICH_LR13
+#define ICH_LR14_EL2            ICH_LR14
+#define ICH_LR15_EL2            ICH_LR15
+#define ICH_LRC0_EL2            ICH_LRC0
+#define ICH_LRC1_EL2            ICH_LRC1
+#define ICH_LRC2_EL2            ICH_LRC2
+#define ICH_LRC3_EL2            ICH_LRC3
+#define ICH_LRC4_EL2            ICH_LRC4
+#define ICH_LRC5_EL2            ICH_LRC5
+#define ICH_LRC6_EL2            ICH_LRC6
+#define ICH_LRC7_EL2            ICH_LRC7
+#define ICH_LRC8_EL2            ICH_LRC8
+#define ICH_LRC9_EL2            ICH_LRC9
+#define ICH_LRC10_EL2           ICH_LRC10
+#define ICH_LRC11_EL2           ICH_LRC11
+#define ICH_LRC12_EL2           ICH_LRC12
+#define ICH_LRC13_EL2           ICH_LRC13
+#define ICH_LRC14_EL2           ICH_LRC14
+#define ICH_LRC15_EL2           ICH_LRC15
+#define ICH_MISR_EL2            ICH_MISR
+#define ICH_VMCR_EL2            ICH_VMCR
+#define ICH_VTR_EL2             ICH_VTR
 #define ID_AFR0_EL1             ID_AFR0
 #define ID_DFR0_EL1             ID_DFR0
 #define ID_DFR1_EL1             ID_DFR1

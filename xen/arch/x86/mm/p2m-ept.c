@@ -1,18 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * ept-p2m.c: use the EPT page table as p2m
  * Copyright (c) 2007, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <xen/domain_page.h>
@@ -22,7 +11,6 @@
 #include <asm/current.h>
 #include <asm/iocap.h>
 #include <asm/paging.h>
-#include <asm/types.h>
 #include <asm/domain.h>
 #include <asm/p2m.h>
 #include <asm/hvm/vmx/vmx.h>
@@ -42,7 +30,8 @@
 
 #define is_epte_present(ept_entry)      ((ept_entry)->epte & 0x7)
 #define is_epte_superpage(ept_entry)    ((ept_entry)->sp)
-static inline bool_t is_epte_valid(ept_entry_t *e)
+
+static bool is_epte_valid(const ept_entry_t *e)
 {
     /* suppress_ve alone is not considered valid, so mask it off */
     return ((e->epte & ~(1ul << 63)) != 0 && e->sa_p2mt != p2m_invalid);
@@ -160,12 +149,16 @@ static void ept_p2m_type_to_flags(const struct p2m_domain *p2m,
     }
 
     /* Then restrict with access permissions */
+    entry->pw = 0;
     switch ( entry->access )
     {
         case p2m_access_n:
         case p2m_access_n2rwx:
             entry->r = entry->w = entry->x = 0;
             break;
+        case p2m_access_r_pw:
+            entry->pw = !!cpu_has_vmx_ept_paging_write;
+            fallthrough;
         case p2m_access_r:
             entry->w = entry->x = 0;
             break;
@@ -251,14 +244,14 @@ static void ept_free_entry(struct p2m_domain *p2m, ept_entry_t *ept_entry, int l
     p2m_free_ptp(p2m, mfn_to_page(_mfn(ept_entry->mfn)));
 }
 
-static bool_t ept_split_super_page(struct p2m_domain *p2m,
-                                   ept_entry_t *ept_entry,
-                                   unsigned int level, unsigned int target)
+static bool ept_split_super_page(
+    struct p2m_domain *p2m, ept_entry_t *ept_entry,
+    unsigned int level, unsigned int target)
 {
     ept_entry_t new_ept, *table;
     uint64_t trunk;
     unsigned int i;
-    bool_t rv = 1;
+    bool rv = true;
 
     /* End if the entry is a leaf entry or reaches the target level. */
     if ( level <= target )
@@ -317,7 +310,7 @@ static bool_t ept_split_super_page(struct p2m_domain *p2m,
  *  GUEST_TABLE_POD:
  *   The next entry is marked populate-on-demand.
  */
-static int ept_next_level(struct p2m_domain *p2m, bool_t read_only,
+static int ept_next_level(struct p2m_domain *p2m, bool read_only,
                           ept_entry_t **table, unsigned long *gfn_remainder,
                           int next_level)
 {
@@ -506,16 +499,10 @@ int epte_get_entry_emt(struct domain *d, gfn_t gfn, mfn_t mfn,
                                                mfn_x(mfn) | ((1UL << order) - 1)) )
         {
             *ipat = true;
-            return MTRR_TYPE_UNCACHABLE;
+            return X86_MT_UC;
         }
         /* Force invalid memory type so resolve_misconfig() will split it */
         return -1;
-    }
-
-    if ( !mfn_valid(mfn) )
-    {
-        *ipat = true;
-        return MTRR_TYPE_UNCACHABLE;
     }
 
     /*
@@ -526,12 +513,16 @@ int epte_get_entry_emt(struct domain *d, gfn_t gfn, mfn_t mfn,
          !cache_flush_permitted(d) )
     {
         *ipat = true;
-        return MTRR_TYPE_WRBACK;
+        return X86_MT_WB;
     }
 
     for ( special_pgs = i = 0; i < (1ul << order); i++ )
-        if ( is_special_page(mfn_to_page(mfn_add(mfn, i))) )
+    {
+        mfn_t cur = mfn_add(mfn, i);
+
+        if ( mfn_valid(cur) && is_special_page(mfn_to_page(cur)) )
             special_pgs++;
+    }
 
     if ( special_pgs )
     {
@@ -539,13 +530,13 @@ int epte_get_entry_emt(struct domain *d, gfn_t gfn, mfn_t mfn,
             return -1;
 
         *ipat = true;
-        return MTRR_TYPE_WRBACK;
+        return X86_MT_WB;
     }
 
     switch ( type )
     {
     case p2m_mmio_direct:
-        return MTRR_TYPE_UNCACHABLE;
+        return X86_MT_UC;
 
     case p2m_grant_map_ro:
     case p2m_grant_map_rw:
@@ -563,7 +554,7 @@ int epte_get_entry_emt(struct domain *d, gfn_t gfn, mfn_t mfn,
          * diverges. See p2m_type_to_flags for the AMD attributes.
          */
         *ipat = true;
-        return MTRR_TYPE_WRBACK;
+        return X86_MT_WB;
 
     default:
         break;
@@ -573,17 +564,15 @@ int epte_get_entry_emt(struct domain *d, gfn_t gfn, mfn_t mfn,
     if ( gmtrr_mtype >= 0 )
     {
         *ipat = true;
-        return gmtrr_mtype != PAT_TYPE_UC_MINUS ? gmtrr_mtype
-                                                : MTRR_TYPE_UNCACHABLE;
+        return gmtrr_mtype != X86_MT_UCM ? gmtrr_mtype : X86_MT_UC;
     }
     if ( gmtrr_mtype == -EADDRNOTAVAIL )
         return -1;
 
-    gmtrr_mtype = v ? mtrr_get_type(&v->arch.hvm.mtrr,
-                                    gfn_x(gfn) << PAGE_SHIFT, order)
-                    : MTRR_TYPE_WRBACK;
-    hmtrr_mtype = mtrr_get_type(&mtrr_state, mfn_x(mfn) << PAGE_SHIFT,
-                                order);
+    gmtrr_mtype = v ? mtrr_get_type(&v->arch.hvm.mtrr, gfn_to_gaddr(gfn),
+                                    order)
+                    : X86_MT_WB;
+    hmtrr_mtype = mtrr_get_type(&mtrr_state, mfn_to_maddr(mfn), order);
     if ( gmtrr_mtype < 0 || hmtrr_mtype < 0 )
         return -1;
 
@@ -592,14 +581,14 @@ int epte_get_entry_emt(struct domain *d, gfn_t gfn, mfn_t mfn,
         return hmtrr_mtype;
 
     /* If either type is UC, we have to go with that one. */
-    if ( gmtrr_mtype == MTRR_TYPE_UNCACHABLE ||
-         hmtrr_mtype == MTRR_TYPE_UNCACHABLE )
-        return MTRR_TYPE_UNCACHABLE;
+    if ( gmtrr_mtype == X86_MT_UC ||
+         hmtrr_mtype == X86_MT_UC )
+        return X86_MT_UC;
 
     /* If either type is WB, we have to go with the other one. */
-    if ( gmtrr_mtype == MTRR_TYPE_WRBACK )
+    if ( gmtrr_mtype == X86_MT_WB )
         return hmtrr_mtype;
-    if ( hmtrr_mtype == MTRR_TYPE_WRBACK )
+    if ( hmtrr_mtype == X86_MT_WB )
         return gmtrr_mtype;
 
     /*
@@ -610,13 +599,13 @@ int epte_get_entry_emt(struct domain *d, gfn_t gfn, mfn_t mfn,
      * permit this), while WT and WP require writes to go straight to memory
      * (WC can buffer them).
      */
-    if ( (gmtrr_mtype == MTRR_TYPE_WRTHROUGH &&
-          hmtrr_mtype == MTRR_TYPE_WRPROT) ||
-         (gmtrr_mtype == MTRR_TYPE_WRPROT &&
-          hmtrr_mtype == MTRR_TYPE_WRTHROUGH) )
-        return MTRR_TYPE_WRPROT;
+    if ( (gmtrr_mtype == X86_MT_WT &&
+          hmtrr_mtype == X86_MT_WP) ||
+         (gmtrr_mtype == X86_MT_WP &&
+          hmtrr_mtype == X86_MT_WT) )
+        return X86_MT_WP;
 
-    return MTRR_TYPE_UNCACHABLE;
+    return X86_MT_UC;
 }
 
 /*
@@ -658,6 +647,8 @@ static int cf_check resolve_misconfig(struct p2m_domain *p2m, unsigned long gfn)
             if ( e.emt != MTRR_NUM_TYPES )
                 break;
 
+            ASSERT(is_epte_present(&e));
+
             if ( level == 0 )
             {
                 for ( gfn -= i, i = 0; i < EPT_PAGETABLE_ENTRIES; ++i )
@@ -691,7 +682,7 @@ static int cf_check resolve_misconfig(struct p2m_domain *p2m, unsigned long gfn)
                                              _mfn(e.mfn),
                                              level * EPT_TABLE_ORDER, &ipat,
                                              e.sa_p2mt);
-                bool_t recalc = e.recalc;
+                bool recalc = e.recalc;
 
                 if ( recalc && p2m_is_changeable(e.sa_p2mt) )
                 {
@@ -773,11 +764,11 @@ static int cf_check resolve_misconfig(struct p2m_domain *p2m, unsigned long gfn)
     return rc;
 }
 
-bool_t ept_handle_misconfig(uint64_t gpa)
+bool ept_handle_misconfig(uint64_t gpa)
 {
     struct vcpu *curr = current;
     struct p2m_domain *p2m = p2m_get_hostp2m(curr->domain);
-    bool_t spurious;
+    bool spurious;
     int rc;
 
     if ( altp2m_active(curr->domain) )
@@ -811,11 +802,11 @@ ept_set_entry(struct p2m_domain *p2m, gfn_t gfn_, mfn_t mfn,
     unsigned int i, target = order / EPT_TABLE_ORDER;
     unsigned long fn_mask = !mfn_eq(mfn, INVALID_MFN) ? (gfn | mfn_x(mfn)) : gfn;
     int ret, rc = 0;
-    bool_t entry_written = 0;
-    bool_t need_modify_vtd_table = 1;
-    bool_t vtd_pte_present = 0;
+    bool entry_written = false;
+    bool need_modify_vtd_table = true;
+    bool vtd_pte_present = false;
     unsigned int iommu_flags = p2m_get_iommu_flags(p2mt, p2ma, mfn);
-    bool_t needs_sync = 1;
+    bool needs_sync = true;
     ept_entry_t old_entry = { .epte = 0 };
     ept_entry_t new_entry = { .epte = 0 };
     struct ept_data *ept = &p2m->ept;
@@ -923,17 +914,6 @@ ept_set_entry(struct p2m_domain *p2m, gfn_t gfn_, mfn_t mfn,
 
     if ( mfn_valid(mfn) || p2m_allows_invalid_mfn(p2mt) )
     {
-        bool ipat;
-        int emt = epte_get_entry_emt(p2m->domain, _gfn(gfn), mfn,
-                                     i * EPT_TABLE_ORDER, &ipat,
-                                     p2mt);
-
-        if ( emt >= 0 )
-            new_entry.emt = emt;
-        else /* ept_handle_misconfig() will need to take care of this. */
-            new_entry.emt = MTRR_NUM_TYPES;
-
-        new_entry.ipat = ipat;
         new_entry.sp = !!i;
         new_entry.sa_p2mt = p2mt;
         new_entry.access = p2ma;
@@ -949,6 +929,22 @@ ept_set_entry(struct p2m_domain *p2m, gfn_t gfn_, mfn_t mfn,
             need_modify_vtd_table = 0;
 
         ept_p2m_type_to_flags(p2m, &new_entry);
+
+        if ( is_epte_present(&new_entry) )
+        {
+            bool ipat;
+            int emt = epte_get_entry_emt(p2m->domain, _gfn(gfn), mfn,
+                                         i * EPT_TABLE_ORDER, &ipat,
+                                         p2mt);
+
+            BUG_ON(mfn_eq(mfn, INVALID_MFN));
+
+            if ( emt >= 0 )
+                new_entry.emt = emt;
+            else /* ept_handle_misconfig() will need to take care of this. */
+                new_entry.emt = MTRR_NUM_TYPES;
+            new_entry.ipat = ipat;
+        }
     }
 
     if ( sve != -1 )
@@ -998,7 +994,7 @@ out:
     if ( is_epte_present(&old_entry) )
         ept_free_entry(p2m, &old_entry, target);
 
-    if ( entry_written && p2m_is_hostp2m(p2m) )
+    if ( hvm_altp2m_supported() && entry_written && p2m_is_hostp2m(p2m) )
     {
         ret = p2m_altp2m_propagate_change(d, _gfn(gfn), mfn, order, p2mt, p2ma);
         if ( !rc )
@@ -1020,7 +1016,7 @@ static mfn_t cf_check ept_get_entry(
     ept_entry_t *ept_entry;
     u32 index;
     int i;
-    bool_t recalc = 0;
+    bool recalc = false;
     mfn_t mfn = INVALID_MFN;
     struct ept_data *ept = &p2m->ept;
 
@@ -1377,6 +1373,71 @@ static void cf_check ept_flush_pml_buffers(struct p2m_domain *p2m)
     vmx_domain_flush_pml_buffers(p2m->domain);
 }
 
+void ept_vcpu_flush_pml_buffer(struct vcpu *v)
+{
+    struct domain *d = v->domain;
+    struct p2m_domain *p2m = p2m_get_hostp2m(d);
+    uint64_t *pml_buf;
+    unsigned long pml_idx;
+
+    ASSERT((v == current) || (!vcpu_runnable(v) && !v->is_running));
+    ASSERT(vmx_vcpu_pml_enabled(v));
+
+    vmx_vmcs_enter(v);
+
+    __vmread(GUEST_PML_INDEX, &pml_idx);
+
+    /* Do nothing if PML buffer is empty. */
+    if ( pml_idx == (NR_PML_ENTRIES - 1) )
+        goto out;
+
+    pml_buf = __map_domain_page(v->arch.hvm.vmx.pml_pg);
+
+    /*
+     * PML index can be either 2^16-1 (buffer is full), or 0 ~ NR_PML_ENTRIES-1
+     * (buffer is not full), and in latter case PML index always points to next
+     * available entity.
+     */
+    if ( pml_idx >= NR_PML_ENTRIES )
+        pml_idx = 0;
+    else
+        pml_idx++;
+
+    /*
+     * Take the lock outside of the loop, so all the type changes are done
+     * inside of the same locked region and the EPT flush is deferred until the
+     * end of the loop.
+     */
+    p2m_lock(p2m);
+    for ( ; pml_idx < NR_PML_ENTRIES; pml_idx++ )
+    {
+        unsigned long gfn = pml_buf[pml_idx] >> PAGE_SHIFT;
+
+        /*
+         * Need to change type from log-dirty to normal memory for logged GFN.
+         * hap_track_dirty_vram depends on it to work. And we mark all loqgged
+         * GFNs to be dirty, as we cannot be sure whether it's safe to ignore
+         * GFNs on which p2m_change_type_one returns failure. The failure cases
+         * are very rare, and additional cost is negligible, but a missing mark
+         * is extremely difficult to debug.
+         */
+        p2m_change_type_one(d, gfn, p2m_ram_logdirty, p2m_ram_rw);
+
+        /* HVM guest: pfn == gfn */
+        paging_mark_pfn_dirty(d, _pfn(gfn));
+    }
+    p2m_unlock(p2m);
+
+    unmap_domain_page(pml_buf);
+
+    /* Reset PML index */
+    __vmwrite(GUEST_PML_INDEX, NR_PML_ENTRIES - 1);
+
+ out:
+    vmx_vmcs_exit(v);
+
+}
+
 int ept_p2m_init(struct p2m_domain *p2m)
 {
     struct ept_data *ept = &p2m->ept;
@@ -1426,12 +1487,12 @@ void ept_p2m_uninit(struct p2m_domain *p2m)
 static const char *memory_type_to_str(unsigned int x)
 {
     static const char memory_types[8][3] = {
-        [MTRR_TYPE_UNCACHABLE]     = "UC",
-        [MTRR_TYPE_WRCOMB]         = "WC",
-        [MTRR_TYPE_WRTHROUGH]      = "WT",
-        [MTRR_TYPE_WRPROT]         = "WP",
-        [MTRR_TYPE_WRBACK]         = "WB",
-        [MTRR_NUM_TYPES]           = "??"
+        [X86_MT_UC]      = "UC",
+        [X86_MT_WC]      = "WC",
+        [X86_MT_WT]      = "WT",
+        [X86_MT_WP]      = "WP",
+        [X86_MT_WB]      = "WB",
+        [MTRR_NUM_TYPES] = "??",
     };
 
     ASSERT(x < ARRAY_SIZE(memory_types));
@@ -1505,7 +1566,7 @@ static void cf_check ept_dump_p2m_table(unsigned char key)
     rcu_read_unlock(&domlist_read_lock);
 }
 
-void setup_ept_dump(void)
+void __init setup_ept_dump(void)
 {
     register_keyhandler('D', ept_dump_p2m_table, "dump VT-x EPT tables", 0);
 }

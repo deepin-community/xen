@@ -56,8 +56,6 @@ static int bool_num = 0;
 static int *bool_pending_values = NULL;
 static int flask_security_make_bools(void);
 
-extern int ss_initialized;
-
 static int __init cf_check parse_flask_param(const char *s)
 {
     if ( !strcmp(s, "enforcing") )
@@ -471,7 +469,7 @@ static int flask_security_load(struct xen_flask_load *load)
     return ret;
 }
 
-static int flask_devicetree_label(struct xen_flask_devicetree_label *arg)
+static int flask_devicetree_label(const struct xen_flask_devicetree_label *arg)
 {
     int rv;
     char *buf;
@@ -494,7 +492,7 @@ static int flask_devicetree_label(struct xen_flask_devicetree_label *arg)
 
 #ifndef COMPAT
 
-static int flask_ocontext_del(struct xen_flask_ocontext *arg)
+static int flask_ocontext_del(const struct xen_flask_ocontext *arg)
 {
     int rv;
 
@@ -508,7 +506,7 @@ static int flask_ocontext_del(struct xen_flask_ocontext *arg)
     return security_ocontext_del(arg->ocon, arg->low, arg->high);
 }
 
-static int flask_ocontext_add(struct xen_flask_ocontext *arg)
+static int flask_ocontext_add(const struct xen_flask_ocontext *arg)
 {
     int rv;
 
@@ -552,7 +550,7 @@ static int flask_get_peer_sid(struct xen_flask_peersid *arg)
     return rv;
 }
 
-static int flask_relabel_domain(struct xen_flask_relabel *arg)
+static int flask_relabel_domain(const struct xen_flask_relabel *arg)
 {
     int rc;
     struct domain *d;

@@ -1,22 +1,14 @@
 #ifndef __X86_PERCPU_H__
 #define __X86_PERCPU_H__
 
-#ifndef __ASSEMBLY__
-extern char __per_cpu_start[], __per_cpu_data_end[];
-extern unsigned long __per_cpu_offset[NR_CPUS];
-void percpu_init_areas(void);
-#endif
+#define PARK_OFFLINE_CPUS_VAR
 
-/* var is in discarded region: offset to particular copy we want */
-#define per_cpu(var, cpu)  \
-    (*RELOC_HIDE(&per_cpu__##var, __per_cpu_offset[cpu]))
-#define this_cpu(var) \
-    (*RELOC_HIDE(&per_cpu__##var, get_cpu_info()->per_cpu_offset))
-
-#define this_cpu_ptr(var) \
-    (*RELOC_HIDE(var, get_cpu_info()->per_cpu_offset))
-
-#define per_cpu_ptr(var, cpu)  \
-    (*RELOC_HIDE(var, __per_cpu_offset[cpu]))
+/*
+ * Force uses of per_cpu() with an invalid area to attempt to access the
+ * middle of the non-canonical address space resulting in a #GP, rather than a
+ * possible #PF at (NULL + a little) which has security implications in the
+ * context of PV guests.
+ */
+#define INVALID_PERCPU_AREA (0x8000000000000000UL - (unsigned long)__per_cpu_start)
 
 #endif /* __X86_PERCPU_H__ */

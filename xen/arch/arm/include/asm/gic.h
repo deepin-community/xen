@@ -246,7 +246,7 @@ void gic_set_irq_type(struct irq_desc *desc, unsigned int type);
 
 /* Program the GIC to route an interrupt */
 extern void gic_route_irq_to_xen(struct irq_desc *desc, unsigned int priority);
-extern int gic_route_irq_to_guest(struct domain *, unsigned int virq,
+extern int gic_route_irq_to_guest(struct domain *d, unsigned int virq,
                                   struct irq_desc *desc,
                                   unsigned int priority);
 
@@ -257,7 +257,7 @@ int gic_remove_irq_from_guest(struct domain *d, unsigned int virq,
 extern void gic_clear_pending_irqs(struct vcpu *v);
 
 extern void init_maintenance_interrupt(void);
-extern void gic_raise_guest_irq(struct vcpu *v, unsigned int irq,
+extern void gic_raise_guest_irq(struct vcpu *v, unsigned int virtual_irq,
         unsigned int priority);
 extern void gic_raise_inflight_irq(struct vcpu *v, unsigned int virtual_irq);
 
@@ -285,7 +285,7 @@ enum gic_sgi {
     GIC_SGI_EVENT_CHECK,
     GIC_SGI_DUMP_STATE,
     GIC_SGI_CALL_FUNCTION,
-    GIC_SGI_MAX,
+    GIC_SGI_STATIC_MAX,
 };
 
 /* SGI irq mode types */
@@ -330,11 +330,11 @@ struct gic_hw_operations {
     /* Initialize the GIC and the boot CPU */
     int (*init)(void);
     /* Save GIC registers */
-    void (*save_state)(struct vcpu *);
+    void (*save_state)(struct vcpu *v);
     /* Restore GIC registers */
-    void (*restore_state)(const struct vcpu *);
+    void (*restore_state)(const struct vcpu *v);
     /* Dump GIC LR register information */
-    void (*dump_state)(const struct vcpu *);
+    void (*dump_state)(const struct vcpu *v);
 
     /* hw_irq_controller to enable/disable/eoi host irq */
     hw_irq_controller *gic_host_irq_type;
@@ -369,9 +369,9 @@ struct gic_hw_operations {
     /* Clear LR register */
     void (*clear_lr)(int lr);
     /* Read LR register and populate gic_lr structure */
-    void (*read_lr)(int lr, struct gic_lr *);
+    void (*read_lr)(int lr, struct gic_lr *lr_reg);
     /* Write LR register from gic_lr structure */
-    void (*write_lr)(int lr, const struct gic_lr *);
+    void (*write_lr)(int lr, const struct gic_lr *lr_reg);
     /* Read VMCR priority */
     unsigned int (*read_vmcr_priority)(void);
     /* Read APRn register */

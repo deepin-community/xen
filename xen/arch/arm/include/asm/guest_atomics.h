@@ -32,7 +32,7 @@ static inline void guest_##name(struct domain *d, int nr, volatile void *p) \
     perfc_incr(atomics_guest_paused);                                       \
                                                                             \
     domain_pause_nosync(d);                                                 \
-    name(nr, p);                                                            \
+    (name)(nr, p);                                                          \
     domain_unpause(d);                                                      \
 }
 
@@ -52,7 +52,7 @@ static inline int guest_##name(struct domain *d, int nr, volatile void *p)  \
     perfc_incr(atomics_guest_paused);                                       \
                                                                             \
     domain_pause_nosync(d);                                                 \
-    oldbit = name(nr, p);                                                   \
+    oldbit = (name)(nr, p);                                                 \
     domain_unpause(d);                                                      \
                                                                             \
     return oldbit;                                                          \
@@ -86,11 +86,11 @@ static inline void guest_clear_mask16(struct domain *d, uint16_t mask,
     domain_unpause(d);
 }
 
-static inline unsigned long __guest_cmpxchg(struct domain *d,
-                                            volatile void *ptr,
-                                            unsigned long old,
-                                            unsigned long new,
-                                            unsigned int size)
+static always_inline unsigned long __guest_cmpxchg(struct domain *d,
+                                                   volatile void *ptr,
+                                                   unsigned long old,
+                                                   unsigned long new,
+                                                   unsigned int size)
 {
     unsigned long oldval = old;
 

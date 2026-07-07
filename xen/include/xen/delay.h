@@ -3,8 +3,12 @@
 
 /* Copyright (C) 1993 Linus Torvalds */
 
-#include <asm/delay.h>
-#define mdelay(n) (\
-	{unsigned long msec=(n); while (msec--) udelay(1000);})
+void udelay(unsigned long usecs);
+
+static inline void mdelay(unsigned long msec)
+{
+    while ( msec-- )
+        udelay(1000);
+}
 
 #endif /* defined(_LINUX_DELAY_H) */

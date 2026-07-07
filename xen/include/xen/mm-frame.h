@@ -14,16 +14,13 @@ TYPE_SAFE(unsigned long, mfn);
  */
 #define INVALID_MFN_INITIALIZER { INVALID_MFN_RAW }
 
-#ifndef mfn_t
+#if 0
 #define mfn_t /* Grep fodder: mfn_t, _mfn() and mfn_x() are defined above */
 #define _mfn
 #define mfn_x
-#undef mfn_t
-#undef _mfn
-#undef mfn_x
 #endif
 
-static inline mfn_t mfn_add(mfn_t mfn, unsigned long i)
+static inline mfn_t __must_check mfn_add(mfn_t mfn, unsigned long i)
 {
     return _mfn(mfn_x(mfn) + i);
 }
@@ -38,7 +35,7 @@ static inline mfn_t mfn_min(mfn_t x, mfn_t y)
     return _mfn(min(mfn_x(x), mfn_x(y)));
 }
 
-static inline bool_t mfn_eq(mfn_t x, mfn_t y)
+static inline bool mfn_eq(mfn_t x, mfn_t y)
 {
     return mfn_x(x) == mfn_x(y);
 }
@@ -53,16 +50,13 @@ TYPE_SAFE(unsigned long, gfn);
  */
 #define INVALID_GFN_INITIALIZER { INVALID_GFN_RAW }
 
-#ifndef gfn_t
+#if 0
 #define gfn_t /* Grep fodder: gfn_t, _gfn() and gfn_x() are defined above */
 #define _gfn
 #define gfn_x
-#undef gfn_t
-#undef _gfn
-#undef gfn_x
 #endif
 
-static inline gfn_t gfn_add(gfn_t gfn, unsigned long i)
+static inline gfn_t __must_check gfn_add(gfn_t gfn, unsigned long i)
 {
     return _gfn(gfn_x(gfn) + i);
 }
@@ -77,7 +71,7 @@ static inline gfn_t gfn_min(gfn_t x, gfn_t y)
     return _gfn(min(gfn_x(x), gfn_x(y)));
 }
 
-static inline bool_t gfn_eq(gfn_t x, gfn_t y)
+static inline bool gfn_eq(gfn_t x, gfn_t y)
 {
     return gfn_x(x) == gfn_x(y);
 }
@@ -85,13 +79,10 @@ static inline bool_t gfn_eq(gfn_t x, gfn_t y)
 TYPE_SAFE(unsigned long, pfn);
 #define PRI_pfn          "05lx"
 
-#ifndef pfn_t
+#if 0
 #define pfn_t /* Grep fodder: pfn_t, _pfn() and pfn_x() are defined above */
 #define _pfn
 #define pfn_x
-#undef pfn_t
-#undef _pfn
-#undef pfn_x
 #endif
 
 #endif /* __XEN_FRAME_NUM_H__ */

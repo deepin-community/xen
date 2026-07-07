@@ -8,11 +8,10 @@
 #include <xen/sched.h>
 #include <xen/dmi.h>
 
-unsigned int (*__read_mostly ioemul_handle_quirk)(
-    uint8_t opcode, char *io_emul_stub, struct cpu_user_regs *regs);
+bool __ro_after_init ioemul_handle_quirk;
 
-static unsigned int cf_check ioemul_handle_proliant_quirk(
-    u8 opcode, char *io_emul_stub, struct cpu_user_regs *regs)
+unsigned int ioemul_handle_proliant_quirk(
+    uint8_t opcode, char *io_emul_stub, const struct cpu_user_regs *regs)
 {
     static const char stub[] = {
         0x9c,       /*    pushf           */
@@ -43,59 +42,51 @@ static const struct dmi_system_id __initconstrel ioport_quirks_tbl[] = {
      */
     {
         .ident = "HP ProLiant DL3xx",
-        .matches = {
+        DMI_MATCH2(
             DMI_MATCH(DMI_BIOS_VENDOR, "HP"),
-            DMI_MATCH(DMI_PRODUCT_NAME, "ProLiant DL3"),
-        },
+            DMI_MATCH(DMI_PRODUCT_NAME, "ProLiant DL3")),
     },
     {
         .ident = "HP ProLiant DL5xx",
-        .matches = {
+        DMI_MATCH2(
             DMI_MATCH(DMI_BIOS_VENDOR, "HP"),
-            DMI_MATCH(DMI_PRODUCT_NAME, "ProLiant DL5"),
-        },
+            DMI_MATCH(DMI_PRODUCT_NAME, "ProLiant DL5")),
     },
     {
         .ident = "HP ProLiant DL7xx",
-        .matches = {
+        DMI_MATCH2(
             DMI_MATCH(DMI_BIOS_VENDOR, "HP"),
-            DMI_MATCH(DMI_PRODUCT_NAME, "ProLiant DL7"),
-        },
+            DMI_MATCH(DMI_PRODUCT_NAME, "ProLiant DL7")),
     },
     {
         .ident = "HP ProLiant ML3xx",
-        .matches = {
+        DMI_MATCH2(
             DMI_MATCH(DMI_BIOS_VENDOR, "HP"),
-            DMI_MATCH(DMI_PRODUCT_NAME, "ProLiant ML3"),
-        },
+            DMI_MATCH(DMI_PRODUCT_NAME, "ProLiant ML3")),
     },
     {
         .ident = "HP ProLiant ML5xx",
-        .matches = {
+        DMI_MATCH2(
             DMI_MATCH(DMI_BIOS_VENDOR, "HP"),
-            DMI_MATCH(DMI_PRODUCT_NAME, "ProLiant ML5"),
-        },
+            DMI_MATCH(DMI_PRODUCT_NAME, "ProLiant ML5")),
     },
     {
         .ident = "HP ProLiant BL2xx",
-        .matches = {
+        DMI_MATCH2(
             DMI_MATCH(DMI_BIOS_VENDOR, "HP"),
-            DMI_MATCH(DMI_PRODUCT_NAME, "ProLiant BL2"),
-        },
+            DMI_MATCH(DMI_PRODUCT_NAME, "ProLiant BL2")),
     },
     {
         .ident = "HP ProLiant BL4xx",
-        .matches = {
+        DMI_MATCH2(
             DMI_MATCH(DMI_BIOS_VENDOR, "HP"),
-            DMI_MATCH(DMI_PRODUCT_NAME, "ProLiant BL4"),
-        },
+            DMI_MATCH(DMI_PRODUCT_NAME, "ProLiant BL4")),
     },
     {
         .ident = "HP ProLiant BL6xx",
-        .matches = {
+        DMI_MATCH2(
             DMI_MATCH(DMI_BIOS_VENDOR, "HP"),
-            DMI_MATCH(DMI_PRODUCT_NAME, "ProLiant BL6"),
-        },
+            DMI_MATCH(DMI_PRODUCT_NAME, "ProLiant BL6")),
     },
     { }
 };
@@ -103,7 +94,7 @@ static const struct dmi_system_id __initconstrel ioport_quirks_tbl[] = {
 static int __init cf_check ioport_quirks_init(void)
 {
     if ( dmi_check_system(ioport_quirks_tbl) )
-        ioemul_handle_quirk = ioemul_handle_proliant_quirk;
+        ioemul_handle_quirk = true;
 
     return 0;
 }

@@ -1,19 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * vmcb.c: VMCB management
  * Copyright (c) 2005-2007, Advanced Micro Devices, Inc.
  * Copyright (c) 2004, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  *
  */
 
@@ -26,7 +15,6 @@
 #include <asm/hvm/svm/vmcb.h>
 #include <asm/msr-index.h>
 #include <asm/p2m.h>
-#include <asm/hvm/support.h>
 #include <asm/hvm/svm/svm.h>
 #include <asm/hvm/svm/svmdebug.h>
 #include <asm/spec_ctrl.h>
@@ -141,11 +129,11 @@ static int construct_vmcb(struct vcpu *v)
 
     vmcb->_exception_intercepts =
         HVM_TRAP_MASK |
-        (v->arch.fully_eager_fpu ? 0 : (1U << TRAP_no_device));
+        (v->arch.fully_eager_fpu ? 0 : (1U << X86_EXC_NM));
 
     if ( paging_mode_hap(v->domain) )
     {
-        vmcb->_np_enable = 1; /* enable nested paging */
+        vmcb_set_np(vmcb, true); /* enable nested paging */
         vmcb->_g_pat = MSR_IA32_CR_PAT_RESET; /* guest PAT */
         vmcb->_h_cr3 = pagetable_get_paddr(
             p2m_get_pagetable(p2m_get_hostp2m(v->domain)));
@@ -165,16 +153,16 @@ static int construct_vmcb(struct vcpu *v)
     }
     else
     {
-        vmcb->_exception_intercepts |= (1U << TRAP_page_fault);
+        vmcb->_exception_intercepts |= (1U << X86_EXC_PF);
     }
 
     if ( cpu_has_pause_filter )
     {
-        vmcb->_pause_filter_count = SVM_PAUSEFILTER_INIT;
+        vmcb->_pause_filter_count = 4000;
         vmcb->_general1_intercepts |= GENERAL1_INTERCEPT_PAUSE;
 
         if ( cpu_has_pause_thresh )
-            vmcb->_pause_filter_thresh = SVM_PAUSETHRESH_INIT;
+            vmcb->_pause_filter_thresh = 1000;
     }
 
     /*

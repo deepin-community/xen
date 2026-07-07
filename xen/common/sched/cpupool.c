@@ -22,6 +22,7 @@
 #include <xen/param.h>
 #include <xen/percpu.h>
 #include <xen/sched.h>
+#include <xen/sections.h>
 #include <xen/warning.h>
 
 #include "private.h"
@@ -102,6 +103,7 @@ custom_param("sched-gran", sched_select_granularity);
 #elif defined(CONFIG_HYPFS)
 static int sched_gran_get(const char *str, enum sched_gran *mode)
 {
+    *mode = SCHED_GRAN_cpu;
     return -EINVAL;
 }
 #endif
@@ -1076,7 +1078,7 @@ static int cf_check cpu_callback(
         break;
     }
 
-    return !rc ? NOTIFY_DONE : notifier_from_errno(rc);
+    return notifier_from_errno(rc);
 }
 
 static struct notifier_block cpu_nfb = {

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /******************************************************************************
  * include/asm-x86/paging.h
  *
@@ -6,19 +7,6 @@
  * Parts of this code are Copyright (c) 2006 by XenSource Inc.
  * Parts of this code are Copyright (c) 2006 by Michael A Fetterman
  * Parts based on earlier work by Michael A Fetterman, Ian Pratt et al.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef _XEN_PAGING_H
@@ -98,14 +86,6 @@
 
 struct shadow_paging_mode {
 #ifdef CONFIG_SHADOW_PAGING
-    void          (*detach_old_tables     )(struct vcpu *v);
-#ifdef CONFIG_PV
-    void          (*write_guest_entry     )(struct vcpu *v, intpte_t *p,
-                                            intpte_t new, mfn_t gmfn);
-    intpte_t      (*cmpxchg_guest_entry   )(struct vcpu *v, intpte_t *p,
-                                            intpte_t old, intpte_t new,
-                                            mfn_t gmfn);
-#endif
 #ifdef CONFIG_HVM
     int           (*guess_wrmap           )(struct vcpu *v, 
                                             unsigned long vaddr, mfn_t gmfn);
@@ -138,10 +118,7 @@ struct paging_mode {
                                             paddr_t ga, uint32_t *pfec,
                                             unsigned int *page_order);
 #endif
-    pagetable_t   (*update_cr3            )(struct vcpu *v, bool do_locking,
-                                            bool noflush);
-    void          (*update_paging_modes   )(struct vcpu *v);
-    bool          (*flush_tlb             )(const unsigned long *vcpu_bitmap);
+    pagetable_t   (*update_cr3            )(struct vcpu *v, bool noflush);
 
     unsigned int guest_levels;
 
@@ -233,7 +210,7 @@ int paging_domain_init(struct domain *d);
  * manipulate the log-dirty bitmap. */
 int paging_domctl(struct domain *d, struct xen_domctl_shadow_op *sc,
                   XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl,
-                  bool_t resuming);
+                  bool resuming);
 
 /* Call when destroying a vcpu/domain */
 void paging_vcpu_teardown(struct vcpu *v);
@@ -268,7 +245,7 @@ paging_fault(unsigned long va, struct cpu_user_regs *regs)
 }
 
 /* Handle invlpg requests on vcpus. */
-void paging_invlpg(struct vcpu *v, unsigned long va);
+void paging_invlpg(struct vcpu *v, unsigned long linear);
 
 /*
  * Translate a guest virtual address to the frame number that the
@@ -305,6 +282,12 @@ static inline unsigned long paging_ga_to_gfn_cr3(struct vcpu *v,
         page_order);
 }
 
+/* Flush selected vCPUs TLBs.  NULL for all. */
+static inline bool paging_flush_tlb(const unsigned long *vcpu_bitmap)
+{
+    return current->domain->arch.paging.flush_tlb(vcpu_bitmap);
+}
+
 #endif /* CONFIG_HVM */
 
 /* Update all the things that are derived from the guest's CR3.
@@ -312,7 +295,7 @@ static inline unsigned long paging_ga_to_gfn_cr3(struct vcpu *v,
  * as the value to load into the host CR3 to schedule this vcpu */
 static inline pagetable_t paging_update_cr3(struct vcpu *v, bool noflush)
 {
-    return paging_get_hostmode(v)->update_cr3(v, 1, noflush);
+    return paging_get_hostmode(v)->update_cr3(v, noflush);
 }
 
 /* Update all the things that are derived from the guest's CR0/CR3/CR4.
@@ -320,46 +303,8 @@ static inline pagetable_t paging_update_cr3(struct vcpu *v, bool noflush)
  * has changed, and when bringing up a VCPU for the first time. */
 static inline void paging_update_paging_modes(struct vcpu *v)
 {
-    paging_get_hostmode(v)->update_paging_modes(v);
+    v->domain->arch.paging.update_paging_modes(v);
 }
-
-#ifdef CONFIG_PV
-
-/*
- * Write a new value into the guest pagetable, and update the
- * paging-assistance state appropriately.  Returns false if we page-faulted,
- * true for success.
- */
-static inline void paging_write_guest_entry(
-    struct vcpu *v, intpte_t *p, intpte_t new, mfn_t gmfn)
-{
-#ifdef CONFIG_SHADOW_PAGING
-    if ( unlikely(paging_mode_shadow(v->domain)) && paging_get_hostmode(v) )
-        paging_get_hostmode(v)->shadow.write_guest_entry(v, p, new, gmfn);
-    else
-#endif
-        write_atomic(p, new);
-}
-
-
-/*
- * Cmpxchg a new value into the guest pagetable, and update the
- * paging-assistance state appropriately.  Returns false if we page-faulted,
- * true if not.  N.B. caller should check the value of "old" to see if the
- * cmpxchg itself was successful.
- */
-static inline intpte_t paging_cmpxchg_guest_entry(
-    struct vcpu *v, intpte_t *p, intpte_t old, intpte_t new, mfn_t gmfn)
-{
-#ifdef CONFIG_SHADOW_PAGING
-    if ( unlikely(paging_mode_shadow(v->domain)) && paging_get_hostmode(v) )
-        return paging_get_hostmode(v)->shadow.cmpxchg_guest_entry(v, p, old,
-                                                                  new, gmfn);
-#endif
-    return cmpxchg(p, old, new);
-}
-
-#endif /* CONFIG_PV */
 
 /* Helper function that writes a pte in such a way that a concurrent read 
  * never sees a half-written entry that has _PAGE_PRESENT set */
@@ -389,34 +334,6 @@ int paging_set_allocation(struct domain *d, unsigned int pages,
 static inline bool gfn_valid(const struct domain *d, gfn_t gfn)
 {
     return !(gfn_x(gfn) >> (d->arch.cpuid->extd.maxphysaddr - PAGE_SHIFT));
-}
-
-/* Maxphysaddr supportable by the paging infrastructure. */
-static always_inline unsigned int paging_max_paddr_bits(const struct domain *d)
-{
-    unsigned int bits = paging_mode_hap(d) ? hap_paddr_bits : paddr_bits;
-
-    if ( paging_mode_external(d) )
-    {
-        if ( !IS_ENABLED(CONFIG_BIGMEM) && paging_mode_shadow(d) )
-        {
-            /* Shadowed superpages store GFNs in 32-bit page_info fields. */
-            bits = min(bits, 32U + PAGE_SHIFT);
-        }
-        else
-        {
-            /* Both p2m-ept and p2m-pt only support 4-level page tables. */
-            bits = min(bits, 48U);
-        }
-    }
-
-    return bits;
-}
-
-/* Flush selected vCPUs TLBs.  NULL for all. */
-static inline bool paging_flush_tlb(const unsigned long *vcpu_bitmap)
-{
-    return paging_get_hostmode(current)->flush_tlb(vcpu_bitmap);
 }
 
 #endif /* XEN_PAGING_H */

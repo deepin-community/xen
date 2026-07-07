@@ -8,6 +8,7 @@
 
 #include <xen/types.h>
 #include <xen/lib.h>
+#include <xen/llc-coloring.h>
 #include <xen/err.h>
 #include <xen/mm.h>
 #include <xen/sched.h>
@@ -126,7 +127,7 @@ void getdomaininfo(struct domain *d, struct xen_domctl_getdomaininfo *info)
     arch_get_domain_info(d, info);
 }
 
-bool_t domctl_lock_acquire(void)
+bool domctl_lock_acquire(void)
 {
     /*
      * Caller may try to pause its own VCPUs. We must prevent deadlock
@@ -281,7 +282,7 @@ static struct vnuma_info *vnuma_init(const struct xen_domctl_vnuma *uinfo,
 long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
 {
     long ret = 0;
-    bool_t copyback = 0;
+    bool copyback = false;
     struct xen_domctl curop, *op = &curop;
     struct domain *d;
 
@@ -293,6 +294,10 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
 
     switch ( op->cmd )
     {
+    case XEN_DOMCTL_createdomain:
+        d = NULL;
+        break;
+
     case XEN_DOMCTL_assign_device:
     case XEN_DOMCTL_deassign_device:
         if ( op->domain == DOMID_IO )
@@ -302,23 +307,25 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
         }
         else if ( op->domain == DOMID_INVALID )
             return -ESRCH;
-        /* fall through */
+        fallthrough;
     case XEN_DOMCTL_test_assign_device:
     case XEN_DOMCTL_vm_event_op:
         if ( op->domain == DOMID_INVALID )
         {
-    case XEN_DOMCTL_createdomain:
             d = NULL;
             break;
         }
-        /* fall through */
+        fallthrough;
     default:
         d = rcu_lock_domain_by_id(op->domain);
-        if ( !d && op->cmd != XEN_DOMCTL_getdomaininfo )
+        if ( !d )
             return -ESRCH;
+        break;
     }
 
-    ret = xsm_domctl(XSM_OTHER, d, op->cmd);
+    ret = xsm_domctl(XSM_OTHER, d, op->cmd,
+                     /* SSIDRef only applicable for cmd == createdomain */
+                     op->u.createdomain.ssidref);
     if ( ret )
         goto domctl_out_unlock_domonly;
 
@@ -533,45 +540,15 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
         break;
 
     case XEN_DOMCTL_getdomaininfo:
-    {
-        domid_t dom = DOMID_INVALID;
-
-        if ( !d )
-        {
-            ret = -EINVAL;
-            if ( op->domain >= DOMID_FIRST_RESERVED )
-                break;
-
-            rcu_read_lock(&domlist_read_lock);
-
-            dom = op->domain;
-            for_each_domain ( d )
-                if ( d->domain_id >= dom )
-                    break;
-        }
-
-        ret = -ESRCH;
-        if ( d == NULL )
-            goto getdomaininfo_out;
-
-        ret = xsm_getdomaininfo(XSM_HOOK, d);
+        ret = xsm_getdomaininfo(XSM_XS_PRIV, d);
         if ( ret )
-            goto getdomaininfo_out;
+            break;
 
         getdomaininfo(d, &op->u.getdomaininfo);
 
         op->domain = op->u.getdomaininfo.domain;
         copyback = 1;
-
-    getdomaininfo_out:
-        /* When d was non-NULL upon entry, no cleanup is needed. */
-        if ( dom == DOMID_INVALID )
-            break;
-
-        rcu_read_unlock(&domlist_read_lock);
-        d = NULL;
         break;
-    }
 
     case XEN_DOMCTL_getvcpucontext:
     {
@@ -651,14 +628,14 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
     {
         uint64_t new_max = op->u.max_mem.max_memkb >> (PAGE_SHIFT - 10);
 
-        spin_lock(&d->page_alloc_lock);
+        nrspin_lock(&d->page_alloc_lock);
         /*
          * NB. We removed a check that new_max >= current tot_pages; this means
          * that the domain will now be allowed to "ratchet" down to new_max. In
          * the meantime, while tot > max, all new allocations are disallowed.
          */
         d->max_pages = min(new_max, (uint64_t)(typeof(d->max_pages))-1);
-        spin_unlock(&d->page_alloc_lock);
+        nrspin_unlock(&d->page_alloc_lock);
         break;
     }
 
@@ -678,6 +655,7 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
         }
         break;
 
+#ifdef CONFIG_HAS_PIRQ
     case XEN_DOMCTL_irq_permission:
     {
         unsigned int pirq = op->u.irq_permission.pirq, irq;
@@ -697,6 +675,7 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
             ret = irq_deny_access(d, irq);
         break;
     }
+#endif
 
     case XEN_DOMCTL_iomem_permission:
     {
@@ -886,6 +865,15 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
         if ( ret == -ERESTART )
             ret = hypercall_create_continuation(
                 __HYPERVISOR_domctl, "h", u_domctl);
+        break;
+
+    case XEN_DOMCTL_set_llc_colors:
+        if ( op->u.set_llc_colors.pad )
+            ret = -EINVAL;
+        else if ( llc_coloring_enabled )
+            ret = domain_set_llc_colors(d, &op->u.set_llc_colors);
+        else
+            ret = -EOPNOTSUPP;
         break;
 
     default:

@@ -232,7 +232,7 @@ Specifies the backend implementation to use
 
 =item Supported values
 
-phy, qdisk, standalone
+phy, qdisk, standalone, tap
 
 =item Mandatory
 
@@ -253,6 +253,8 @@ For example, "phy" and "standalone" do not support formats other than "raw"
 and "standalone" does not support specifications other than "virtio".
 Normally this option should not be specified, in which case libxl will
 automatically determine the most suitable backend.
+
+"tap" needs blktap's tapback to be running.
 
 
 =item B<script>=I<SCRIPT>
@@ -403,6 +405,30 @@ affects the guest's view of the device. For example, "virtio" requires
 Virtio frontend driver (virtio-blk) to be used. Please note, the virtual
 device (vdev) is not passed to the guest in that case, but it still must be
 specified for the internal purposes.
+
+=item B<grant_usage=BOOLEAN>
+
+=over 4
+
+=item Description
+
+Specifies the usage of Xen grants for accessing guest memory. Only applicable
+to specification "virtio".
+
+=item Supported values
+
+1, 0
+
+=item Mandatory
+
+No
+
+=item Default value
+
+If this option is missing, then the default grant setting will be used,
+i.e. "grant_usage=1" if backend-domid != 0 or "grant_usage=0" otherwise.
+
+=back
 
 =back
 

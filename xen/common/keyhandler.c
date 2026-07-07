@@ -3,10 +3,11 @@
  */
 
 #include <asm/regs.h>
-#include <xen/debugger.h>
 #include <xen/delay.h>
 #include <xen/keyhandler.h>
+#include <xen/llc-coloring.h>
 #include <xen/param.h>
+#include <xen/sections.h>
 #include <xen/shutdown.h>
 #include <xen/event.h>
 #include <xen/console.h>
@@ -24,13 +25,12 @@
 #include <asm/div64.h>
 
 static unsigned char keypress_key;
-static bool_t alt_key_handling;
+static bool alt_key_handling;
 
 static keyhandler_fn_t cf_check show_handlers, cf_check dump_hwdom_registers,
     cf_check dump_domains, cf_check read_clocks;
 static irq_keyhandler_fn_t cf_check do_toggle_alt_key, cf_check dump_registers,
-    cf_check reboot_machine, cf_check run_all_keyhandlers,
-    cf_check do_debug_key;
+    cf_check reboot_machine, cf_check run_all_keyhandlers;
 
 static struct keyhandler {
     union {
@@ -39,9 +39,9 @@ static struct keyhandler {
     };
 
     const char *desc;    /* Description for help message.                 */
-    bool_t irq_callback, /* Call in irq context? if not, tasklet context. */
+    bool irq_callback,   /* Call in irq context? if not, tasklet context. */
         diagnostic;      /* Include in 'dump all' handler.                */
-} key_table[128] __read_mostly =
+} key_table[128] __ro_after_init =
 {
 #define KEYHANDLER(k, f, desc, diag)            \
     [k] = { { .fn = (f) }, desc, 0, diag }
@@ -57,7 +57,6 @@ static struct keyhandler {
     IRQ_KEYHANDLER('R', reboot_machine, "reboot machine", 0),
         KEYHANDLER('t', read_clocks, "display multi-cpu clock info", 1),
         KEYHANDLER('0', dump_hwdom_registers, "dump Dom0 registers", 1),
-    IRQ_KEYHANDLER('%', do_debug_key, "trap to xendbg", 0),
     IRQ_KEYHANDLER('*', run_all_keyhandlers, "print all diagnostics", 0),
 
 #ifdef CONFIG_PERF_COUNTERS
@@ -76,12 +75,12 @@ static struct keyhandler {
 
 static void cf_check keypress_action(void *unused)
 {
-    handle_keypress(keypress_key, NULL);
+    handle_keypress(keypress_key, true);
 }
 
 static DECLARE_TASKLET(keypress_tasklet, keypress_action, NULL);
 
-void handle_keypress(unsigned char key, struct cpu_user_regs *regs)
+void handle_keypress(unsigned char key, bool need_context)
 {
     struct keyhandler *h;
 
@@ -91,7 +90,7 @@ void handle_keypress(unsigned char key, struct cpu_user_regs *regs)
     if ( !in_irq() || h->irq_callback )
     {
         console_start_log_everything();
-        h->irq_callback ? h->irq_fn(key, regs) : h->fn(key);
+        h->irq_callback ? h->irq_fn(key, need_context) : h->fn(key);
         console_end_log_everything();
     }
     else
@@ -101,8 +100,8 @@ void handle_keypress(unsigned char key, struct cpu_user_regs *regs)
     }
 }
 
-void register_keyhandler(unsigned char key, keyhandler_fn_t fn,
-                         const char *desc, bool_t diagnostic)
+void __init register_keyhandler(unsigned char key, keyhandler_fn_t *fn,
+                                const char *desc, bool diagnostic)
 {
     BUG_ON(key >= ARRAY_SIZE(key_table)); /* Key in range? */
     ASSERT(!key_table[key].fn);           /* Clobbering something else? */
@@ -113,8 +112,8 @@ void register_keyhandler(unsigned char key, keyhandler_fn_t fn,
     key_table[key].diagnostic = diagnostic;
 }
 
-void register_irq_keyhandler(unsigned char key, irq_keyhandler_fn_t fn,
-                             const char *desc, bool_t diagnostic)
+void __init register_irq_keyhandler(unsigned char key, irq_keyhandler_fn_t *fn,
+                                    const char *desc, bool diagnostic)
 {
     BUG_ON(key >= ARRAY_SIZE(key_table)); /* Key in range? */
     ASSERT(!key_table[key].irq_fn);       /* Clobbering something else? */
@@ -138,7 +137,7 @@ static void cf_check show_handlers(unsigned char key)
 
 static cpumask_t dump_execstate_mask;
 
-void cf_check dump_execstate(struct cpu_user_regs *regs)
+void cf_check dump_execstate(const struct cpu_user_regs *regs)
 {
     unsigned int cpu = smp_processor_id();
 
@@ -172,7 +171,7 @@ void cf_check dump_execstate(struct cpu_user_regs *regs)
 }
 
 static void cf_check dump_registers(
-    unsigned char key, struct cpu_user_regs *regs)
+    unsigned char key, bool need_context)
 {
     unsigned int cpu;
 
@@ -185,8 +184,8 @@ static void cf_check dump_registers(
     cpumask_copy(&dump_execstate_mask, &cpu_online_map);
 
     /* Get local execution state out immediately, in case we get stuck. */
-    if ( regs )
-        dump_execstate(regs);
+    if ( !need_context )
+        dump_execstate(get_irq_regs() ?: guest_cpu_user_regs());
     else
         run_in_exception_handler(dump_execstate);
 
@@ -248,8 +247,7 @@ static void cf_check dump_hwdom_registers(unsigned char key)
     }
 }
 
-static void cf_check reboot_machine(
-    unsigned char key, struct cpu_user_regs *regs)
+static void cf_check reboot_machine(unsigned char key, bool unused)
 {
     printk("'%c' pressed -> rebooting machine\n", key);
     machine_restart(0);
@@ -306,6 +304,8 @@ static void cf_check dump_domains(unsigned char key)
                        i, (u32)((d->watchdog_timer[i].expires - NOW()) >> 30));
 
         arch_dump_domain_info(d);
+
+        domain_dump_llc_colors(d);
 
         rangeset_domain_printk(d);
 
@@ -365,7 +365,9 @@ static void cf_check dump_domains(unsigned char key)
         }
     }
 
+#ifdef CONFIG_MEM_SHARING
     arch_dump_shared_mem_info();
+#endif
 
     rcu_read_unlock(&domlist_read_lock);
 }
@@ -475,8 +477,7 @@ static void cf_check run_all_nonirq_keyhandlers(void *unused)
 static DECLARE_TASKLET(run_all_keyhandlers_tasklet,
                        run_all_nonirq_keyhandlers, NULL);
 
-static void cf_check run_all_keyhandlers(
-    unsigned char key, struct cpu_user_regs *regs)
+static void cf_check run_all_keyhandlers(unsigned char key, bool need_context)
 {
     struct keyhandler *h;
     unsigned int k;
@@ -492,7 +493,7 @@ static void cf_check run_all_keyhandlers(
         if ( !h->irq_fn || !h->diagnostic || !h->irq_callback )
             continue;
         printk("[%c: %s]\n", k, h->desc);
-        h->irq_fn(k, regs);
+        h->irq_fn(k, need_context);
     }
 
     watchdog_enable();
@@ -501,25 +502,7 @@ static void cf_check run_all_keyhandlers(
     tasklet_schedule(&run_all_keyhandlers_tasklet);
 }
 
-static void cf_check do_debugger_trap_fatal(struct cpu_user_regs *regs)
-{
-    (void)debugger_trap_fatal(0xf001, regs);
-
-    /* Prevent tail call optimisation, which confuses xendbg. */
-    barrier();
-}
-
-static void cf_check do_debug_key(unsigned char key, struct cpu_user_regs *regs)
-{
-    printk("'%c' pressed -> trapping into debugger\n", key);
-    if ( regs )
-        do_debugger_trap_fatal(regs);
-    else
-        run_in_exception_handler(do_debugger_trap_fatal);
-}
-
-static void cf_check do_toggle_alt_key(
-    unsigned char key, struct cpu_user_regs *regs)
+static void cf_check do_toggle_alt_key(unsigned char key, bool unused)
 {
     alt_key_handling = !alt_key_handling;
     printk("'%c' pressed -> using %s key handling\n", key,
@@ -584,7 +567,7 @@ void keyhandler_crash_action(enum crash_reason reason)
         if ( *action == '+' )
             mdelay(10);
         else
-            handle_keypress(*action, NULL);
+            handle_keypress(*action, true);
         action++;
     }
 }

@@ -61,18 +61,17 @@ static struct meson_uart {
     struct vuart_info vuart;
 } meson_com;
 
-static void meson_uart_interrupt(int irq, void *data,
-                                 struct cpu_user_regs *regs)
+static void meson_uart_interrupt(int irq, void *data)
 {
     struct serial_port *port = data;
     struct meson_uart *uart = port->uart;
     uint32_t st = readl(uart->regs + AML_UART_STATUS_REG);
 
     if ( !(st & AML_UART_RX_FIFO_EMPTY) )
-        serial_rx_interrupt(port, regs);
+        serial_rx_interrupt(port);
 
     if ( !(st & AML_UART_TX_FIFO_FULL) )
-        serial_tx_interrupt(port, regs);
+        serial_tx_interrupt(port);
 }
 
 static void __init meson_uart_init_preirq(struct serial_port *port)
@@ -115,16 +114,6 @@ static void __init meson_uart_init_postirq(struct serial_port *port)
     /* Make sure Rx/Tx interrupts are enabled now */
     setbits(uart->regs + AML_UART_CONTROL_REG,
             (AML_UART_RX_INT_EN | AML_UART_TX_INT_EN));
-}
-
-static void meson_uart_suspend(struct serial_port *port)
-{
-    BUG();
-}
-
-static void meson_uart_resume(struct serial_port *port)
-{
-    BUG();
 }
 
 static void meson_uart_putc(struct serial_port *port, char c)
@@ -192,9 +181,6 @@ static int meson_uart_tx_ready(struct serial_port *port)
 static struct uart_driver __read_mostly meson_uart_driver = {
     .init_preirq  = meson_uart_init_preirq,
     .init_postirq = meson_uart_init_postirq,
-    .endboot      = NULL,
-    .suspend      = meson_uart_suspend,
-    .resume       = meson_uart_resume,
     .putc         = meson_uart_putc,
     .getc         = meson_uart_getc,
     .tx_ready     = meson_uart_tx_ready,
@@ -209,14 +195,14 @@ static int __init meson_uart_init(struct dt_device_node *dev, const void *data)
     const char *config = data;
     struct meson_uart *uart;
     int res;
-    u64 addr, size;
+    paddr_t addr, size;
 
     if ( strcmp(config, "") )
         printk("WARNING: UART configuration is not supported\n");
 
     uart = &meson_com;
 
-    res = dt_device_get_address(dev, 0, &addr, &size);
+    res = dt_device_get_paddr(dev, 0, &addr, &size);
     if ( res )
     {
         printk("meson: Unable to retrieve the base address of the UART\n");

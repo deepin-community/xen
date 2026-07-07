@@ -1,6 +1,6 @@
 /******************************************************************************
  * kernel.c
- * 
+ *
  * Copyright (c) 2002-2005 K A Fraser
  */
 
@@ -18,7 +18,14 @@
 #include <asm/current.h>
 #include <public/version.h>
 
-#ifndef COMPAT
+#ifdef CONFIG_COMPAT
+#include <compat/version.h>
+
+CHECK_build_id;
+CHECK_compile_info;
+CHECK_feature_info;
+CHECK_varbuf;
+#endif
 
 enum system_state system_state = SYS_STATE_early_boot;
 
@@ -27,8 +34,9 @@ bool __ro_after_init opt_dit = IS_ENABLED(CONFIG_DIT_DEFAULT);
 boolean_param("dit", opt_dit);
 #endif
 
-xen_commandline_t saved_cmdline;
+static xen_commandline_t saved_cmdline;
 static const char __initconst opt_builtin_cmdline[] = CONFIG_CMDLINE;
+char __ro_after_init xen_cap_info[128];
 
 static int assign_integer_param(const struct kernel_param *param, uint64_t val)
 {
@@ -313,6 +321,34 @@ int parse_boolean(const char *name, const char *s, const char *e)
     return -1;
 }
 
+int __init parse_signed_integer(const char *name, const char *s, const char *e,
+                                long long *val)
+{
+    size_t slen, nlen;
+    const char *str;
+    long long pval;
+
+    slen = e ? ({ ASSERT(e >= s); e - s; }) : strlen(s);
+    nlen = strlen(name);
+
+    if ( !e )
+        e = s + slen;
+
+    /* Check that this is the name we're looking for and a value was provided */
+    if ( slen <= nlen || strncmp(s, name, nlen) || s[nlen] != '=' )
+        return -1;
+
+    pval = simple_strtoll(&s[nlen + 1], &str, 10);
+
+    /* Number not recognised */
+    if ( str != e )
+        return -2;
+
+    *val = pval;
+
+    return 0;
+}
+
 int cmdline_strcmp(const char *frag, const char *name)
 {
     for ( ; ; frag++, name++ )
@@ -342,8 +378,8 @@ unsigned int tainted;
  *  'C' - Console output is synchronous.
  *  'E' - An error (e.g. a machine check exceptions) has been injected.
  *  'H' - HVM forced emulation prefix is permitted.
+ *  'I' - Platform is insecure (usually due to an errata on the platform).
  *  'M' - Machine had a machine check experience.
- *  'U' - Platform is unsecure (usually due to an errata on the platform).
  *  'S' - Out of spec CPU (Incompatible features on one or more cores).
  *
  *      The string is overwritten by the next call to print_taint().
@@ -353,7 +389,7 @@ char *print_tainted(char *str)
     if ( tainted )
     {
         snprintf(str, TAINT_STRING_MAX_LEN, "Tainted: %c%c%c%c%c%c",
-                 tainted & TAINT_MACHINE_UNSECURE ? 'U' : ' ',
+                 tainted & TAINT_MACHINE_INSECURE ? 'I' : ' ',
                  tainted & TAINT_MACHINE_CHECK ? 'M' : ' ',
                  tainted & TAINT_SYNC_CONSOLE ? 'C' : ' ',
                  tainted & TAINT_ERROR_INJECT ? 'E' : ' ',
@@ -368,9 +404,9 @@ char *print_tainted(char *str)
     return str;
 }
 
-void add_taint(unsigned int flag)
+void add_taint(unsigned int taint)
 {
-    tainted |= flag;
+    tainted |= taint;
 }
 
 extern const initcall_t __initcall_start[], __presmp_initcall_end[],
@@ -468,17 +504,73 @@ static int __init cf_check param_init(void)
 __initcall(param_init);
 #endif
 
-# define DO(fn) long do_##fn
-
-#endif
-
-/*
- * Simple hypercalls.
- */
-
-DO(xen_version)(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
+static long xenver_varbuf_op(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
 {
-    bool_t deny = !!xsm_xen_version(XSM_OTHER, cmd);
+    struct xen_varbuf user_str;
+    const char *str = NULL;
+    size_t sz;
+    int rc;
+
+    switch ( cmd )
+    {
+    case XENVER_build_id:
+    {
+        unsigned int local_sz;
+
+        rc = xen_build_id((const void **)&str, &local_sz);
+        if ( rc )
+            return rc;
+
+        sz = local_sz;
+        goto have_len;
+    }
+
+    case XENVER_extraversion2:
+        str = xen_extra_version();
+        break;
+
+    case XENVER_changeset2:
+        str = xen_changeset();
+        break;
+
+    case XENVER_commandline2:
+        str = saved_cmdline;
+        break;
+
+    case XENVER_capabilities2:
+        str = xen_cap_info;
+        break;
+
+    default:
+        ASSERT_UNREACHABLE();
+        return -ENODATA;
+    }
+
+    sz = strlen(str);
+
+ have_len:
+    if ( sz > KB(64) ) /* Arbitrary limit.  Avoid long-running operations. */
+        return -E2BIG;
+
+    if ( guest_handle_is_null(arg) ) /* Length request */
+        return sz;
+
+    if ( copy_from_guest(&user_str, arg, 1) )
+        return -EFAULT;
+
+    if ( sz > user_str.len )
+        return -ENOBUFS;
+
+    if ( copy_to_guest_offset(arg, offsetof(struct xen_varbuf, buf),
+                              str, sz) )
+        return -EFAULT;
+
+    return sz;
+}
+
+long do_xen_version(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
+{
+    bool deny = xsm_xen_version(XSM_OTHER, cmd);
 
     switch ( cmd )
     {
@@ -516,25 +608,53 @@ DO(xen_version)(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
 
         memset(info, 0, sizeof(info));
         if ( !deny )
-            arch_get_xen_caps(&info);
+            safe_strcpy(info, xen_cap_info);
 
         if ( copy_to_guest(arg, info, ARRAY_SIZE(info)) )
             return -EFAULT;
         return 0;
     }
-    
+
     case XENVER_platform_parameters:
     {
-        xen_platform_parameters_t params = {
-            .virt_start = HYPERVISOR_VIRT_START
-        };
+        const struct vcpu *curr = current;
 
-        if ( copy_to_guest(arg, &params, 1) )
-            return -EFAULT;
+#ifdef CONFIG_COMPAT
+        if ( curr->hcall_compat )
+        {
+            compat_platform_parameters_t params = {
+                .virt_start = is_pv_vcpu(curr)
+                            ? HYPERVISOR_COMPAT_VIRT_START(curr->domain)
+                            : 0,
+            };
+
+            if ( copy_to_guest(arg, &params, 1) )
+                return -EFAULT;
+        }
+        else
+#endif
+        {
+            xen_platform_parameters_t params = {
+                /*
+                 * Out of an abundance of caution, retain the useless return
+                 * value for 64bit PV guests, but in release builds only.
+                 *
+                 * This is not expected to cause any problems, but if it does,
+                 * the developer impacted will be the one best suited to fix
+                 * the caller not to issue this hypercall.
+                 */
+                .virt_start = !IS_ENABLED(CONFIG_DEBUG) && is_pv_vcpu(curr)
+                              ? HYPERVISOR_VIRT_START
+                              : 0,
+            };
+
+            if ( copy_to_guest(arg, &params, 1) )
+                return -EFAULT;
+        }
+
         return 0;
-        
     }
-    
+
     case XENVER_changeset:
     {
         xen_changeset_info_t chgset;
@@ -557,11 +677,15 @@ DO(xen_version)(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
         switch ( fi.submap_idx )
         {
         case 0:
-            fi.submap = (1U << XENFEAT_memory_op_vnode_supported);
+            fi.submap = (1U << XENFEAT_memory_op_vnode_supported) |
+#ifdef CONFIG_X86
+                        (1U << XENFEAT_vcpu_time_phys_area) |
+#endif
+                        (1U << XENFEAT_runstate_phys_area);
             if ( VM_ASSIST(d, pae_extended_cr3) )
                 fi.submap |= (1U << XENFEAT_pae_pgdir_above_4gb);
             if ( paging_mode_translate(d) )
-                fi.submap |= 
+                fi.submap |=
                     (1U << XENFEAT_writable_page_tables) |
                     (1U << XENFEAT_auto_translated_physmap);
             if ( is_hardware_domain(d) )
@@ -578,6 +702,7 @@ DO(xen_version)(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
                 fi.submap |= (1U << XENFEAT_hvm_safe_pvclock) |
                              (1U << XENFEAT_hvm_callback_vector) |
                              (has_pirq(d) ? (1U << XENFEAT_hvm_pirqs) : 0);
+            fi.submap |= (1U << XENFEAT_dm_msix_all_writes);
 #endif
             if ( !paging_mode_translate(d) || is_domain_direct_mapped(d) )
                 fi.submap |= (1U << XENFEAT_direct_mapped);
@@ -626,40 +751,13 @@ DO(xen_version)(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
     }
 
     case XENVER_build_id:
-    {
-        xen_build_id_t build_id;
-        unsigned int sz;
-        int rc;
-        const void *p;
-
+    case XENVER_extraversion2:
+    case XENVER_capabilities2:
+    case XENVER_changeset2:
+    case XENVER_commandline2:
         if ( deny )
             return -EPERM;
-
-        /* Only return size. */
-        if ( !guest_handle_is_null(arg) )
-        {
-            if ( copy_from_guest(&build_id, arg, 1) )
-                return -EFAULT;
-
-            if ( build_id.len == 0 )
-                return -EINVAL;
-        }
-
-        rc = xen_build_id(&p, &sz);
-        if ( rc )
-            return rc;
-
-        if ( guest_handle_is_null(arg) )
-            return sz;
-
-        if ( sz > build_id.len )
-            return -ENOBUFS;
-
-        if ( copy_to_guest_offset(arg, offsetof(xen_build_id_t, buf), p, sz) )
-            return -EFAULT;
-
-        return sz;
-    }
+        return xenver_varbuf_op(cmd, arg);
     }
 
     return -ENOSYS;

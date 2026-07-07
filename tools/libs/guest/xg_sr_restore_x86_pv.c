@@ -376,7 +376,7 @@ static int process_vcpu_extended(struct xc_sr_context *ctx,
     xc_interface *xch = ctx->xch;
     struct xc_sr_x86_pv_restore_vcpu *vcpu =
         &ctx->x86.pv.restore.vcpus[vcpuid];
-    DECLARE_DOMCTL;
+    struct xen_domctl domctl = {};
 
     domctl.cmd = XEN_DOMCTL_set_ext_vcpucontext;
     domctl.domain = ctx->domid;
@@ -401,7 +401,7 @@ static int process_vcpu_xsave(struct xc_sr_context *ctx,
     struct xc_sr_x86_pv_restore_vcpu *vcpu =
         &ctx->x86.pv.restore.vcpus[vcpuid];
     int rc;
-    DECLARE_DOMCTL;
+    struct xen_domctl domctl = {};
     DECLARE_HYPERCALL_BUFFER(void, buffer);
 
     buffer = xc_hypercall_buffer_alloc(xch, buffer, vcpu->xsave.size);
@@ -439,7 +439,7 @@ static int process_vcpu_msrs(struct xc_sr_context *ctx,
     struct xc_sr_x86_pv_restore_vcpu *vcpu =
         &ctx->x86.pv.restore.vcpus[vcpuid];
     int rc;
-    DECLARE_DOMCTL;
+    struct xen_domctl domctl = {};
     DECLARE_HYPERCALL_BUFFER(void, buffer);
 
     buffer = xc_hypercall_buffer_alloc(xch, buffer, vcpu->msr.size);
@@ -903,7 +903,7 @@ static int handle_shared_info(struct xc_sr_context *ctx,
         ctx->dominfo.shared_info_frame);
     if ( !guest_shinfo )
     {
-        PERROR("Failed to map Shared Info at mfn %#lx",
+        PERROR("Failed to map Shared Info at mfn %#"PRIx64,
                ctx->dominfo.shared_info_frame);
         goto err;
     }

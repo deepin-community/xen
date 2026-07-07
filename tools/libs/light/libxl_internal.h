@@ -58,7 +58,7 @@
 #include <xenguest.h>
 #include <xenhypfs.h>
 
-#include <xen-tools/libs.h>
+#include <xen-tools/common-macros.h>
 
 #include "xentoollog.h"
 
@@ -120,21 +120,13 @@
 #define STUBDOM_CONSOLE_SERIAL 3
 #define STUBDOM_SPECIAL_CONSOLES 3
 #define LIBXL_LINUX_STUBDOM_MEM 128
+#define LIBXL_STUBDOM_EMPTY_CDROM XEN_RUN_DIR "/empty-cdrom" /* .$domid */
 #define TAP_DEVICE_SUFFIX "-emu"
 #define DOMID_XS_PATH "domid"
 #define PVSHIM_BASENAME "xen-shim"
 #define PVSHIM_CMDLINE "pv-shim console=xen,pv"
 
-/* Size macros. */
-#define __AC(X,Y)   (X##Y)
-#define _AC(X,Y)    __AC(X,Y)
-#define MB(_mb)     (_AC(_mb, ULL) << 20)
-#define GB(_gb)     (_AC(_gb, ULL) << 30)
-
 #define DIV_ROUNDUP(n, d) (((n) + (d) - 1) / (d))
-
-#define MASK_EXTR(v, m) (((v) & (m)) / ((m) & -(m)))
-#define MASK_INSR(v, m) (((v) * ((m) & -(m))) & (m))
 
 #define LIBXL__LOGGING_ENABLED
 
@@ -166,6 +158,11 @@
 
 /* Convert pfn to physical address space. */
 #define pfn_to_paddr(x) ((uint64_t)(x) << XC_PAGE_SHIFT)
+
+/* Virtio device types */
+#define VIRTIO_DEVICE_TYPE_GENERIC   "virtio,device"
+#define VIRTIO_DEVICE_TYPE_I2C       "virtio,device22"
+#define VIRTIO_DEVICE_TYPE_GPIO      "virtio,device29"
 
 /* logging */
 _hidden void libxl__logv(libxl_ctx *ctx, xentoollog_level msglevel, int errnoval,
@@ -2080,7 +2077,6 @@ _hidden char *libxl__uuid2string(libxl__gc *gc, const libxl_uuid uuid);
 struct libxl__xen_console_reader {
     char *buffer;
     unsigned int size;
-    unsigned int count;
     unsigned int clear;
     unsigned int incremental;
     unsigned int index;
@@ -4006,6 +4002,7 @@ static inline int *libxl__device_type_get_num(
 
 extern const libxl__device_type libxl__vfb_devtype;
 extern const libxl__device_type libxl__vkb_devtype;
+extern const libxl__device_type libxl__virtio_devtype;
 extern const libxl__device_type libxl__disk_devtype;
 extern const libxl__device_type libxl__nic_devtype;
 extern const libxl__device_type libxl__vtpm_devtype;
@@ -4144,6 +4141,11 @@ _hidden void libxl__add_nics(libxl__egc *egc, libxl__ao *ao, uint32_t domid,
 /* First layer; wraps libxl__spawn_spawn. */
 
 typedef struct libxl__dm_spawn_state libxl__dm_spawn_state;
+typedef struct libxl__qemu_available_opts libxl__qemu_available_opts;
+struct libxl__qemu_available_opts {
+    bool have_runwith_chroot;
+    bool have_runwith_user;
+};
 
 typedef void libxl__dm_spawn_cb(libxl__egc *egc, libxl__dm_spawn_state*,
                                 int rc /* if !0, error was logged */);
@@ -4156,6 +4158,8 @@ struct libxl__dm_spawn_state {
     libxl__ev_qmp qmp;
     libxl__ev_time timeout;
     libxl__dm_resume_state dmrs;
+    libxl__qemu_available_opts qemu_opts;
+    const char *dm;
     /* filled in by user, must remain valid: */
     uint32_t guest_domid; /* domain being served */
     libxl_domain_config *guest_config;
@@ -4194,9 +4198,9 @@ _hidden char *libxl__stub_dm_name(libxl__gc *gc, const char * guest_name);
 
 /* Qdisk backend launch helpers */
 
-_hidden void libxl__spawn_qdisk_backend(libxl__egc *egc,
+_hidden void libxl__spawn_qemu_xenpv_backend(libxl__egc *egc,
                                         libxl__dm_spawn_state *dmss);
-_hidden int libxl__destroy_qdisk_backend(libxl__gc *gc, uint32_t domid);
+_hidden int libxl__destroy_qemu_xenpv_backend(libxl__gc *gc, uint32_t domid);
 
 /*----- Domain creation -----*/
 

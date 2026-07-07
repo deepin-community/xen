@@ -120,27 +120,33 @@
  *   regions within it.
  */
 
-#include <xen/init.h>
-#include <xen/types.h>
-#include <xen/lib.h>
-#include <xen/sched.h>
-#include <xen/spinlock.h>
-#include <xen/mm.h>
-#include <xen/param.h>
-#include <xen/irq.h>
-#include <xen/softirq.h>
 #include <xen/domain_page.h>
+#include <xen/event.h>
+#include <xen/init.h>
+#include <xen/irq.h>
 #include <xen/keyhandler.h>
+#include <xen/lib.h>
+#include <xen/llc-coloring.h>
+#include <xen/mm.h>
+#include <xen/nodemask.h>
+#include <xen/numa.h>
+#include <xen/param.h>
 #include <xen/perfc.h>
 #include <xen/pfn.h>
-#include <xen/numa.h>
-#include <xen/nodemask.h>
-#include <xen/event.h>
+#include <xen/types.h>
+#include <xen/sched.h>
+#include <xen/sections.h>
+#include <xen/softirq.h>
+#include <xen/spinlock.h>
+#include <xen/vm_event.h>
+#include <xen/xvmalloc.h>
+
+#include <asm/flushtlb.h>
+#include <asm/page.h>
+
 #include <public/sysctl.h>
 #include <public/sched.h>
-#include <asm/page.h>
-#include <asm/numa.h>
-#include <asm/flushtlb.h>
+
 #ifdef CONFIG_X86
 #include <asm/guest.h>
 #include <asm/p2m.h>
@@ -148,16 +154,33 @@
 #include <asm/paging.h>
 #else
 #define p2m_pod_offline_or_broken_hit(pg) 0
-#define p2m_pod_offline_or_broken_replace(pg) BUG_ON(pg != NULL)
+#define p2m_pod_offline_or_broken_replace(pg) BUG_ON(pg)
 #endif
 
 #ifndef PGC_static
 #define PGC_static 0
 #endif
 
+#ifndef PGC_colored
+#define PGC_colored 0
+#endif
+
+#define PGC_no_buddy_merge (PGC_static | PGC_colored)
+/*
+ * Flags that are preserved in assign_pages() (and only there)
+ */
+#define PGC_preserved (PGC_extra | PGC_static | PGC_colored | PGC_need_scrub)
+
 #ifndef PGT_TYPE_INFO_INITIALIZER
 #define PGT_TYPE_INFO_INITIALIZER 0
 #endif
+
+/* Flag saved when Xen is using the static heap feature */
+bool __ro_after_init using_static_heap;
+
+unsigned long __read_mostly max_page;
+unsigned long __read_mostly total_pages;
+paddr_t __ro_after_init mem_hotplug;
 
 /*
  * Comma-separated list of hexadecimal page numbers containing bad bytes.
@@ -248,10 +271,10 @@ static PAGE_LIST_HEAD(page_broken_list);
  */
 
 /*
- * first_valid_mfn is exported because it is use in ARM specific NUMA
- * helpers. See comment in arch/arm/include/asm/numa.h.
+ * When !CONFIG_NUMA first_valid_mfn is non-static, for use by respective
+ * stubs.
  */
-mfn_t first_valid_mfn = INVALID_MFN_INITIALIZER;
+STATIC_IF(CONFIG_NUMA) mfn_t first_valid_mfn = INVALID_MFN_INITIALIZER;
 
 struct bootmem_region {
     unsigned long s, e; /* MFNs @s through @e-1 inclusive are free */
@@ -467,34 +490,9 @@ static long outstanding_claims; /* total outstanding claims by all domains */
 
 unsigned long domain_adjust_tot_pages(struct domain *d, long pages)
 {
-    long dom_before, dom_after, dom_claimed, sys_before, sys_after;
-
-    ASSERT(spin_is_locked(&d->page_alloc_lock));
+    ASSERT(rspin_is_locked(&d->page_alloc_lock));
     d->tot_pages += pages;
 
-    /*
-     * can test d->claimed_pages race-free because it can only change
-     * if d->page_alloc_lock and heap_lock are both held, see also
-     * domain_set_outstanding_pages below
-     */
-    if ( !d->outstanding_pages )
-        goto out;
-
-    spin_lock(&heap_lock);
-    /* adjust domain outstanding pages; may not go negative */
-    dom_before = d->outstanding_pages;
-    dom_after = dom_before - pages;
-    BUG_ON(dom_before < 0);
-    dom_claimed = dom_after < 0 ? 0 : dom_after;
-    d->outstanding_pages = dom_claimed;
-    /* flag accounting bug if system outstanding_claims would go negative */
-    sys_before = outstanding_claims;
-    sys_after = sys_before - (dom_before - dom_claimed);
-    BUG_ON(sys_after < 0);
-    outstanding_claims = sys_after;
-    spin_unlock(&heap_lock);
-
-out:
     return d->tot_pages;
 }
 
@@ -504,11 +502,12 @@ int domain_set_outstanding_pages(struct domain *d, unsigned long pages)
     unsigned long claim, avail_pages;
 
     /*
-     * take the domain's page_alloc_lock, else all d->tot_page adjustments
-     * must always take the global heap_lock rather than only in the much
-     * rarer case that d->outstanding_pages is non-zero
+     * Two locks are needed here:
+     *  - d->page_alloc_lock: protects accesses to d->{tot,max,extra}_pages.
+     *  - heap_lock: protects accesses to d->outstanding_pages, total_avail_pages
+     *    and outstanding_claims.
      */
-    spin_lock(&d->page_alloc_lock);
+    nrspin_lock(&d->page_alloc_lock);
     spin_lock(&heap_lock);
 
     /* pages==0 means "unset" the claim. */
@@ -554,7 +553,7 @@ int domain_set_outstanding_pages(struct domain *d, unsigned long pages)
 
 out:
     spin_unlock(&heap_lock);
-    spin_unlock(&d->page_alloc_lock);
+    nrspin_unlock(&d->page_alloc_lock);
     return ret;
 }
 
@@ -765,6 +764,21 @@ static void page_list_add_scrub(struct page_info *pg, unsigned int node,
 #endif
 #define SCRUB_BYTE_PATTERN   (SCRUB_PATTERN & 0xff)
 
+void scrub_one_page(const struct page_info *pg)
+{
+    if ( unlikely(pg->count_info & PGC_broken) )
+        return;
+
+#ifndef NDEBUG
+    /* Avoid callers relying on allocations returning zeroed pages. */
+    unmap_domain_page(memset(__map_domain_page(pg),
+                             SCRUB_BYTE_PATTERN, PAGE_SIZE));
+#else
+    /* For a production build, clear_page() is the fastest way to scrub. */
+    clear_domain_page(_mfn(page_to_mfn(pg)));
+#endif
+}
+
 static void poison_one_page(struct page_info *pg)
 {
 #ifdef CONFIG_SCRUB_DEBUG
@@ -919,6 +933,13 @@ static struct page_info *get_free_buddy(unsigned int zone_lo,
     }
 }
 
+/* Initialise fields which have other uses for free pages. */
+static void init_free_page_fields(struct page_info *pg)
+{
+    pg->u.inuse.type_info = PGT_TYPE_INFO_INITIALIZER;
+    page_set_owner(pg, NULL);
+}
+
 /* Allocate 2^@order contiguous pages. */
 static struct page_info *alloc_heap_pages(
     unsigned int zone_lo, unsigned int zone_hi,
@@ -969,7 +990,7 @@ static struct page_info *alloc_heap_pages(
         return NULL;
     }
 
-    node = phys_to_nid(page_to_maddr(pg));
+    node = page_to_nid(pg);
     zone = page_to_zone(pg);
     buddy_order = PFN_ORDER(pg);
 
@@ -999,6 +1020,30 @@ static struct page_info *alloc_heap_pages(
     total_avail_pages -= request;
     ASSERT(total_avail_pages >= 0);
 
+    if ( d && d->outstanding_pages && !(memflags & MEMF_no_refcount) )
+    {
+        /*
+         * Adjust claims in the same locked region where total_avail_pages is
+         * adjusted, not doing so would lead to a window where the amount of
+         * free memory (avail - claimed) would be incorrect.
+         *
+         * Note that by adjusting the claimed amount here it's possible for
+         * pages to fail to be assigned to the claiming domain while already
+         * having been subtracted from d->outstanding_pages.  Such claimed
+         * amount is then lost, as the pages that fail to be assigned to the
+         * domain are freed without replenishing the claim.  This is fine given
+         * claims are only to be used during physmap population as part of
+         * domain build, and any failure in assign_pages() there will result in
+         * the domain being destroyed before creation is finished.  Losing part
+         * of the claim makes no difference.
+         */
+        unsigned long outstanding = min(d->outstanding_pages + 0UL, request);
+
+        BUG_ON(outstanding > outstanding_claims);
+        outstanding_claims -= outstanding;
+        d->outstanding_pages -= outstanding;
+    }
+
     check_low_mem_virq();
 
     if ( d != NULL )
@@ -1027,10 +1072,7 @@ static struct page_info *alloc_heap_pages(
             accumulate_tlbflush(&need_tlbflush, &pg[i],
                                 &tlbflush_timestamp);
 
-        /* Initialise fields which have other uses for free pages. */
-        pg[i].u.inuse.type_info = PGT_TYPE_INFO_INITIALIZER;
-        page_set_owner(&pg[i], NULL);
-
+        init_free_page_fields(&pg[i]);
     }
 
     spin_unlock(&heap_lock);
@@ -1076,7 +1118,7 @@ static struct page_info *alloc_heap_pages(
 /* Remove any offlined page in the buddy pointed to by head. */
 static int reserve_offlined_page(struct page_info *head)
 {
-    unsigned int node = phys_to_nid(page_to_maddr(head));
+    unsigned int node = page_to_nid(head);
     int zone = page_to_zone(head), i, head_order = PFN_ORDER(head), count = 0;
     struct page_info *cur_head;
     unsigned int cur_order, first_dirty;
@@ -1203,6 +1245,14 @@ static unsigned int node_to_scrub(bool get_node)
             node = cycle_node(node, node_online_map);
         } while ( !cpumask_empty(&node_to_cpumask(node)) &&
                   (node != local_node) );
+
+        /*
+         * In practice `node` will always be within MAX_NUMNODES, but GCC can't
+         * always see that, so an explicit check is necessary to avoid tripping
+         * its out-of-bounds array access warning (-Warray-bounds).
+         */
+        if ( node >= MAX_NUMNODES )
+            break;
 
         if ( node == local_node )
             break;
@@ -1435,13 +1485,15 @@ static bool mark_page_free(struct page_info *pg, mfn_t mfn)
     return pg_offlined;
 }
 
+static void free_color_heap_page(struct page_info *pg, bool need_scrub);
+
 /* Free 2^@order set of pages. */
 static void free_heap_pages(
     struct page_info *pg, unsigned int order, bool need_scrub)
 {
     unsigned long mask;
     mfn_t mfn = page_to_mfn(pg);
-    unsigned int i, node = phys_to_nid(mfn_to_maddr(mfn));
+    unsigned int i, node = mfn_to_nid(mfn);
     unsigned int zone = page_to_zone(pg);
     bool pg_offlined = false;
 
@@ -1458,6 +1510,15 @@ static void free_heap_pages(
         {
             pg[i].count_info |= PGC_need_scrub;
             poison_one_page(&pg[i]);
+        }
+
+        if ( pg->count_info & PGC_colored )
+        {
+            ASSERT(order == 0);
+
+            free_color_heap_page(pg, need_scrub);
+            spin_unlock(&heap_lock);
+            return;
         }
     }
 
@@ -1483,9 +1544,9 @@ static void free_heap_pages(
             /* Merge with predecessor block? */
             if ( !mfn_valid(page_to_mfn(predecessor)) ||
                  !page_state_is(predecessor, free) ||
-                 (predecessor->count_info & PGC_static) ||
+                 (predecessor->count_info & PGC_no_buddy_merge) ||
                  (PFN_ORDER(predecessor) != order) ||
-                 (phys_to_nid(page_to_maddr(predecessor)) != node) )
+                 (page_to_nid(predecessor) != node) )
                 break;
 
             check_and_stop_scrub(predecessor);
@@ -1507,9 +1568,9 @@ static void free_heap_pages(
             /* Merge with successor block? */
             if ( !mfn_valid(page_to_mfn(successor)) ||
                  !page_state_is(successor, free) ||
-                 (successor->count_info & PGC_static) ||
+                 (successor->count_info & PGC_no_buddy_merge) ||
                  (PFN_ORDER(successor) != order) ||
-                 (phys_to_nid(page_to_maddr(successor)) != node) )
+                 (page_to_nid(successor) != node) )
                 break;
 
             check_and_stop_scrub(successor);
@@ -1572,7 +1633,7 @@ static unsigned long mark_page_offline(struct page_info *pg, int broken)
 static int reserve_heap_page(struct page_info *pg)
 {
     struct page_info *head = NULL;
-    unsigned int i, node = phys_to_nid(page_to_maddr(pg));
+    unsigned int i, node = page_to_nid(pg);
     unsigned int zone = page_to_zone(pg);
 
     for ( i = 0; i <= MAX_ORDER; i++ )
@@ -1792,14 +1853,14 @@ static void _init_heap_pages(const struct page_info *pg,
                              bool need_scrub)
 {
     unsigned long s, e;
-    unsigned int nid = phys_to_nid(page_to_maddr(pg));
+    unsigned int nid = page_to_nid(pg);
 
     s = mfn_x(page_to_mfn(pg));
     e = mfn_x(mfn_add(page_to_mfn(pg + nr_pages - 1), 1));
     if ( unlikely(!avail[nid]) )
     {
         bool use_tail = IS_ALIGNED(s, 1UL << MAX_ORDER) &&
-                        (find_first_set_bit(e) <= find_first_set_bit(s));
+                        (ffsl(e) <= ffsl(s));
         unsigned long n;
 
         n = init_node_heap(nid, s, nr_pages, &use_tail);
@@ -1822,7 +1883,7 @@ static void _init_heap_pages(const struct page_info *pg,
          * Note that the value of ffsl() and flsl() starts from 1 so we need
          * to decrement it by 1.
          */
-        unsigned int inc_order = min(MAX_ORDER, flsl(e - s) - 1);
+        unsigned int inc_order = min(MAX_ORDER + 0U, flsl(e - s) - 1U);
 
         if ( s )
             inc_order = min(inc_order, ffsl(s) - 1U);
@@ -1867,7 +1928,7 @@ static void init_heap_pages(
 #ifdef CONFIG_SEPARATE_XENHEAP
         unsigned int zone = page_to_zone(pg);
 #endif
-        unsigned int nid = phys_to_nid(page_to_maddr(pg));
+        unsigned int nid = page_to_nid(pg);
         unsigned long left = nr_pages - i;
         unsigned long contig_pages;
 
@@ -1891,7 +1952,7 @@ static void init_heap_pages(
                 break;
 #endif
 
-            if ( nid != (phys_to_nid(page_to_maddr(pg + contig_pages))) )
+            if ( nid != (page_to_nid(pg + contig_pages)) )
                 break;
         }
 
@@ -1923,6 +1984,157 @@ static unsigned long avail_heap_pages(
     return free_pages;
 }
 
+/*************************
+ * COLORED SIDE-ALLOCATOR
+ *
+ * Pages are grouped by LLC color in lists which are globally referred to as the
+ * color heap. Lists are populated in end_boot_allocator().
+ * After initialization there will be N lists where N is the number of
+ * available colors on the platform.
+ */
+static struct page_list_head *__ro_after_init _color_heap;
+#define color_heap(color) (&_color_heap[color])
+
+static unsigned long *__ro_after_init free_colored_pages;
+
+#ifdef CONFIG_LLC_COLORING
+#define domain_num_llc_colors(d) ((d)->num_llc_colors)
+#define domain_llc_color(d, i)   ((d)->llc_colors[i])
+
+/* Memory required for buddy allocator to work with colored one */
+static unsigned long __initdata buddy_alloc_size =
+    MB(CONFIG_BUDDY_ALLOCATOR_SIZE);
+size_param("buddy-alloc-size", buddy_alloc_size);
+#else
+#define domain_num_llc_colors(d) 0
+#define domain_llc_color(d, i)   0
+#endif
+
+static void free_color_heap_page(struct page_info *pg, bool need_scrub)
+{
+    unsigned int color;
+
+    color = page_to_llc_color(pg);
+    free_colored_pages[color]++;
+    /*
+     * Head insertion allows re-using cache-hot pages in configurations without
+     * sharing of colors.
+     */
+    page_list_add(pg, color_heap(color));
+}
+
+static struct page_info *alloc_color_heap_page(unsigned int memflags,
+                                               const struct domain *d)
+{
+    struct page_info *pg = NULL;
+    unsigned int i, color = 0;
+    unsigned long max = 0;
+    bool need_tlbflush = false;
+    uint32_t tlbflush_timestamp = 0;
+    bool need_scrub;
+
+    if ( memflags & ~(MEMF_no_refcount | MEMF_no_owner | MEMF_no_tlbflush |
+                      MEMF_no_icache_flush | MEMF_no_scrub) )
+        return NULL;
+
+    spin_lock(&heap_lock);
+
+    for ( i = 0; i < domain_num_llc_colors(d); i++ )
+    {
+        unsigned long free = free_colored_pages[domain_llc_color(d, i)];
+
+        if ( free > max )
+        {
+            color = domain_llc_color(d, i);
+            pg = page_list_first(color_heap(color));
+            max = free;
+        }
+    }
+
+    if ( !pg )
+    {
+        spin_unlock(&heap_lock);
+        return NULL;
+    }
+
+    need_scrub = pg->count_info & PGC_need_scrub;
+    pg->count_info = PGC_state_inuse | (pg->count_info & PGC_colored);
+    free_colored_pages[color]--;
+    page_list_del(pg, color_heap(color));
+
+    if ( !(memflags & MEMF_no_tlbflush) )
+        accumulate_tlbflush(&need_tlbflush, pg, &tlbflush_timestamp);
+
+    init_free_page_fields(pg);
+
+    spin_unlock(&heap_lock);
+
+    if ( !(memflags & MEMF_no_scrub) )
+    {
+        if ( need_scrub )
+            scrub_one_page(pg);
+        else
+            check_one_page(pg);
+    }
+
+    if ( need_tlbflush )
+        filtered_flush_tlb_mask(tlbflush_timestamp);
+
+    flush_page_to_ram(mfn_x(page_to_mfn(pg)),
+                      !(memflags & MEMF_no_icache_flush));
+
+    return pg;
+}
+
+static void __init init_color_heap_pages(struct page_info *pg,
+                                         unsigned long nr_pages)
+{
+    unsigned long i;
+    bool need_scrub = opt_bootscrub == BOOTSCRUB_IDLE;
+
+#ifdef CONFIG_LLC_COLORING
+    if ( buddy_alloc_size >= PAGE_SIZE )
+    {
+        unsigned long buddy_pages = min(PFN_DOWN(buddy_alloc_size), nr_pages);
+
+        init_heap_pages(pg, buddy_pages);
+        nr_pages -= buddy_pages;
+        buddy_alloc_size -= buddy_pages << PAGE_SHIFT;
+        pg += buddy_pages;
+    }
+#endif
+
+    if ( !_color_heap )
+    {
+        unsigned int max_nr_colors = get_max_nr_llc_colors();
+
+        _color_heap = xvmalloc_array(struct page_list_head, max_nr_colors);
+        free_colored_pages = xvzalloc_array(unsigned long, max_nr_colors);
+        if ( !_color_heap || !free_colored_pages )
+            panic("Can't allocate colored heap. Buddy reserved size is too low");
+
+        for ( i = 0; i < max_nr_colors; i++ )
+            INIT_PAGE_LIST_HEAD(color_heap(i));
+    }
+
+    for ( i = 0; i < nr_pages; i++ )
+    {
+        pg[i].count_info = PGC_colored;
+        free_color_heap_page(&pg[i], need_scrub);
+    }
+}
+
+static void dump_color_heap(void)
+{
+    unsigned int color;
+
+    printk("Dumping color heap info\n");
+    for ( color = 0; color < get_max_nr_llc_colors(); color++ )
+        if ( free_colored_pages[color] > 0 )
+            printk("Color heap[%u]: %lu pages\n",
+                   color, free_colored_pages[color]);
+}
+
 void __init end_boot_allocator(void)
 {
     unsigned int i;
@@ -1932,7 +2144,7 @@ void __init end_boot_allocator(void)
     {
         struct bootmem_region *r = &bootmem_region_list[i];
         if ( (r->s < r->e) &&
-             (phys_to_nid(pfn_to_paddr(r->s)) == cpu_to_node(0)) )
+             (mfn_to_nid(_mfn(r->s)) == cpu_to_node(0)) )
         {
             init_heap_pages(mfn_to_page(_mfn(r->s)), r->e - r->s);
             r->e = r->s;
@@ -1942,7 +2154,13 @@ void __init end_boot_allocator(void)
     for ( i = nr_bootmem_regions; i-- > 0; )
     {
         struct bootmem_region *r = &bootmem_region_list[i];
-        if ( r->s < r->e )
+
+        if ( r->s >= r->e )
+            continue;
+
+        if ( llc_coloring_enabled )
+            init_color_heap_pages(mfn_to_page(_mfn(r->s)), r->e - r->s);
+        else
             init_heap_pages(mfn_to_page(_mfn(r->s)), r->e - r->s);
     }
     nr_bootmem_regions = 0;
@@ -2245,8 +2463,8 @@ void __init xenheap_max_mfn(unsigned long mfn)
 {
     ASSERT(!first_node_initialised);
     ASSERT(!xenheap_bits);
-    BUILD_BUG_ON(PADDR_BITS >= BITS_PER_LONG);
-    xenheap_bits = min(flsl(mfn + 1) - 1 + PAGE_SHIFT, PADDR_BITS);
+    BUILD_BUG_ON((PADDR_BITS - PAGE_SHIFT) >= BITS_PER_LONG);
+    xenheap_bits = min(flsl(mfn + 1) - 1U + PAGE_SHIFT, PADDR_BITS + 0U);
     printk(XENLOG_INFO "Xen heap: %u bits\n", xenheap_bits);
 }
 
@@ -2328,7 +2546,7 @@ int assign_pages(
     int rc = 0;
     unsigned int i;
 
-    spin_lock(&d->page_alloc_lock);
+    nrspin_lock(&d->page_alloc_lock);
 
     if ( unlikely(d->is_dying) )
     {
@@ -2344,7 +2562,7 @@ int assign_pages(
 
         for ( i = 0; i < nr; i++ )
         {
-            ASSERT(!(pg[i].count_info & ~(PGC_extra | PGC_static)));
+            ASSERT(!(pg[i].count_info & ~PGC_preserved));
             if ( pg[i].count_info & PGC_extra )
                 extra_pages++;
         }
@@ -2375,7 +2593,7 @@ int assign_pages(
         if ( unlikely(nr > d->max_pages - tot_pages) )
         {
             gprintk(XENLOG_INFO, "Over-allocation for %pd: %Lu > %u\n",
-                    d, tot_pages + 0ull + nr, d->max_pages);
+                    d, tot_pages + 0ULL + nr, d->max_pages);
             rc = -E2BIG;
             goto out;
         }
@@ -2387,7 +2605,7 @@ int assign_pages(
         {
             gprintk(XENLOG_INFO,
                     "Excess allocation for %pd: %Lu (%u extra)\n",
-                    d, d->tot_pages + 0ull + nr, d->extra_pages);
+                    d, d->tot_pages + 0ULL + nr, d->extra_pages);
             if ( pg[0].count_info & PGC_extra )
                 d->extra_pages -= nr;
             rc = -E2BIG;
@@ -2404,13 +2622,13 @@ int assign_pages(
         page_set_owner(&pg[i], d);
         smp_wmb(); /* Domain pointer must be visible before updating refcnt. */
         pg[i].count_info =
-            (pg[i].count_info & (PGC_extra | PGC_static)) | PGC_allocated | 1;
+            (pg[i].count_info & PGC_preserved) | PGC_allocated | 1;
 
         page_list_add_tail(&pg[i], page_to_list(d, &pg[i]));
     }
 
  out:
-    spin_unlock(&d->page_alloc_lock);
+    nrspin_unlock(&d->page_alloc_lock);
     return rc;
 }
 
@@ -2438,7 +2656,14 @@ struct page_info *alloc_domheap_pages(
     if ( memflags & MEMF_no_owner )
         memflags |= MEMF_no_refcount;
 
-    if ( !dma_bitsize )
+    /* Only domains are supported for coloring */
+    if ( d && llc_coloring_enabled )
+    {
+        /* Colored allocation must be done on 0 order */
+        if ( order || (pg = alloc_color_heap_page(memflags, d)) == NULL )
+            return NULL;
+    }
+    else if ( !dma_bitsize )
         memflags &= ~MEMF_no_dma;
     else if ( (dma_zone = bits_to_zone(dma_bitsize)) < zone_hi )
         pg = alloc_heap_pages(dma_zone + 1, zone_hi, order, memflags, d);
@@ -2455,7 +2680,7 @@ struct page_info *alloc_domheap_pages(
         {
             unsigned long i;
 
-            for ( i = 0; i < (1ul << order); i++ )
+            for ( i = 0; i < (1UL << order); i++ )
             {
                 ASSERT(!pg[i].count_info);
                 pg[i].count_info = PGC_extra;
@@ -2482,7 +2707,7 @@ void free_domheap_pages(struct page_info *pg, unsigned int order)
     if ( unlikely(is_xen_heap_page(pg)) )
     {
         /* NB. May recursively lock from relinquish_memory(). */
-        spin_lock_recursive(&d->page_alloc_lock);
+        rspin_lock(&d->page_alloc_lock);
 
         for ( i = 0; i < (1 << order); i++ )
             arch_free_heap_page(d, &pg[i]);
@@ -2490,7 +2715,7 @@ void free_domheap_pages(struct page_info *pg, unsigned int order)
         d->xenheap_pages -= 1 << order;
         drop_dom_ref = (d->xenheap_pages == 0);
 
-        spin_unlock_recursive(&d->page_alloc_lock);
+        rspin_unlock(&d->page_alloc_lock);
     }
     else
     {
@@ -2499,7 +2724,7 @@ void free_domheap_pages(struct page_info *pg, unsigned int order)
         if ( likely(d) && likely(d != dom_cow) )
         {
             /* NB. May recursively lock from relinquish_memory(). */
-            spin_lock_recursive(&d->page_alloc_lock);
+            rspin_lock(&d->page_alloc_lock);
 
             for ( i = 0; i < (1 << order); i++ )
             {
@@ -2522,15 +2747,17 @@ void free_domheap_pages(struct page_info *pg, unsigned int order)
 
             drop_dom_ref = !domain_adjust_tot_pages(d, -(1 << order));
 
-            spin_unlock_recursive(&d->page_alloc_lock);
+            rspin_unlock(&d->page_alloc_lock);
 
             /*
              * Normally we expect a domain to clear pages before freeing them,
              * if it cares about the secrecy of their contents. However, after
-             * a domain has died we assume responsibility for erasure. We do
-             * scrub regardless if option scrub_domheap is set.
+             * a domain has died or if it has mem-paging enabled we assume
+             * responsibility for erasure. We do scrub regardless if option
+             * scrub_domheap is set.
              */
-            scrub = d->is_dying || scrub_debug || opt_scrub_domheap;
+            scrub = d->is_dying || mem_paging_enabled(d) ||
+                    scrub_debug || opt_scrub_domheap;
         }
         else
         {
@@ -2605,6 +2832,8 @@ static void cf_check pagealloc_info(unsigned char key)
     }
 
     printk("    Dom heap: %lukB free\n", total << (PAGE_SHIFT-10));
+
+    dump_llc_coloring_info();
 }
 
 static __init int cf_check pagealloc_keyhandler_init(void)
@@ -2613,22 +2842,6 @@ static __init int cf_check pagealloc_keyhandler_init(void)
     return 0;
 }
 __initcall(pagealloc_keyhandler_init);
-
-
-void scrub_one_page(struct page_info *pg)
-{
-    if ( unlikely(pg->count_info & PGC_broken) )
-        return;
-
-#ifndef NDEBUG
-    /* Avoid callers relying on allocations returning zeroed pages. */
-    unmap_domain_page(memset(__map_domain_page(pg),
-                             SCRUB_BYTE_PATTERN, PAGE_SIZE));
-#else
-    /* For a production build, clear_page() is the fastest way to scrub. */
-    clear_domain_page(_mfn(page_to_mfn(pg)));
-#endif
-}
 
 static void cf_check dump_heap(unsigned char key)
 {
@@ -2653,6 +2866,9 @@ static void cf_check dump_heap(unsigned char key)
             continue;
         printk("Node %d has %lu unscrubbed pages\n", i, node_need_scrub[i]);
     }
+
+    if ( llc_coloring_enabled )
+        dump_color_heap();
 }
 
 static __init int cf_check register_heap_trigger(void)
@@ -2738,7 +2954,7 @@ void free_domstatic_page(struct page_info *page)
     ASSERT_ALLOC_CONTEXT();
 
     /* NB. May recursively lock from relinquish_memory(). */
-    spin_lock_recursive(&d->page_alloc_lock);
+    rspin_lock(&d->page_alloc_lock);
 
     arch_free_heap_page(d, page);
 
@@ -2749,7 +2965,7 @@ void free_domstatic_page(struct page_info *page)
     /* Add page on the resv_page_list *after* it has been freed. */
     page_list_add_tail(page, &d->resv_page_list);
 
-    spin_unlock_recursive(&d->page_alloc_lock);
+    rspin_unlock(&d->page_alloc_lock);
 
     if ( drop_dom_ref )
         put_domain(d);
@@ -2785,9 +3001,7 @@ static bool prepare_staticmem_pages(struct page_info *pg, unsigned long nr_mfns,
          * to PGC_state_inuse.
          */
         pg[i].count_info = PGC_static | PGC_state_inuse;
-        /* Initialise fields which have other uses for free pages. */
-        pg[i].u.inuse.type_info = PGT_TYPE_INFO_INITIALIZER;
-        page_set_owner(&pg[i], NULL);
+        init_free_page_fields(&pg[i]);
     }
 
     spin_unlock(&heap_lock);
@@ -2891,9 +3105,9 @@ mfn_t acquire_reserved_page(struct domain *d, unsigned int memflags)
     ASSERT_ALLOC_CONTEXT();
 
     /* Acquire a page from reserved page list(resv_page_list). */
-    spin_lock(&d->page_alloc_lock);
+    nrspin_lock(&d->page_alloc_lock);
     page = page_list_remove_head(&d->resv_page_list);
-    spin_unlock(&d->page_alloc_lock);
+    nrspin_unlock(&d->page_alloc_lock);
     if ( unlikely(!page) )
         return INVALID_MFN;
 
@@ -2912,9 +3126,9 @@ mfn_t acquire_reserved_page(struct domain *d, unsigned int memflags)
      */
     unprepare_staticmem_pages(page, 1, false);
  fail:
-    spin_lock(&d->page_alloc_lock);
+    nrspin_lock(&d->page_alloc_lock);
     page_list_add_tail(page, &d->resv_page_list);
-    spin_unlock(&d->page_alloc_lock);
+    nrspin_unlock(&d->page_alloc_lock);
     return INVALID_MFN;
 }
 #endif

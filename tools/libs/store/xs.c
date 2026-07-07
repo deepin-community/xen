@@ -1,4 +1,4 @@
-/* 
+/*
     Xen Store Daemon interface providing simple tree-like database.
     Copyright (C) 2005 Rusty Russell IBM Corporation
 
@@ -33,46 +33,61 @@
 #include <signal.h>
 #include <stdint.h>
 #include <errno.h>
+#include <xen-tools/common-macros.h>
+#include <xen-tools/xenstore-common.h>
 #include "xenstore.h"
-#include "xs_lib.h"
-#include "list.h"
-#include "utils.h"
 
 #include <xentoolcore_internal.h>
+#include <xen_list.h>
+
+#ifdef USE_PTHREAD
+# include <pthread.h>
+#endif
+
+#ifdef USE_DLSYM
+# include <dlfcn.h>
+#endif
+
+#ifndef O_CLOEXEC
+#define O_CLOEXEC 0
+#endif
+
+#ifndef SOCK_CLOEXEC
+#define SOCK_CLOEXEC 0
+#endif
 
 struct xs_stored_msg {
-	struct list_head list;
+	XEN_TAILQ_ENTRY(struct xs_stored_msg) list;
 	struct xsd_sockmsg hdr;
 	char *body;
 };
 
-#ifdef USE_PTHREAD
-
-#include <pthread.h>
-
-#ifdef USE_DLSYM
-#include <dlfcn.h>
-#endif
-
 struct xs_handle {
 	/* Communications channel to xenstore daemon. */
 	int fd;
+
+	bool is_socket; /* is @fd a file or socket? */
+
 	Xentoolcore__Active_Handle tc_ah; /* for restrict */
 
 	/*
          * A read thread which pulls messages off the comms channel and
          * signals waiters.
          */
+#ifdef USE_PTHREAD
 	pthread_t read_thr;
 	int read_thr_exists;
+#endif
 
 	/*
          * A list of fired watch messages, protected by a mutex. Users can
          * wait on the conditional variable until a watch is pending.
          */
-	struct list_head watch_list;
+	XEN_TAILQ_HEAD(, struct xs_stored_msg) watch_list;
+#ifdef USE_PTHREAD
 	pthread_mutex_t watch_mutex;
 	pthread_cond_t watch_condvar;
+#endif
 
 	/* Clients can select() on this pipe to wait for a watch to fire. */
 	int watch_pipe[2];
@@ -84,7 +99,8 @@ struct xs_handle {
          * because we serialise requests. The requester can wait on the
          * conditional variable for its response.
          */
-	struct list_head reply_list;
+	XEN_TAILQ_HEAD(, struct xs_stored_msg) reply_list;
+#ifdef USE_PTHREAD
 	pthread_mutex_t reply_mutex;
 	pthread_cond_t reply_condvar;
 
@@ -104,60 +120,54 @@ struct xs_handle {
 	 *     reply_mutex
 	 *     watch_mutex
 	 */
+#endif
 };
 
-#define mutex_lock(m)		pthread_mutex_lock(m)
-#define mutex_unlock(m)		pthread_mutex_unlock(m)
-#define condvar_signal(c)	pthread_cond_signal(c)
-#define condvar_wait(c,m)	pthread_cond_wait(c,m)
-#define cleanup_push(f, a)	\
-    pthread_cleanup_push((void (*)(void *))(f), (void *)(a))
+
+#ifdef USE_PTHREAD
+
+# define mutex_lock(m)             pthread_mutex_lock(m)
+# define mutex_unlock(m)           pthread_mutex_unlock(m)
+# define condvar_signal(c)         pthread_cond_signal(c)
+# define condvar_wait(c, m)        pthread_cond_wait(c, m)
+# define cleanup_push(f, a)        pthread_cleanup_push((void (*)(void *))(f), (void *)(a))
 /*
  * Some definitions of pthread_cleanup_pop() are a macro starting with an
  * end-brace. GCC then complains if we immediately precede that with a label.
  * Hence we insert a dummy statement to appease the compiler in this situation.
  */
-#define cleanup_pop(run)        ((void)0); pthread_cleanup_pop(run)
+# define cleanup_pop(run)          ((void)0); pthread_cleanup_pop(run)
 
-#define read_thread_exists(h)	(h->read_thr_exists)
+# define read_thread_exists(h)     ((h)->read_thr_exists)
 
 /* Because pthread_cleanup_p* are not available when USE_PTHREAD is
  * disabled, use these macros which convert appropriately. */
-#define cleanup_push_heap(p)        cleanup_push(free, p)
-#define cleanup_pop_heap(run, p)    cleanup_pop((run))
+# define cleanup_push_heap(p)      cleanup_push(free, p)
+# define cleanup_pop_heap(run, p)  cleanup_pop((run))
 
 static void *read_thread(void *arg);
 
-#else /* !defined(USE_PTHREAD) */
+#else /* USE_PTHREAD */
 
-struct xs_handle {
-	int fd;
-	Xentoolcore__Active_Handle tc_ah; /* for restrict */
-	struct list_head reply_list;
-	struct list_head watch_list;
-	/* Clients can select() on this pipe to wait for a watch to fire. */
-	int watch_pipe[2];
-	/* Filtering watch event in unwatch function? */
-	bool unwatch_filter;
-};
+# define mutex_lock(m)               ((void)0)
+# define mutex_unlock(m)             ((void)0)
+# define condvar_signal(c)           ((void)0)
+# define condvar_wait(c, m)          ((void)0)
+# define cleanup_push(f, a)          ((void)0)
+# define cleanup_pop(run)            ((void)0)
+# define read_thread_exists(h)       (0)
+# define cleanup_push_heap(p)        ((void)0)
+# define cleanup_pop_heap(run, p)    do { if ((run)) free(p); } while(0)
 
-#define mutex_lock(m)		((void)0)
-#define mutex_unlock(m)		((void)0)
-#define condvar_signal(c)	((void)0)
-#define condvar_wait(c,m)	((void)0)
-#define cleanup_push(f, a)	((void)0)
-#define cleanup_pop(run)	((void)0)
-#define read_thread_exists(h)	(0)
+#endif /* !USE_PTHREAD */
 
-#define cleanup_push_heap(p)        ((void)0)
-#define cleanup_pop_heap(run, p)    do { if ((run)) free(p); } while(0)
-
-#endif
 
 static int read_message(struct xs_handle *h, int nonblocking);
 
-static bool setnonblock(int fd, int nonblock) {
+static bool setnonblock(int fd, int nonblock)
+{
 	int flags = fcntl(fd, F_GETFL);
+
 	if (flags == -1)
 		return false;
 
@@ -172,15 +182,39 @@ static bool setnonblock(int fd, int nonblock) {
 	return true;
 }
 
+static bool set_cloexec(int fd)
+{
+	int flags = fcntl(fd, F_GETFD);
+
+	if (flags < 0)
+		return false;
+
+	return fcntl(fd, F_SETFD, flags | FD_CLOEXEC) >= 0;
+}
+
+static int pipe_cloexec(int fds[2])
+{
+#if HAVE_PIPE2
+	return pipe2(fds, O_CLOEXEC);
+#else
+	if (pipe(fds) < 0)
+		return -1;
+	/* Best effort to set CLOEXEC.  Racy. */
+	set_cloexec(fds[0]);
+	set_cloexec(fds[1]);
+	return 0;
+#endif
+}
+
 int xs_fileno(struct xs_handle *h)
 {
 	char c = 0;
 
 	mutex_lock(&h->watch_mutex);
 
-	if ((h->watch_pipe[0] == -1) && (pipe(h->watch_pipe) != -1)) {
+	if ((h->watch_pipe[0] == -1) && (pipe_cloexec(h->watch_pipe) != -1)) {
 		/* Kick things off if the watch list is already non-empty. */
-		if (!list_empty(&h->watch_list))
+		if (!XEN_TAILQ_EMPTY(&h->watch_list))
 			while (write(h->watch_pipe[1], &c, 1) != 1)
 				continue;
 	}
@@ -193,20 +227,18 @@ int xs_fileno(struct xs_handle *h)
 static int get_socket(const char *connect_to)
 {
 	struct sockaddr_un addr;
-	int sock, saved_errno, flags;
+	int sock, saved_errno;
 
-	sock = socket(PF_UNIX, SOCK_STREAM, 0);
+	sock = socket(PF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
 	if (sock < 0)
 		return -1;
 
-	if ((flags = fcntl(sock, F_GETFD)) < 0)
-		goto error;
-	flags |= FD_CLOEXEC;
-	if (fcntl(sock, F_SETFD, flags) < 0)
+	/* Compat for non-SOCK_CLOEXEC environments.  Racy. */
+	if (!SOCK_CLOEXEC && !set_cloexec(sock))
 		goto error;
 
 	addr.sun_family = AF_UNIX;
-	if(strlen(connect_to) >= sizeof(addr.sun_path)) {
+	if (strlen(connect_to) >= sizeof(addr.sun_path)) {
 		errno = EINVAL;
 		goto error;
 	}
@@ -226,13 +258,31 @@ error:
 
 static int get_dev(const char *connect_to)
 {
-	/* We cannot open read-only because requests are writes */
-	return open(connect_to, O_RDWR);
+	int fd, saved_errno;
+
+	fd = open(connect_to, O_RDWR | O_CLOEXEC);
+	if (fd < 0)
+		return -1;
+
+	/* Compat for non-O_CLOEXEC environments.  Racy. */
+	if (!O_CLOEXEC && !set_cloexec(fd))
+		goto error;
+
+	return fd;
+
+error:
+	saved_errno = errno;
+	close(fd);
+	errno = saved_errno;
+
+	return -1;
 }
 
-static int all_restrict_cb(Xentoolcore__Active_Handle *ah, domid_t domid) {
-    struct xs_handle *h = CONTAINER_OF(ah, *h, tc_ah);
-    return xentoolcore__restrict_by_dup2_null(h->fd);
+static int all_restrict_cb(Xentoolcore__Active_Handle *ah, domid_t domid)
+{
+	struct xs_handle *h = CONTAINER_OF(ah, *h, tc_ah);
+
+	return xentoolcore__restrict_by_dup2_null(h->fd);
 }
 
 static struct xs_handle *get_handle(const char *connect_to)
@@ -254,7 +304,9 @@ static struct xs_handle *get_handle(const char *connect_to)
 	if (stat(connect_to, &buf) != 0)
 		goto err;
 
-	if (S_ISSOCK(buf.st_mode))
+	h->is_socket = S_ISSOCK(buf.st_mode);
+
+	if (h->is_socket)
 		h->fd = get_socket(connect_to);
 	else
 		h->fd = get_dev(connect_to);
@@ -262,8 +314,8 @@ static struct xs_handle *get_handle(const char *connect_to)
 	if (h->fd == -1)
 		goto err;
 
-	INIT_LIST_HEAD(&h->reply_list);
-	INIT_LIST_HEAD(&h->watch_list);
+	XEN_TAILQ_INIT(&h->reply_list);
+	XEN_TAILQ_INIT(&h->watch_list);
 
 	/* Watch pipe is allocated on demand in xs_fileno(). */
 	h->watch_pipe[0] = h->watch_pipe[1] = -1;
@@ -311,6 +363,28 @@ struct xs_handle *xs_domain_open(void)
 	return xs_open(0);
 }
 
+static const char *xs_domain_dev(void)
+{
+	char *s = getenv("XENSTORED_PATH");
+
+	if (s)
+		return s;
+
+#if defined(__RUMPUSER_XEN__) || defined(__RUMPRUN__)
+	return "/dev/xen/xenbus";
+#elif defined(__linux__)
+	if (access("/dev/xen/xenbus", F_OK) == 0)
+		return "/dev/xen/xenbus";
+	return "/proc/xen/xenbus";
+#elif defined(__NetBSD__)
+	return "/kern/xen/xenbus";
+#elif defined(__FreeBSD__)
+	return "/dev/xen/xenstore";
+#else
+	return "/dev/xen/xenbus";
+#endif
+}
+
 struct xs_handle *xs_open(unsigned long flags)
 {
 	struct xs_handle *xsh = NULL;
@@ -326,21 +400,23 @@ struct xs_handle *xs_open(unsigned long flags)
 	return xsh;
 }
 
-static void close_free_msgs(struct xs_handle *h) {
+static void close_free_msgs(struct xs_handle *h)
+{
 	struct xs_stored_msg *msg, *tmsg;
 
-	list_for_each_entry_safe(msg, tmsg, &h->reply_list, list) {
+	XEN_TAILQ_FOREACH_SAFE(msg, &h->reply_list, list, tmsg) {
 		free(msg->body);
 		free(msg);
 	}
 
-	list_for_each_entry_safe(msg, tmsg, &h->watch_list, list) {
+	XEN_TAILQ_FOREACH_SAFE(msg, &h->watch_list, list, tmsg) {
 		free(msg->body);
 		free(msg);
 	}
 }
 
-static void close_fds_free(struct xs_handle *h) {
+static void close_fds_free(struct xs_handle *h)
+{
 	if (h->watch_pipe[0] != -1) {
 		close(h->watch_pipe[0]);
 		close(h->watch_pipe[1]);
@@ -348,7 +424,7 @@ static void close_fds_free(struct xs_handle *h) {
 
 	xentoolcore__deregister_active_handle(&h->tc_ah);
         close(h->fd);
-        
+
 	free(h);
 }
 
@@ -380,7 +456,7 @@ void xs_daemon_close(struct xs_handle *h)
         close_fds_free(h);
 }
 
-void xs_close(struct xs_handle* xsh)
+void xs_close(struct xs_handle *xsh)
 {
 	if (xsh)
 		xs_daemon_close(xsh);
@@ -428,16 +504,29 @@ out_false:
 	return false;
 }
 
-#ifdef XSTEST
-#define read_all read_all_choice
-#define xs_write_all write_all_choice
-#endif
+/* Simple routine for writing to sockets, etc. */
+bool xs_write_all(int fd, const void *data, unsigned int len)
+{
+	while (len) {
+		int done;
+
+		done = write(fd, data, len);
+		if (done < 0 && errno == EINTR)
+			continue;
+		if (done <= 0)
+			return false;
+		data += done;
+		len -= done;
+	}
+
+	return true;
+}
 
 static int get_error(const char *errorstring)
 {
 	unsigned int i;
 
-	for (i = 0; !streq(errorstring, xsd_errors[i].errstring); i++)
+	for (i = 0; strcmp(errorstring, xsd_errors[i].errstring); i++)
 		if (i == ARRAY_SIZE(xsd_errors) - 1)
 			return EINVAL;
 	return xsd_errors[i].errnum;
@@ -459,17 +548,17 @@ static void *read_reply(
 
 	mutex_lock(&h->reply_mutex);
 #ifdef USE_PTHREAD
-	while (list_empty(&h->reply_list) && read_from_thread && h->fd != -1)
+	while (XEN_TAILQ_EMPTY(&h->reply_list) && read_from_thread && h->fd != -1)
 		condvar_wait(&h->reply_condvar, &h->reply_mutex);
 #endif
-	if (list_empty(&h->reply_list)) {
+	if (XEN_TAILQ_EMPTY(&h->reply_list)) {
 		mutex_unlock(&h->reply_mutex);
 		errno = EINVAL;
 		return NULL;
 	}
-	msg = list_top(&h->reply_list, struct xs_stored_msg, list);
-	list_del(&msg->list);
-	assert(list_empty(&h->reply_list));
+	msg = XEN_TAILQ_FIRST(&h->reply_list);
+	XEN_TAILQ_REMOVE(&h->reply_list, msg, list);
+	assert(XEN_TAILQ_EMPTY(&h->reply_list));
 	mutex_unlock(&h->reply_mutex);
 
 	*type = msg->hdr.type;
@@ -482,60 +571,142 @@ static void *read_reply(
 	return body;
 }
 
-/* Send message to xs, get malloc'ed reply.  NULL and set errno on error. */
-static void *xs_talkv(struct xs_handle *h, xs_transaction_t t,
-		      enum xsd_sockmsg_type type,
-		      const struct iovec *iovec,
+/*
+ * Update an iov/nr pair after an incomplete writev()/sendmsg().
+ *
+ * Awkwardly, nr has different widths and signs between writev() and
+ * sendmsg(), so we take it and return it by value, rather than by pointer.
+ */
+static size_t update_iov(struct iovec **p_iov, size_t nr, size_t res)
+{
+	struct iovec *iov = *p_iov;
+
+        /* Skip fully complete elements, including empty elements. */
+        while (nr && res >= iov->iov_len) {
+                res -= iov->iov_len;
+                nr--;
+                iov++;
+        }
+
+        /* Partial element, adjust base/len. */
+        if (res) {
+                iov->iov_len  -= res;
+                iov->iov_base += res;
+        }
+
+        *p_iov = iov;
+
+	return nr;
+}
+
+/*
+ * Wrapper around sendmsg() to resubmit on EINTR or short write.  Returns
+ * @true if all data was transmitted, or @false with errno for an error.
+ * Note: May alter @iov in place on resubmit.
+ */
+static bool sendmsg_exact(int fd, struct iovec *iov, unsigned int nr)
+{
+	struct msghdr hdr = {
+		.msg_iov    = iov,
+		.msg_iovlen = nr,
+	};
+
+	while (hdr.msg_iovlen) {
+		ssize_t res = sendmsg(fd, &hdr, MSG_NOSIGNAL);
+
+		if (res < 0 && errno == EINTR)
+			continue;
+		if (res <= 0)
+			return false;
+
+		hdr.msg_iovlen = update_iov(&hdr.msg_iov, hdr.msg_iovlen, res);
+	}
+
+	return true;
+}
+
+/*
+ * Wrapper around sendmsg() to resubmit on EINTR or short write.  Returns
+ * @true if all data was transmitted, or @false with errno for an error.
+ * Note: May alter @iov in place on resubmit.
+ */
+static bool writev_exact(int fd, struct iovec *iov, unsigned int nr)
+{
+	while (nr) {
+		ssize_t res = writev(fd, iov, nr);
+
+		if (res < 0 && errno == EINTR)
+			continue;
+		if (res <= 0)
+			return false;
+
+		nr = update_iov(&iov, nr, res);
+	}
+
+	return true;
+}
+
+static bool write_request(struct xs_handle *h, struct iovec *iov, unsigned int nr)
+{
+	if (h->is_socket)
+		return sendmsg_exact(h->fd, iov, nr);
+	else
+		return writev_exact(h->fd, iov, nr);
+}
+
+/*
+ * Send message to xenstore, get malloc'ed reply.  NULL and set errno on error.
+ *
+ * @iovec describes the entire outgoing message, starting with the xsd_sockmsg
+ * header.  xs_talkv() calculates the outgoing message length, updating
+ * xsd_sockmsg in element 0.  xs_talkv() might edit the iovec structure in
+ * place (e.g. following short writes).
+ */
+static void *xs_talkv(struct xs_handle *h,
+		      struct iovec *iovec,
 		      unsigned int num_vecs,
 		      unsigned int *len)
 {
-	struct xsd_sockmsg msg;
+	struct xsd_sockmsg *msg = iovec[0].iov_base;
+	enum xsd_sockmsg_type reply_type;
 	void *ret = NULL;
 	int saved_errno;
-	unsigned int i;
-	struct sigaction ignorepipe, oldact;
+	unsigned int i, msg_len;
 
-	msg.tx_id = t;
-	msg.req_id = 0;
-	msg.type = type;
-	msg.len = 0;
-	for (i = 0; i < num_vecs; i++)
-		msg.len += iovec[i].iov_len;
+	/* Element 0 must be xsd_sockmsg */
+	assert(num_vecs >= 1);
+	assert(iovec[0].iov_len == sizeof(*msg));
 
-	if (msg.len > XENSTORE_PAYLOAD_MAX) {
-		errno = E2BIG;
-		return 0;
+	/* Calculate the payload length by summing iovec elements */
+	for (i = 1, msg_len = 0; i < num_vecs; i++) {
+		if ((iovec[i].iov_len > XENSTORE_PAYLOAD_MAX) ||
+		    ((msg_len += iovec[i].iov_len) > XENSTORE_PAYLOAD_MAX)) {
+			errno = E2BIG;
+			return NULL;
+		}
 	}
 
-	ignorepipe.sa_handler = SIG_IGN;
-	sigemptyset(&ignorepipe.sa_mask);
-	ignorepipe.sa_flags = 0;
-	sigaction(SIGPIPE, &ignorepipe, &oldact);
+	msg->len = msg_len;
 
 	mutex_lock(&h->request_mutex);
 
-	if (!xs_write_all(h->fd, &msg, sizeof(msg)))
+	if (!write_request(h, iovec, num_vecs))
 		goto fail;
 
-	for (i = 0; i < num_vecs; i++)
-		if (!xs_write_all(h->fd, iovec[i].iov_base, iovec[i].iov_len))
-			goto fail;
-
-	ret = read_reply(h, &msg.type, len);
+	ret = read_reply(h, &reply_type, len);
 	if (!ret)
 		goto fail;
 
 	mutex_unlock(&h->request_mutex);
 
-	sigaction(SIGPIPE, &oldact, NULL);
-	if (msg.type == XS_ERROR) {
+	if (reply_type == XS_ERROR) {
 		saved_errno = get_error(ret);
 		free(ret);
 		errno = saved_errno;
 		return NULL;
 	}
 
-	if (msg.type != type) {
+	if (reply_type != msg->type) {
 		free(ret);
 		saved_errno = EBADF;
 		goto close_fd;
@@ -546,7 +717,6 @@ fail:
 	/* We're in a bad state, so close fd. */
 	saved_errno = errno;
 	mutex_unlock(&h->request_mutex);
-	sigaction(SIGPIPE, &oldact, NULL);
 close_fd:
 	close(h->fd);
 	h->fd = -1;
@@ -568,11 +738,15 @@ static void *xs_single(struct xs_handle *h, xs_transaction_t t,
 		       const char *string,
 		       unsigned int *len)
 {
-	struct iovec iovec;
+	struct xsd_sockmsg msg = { .type = type, .tx_id = t };
+	struct iovec iov[2];
 
-	iovec.iov_base = (void *)string;
-	iovec.iov_len = strlen(string) + 1;
-	return xs_talkv(h, t, type, &iovec, 1, len);
+	iov[0].iov_base = &msg;
+	iov[0].iov_len  = sizeof(msg);
+	iov[1].iov_base = (void *)string;
+	iov[1].iov_len  = strlen(string) + 1;
+
+	return xs_talkv(h, iov, ARRAY_SIZE(iov), len);
 }
 
 static bool xs_bool(char *reply)
@@ -589,7 +763,7 @@ static char **xs_directory_common(char *strings, unsigned int len,
 	char *p, **ret;
 
 	/* Count the strings. */
-	*num = xs_count_strings(strings, len);
+	*num = xenstore_count_strings(strings, len);
 
 	/* Transfer to one big alloc for easy freeing. */
 	ret = malloc(*num * sizeof(char *) + len);
@@ -609,21 +783,25 @@ static char **xs_directory_common(char *strings, unsigned int len,
 static char **xs_directory_part(struct xs_handle *h, xs_transaction_t t,
 				const char *path, unsigned int *num)
 {
+	struct xsd_sockmsg msg = { .type = XS_DIRECTORY_PART, .tx_id = t };
 	unsigned int off, result_len;
 	char gen[24], offstr[8];
-	struct iovec iovec[2];
+	struct iovec iov[3];
 	char *result = NULL, *strings = NULL;
 
 	memset(gen, 0, sizeof(gen));
-	iovec[0].iov_base = (void *)path;
-	iovec[0].iov_len = strlen(path) + 1;
 
 	for (off = 0;;) {
 		snprintf(offstr, sizeof(offstr), "%u", off);
-		iovec[1].iov_base = (void *)offstr;
-		iovec[1].iov_len = strlen(offstr) + 1;
-		result = xs_talkv(h, t, XS_DIRECTORY_PART, iovec, 2,
-				  &result_len);
+
+		iov[0].iov_base = &msg;
+		iov[0].iov_len  = sizeof(msg);
+		iov[1].iov_base = (void *)path;
+		iov[1].iov_len  = strlen(path) + 1;
+		iov[2].iov_base = (void *)offstr;
+		iov[2].iov_len  = strlen(offstr) + 1;
+
+		result = xs_talkv(h, iov, ARRAY_SIZE(iov), &result_len);
 
 		/* If XS_DIRECTORY_PART isn't supported return E2BIG. */
 		if (!result) {
@@ -692,15 +870,17 @@ void *xs_read(struct xs_handle *h, xs_transaction_t t,
 bool xs_write(struct xs_handle *h, xs_transaction_t t,
 	      const char *path, const void *data, unsigned int len)
 {
-	struct iovec iovec[2];
+	struct xsd_sockmsg msg = { .type = XS_WRITE, .tx_id = t };
+	struct iovec iov[3];
 
-	iovec[0].iov_base = (void *)path;
-	iovec[0].iov_len = strlen(path) + 1;
-	iovec[1].iov_base = (void *)data;
-	iovec[1].iov_len = len;
+	iov[0].iov_base = &msg;
+	iov[0].iov_len  = sizeof(msg);
+	iov[1].iov_base = (void *)path;
+	iov[1].iov_len  = strlen(path) + 1;
+	iov[2].iov_base = (void *)data;
+	iov[2].iov_len  = len;
 
-	return xs_bool(xs_talkv(h, t, XS_WRITE, iovec,
-				ARRAY_SIZE(iovec), NULL));
+	return xs_bool(xs_talkv(h, iov, ARRAY_SIZE(iov), NULL));
 }
 
 /* Create a new directory.
@@ -737,7 +917,7 @@ struct xs_permissions *xs_get_permissions(struct xs_handle *h,
 		return NULL;
 
 	/* Count the strings: each one perms then domid. */
-	*num = xs_count_strings(strings, len);
+	*num = xenstore_count_strings(strings, len);
 
 	/* Transfer to one big alloc for easy freeing. */
 	ret = malloc(*num * sizeof(struct xs_permissions));
@@ -746,7 +926,7 @@ struct xs_permissions *xs_get_permissions(struct xs_handle *h,
 		return NULL;
 	}
 
-	if (!xs_strings_to_perms(ret, *num, strings)) {
+	if (!xenstore_strings_to_perms(ret, *num, strings)) {
 		free_no_errno(ret);
 		ret = NULL;
 	}
@@ -764,34 +944,37 @@ bool xs_set_permissions(struct xs_handle *h,
 			struct xs_permissions *perms,
 			unsigned int num_perms)
 {
+	struct xsd_sockmsg msg = { .type = XS_SET_PERMS, .tx_id = t };
 	unsigned int i;
-	struct iovec iov[1+num_perms];
+	struct iovec iov[2 + num_perms];
 
-	iov[0].iov_base = (void *)path;
-	iov[0].iov_len = strlen(path) + 1;
-	
+	iov[0].iov_base = &msg;
+	iov[0].iov_len  = sizeof(msg);
+	iov[1].iov_base = (void *)path;
+	iov[1].iov_len  = strlen(path) + 1;
+
 	for (i = 0; i < num_perms; i++) {
 		char buffer[MAX_STRLEN(unsigned int)+1];
 
-		if (!xs_perm_to_string(&perms[i], buffer, sizeof(buffer)))
+		if (!xenstore_perm_to_string(&perms[i], buffer, sizeof(buffer)))
 			goto unwind;
 
-		iov[i+1].iov_base = strdup(buffer);
-		iov[i+1].iov_len = strlen(buffer) + 1;
+		iov[i + 2].iov_base = strdup(buffer);
+		iov[i + 2].iov_len  = strlen(buffer) + 1;
 		if (!iov[i+1].iov_base)
 			goto unwind;
 	}
 
-	if (!xs_bool(xs_talkv(h, t, XS_SET_PERMS, iov, 1+num_perms, NULL)))
+	if (!xs_bool(xs_talkv(h, iov, ARRAY_SIZE(iov), NULL)))
 		goto unwind;
 	for (i = 0; i < num_perms; i++)
-		free(iov[i+1].iov_base);
+		free(iov[i + 2].iov_base);
 	return true;
 
 unwind:
 	num_perms = i;
 	for (i = 0; i < num_perms; i++)
-		free_no_errno(iov[i+1].iov_base);
+		free_no_errno(iov[i + 2].iov_base);
 	return false;
 }
 
@@ -808,7 +991,8 @@ bool xs_restrict(struct xs_handle *h, unsigned domid)
  */
 bool xs_watch(struct xs_handle *h, const char *path, const char *token)
 {
-	struct iovec iov[2];
+	struct xsd_sockmsg msg = { .type = XS_WATCH };
+	struct iovec iov[3];
 
 #ifdef USE_PTHREAD
 #define DEFAULT_THREAD_STACKSIZE (16 * 1024)
@@ -819,7 +1003,7 @@ bool xs_watch(struct xs_handle *h, const char *path, const char *token)
 
 #define READ_THREAD_STACKSIZE 					\
 	((DEFAULT_THREAD_STACKSIZE < PTHREAD_STACK_MIN) ? 	\
-	PTHREAD_STACK_MIN : DEFAULT_THREAD_STACKSIZE)
+	 PTHREAD_STACK_MIN : DEFAULT_THREAD_STACKSIZE)
 
 	/* We dynamically create a reader thread on demand. */
 	mutex_lock(&h->request_mutex);
@@ -866,13 +1050,14 @@ bool xs_watch(struct xs_handle *h, const char *path, const char *token)
 	mutex_unlock(&h->request_mutex);
 #endif
 
-	iov[0].iov_base = (void *)path;
-	iov[0].iov_len = strlen(path) + 1;
-	iov[1].iov_base = (void *)token;
-	iov[1].iov_len = strlen(token) + 1;
+	iov[0].iov_base = &msg;
+	iov[0].iov_len  = sizeof(msg);
+	iov[1].iov_base = (void *)path;
+	iov[1].iov_len  = strlen(path) + 1;
+	iov[2].iov_base = (void *)token;
+	iov[2].iov_len  = strlen(token) + 1;
 
-	return xs_bool(xs_talkv(h, XBT_NULL, XS_WATCH, iov,
-				ARRAY_SIZE(iov), NULL));
+	return xs_bool(xs_talkv(h, iov, ARRAY_SIZE(iov), NULL));
 }
 
 
@@ -883,7 +1068,7 @@ static void xs_maybe_clear_watch_pipe(struct xs_handle *h)
 {
 	char c;
 
-	if (list_empty(&h->watch_list) && (h->watch_pipe[0] != -1))
+	if (XEN_TAILQ_EMPTY(&h->watch_list) && (h->watch_pipe[0] != -1))
 		while (read(h->watch_pipe[0], &c, 1) != 1)
 			continue;
 }
@@ -907,7 +1092,7 @@ static char **read_watch_internal(struct xs_handle *h, unsigned int *num,
 	 * we haven't called xs_watch.	Presumably the application
 	 * will do so later; in the meantime we just block.
 	 */
-	while (list_empty(&h->watch_list) && h->fd != -1) {
+	while (XEN_TAILQ_EMPTY(&h->watch_list) && h->fd != -1) {
 		if (nonblocking) {
 			mutex_unlock(&h->watch_mutex);
 			errno = EAGAIN;
@@ -925,13 +1110,13 @@ static char **read_watch_internal(struct xs_handle *h, unsigned int *num,
 
 #endif /* !defined(USE_PTHREAD) */
 
-	if (list_empty(&h->watch_list)) {
+	if (XEN_TAILQ_EMPTY(&h->watch_list)) {
 		mutex_unlock(&h->watch_mutex);
 		errno = EINVAL;
 		return NULL;
 	}
-	msg = list_top(&h->watch_list, struct xs_stored_msg, list);
-	list_del(&msg->list);
+	msg = XEN_TAILQ_FIRST(&h->watch_list);
+	XEN_TAILQ_REMOVE(&h->watch_list, msg, list);
 
 	xs_maybe_clear_watch_pipe(h);
 	mutex_unlock(&h->watch_mutex);
@@ -939,7 +1124,7 @@ static char **read_watch_internal(struct xs_handle *h, unsigned int *num,
 	assert(msg->hdr.type == XS_WATCH_EVENT);
 
 	strings     = msg->body;
-	num_strings = xs_count_strings(strings, msg->hdr.len);
+	num_strings = xenstore_count_strings(strings, msg->hdr.len);
 
 	ret = malloc(sizeof(char*) * num_strings + msg->hdr.len);
 	if (!ret) {
@@ -985,20 +1170,22 @@ char **xs_read_watch(struct xs_handle *h, unsigned int *num)
  */
 bool xs_unwatch(struct xs_handle *h, const char *path, const char *token)
 {
-	struct iovec iov[2];
+	struct xsd_sockmsg sockmsg = { .type = XS_UNWATCH };
+	struct iovec iov[3];
 	struct xs_stored_msg *msg, *tmsg;
 	bool res;
 	char *s, *p;
 	unsigned int i;
 	char *l_token, *l_path;
 
-	iov[0].iov_base = (char *)path;
-	iov[0].iov_len = strlen(path) + 1;
-	iov[1].iov_base = (char *)token;
-	iov[1].iov_len = strlen(token) + 1;
+	iov[0].iov_base = &sockmsg;
+	iov[0].iov_len  = sizeof(sockmsg);
+	iov[1].iov_base = (char *)path;
+	iov[1].iov_len  = strlen(path) + 1;
+	iov[2].iov_base = (char *)token;
+	iov[2].iov_len  = strlen(token) + 1;
 
-	res = xs_bool(xs_talkv(h, XBT_NULL, XS_UNWATCH, iov,
-			       ARRAY_SIZE(iov), NULL));
+	res = xs_bool(xs_talkv(h, iov, ARRAY_SIZE(iov), NULL));
 
 	if (!h->unwatch_filter) /* Don't filter the watch list */
 		return res;
@@ -1007,12 +1194,12 @@ bool xs_unwatch(struct xs_handle *h, const char *path, const char *token)
 	/* Filter the watch list to remove potential message */
 	mutex_lock(&h->watch_mutex);
 
-	if (list_empty(&h->watch_list)) {
+	if (XEN_TAILQ_EMPTY(&h->watch_list)) {
 		mutex_unlock(&h->watch_mutex);
 		return res;
 	}
 
-	list_for_each_entry_safe(msg, tmsg, &h->watch_list, list) {
+	XEN_TAILQ_FOREACH_SAFE(msg, &h->watch_list, list, tmsg) {
 		assert(msg->hdr.type == XS_WATCH_EVENT);
 
 		s = msg->body;
@@ -1034,7 +1221,7 @@ bool xs_unwatch(struct xs_handle *h, const char *path, const char *token)
 
 		if (l_token && !strcmp(token, l_token) &&
 		    l_path && xs_path_is_subpath(path, l_path)) {
-			list_del(&msg->list);
+			XEN_TAILQ_REMOVE(&h->watch_list, msg, list);
 			free(msg);
 		}
 	}
@@ -1079,7 +1266,7 @@ bool xs_transaction_end(struct xs_handle *h, xs_transaction_t t,
 		strcpy(abortstr, "F");
 	else
 		strcpy(abortstr, "T");
-	
+
 	return xs_bool(xs_single(h, t, XS_TRANSACTION_END, abortstr, NULL));
 }
 
@@ -1091,43 +1278,47 @@ bool xs_introduce_domain(struct xs_handle *h,
 			 unsigned int domid, unsigned long mfn,
 			 unsigned int eventchn)
 {
+	struct xsd_sockmsg msg = { .type = XS_INTRODUCE };
 	char domid_str[MAX_STRLEN(domid)];
 	char mfn_str[MAX_STRLEN(mfn)];
 	char eventchn_str[MAX_STRLEN(eventchn)];
-	struct iovec iov[3];
+	struct iovec iov[4];
 
 	snprintf(domid_str, sizeof(domid_str), "%u", domid);
 	snprintf(mfn_str, sizeof(mfn_str), "%lu", mfn);
 	snprintf(eventchn_str, sizeof(eventchn_str), "%u", eventchn);
 
-	iov[0].iov_base = domid_str;
-	iov[0].iov_len = strlen(domid_str) + 1;
-	iov[1].iov_base = mfn_str;
-	iov[1].iov_len = strlen(mfn_str) + 1;
-	iov[2].iov_base = eventchn_str;
-	iov[2].iov_len = strlen(eventchn_str) + 1;
+	iov[0].iov_base = &msg;
+	iov[0].iov_len  = sizeof(msg);
+	iov[1].iov_base = domid_str;
+	iov[1].iov_len  = strlen(domid_str) + 1;
+	iov[2].iov_base = mfn_str;
+	iov[2].iov_len  = strlen(mfn_str) + 1;
+	iov[3].iov_base = eventchn_str;
+	iov[3].iov_len  = strlen(eventchn_str) + 1;
 
-	return xs_bool(xs_talkv(h, XBT_NULL, XS_INTRODUCE, iov,
-				ARRAY_SIZE(iov), NULL));
+	return xs_bool(xs_talkv(h, iov, ARRAY_SIZE(iov), NULL));
 }
 
 bool xs_set_target(struct xs_handle *h,
-			 unsigned int domid, unsigned int target)
+		   unsigned int domid, unsigned int target)
 {
+	struct xsd_sockmsg msg = { .type = XS_SET_TARGET };
 	char domid_str[MAX_STRLEN(domid)];
 	char target_str[MAX_STRLEN(target)];
-	struct iovec iov[2];
+	struct iovec iov[3];
 
 	snprintf(domid_str, sizeof(domid_str), "%u", domid);
 	snprintf(target_str, sizeof(target_str), "%u", target);
 
-	iov[0].iov_base = domid_str;
-	iov[0].iov_len = strlen(domid_str) + 1;
-	iov[1].iov_base = target_str;
-	iov[1].iov_len = strlen(target_str) + 1;
+	iov[0].iov_base = &msg;
+	iov[0].iov_len  = sizeof(msg);
+	iov[1].iov_base = domid_str;
+	iov[1].iov_len  = strlen(domid_str) + 1;
+	iov[2].iov_base = target_str;
+	iov[2].iov_len  = strlen(target_str) + 1;
 
-	return xs_bool(xs_talkv(h, XBT_NULL, XS_SET_TARGET, iov,
-				ARRAY_SIZE(iov), NULL));
+	return xs_bool(xs_talkv(h, iov, ARRAY_SIZE(iov), NULL));
 }
 
 static void * single_with_domid(struct xs_handle *h,
@@ -1194,44 +1385,46 @@ bool xs_is_domain_introduced(struct xs_handle *h, unsigned int domid)
 
 int xs_suspend_evtchn_port(int domid)
 {
-    char path[128];
-    char *portstr;
-    int port;
-    unsigned int plen;
-    struct xs_handle *xs;
+	char path[128];
+	char *portstr;
+	int port;
+	unsigned int plen;
+	struct xs_handle *xs;
 
-    xs = xs_daemon_open();
-    if (!xs)
-        return -1;
+	xs = xs_daemon_open();
+	if (!xs)
+		return -1;
 
-    sprintf(path, "/local/domain/%d/device/suspend/event-channel", domid);
-    portstr = xs_read(xs, XBT_NULL, path, &plen);
-    xs_daemon_close(xs);
+	sprintf(path, "/local/domain/%d/device/suspend/event-channel", domid);
+	portstr = xs_read(xs, XBT_NULL, path, &plen);
+	xs_daemon_close(xs);
 
-    if (!portstr || !plen) {
-        port = -1;
-        goto out;
-    }
+	if (!portstr || !plen) {
+		port = -1;
+		goto out;
+	}
 
-    port = atoi(portstr);
+	port = atoi(portstr);
 
 out:
-    free(portstr);
-    return port;
+	free(portstr);
+	return port;
 }
 
 char *xs_control_command(struct xs_handle *h, const char *cmd,
 			 void *data, unsigned int len)
 {
-	struct iovec iov[2];
+	struct xsd_sockmsg msg = { .type = XS_CONTROL };
+	struct iovec iov[3];
 
-	iov[0].iov_base = (void *)cmd;
-	iov[0].iov_len = strlen(cmd) + 1;
-	iov[1].iov_base = data;
-	iov[1].iov_len = len;
+	iov[0].iov_base = &msg;
+	iov[0].iov_len  = sizeof(msg);
+	iov[1].iov_base = (void *)cmd;
+	iov[1].iov_len  = strlen(cmd) + 1;
+	iov[2].iov_base = data;
+	iov[2].iov_len  = len;
 
-	return xs_talkv(h, XBT_NULL, XS_CONTROL, iov,
-			ARRAY_SIZE(iov), NULL);
+	return xs_talkv(h, iov, ARRAY_SIZE(iov), NULL);
 }
 
 char *xs_debug_command(struct xs_handle *h, const char *cmd,
@@ -1251,7 +1444,7 @@ static int read_message(struct xs_handle *h, int nonblocking)
 	 * whole amount requested.  Ie as soon as we have the start of
 	 * the message we block until we get all of it.
 	 */
-         
+
 	struct xs_stored_msg *msg = NULL;
 	char *body = NULL;
 	int saved_errno = 0;
@@ -1290,12 +1483,12 @@ static int read_message(struct xs_handle *h, int nonblocking)
 		cleanup_push(pthread_mutex_unlock, &h->watch_mutex);
 
 		/* Kick users out of their select() loop. */
-		if (list_empty(&h->watch_list) &&
+		if (XEN_TAILQ_EMPTY(&h->watch_list) &&
 		    (h->watch_pipe[1] != -1))
 			while (write(h->watch_pipe[1], body, 1) != 1) /* Cancellation point */
 				continue;
 
-		list_add_tail(&msg->list, &h->watch_list);
+		XEN_TAILQ_INSERT_TAIL(&h->watch_list, msg, list);
 
 		condvar_signal(&h->watch_condvar);
 
@@ -1304,13 +1497,13 @@ static int read_message(struct xs_handle *h, int nonblocking)
 		mutex_lock(&h->reply_mutex);
 
 		/* There should only ever be one response pending! */
-		if (!list_empty(&h->reply_list)) {
+		if (!XEN_TAILQ_EMPTY(&h->reply_list)) {
 			mutex_unlock(&h->reply_mutex);
 			saved_errno = EEXIST;
 			goto error_freebody;
 		}
 
-		list_add_tail(&msg->list, &h->reply_list);
+		XEN_TAILQ_INSERT_TAIL(&h->reply_list, msg, list);
 		condvar_signal(&h->reply_condvar);
 
 		mutex_unlock(&h->reply_mutex);
@@ -1326,6 +1519,27 @@ error:
 	errno = saved_errno;
 
 	return ret;
+}
+
+const char *xs_daemon_socket(void)
+{
+	return xenstore_daemon_path();
+}
+
+const char *xs_daemon_socket_ro(void)
+{
+	return xs_daemon_socket();
+}
+
+const char *xs_daemon_rundir(void)
+{
+	return xenstore_daemon_rundir();
+}
+
+bool xs_strings_to_perms(struct xs_permissions *perms, unsigned int num,
+			 const char *strings)
+{
+	return xenstore_strings_to_perms(perms, num, strings);
 }
 
 #ifdef USE_PTHREAD

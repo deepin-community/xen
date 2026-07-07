@@ -1,18 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /******************************************************************************
  * include/asm-x86/spec_ctrl.h
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
  *
  * Copyright (c) 2017-2018 Citrix Systems Ltd.
  */
@@ -51,7 +39,7 @@
  *     shadowing logic.
  *
  * Factor 2 is harder.  We maintain a shadow_spec_ctrl value, and a use_shadow
- * boolean in the per cpu spec_ctrl_flags.  The synchronous use is:
+ * boolean in the per cpu scf.  The synchronous use is:
  *
  *  1) Store guest value in shadow_spec_ctrl
  *  2) Set the use_shadow boolean
@@ -87,36 +75,24 @@
  *  - SPEC_CTRL_EXIT_TO_{SVM,VMX}
  */
 
-.macro DO_SPEC_CTRL_COND_IBPB maybexen:req
+.macro DO_COND_IBPB
 /*
- * Requires %rsp=regs (also cpuinfo if !maybexen)
- * Requires %r14=stack_end (if maybexen), %rdx=0
- * Clobbers %rax, %rcx, %rdx
+ * Requires %rbx=SCF, %rdx=0
+ * Clobbers %rax, %rcx
  *
- * Conditionally issue IBPB if SCF_entry_ibpb is active.  In the maybexen
- * case, we can safely look at UREGS_cs to skip taking the hit when
- * interrupting Xen.
+ * Conditionally issue IBPB if SCF_entry_ibpb is active.
  */
-    .if \maybexen
-        testb  $SCF_entry_ibpb, STACK_CPUINFO_FIELD(spec_ctrl_flags)(%r14)
-        jz     .L\@_skip
-        testb  $3, UREGS_cs(%rsp)
-    .else
-        testb  $SCF_entry_ibpb, CPUINFO_xen_spec_ctrl(%rsp)
-    .endif
+    testb  $SCF_entry_ibpb, %bl
     jz     .L\@_skip
 
     mov     $MSR_PRED_CMD, %ecx
     mov     $PRED_CMD_IBPB, %eax
     wrmsr
-    jmp     .L\@_done
 
 .L\@_skip:
-    lfence
-.L\@_done:
 .endm
 
-.macro DO_OVERWRITE_RSB tmp=rax xu
+.macro DO_OVERWRITE_RSB tmp=rax, xu
 /*
  * Requires nothing
  * Clobbers \tmp (%rax by default), %rcx
@@ -164,16 +140,30 @@
 #endif
 .endm
 
-.macro DO_SPEC_CTRL_COND_VERW
 /*
- * Requires %rsp=cpuinfo
+ * Helper to improve the readibility of stack dispacements with %rsp in
+ * unusual positions.  Both @field and @top_of_stack should be constants from
+ * the same object.  @top_of_stack should be where %rsp is currently pointing.
+ */
+#define STK_REL(field, top_of_stk) ((field) - (top_of_stk))
+
+.macro SPEC_CTRL_COND_VERW \
+    scf=STK_REL(CPUINFO_scf,      CPUINFO_error_code), \
+    sel=STK_REL(CPUINFO_verw_sel, CPUINFO_error_code)
+/*
+ * Requires \scf and \sel as %rsp-relative expressions
+ * Clobbers eflags
+ *
+ * VERW needs to run after guest GPRs have been restored, where only %rsp is
+ * good to use.  Default to expecting %rsp pointing at CPUINFO_error_code.
+ * Contexts where this is not true must provide an alternative \scf and \sel.
  *
  * Issue a VERW for its flushing side effect, if indicated.  This is a Spectre
  * v1 gadget, but the IRET/VMEntry is serialising.
  */
-    testb $SCF_verw, CPUINFO_spec_ctrl_flags(%rsp)
+    testb $SCF_verw, \scf(%rsp)
     jz .L\@_verw_skip
-    verw CPUINFO_verw_sel(%rsp)
+    verw \sel(%rsp)
 .L\@_verw_skip:
 .endm
 
@@ -214,11 +204,11 @@
         testb $3, UREGS_cs(%rsp)
         setnz %al
         not %eax
-        and %al, STACK_CPUINFO_FIELD(spec_ctrl_flags)(%r14)
-        movzbl STACK_CPUINFO_FIELD(xen_spec_ctrl)(%r14), %eax
+        and %al, STACK_CPUINFO_FIELD(scf)(%r14)
+        mov STACK_CPUINFO_FIELD(xen_spec_ctrl)(%r14), %eax
     .else
-        andb $~SCF_use_shadow, CPUINFO_spec_ctrl_flags(%rsp)
-        movzbl CPUINFO_xen_spec_ctrl(%rsp), %eax
+        andb $~SCF_use_shadow, CPUINFO_scf(%rsp)
+        mov  CPUINFO_xen_spec_ctrl(%rsp), %eax
     .endif
 
     wrmsr
@@ -236,7 +226,7 @@
     mov %eax, CPUINFO_shadow_spec_ctrl(%rsp)
 
     /* Set SPEC_CTRL shadowing *before* loading the guest value. */
-    orb $SCF_use_shadow, CPUINFO_spec_ctrl_flags(%rsp)
+    orb $SCF_use_shadow, CPUINFO_scf(%rsp)
 
     mov $MSR_SPEC_CTRL, %ecx
     xor %edx, %edx
@@ -249,35 +239,97 @@
  */
 .macro SPEC_CTRL_ENTRY_FROM_PV
 /*
- * Requires %rsp=regs/cpuinfo, %rdx=0
- * Clobbers %rax, %rcx, %rdx
+ * Requires %rsp=regs/cpuinfo, %r14=stack_end, %rdx=0
+ * Clobbers %rax, %rbx, %rcx, %rdx
  */
-    ALTERNATIVE "", __stringify(DO_SPEC_CTRL_COND_IBPB maybexen=0),     \
-        X86_FEATURE_IBPB_ENTRY_PV
+    movzbl STACK_CPUINFO_FIELD(scf)(%r14), %ebx
 
+    /*
+     * For all safety notes, 32bit PV guest kernels run in Ring 1 and are
+     * therefore supervisor (== Xen) in the architecture.  As a result, most
+     * hardware isolation techniques do not work.
+     */
+
+    /*
+     * IBPB is to mitigate BTC/SRSO on AMD/Hygon parts, in particular making
+     * type-confused RETs safe to use.  This is not needed on Zen5 and later
+     * parts when SRSO_U/S_NO is enumerated.
+     */
+    ALTERNATIVE "", DO_COND_IBPB, X86_FEATURE_IBPB_ENTRY_PV
+
+    /*
+     * RSB stuffing is to prevent RET predictions following guest entries.
+     * This is not needed if SMEP is active and the RSB is full-width.
+     */
     ALTERNATIVE "", DO_OVERWRITE_RSB, X86_FEATURE_SC_RSB_PV
 
+    /*
+     * Only used on Intel parts.  Restore Xen's MSR_SPEC_CTRL setting.  The
+     * guest can't change it's value behind Xen's back.  For Legacy IBRS, this
+     * flushes/inhibits indirect predictions and does not flush the RSB.  For
+     * eIBRS, this prevents CALLs/JMPs using predictions learnt at a lower
+     * predictor mode, and it flushes the RSB.
+     */
     ALTERNATIVE "", __stringify(DO_SPEC_CTRL_ENTRY maybexen=0),         \
         X86_FEATURE_SC_MSR_PV
+
+    /*
+     * Clear the BHB to mitigate BHI.  Used on eIBRS parts, and uses RETs
+     * itself so must be after we've perfomed all the RET-safety we can.
+     */
+    testb $SCF_entry_bhb, %bl
+    jz .L\@_skip_bhb
+    ALTERNATIVE_2 "",                                    \
+        "call clear_bhb_loops", X86_SPEC_BHB_LOOPS,      \
+        "call clear_bhb_tsx", X86_SPEC_BHB_TSX
+.L\@_skip_bhb:
+
+    ALTERNATIVE "lfence", "", X86_SPEC_NO_LFENCE_ENTRY_PV
 .endm
 
 /*
  * Used after an exception or maskable interrupt, hitting Xen or PV context.
- * There will either be a guest speculation context, or (barring fatal
- * exceptions) a well-formed Xen speculation context.
+ * There will either be a guest speculation context, or a well-formed Xen
+ * speculation context, with the exception of one case.  IRET #GP handling may
+ * have a guest choice of MSR_SPEC_CTRL.
+ *
+ * Therefore, we can skip the flush/barrier-like protections when hitting Xen,
+ * but we must still run the mode-based protections.
  */
 .macro SPEC_CTRL_ENTRY_FROM_INTR
 /*
  * Requires %rsp=regs, %r14=stack_end, %rdx=0
- * Clobbers %rax, %rcx, %rdx
+ * Clobbers %rax, %rbx, %rcx, %rdx
  */
-    ALTERNATIVE "", __stringify(DO_SPEC_CTRL_COND_IBPB maybexen=1),     \
-        X86_FEATURE_IBPB_ENTRY_PV
+    movzbl STACK_CPUINFO_FIELD(scf)(%r14), %ebx
+
+    /*
+     * All safety notes the same as SPEC_CTRL_ENTRY_FROM_PV, although there is
+     * a conditional jump skipping some actions when interrupting Xen.
+     *
+     * On Intel parts, the IRET #GP path ends up here with the guest's choice
+     * of MSR_SPEC_CTRL.
+     */
+
+    testb $3, UREGS_cs(%rsp)
+    jz .L\@_skip
+
+    ALTERNATIVE "", DO_COND_IBPB, X86_FEATURE_IBPB_ENTRY_PV
 
     ALTERNATIVE "", DO_OVERWRITE_RSB, X86_FEATURE_SC_RSB_PV
 
+.L\@_skip:
     ALTERNATIVE "", __stringify(DO_SPEC_CTRL_ENTRY maybexen=1),         \
         X86_FEATURE_SC_MSR_PV
+
+    testb $SCF_entry_bhb, %bl
+    jz .L\@_skip_bhb
+    ALTERNATIVE_2 "",                                    \
+        "call clear_bhb_loops", X86_SPEC_BHB_LOOPS,      \
+        "call clear_bhb_tsx", X86_SPEC_BHB_TSX
+.L\@_skip_bhb:
+
+    ALTERNATIVE "lfence", "", X86_SPEC_NO_LFENCE_ENTRY_INTR
 .endm
 
 /*
@@ -290,8 +342,6 @@
  * Clobbers %rcx, %rdx
  */
     ALTERNATIVE "", DO_SPEC_CTRL_EXIT_TO_GUEST, X86_FEATURE_SC_MSR_PV
-
-    DO_SPEC_CTRL_COND_VERW
 
     ALTERNATIVE "", DO_SPEC_CTRL_DIV, X86_FEATURE_SC_DIV
 .endm
@@ -311,13 +361,26 @@
  * Clobbers %rax, %rbx, %rcx, %rdx
  *
  * This is logical merge of:
- *    DO_SPEC_CTRL_COND_IBPB maybexen=0
+ *    DO_COND_IBPB
  *    DO_OVERWRITE_RSB
  *    DO_SPEC_CTRL_ENTRY maybexen=1
  * but with conditionals rather than alternatives.
  */
-    movzbl STACK_CPUINFO_FIELD(spec_ctrl_flags)(%r14), %ebx
+    movzbl STACK_CPUINFO_FIELD(scf)(%r14), %ebx
 
+    /*
+     * For all safety notes, 32bit PV guest kernels run in Ring 1 and are
+     * therefore supervisor (== Xen) in the architecture.  As a result, most
+     * hardware isolation techniques do not work.
+     */
+
+    /*
+     * IBPB is to mitigate BTC/SRSO on AMD/Hygon parts, in particular making
+     * type-confused RETs safe to use.  This is not needed on Zen5 and later
+     * parts when SRSO_U/S_NO is enumerated.  The SVM path takes care of
+     * Host/Guest interactions prior to clearing GIF, and it's not used on the
+     * VMX path.
+     */
     test    $SCF_ist_ibpb, %bl
     jz      .L\@_skip_ibpb
 
@@ -327,6 +390,12 @@
 
 .L\@_skip_ibpb:
 
+    /*
+     * RSB stuffing is to prevent RET predictions following guest entries.
+     * SCF_ist_rsb is active if either PV or HVM protections are needed.  The
+     * VMX path cannot guarantee to make the RSB safe ahead of taking an IST
+     * vector.
+     */
     test $SCF_ist_rsb, %bl
     jz .L\@_skip_rsb
 
@@ -334,6 +403,16 @@
 
 .L\@_skip_rsb:
 
+    /*
+     * Only used on Intel parts.  Restore Xen's MSR_SPEC_CTRL setting.  PV
+     * guests can't change their value behind Xen's back.  HVM guests have
+     * their value stored in the MSR load/save list.  For Legacy IBRS, this
+     * flushes/inhibits indirect predictions and does not flush the RSB.  For
+     * eIBRS, this prevents CALLs/JMPs using predictions learnt at a lower
+     * predictor mode, and it flushes the RSB.  On eIBRS parts that also
+     * suffer from PBRSB, the prior RSB stuffing suffices to make the RSB
+     * safe.
+     */
     test $SCF_ist_sc_msr, %bl
     jz .L\@_skip_msr_spec_ctrl
 
@@ -341,25 +420,28 @@
     testb $3, UREGS_cs(%rsp)
     setnz %al
     not %eax
-    and %al, STACK_CPUINFO_FIELD(spec_ctrl_flags)(%r14)
+    and %al, STACK_CPUINFO_FIELD(scf)(%r14)
 
     /* Load Xen's intended value. */
     mov $MSR_SPEC_CTRL, %ecx
-    movzbl STACK_CPUINFO_FIELD(xen_spec_ctrl)(%r14), %eax
+    mov STACK_CPUINFO_FIELD(xen_spec_ctrl)(%r14), %eax
     wrmsr
 
-    /* Opencoded UNLIKELY_START() with no condition. */
-UNLIKELY_DISPATCH_LABEL(\@_serialise):
-    .subsection 1
-    /*
-     * In the case that we might need to set SPEC_CTRL.IBRS for safety, we
-     * need to ensure that an attacker can't poison the `jz .L\@_skip_wrmsr`
-     * to speculate around the WRMSR.  As a result, we need a dispatch
-     * serialising instruction in the else clause.
-     */
 .L\@_skip_msr_spec_ctrl:
+
+    /*
+     * Clear the BHB to mitigate BHI.  Used on eIBRS parts, and uses RETs
+     * itself so must be after we've perfomed all the RET-safety we can.
+     */
+    testb $SCF_entry_bhb, %bl
+    jz .L\@_skip_bhb
+
+    ALTERNATIVE_2 "",                                    \
+        "call clear_bhb_loops", X86_SPEC_BHB_LOOPS,      \
+        "call clear_bhb_tsx", X86_SPEC_BHB_TSX
+.L\@_skip_bhb:
+
     lfence
-    UNLIKELY_END(\@_serialise)
 .endm
 
 /*
@@ -372,10 +454,10 @@ UNLIKELY_DISPATCH_LABEL(\@_serialise):
  */
 .macro SPEC_CTRL_EXIT_TO_XEN
 /*
- * Requires %r12=ist_exit, %r14=stack_end
+ * Requires %r12=ist_exit, %r14=stack_end, %rsp=regs
  * Clobbers %rax, %rbx, %rcx, %rdx
  */
-    movzbl STACK_CPUINFO_FIELD(spec_ctrl_flags)(%r14), %ebx
+    movzbl STACK_CPUINFO_FIELD(scf)(%r14), %ebx
 
     testb $SCF_ist_sc_msr, %bl
     jz .L\@_skip_sc_msr
@@ -400,11 +482,18 @@ UNLIKELY_DISPATCH_LABEL(\@_serialise):
     test %r12, %r12
     jz .L\@_skip_ist_exit
 
-    /* Logically DO_SPEC_CTRL_COND_VERW but without the %rsp=cpuinfo dependency */
-    testb $SCF_verw, %bl
-    jz .L\@_skip_verw
-    verw STACK_CPUINFO_FIELD(verw_sel)(%r14)
-.L\@_skip_verw:
+    /*
+     * Stash SCF and verw_sel above eflags in the case of an IST_exit.  The
+     * VERW logic needs to run after guest GPRs have been restored; i.e. where
+     * we cannot use %r12 or %r14 for the purposes they have here.
+     *
+     * When the CPU pushed this exception frame, it zero-extended eflags.
+     * Therefore it is safe for the VERW logic to look at the stashed SCF
+     * outside of the ist_exit condition.  Also, this stashing won't influence
+     * any other restore_all_guest() paths.
+     */
+    or $(__HYPERVISOR_DS32 << 16), %ebx
+    mov %ebx, UREGS_eflags + 4(%rsp) /* EFRAME_shadow_scf/sel */
 
     ALTERNATIVE "", DO_SPEC_CTRL_DIV, X86_FEATURE_SC_DIV
 

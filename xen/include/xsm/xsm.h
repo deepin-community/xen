@@ -17,7 +17,6 @@
 
 #include <xen/alternative-call.h>
 #include <xen/sched.h>
-#include <xen/multiboot.h>
 
 /* policy magic number (defined by XSM_MAGIC) */
 typedef uint32_t xsm_magic_t;
@@ -60,7 +59,7 @@ struct xsm_ops {
     int (*domctl_scheduler_op)(struct domain *d, int op);
     int (*sysctl_scheduler_op)(int op);
     int (*set_target)(struct domain *d, struct domain *e);
-    int (*domctl)(struct domain *d, int cmd);
+    int (*domctl)(struct domain *d, unsigned int cmd, uint32_t ssidref);
     int (*sysctl)(int cmd);
     int (*readconsole)(uint32_t clear);
 
@@ -248,9 +247,10 @@ static inline int xsm_set_target(
     return alternative_call(xsm_ops.set_target, d, e);
 }
 
-static inline int xsm_domctl(xsm_default_t def, struct domain *d, int cmd)
+static inline int xsm_domctl(xsm_default_t def, struct domain *d,
+                             unsigned int cmd, uint32_t ssidref)
 {
-    return alternative_call(xsm_ops.domctl, d, cmd);
+    return alternative_call(xsm_ops.domctl, d, cmd, ssidref);
 }
 
 static inline int xsm_sysctl(xsm_default_t def, int cmd)
@@ -777,11 +777,10 @@ static inline int xsm_argo_send(const struct domain *d, const struct domain *t)
 #endif /* XSM_NO_WRAPPERS */
 
 #ifdef CONFIG_MULTIBOOT
-int xsm_multiboot_init(
-    unsigned long *module_map, const multiboot_info_t *mbi);
+struct boot_info;
+int xsm_multiboot_init(struct boot_info *bi);
 int xsm_multiboot_policy_init(
-    unsigned long *module_map, const multiboot_info_t *mbi,
-    void **policy_buffer, size_t *policy_size);
+    struct boot_info *bi, void **policy_buffer, size_t *policy_size);
 #endif
 
 #ifdef CONFIG_HAS_DEVICE_TREE
@@ -827,8 +826,8 @@ static const inline struct xsm_ops *silo_init(void)
 #include <xsm/dummy.h>
 
 #ifdef CONFIG_MULTIBOOT
-static inline int xsm_multiboot_init (
-    unsigned long *module_map, const multiboot_info_t *mbi)
+struct boot_info;
+static inline int xsm_multiboot_init(struct boot_info *bi)
 {
     return 0;
 }

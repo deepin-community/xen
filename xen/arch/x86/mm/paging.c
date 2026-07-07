@@ -1,22 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /******************************************************************************
  * arch/x86/paging.c
  *
  * x86 specific paging support
  * Copyright (c) 2007 Advanced Micro Devices (Wei Huang)
  * Copyright (c) 2007 XenSource Inc.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <xen/init.h>
@@ -213,11 +201,11 @@ static int paging_free_log_dirty_bitmap(struct domain *d, int rc)
     return rc;
 }
 
-static int paging_log_dirty_enable(struct domain *d, bool log_global)
+static int paging_log_dirty_enable(struct domain *d)
 {
     int ret;
 
-    if ( has_arch_pdevs(d) && log_global )
+    if ( has_arch_pdevs(d) )
     {
         /*
          * Refuse to turn on global log-dirty mode
@@ -230,13 +218,13 @@ static int paging_log_dirty_enable(struct domain *d, bool log_global)
         return -EINVAL;
 
     domain_pause(d);
-    ret = d->arch.paging.log_dirty.ops->enable(d, log_global);
+    ret = d->arch.paging.log_dirty.ops->enable(d);
     domain_unpause(d);
 
     return ret;
 }
 
-static int paging_log_dirty_disable(struct domain *d, bool_t resuming)
+static int paging_log_dirty_disable(struct domain *d, bool resuming)
 {
     int ret = 1;
 
@@ -406,7 +394,7 @@ bool paging_mfn_is_dirty(const struct domain *d, mfn_t gmfn)
  * clear the bitmap and stats as well. */
 static int paging_log_dirty_op(struct domain *d,
                                struct xen_domctl_shadow_op *sc,
-                               bool_t resuming)
+                               bool resuming)
 {
     int rv = 0, clean = 0, peek = 1;
     unsigned long pages = 0;
@@ -652,6 +640,7 @@ int paging_domain_init(struct domain *d)
     if ( (rc = p2m_init(d)) != 0 )
         return rc;
 
+    INIT_PAGE_LIST_HEAD(&d->arch.paging.freelist);
     mm_lock_init(&d->arch.paging.lock);
 
     /* This must be initialized separately from the rest of the
@@ -683,7 +672,7 @@ void paging_vcpu_init(struct vcpu *v)
 #if PG_log_dirty
 int paging_domctl(struct domain *d, struct xen_domctl_shadow_op *sc,
                   XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl,
-                  bool_t resuming)
+                  bool resuming)
 {
     int rc;
 
@@ -695,9 +684,8 @@ int paging_domctl(struct domain *d, struct xen_domctl_shadow_op *sc,
 
     if ( unlikely(d->is_dying) )
     {
-        gdprintk(XENLOG_INFO, "Ignoring paging op on dying domain %u\n",
-                 d->domain_id);
-        return 0;
+        gdprintk(XENLOG_INFO, "Tried to do a paging op on dying %pd\n", d);
+        return -EINVAL;
     }
 
     if ( unlikely(d->vcpu == NULL) || unlikely(d->vcpu[0] == NULL) )
@@ -738,9 +726,9 @@ int paging_domctl(struct domain *d, struct xen_domctl_shadow_op *sc,
     case XEN_DOMCTL_SHADOW_OP_ENABLE:
         if ( !(sc->mode & XEN_DOMCTL_SHADOW_ENABLE_LOG_DIRTY) )
             break;
-        /* Else fall through... */
+        fallthrough;
     case XEN_DOMCTL_SHADOW_OP_ENABLE_LOGDIRTY:
-        return paging_log_dirty_enable(d, true);
+        return paging_log_dirty_enable(d);
 
     case XEN_DOMCTL_SHADOW_OP_OFF:
         if ( (rc = paging_log_dirty_disable(d, resuming)) != 0 )
@@ -779,7 +767,7 @@ long do_paging_domctl_cont(
     if ( d == NULL )
         return -ESRCH;
 
-    ret = xsm_domctl(XSM_OTHER, d, op.cmd);
+    ret = xsm_domctl(XSM_OTHER, d, op.cmd, 0 /* SSIDref not applicable */);
     if ( !ret )
     {
         if ( domctl_lock_acquire() )
@@ -795,7 +783,7 @@ long do_paging_domctl_cont(
     rcu_unlock_domain(d);
 
     if ( ret == -ERESTART )
-        ret = hypercall_create_continuation(__HYPERVISOR_arch_1,
+        ret = hypercall_create_continuation(__HYPERVISOR_paging_domctl_cont,
                                             "h", u_domctl);
     else if ( __copy_field_to_guest(u_domctl, &op, u.shadow_op) )
         ret = -EFAULT;
@@ -842,10 +830,36 @@ int paging_teardown(struct domain *d)
 /* Call once all of the references to the domain have gone away */
 void paging_final_teardown(struct domain *d)
 {
-    if ( hap_enabled(d) )
+    bool hap = hap_enabled(d);
+
+    PAGING_PRINTK("%pd start: total = %u, free = %u, p2m = %u\n",
+                  d, d->arch.paging.total_pages,
+                  d->arch.paging.free_pages, d->arch.paging.p2m_pages);
+
+    if ( hap )
         hap_final_teardown(d);
-    else
-        shadow_final_teardown(d);
+
+    /*
+     * Remove remaining paging memory.  This can be nonzero on certain error
+     * paths.
+     */
+    if ( d->arch.paging.total_pages )
+    {
+        if ( hap )
+            hap_teardown(d, NULL);
+        else
+            shadow_teardown(d, NULL);
+    }
+
+    /* It is now safe to pull down the p2m map. */
+    p2m_teardown(p2m_get_hostp2m(d), true, NULL);
+
+    PAGING_PRINTK("%pd done: total = %u, free = %u, p2m = %u\n",
+                  d, d->arch.paging.total_pages,
+                  d->arch.paging.free_pages, d->arch.paging.p2m_pages);
+    ASSERT(!d->arch.paging.p2m_pages);
+    ASSERT(!d->arch.paging.free_pages);
+    ASSERT(!d->arch.paging.total_pages);
 
     p2m_final_teardown(d);
 }
@@ -923,19 +937,12 @@ void paging_dump_vcpu_info(struct vcpu *v)
     {
         printk("    paging assistance: ");
         if ( paging_mode_shadow(v->domain) )
-        {
-            if ( paging_get_hostmode(v) )
-                printk("shadowed %u-on-%u\n",
-                       paging_get_hostmode(v)->guest_levels,
-                       paging_get_hostmode(v)->shadow.shadow_levels);
-            else
-                printk("not shadowed\n");
-        }
-        else if ( paging_mode_hap(v->domain) && paging_get_hostmode(v) )
+            printk("shadowed %u-on-%u\n",
+                   paging_get_hostmode(v)->guest_levels,
+                   paging_get_hostmode(v)->shadow.shadow_levels);
+        else
             printk("hap, %u levels\n",
                    paging_get_hostmode(v)->guest_levels);
-        else
-            printk("none\n");
     }
 }
 
@@ -980,17 +987,17 @@ int __init paging_set_allocation(struct domain *d, unsigned int pages,
 
 int arch_get_paging_mempool_size(struct domain *d, uint64_t *size)
 {
-    int rc;
+    unsigned long pages;
 
     if ( is_pv_domain(d) )                 /* TODO: Relax in due course */
         return -EOPNOTSUPP;
 
-    if ( hap_enabled(d) )
-        rc = hap_get_allocation_bytes(d, size);
-    else
-        rc = shadow_get_allocation_bytes(d, size);
+    pages  = d->arch.paging.total_pages;
+    pages += d->arch.paging.p2m_pages;
 
-    return rc;
+    *size = pages << PAGE_SHIFT;
+
+    return 0;
 }
 
 int arch_set_paging_mempool_size(struct domain *d, uint64_t size)

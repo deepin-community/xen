@@ -37,6 +37,8 @@ EMIT_FILE;
 #include <asm/numa.h>
 #include <asm/mem_paging.h>
 #include <asm/mem_sharing.h>
+#include <asm/trampoline.h>
+
 #include <public/memory.h>
 
 #ifdef CONFIG_PV32
@@ -351,9 +353,9 @@ static int setup_compat_m2p_table(struct mem_hotadd_info *info)
                 ~((1UL << (L2_PAGETABLE_SHIFT - 2)) - 1) );
 
 #define MFN(x) (((x) << L2_PAGETABLE_SHIFT) / sizeof(unsigned int))
-#define CNT ((sizeof(*frame_table) & -sizeof(*frame_table)) / \
+#define CNT (ISOLATE_LSB(sizeof(*frame_table)) / \
              sizeof(*compat_machine_to_phys_mapping))
-    BUILD_BUG_ON((sizeof(*frame_table) & -sizeof(*frame_table)) % \
+    BUILD_BUG_ON(ISOLATE_LSB(sizeof(*frame_table)) % \
                  sizeof(*compat_machine_to_phys_mapping));
 
     for ( i = smap; i < emap; i += (1UL << (L2_PAGETABLE_SHIFT - 2)) )
@@ -410,10 +412,10 @@ static int setup_m2p_table(struct mem_hotadd_info *info)
     va = RO_MPT_VIRT_START + smap * sizeof(*machine_to_phys_mapping);
 
 #define MFN(x) (((x) << L2_PAGETABLE_SHIFT) / sizeof(unsigned long))
-#define CNT ((sizeof(*frame_table) & -sizeof(*frame_table)) / \
+#define CNT (ISOLATE_LSB(sizeof(*frame_table)) / \
              sizeof(*machine_to_phys_mapping))
 
-    BUILD_BUG_ON((sizeof(*frame_table) & -sizeof(*frame_table)) % \
+    BUILD_BUG_ON(ISOLATE_LSB(sizeof(*frame_table)) % \
                  sizeof(*machine_to_phys_mapping));
 
     i = smap;
@@ -498,7 +500,7 @@ error:
 void __init paging_init(void)
 {
     unsigned long i, mpt_size, va;
-    unsigned int n, memflags;
+    unsigned int n, memflags = 0;
     l3_pgentry_t *l3_ro_mpt;
     l2_pgentry_t *pl2e = NULL, *l2_ro_mpt = NULL;
     struct page_info *l1_pg;
@@ -539,7 +541,7 @@ void __init paging_init(void)
     mpt_size  = (max_page * BYTES_PER_LONG) + (1UL << L2_PAGETABLE_SHIFT) - 1;
     mpt_size &= ~((1UL << L2_PAGETABLE_SHIFT) - 1UL);
 #define MFN(x) (((x) << L2_PAGETABLE_SHIFT) / sizeof(unsigned long))
-#define CNT ((sizeof(*frame_table) & -sizeof(*frame_table)) / \
+#define CNT (ISOLATE_LSB(sizeof(*frame_table)) / \
              sizeof(*machine_to_phys_mapping))
     BUILD_BUG_ON((sizeof(*frame_table) & ~sizeof(*frame_table)) % \
                  sizeof(*machine_to_phys_mapping));
@@ -547,8 +549,6 @@ void __init paging_init(void)
     {
         BUILD_BUG_ON(RO_MPT_VIRT_START & ((1UL << L3_PAGETABLE_SHIFT) - 1));
         va = RO_MPT_VIRT_START + (i << L2_PAGETABLE_SHIFT);
-        memflags = MEMF_node(phys_to_nid(i <<
-            (L2_PAGETABLE_SHIFT - 3 + PAGE_SHIFT)));
 
         if ( cpu_has_page1gb &&
              !((unsigned long)pl2e & ~PAGE_MASK) &&
@@ -559,10 +559,15 @@ void __init paging_init(void)
             for ( holes = k = 0; k < 1 << PAGETABLE_ORDER; ++k)
             {
                 for ( n = 0; n < CNT; ++n)
-                    if ( mfn_valid(_mfn(MFN(i + k) + n * PDX_GROUP_COUNT)) )
+                {
+                    mfn = _mfn(MFN(i + k) + n * PDX_GROUP_COUNT);
+                    if ( mfn_valid(mfn) )
                         break;
+                }
                 if ( n == CNT )
                     ++holes;
+                else if ( k == holes )
+                    memflags = MEMF_node(mfn_to_nid(mfn));
             }
             if ( k == holes )
             {
@@ -593,8 +598,14 @@ void __init paging_init(void)
         }
 
         for ( n = 0; n < CNT; ++n)
-            if ( mfn_valid(_mfn(MFN(i) + n * PDX_GROUP_COUNT)) )
+        {
+            mfn = _mfn(MFN(i) + n * PDX_GROUP_COUNT);
+            if ( mfn_valid(mfn) )
+            {
+                memflags = MEMF_node(mfn_to_nid(mfn));
                 break;
+            }
+        }
         if ( n == CNT )
             l1_pg = NULL;
         else if ( (l1_pg = alloc_domheap_pages(NULL, PAGETABLE_ORDER,
@@ -657,21 +668,25 @@ void __init paging_init(void)
         mpt_size = 0;
 
 #define MFN(x) (((x) << L2_PAGETABLE_SHIFT) / sizeof(unsigned int))
-#define CNT ((sizeof(*frame_table) & -sizeof(*frame_table)) / \
+#define CNT (ISOLATE_LSB(sizeof(*frame_table)) / \
              sizeof(*compat_machine_to_phys_mapping))
     BUILD_BUG_ON((sizeof(*frame_table) & ~sizeof(*frame_table)) % \
                  sizeof(*compat_machine_to_phys_mapping));
     for ( i = 0; i < (mpt_size >> L2_PAGETABLE_SHIFT); i++, pl2e++ )
     {
-        memflags = MEMF_node(phys_to_nid(i <<
-            (L2_PAGETABLE_SHIFT - 2 + PAGE_SHIFT)));
         for ( n = 0; n < CNT; ++n)
-            if ( mfn_valid(_mfn(MFN(i) + n * PDX_GROUP_COUNT)) )
+        {
+            mfn = _mfn(MFN(i) + n * PDX_GROUP_COUNT);
+            if ( mfn_valid(mfn) )
+            {
+                memflags = MEMF_node(mfn_to_nid(mfn));
                 break;
+            }
+        }
         if ( n == CNT )
             continue;
         if ( (l1_pg = alloc_domheap_pages(NULL, PAGETABLE_ORDER,
-                                               memflags)) == NULL )
+                                          memflags)) == NULL )
             goto nomem;
         map_pages_to_xen(
             RDWR_COMPAT_MPT_VIRT_START + (i << L2_PAGETABLE_SHIFT),
@@ -1145,6 +1160,8 @@ static int transfer_pages_to_heap(struct mem_hotadd_info *info)
 static int mem_hotadd_check(unsigned long spfn, unsigned long epfn)
 {
     unsigned long s, e, length, sidx, eidx;
+    paddr_t mem_base = pfn_to_paddr(spfn);
+    unsigned long mem_npages = epfn - spfn;
 
     if ( (spfn >= epfn) )
         return 0;
@@ -1155,7 +1172,7 @@ static int mem_hotadd_check(unsigned long spfn, unsigned long epfn)
     if ( (spfn | epfn) & ((1UL << PAGETABLE_ORDER) - 1) )
         return 0;
 
-    if ( (spfn | epfn) & pfn_hole_mask )
+    if ( !pdx_is_region_compressible(mem_base, mem_npages) )
         return 0;
 
     /* Make sure the new range is not present now */
@@ -1194,7 +1211,7 @@ static int mem_hotadd_check(unsigned long spfn, unsigned long epfn)
 
     length += (e - s) * sizeof(struct page_info);
 
-    if ((length >> PAGE_SHIFT) > (epfn - spfn))
+    if ( (length >> PAGE_SHIFT) > mem_npages )
         return 0;
 
     return 1;
@@ -1300,7 +1317,7 @@ int memory_add(unsigned long spfn, unsigned long epfn, unsigned int pxm)
     {
         for ( i = spfn; i < epfn; i++ )
             if ( iommu_legacy_map(hardware_domain, _dfn(i), _mfn(i),
-                                  1ul << PAGE_ORDER_4K,
+                                  1UL << PAGE_ORDER_4K,
                                   IOMMUF_readable | IOMMUF_writable) )
                 break;
         if ( i != epfn )
@@ -1308,7 +1325,7 @@ int memory_add(unsigned long spfn, unsigned long epfn, unsigned int pxm)
             while (i-- > old_max)
                 /* If statement to satisfy __must_check. */
                 if ( iommu_legacy_unmap(hardware_domain, _dfn(i),
-                                        1ul << PAGE_ORDER_4K) )
+                                        1UL << PAGE_ORDER_4K) )
                     continue;
 
             goto destroy_m2p;
@@ -1318,6 +1335,9 @@ int memory_add(unsigned long spfn, unsigned long epfn, unsigned int pxm)
     /* We can't revert any more */
     share_hotadd_m2p_table(&info);
     transfer_pages_to_heap(&info);
+
+    /* Update the node's present pages (like the total_pages of the system) */
+    NODE_DATA(node)->node_present_pages += epfn - spfn;
 
     return 0;
 

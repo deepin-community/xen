@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0-only */
 #ifndef XEN_ALTERNATIVE_CALL
 #define XEN_ALTERNATIVE_CALL
 
@@ -50,7 +50,12 @@
 
 #include <asm/alternative.h>
 
-#define __alt_call_maybe_initdata __initdata
+#ifdef CONFIG_LIVEPATCH
+/* Must keep for livepatches to resolve alternative calls. */
+# define __alt_call_maybe_initdata __ro_after_init
+#else
+# define __alt_call_maybe_initdata __initdata
+#endif
 
 #else
 

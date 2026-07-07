@@ -8,7 +8,7 @@
 #include <xenctrl.h>
 #include <xenguest.h>
 
-#include <xen-tools/libs.h>
+#include <xen-tools/common-macros.h>
 
 #define M2P_SIZE(_m)    ROUNDUP(((_m) * sizeof(xen_pfn_t)), 21)
 #define is_mapped(pfn_type) (!((pfn_type) & 0x80000000UL))
@@ -74,7 +74,7 @@ int dump_m2p_func(int argc, char *argv[])
 int dump_p2m_func(int argc, char *argv[])
 {
     struct xc_domain_meminfo minfo;
-    xc_dominfo_t info;
+    xc_domaininfo_t info;
     unsigned long i;
     int domid;
 
@@ -85,8 +85,7 @@ int dump_p2m_func(int argc, char *argv[])
     }
     domid = atoi(argv[0]);
 
-    if ( xc_domain_getinfo(xch, domid, 1, &info) != 1 ||
-         info.domid != domid )
+    if ( xc_domain_getinfo_single(xch, domid, &info) < 0 )
     {
         ERROR("Failed to obtain info for domain %d\n", domid);
         return -1;
@@ -158,7 +157,7 @@ int dump_p2m_func(int argc, char *argv[])
 int dump_ptes_func(int argc, char *argv[])
 {
     struct xc_domain_meminfo minfo;
-    xc_dominfo_t info;
+    xc_domaininfo_t info;
     void *page = NULL;
     unsigned long i, max_mfn;
     int domid, pte_num, rc = 0;
@@ -172,8 +171,7 @@ int dump_ptes_func(int argc, char *argv[])
     domid = atoi(argv[0]);
     mfn = strtoul(argv[1], NULL, 16);
 
-    if ( xc_domain_getinfo(xch, domid, 1, &info) != 1 ||
-         info.domid != domid )
+    if ( xc_domain_getinfo_single(xch, domid, &info) < 0 )
     {
         ERROR("Failed to obtain info for domain %d\n", domid);
         return -1;
@@ -266,8 +264,7 @@ int dump_ptes_func(int argc, char *argv[])
 int lookup_pte_func(int argc, char *argv[])
 {
     struct xc_domain_meminfo minfo;
-    xc_dominfo_t info;
-    void *page = NULL;
+    xc_domaininfo_t info;
     unsigned long i, j;
     int domid, pte_num;
     xen_pfn_t mfn;
@@ -280,8 +277,7 @@ int lookup_pte_func(int argc, char *argv[])
     domid = atoi(argv[0]);
     mfn = strtoul(argv[1], NULL, 16);
 
-    if ( xc_domain_getinfo(xch, domid, 1, &info) != 1 ||
-         info.domid != domid )
+    if ( xc_domain_getinfo_single(xch, domid, &info) < 0 )
     {
         ERROR("Failed to obtain info for domain %d\n", domid);
         return -1;
@@ -304,6 +300,8 @@ int lookup_pte_func(int argc, char *argv[])
 
     for ( i = 0; i < minfo.p2m_size; i++ )
     {
+        void *page;
+
         if ( !(minfo.pfn_type[i] & XEN_DOMCTL_PFINFO_LTABTYPE_MASK) )
             continue;
 
@@ -326,7 +324,6 @@ int lookup_pte_func(int argc, char *argv[])
         }
 
         munmap(page, XC_PAGE_SIZE);
-        page = NULL;
     }
 
     xc_unmap_domain_meminfo(xch, &minfo);
@@ -336,7 +333,7 @@ int lookup_pte_func(int argc, char *argv[])
 
 int memcmp_mfns_func(int argc, char *argv[])
 {
-    xc_dominfo_t info1, info2;
+    xc_domaininfo_t info1, info2;
     void *page1 = NULL, *page2 = NULL;
     int domid1, domid2;
     xen_pfn_t mfn1, mfn2;
@@ -352,9 +349,8 @@ int memcmp_mfns_func(int argc, char *argv[])
     mfn1 = strtoul(argv[1], NULL, 16);
     mfn2 = strtoul(argv[3], NULL, 16);
 
-    if ( xc_domain_getinfo(xch, domid1, 1, &info1) != 1 ||
-         xc_domain_getinfo(xch, domid2, 1, &info2) != 1 ||
-         info1.domid != domid1 || info2.domid != domid2)
+    if ( xc_domain_getinfo_single(xch, domid1, &info1) < 0 ||
+         xc_domain_getinfo_single(xch, domid2, &info2) < 0)
     {
         ERROR("Failed to obtain info for domains\n");
         return -1;

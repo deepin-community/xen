@@ -372,10 +372,10 @@ int libxl__domain_build_info_setdefault(libxl__gc *gc,
         libxl_defbool_setdefault(&b_info->u.hvm.viridian,           false);
         libxl_defbool_setdefault(&b_info->u.hvm.hpet,               true);
         libxl_defbool_setdefault(&b_info->u.hvm.vpt_align,          true);
-        libxl_defbool_setdefault(&b_info->u.hvm.altp2m,             false);
         libxl_defbool_setdefault(&b_info->u.hvm.usb,                false);
         libxl_defbool_setdefault(&b_info->u.hvm.vkb_device,         true);
         libxl_defbool_setdefault(&b_info->u.hvm.xen_platform_pci,   true);
+        libxl_defbool_setdefault(&b_info->u.hvm.pirq,               false);
 
         libxl_defbool_setdefault(&b_info->u.hvm.spice.enable, false);
         if (!libxl_defbool_val(b_info->u.hvm.spice.enable) &&
@@ -481,6 +481,17 @@ int libxl__domain_build_info_setdefault(libxl__gc *gc,
             b_info->max_grant_version);
         return -ERROR_INVAL;
     }
+
+    /* Assume that providing a bootloader user implies enabling restrict. */
+    libxl_defbool_setdefault(&b_info->bootloader_restrict,
+                             !!b_info->bootloader_user);
+    /* ENV takes precedence over provided domain_build_info. */
+    if (getenv("LIBXL_BOOTLOADER_RESTRICT") ||
+        getenv("LIBXL_BOOTLOADER_USER"))
+        libxl_defbool_set(&b_info->bootloader_restrict, true);
+    if(getenv("LIBXL_BOOTLOADER_USER"))
+        b_info->bootloader_user =
+            libxl__strdup(gc, getenv("LIBXL_BOOTLOADER_USER"));
 
     return 0;
 }
@@ -666,6 +677,28 @@ int libxl__domain_make(libxl__gc *gc, libxl_domain_config *d_config,
         if (info->passthrough == LIBXL_PASSTHROUGH_SYNC_PT)
             create.iommu_opts |= XEN_DOMCTL_IOMMU_no_sharept;
 
+        LOG(DETAIL, "altp2m: %s", libxl_altp2m_mode_to_string(b_info->altp2m));
+        switch(b_info->altp2m) {
+        case LIBXL_ALTP2M_MODE_MIXED:
+            create.altp2m_opts |=
+                XEN_DOMCTL_ALTP2M_mode(XEN_DOMCTL_ALTP2M_mixed);
+            break;
+
+        case LIBXL_ALTP2M_MODE_EXTERNAL:
+            create.altp2m_opts |=
+                XEN_DOMCTL_ALTP2M_mode(XEN_DOMCTL_ALTP2M_external);
+            break;
+
+        case LIBXL_ALTP2M_MODE_LIMITED:
+            create.altp2m_opts |=
+                XEN_DOMCTL_ALTP2M_mode(XEN_DOMCTL_ALTP2M_limited);
+            break;
+
+        case LIBXL_ALTP2M_MODE_DISABLED:
+            /* Nothing to do - altp2m disabled is signaled as mode == 0. */
+            break;
+        }
+
         /* Ultimately, handle is an array of 16 uint8_t, same as uuid */
         libxl_uuid_copy(ctx, (libxl_uuid *)&create.handle, &info->uuid);
 
@@ -713,6 +746,24 @@ int libxl__domain_make(libxl__gc *gc, libxl_domain_config *d_config,
 
             /* A new domain now exists */
             *domid = local_domid;
+
+            ret = xc_domain_set_llc_colors(ctx->xch, local_domid,
+                                           b_info->llc_colors,
+                                           b_info->num_llc_colors);
+            if (ret < 0) {
+                if (errno == EOPNOTSUPP) {
+                    if (b_info->num_llc_colors > 0) {
+                        LOGED(ERROR, local_domid,
+                            "LLC coloring not enabled in the hypervisor");
+                        rc = ERROR_FAIL;
+                        goto out;
+                    }
+                } else {
+                    LOGED(ERROR, local_domid, "LLC colors allocation failed");
+                    rc = ERROR_FAIL;
+                    goto out;
+                }
+            }
 
             rc = libxl__is_domid_recent(gc, local_domid, &recent);
             if (rc)
@@ -909,10 +960,8 @@ retry_transaction:
              strlen(dom_type));
 
     if (!xs_transaction_end(ctx->xsh, t, 0)) {
-        if (errno == EAGAIN) {
-            t = 0;
+        if (errno == EAGAIN)
             goto retry_transaction;
-        }
         LOGED(ERROR, *domid, "domain creation ""xenstore transaction commit failed");
         rc = ERROR_FAIL;
         goto out;
@@ -1068,7 +1117,7 @@ int libxl__domain_config_setdefault(libxl__gc *gc,
                                     uint32_t domid /* for logging, only */)
 {
     libxl_ctx *ctx = libxl__gc_owner(gc);
-    int ret;
+    int ret, i;
     bool pod_enabled = false;
     libxl_domain_create_info *c_info = &d_config->c_info;
 
@@ -1081,13 +1130,12 @@ int libxl__domain_config_setdefault(libxl__gc *gc,
         ret = libxl_flask_context_to_sid(ctx, s, strlen(s),
                                          &d_config->c_info.ssidref);
         if (ret) {
-            if (errno == ENOSYS) {
-                LOGD(WARN, domid, "XSM Disabled: init_seclabel not supported");
-                ret = 0;
-            } else {
+            if (errno != ENOSYS) {
                 LOGD(ERROR, domid, "Invalid init_seclabel: %s", s);
                 goto error_out;
             }
+
+            LOGD(WARN, domid, "XSM Disabled: init_seclabel not supported");
         }
     }
 
@@ -1096,13 +1144,12 @@ int libxl__domain_config_setdefault(libxl__gc *gc,
         ret = libxl_flask_context_to_sid(ctx, s, strlen(s),
                                          &d_config->b_info.exec_ssidref);
         if (ret) {
-            if (errno == ENOSYS) {
-                LOGD(WARN, domid, "XSM Disabled: seclabel not supported");
-                ret = 0;
-            } else {
+            if (errno != ENOSYS) {
                 LOGD(ERROR, domid, "Invalid seclabel: %s", s);
                 goto error_out;
             }
+
+            LOGD(WARN, domid, "XSM Disabled: seclabel not supported");
         }
     }
 
@@ -1111,14 +1158,13 @@ int libxl__domain_config_setdefault(libxl__gc *gc,
         ret = libxl_flask_context_to_sid(ctx, s, strlen(s),
                                          &d_config->b_info.device_model_ssidref);
         if (ret) {
-            if (errno == ENOSYS) {
-                LOGD(WARN, domid,
-                     "XSM Disabled: device_model_stubdomain_seclabel not supported");
-                ret = 0;
-            } else {
+            if (errno != ENOSYS) {
                 LOGD(ERROR, domid, "Invalid device_model_stubdomain_seclabel: %s", s);
                 goto error_out;
             }
+
+            LOGD(WARN, domid,
+                 "XSM Disabled: device_model_stubdomain_seclabel not supported");
         }
     }
 
@@ -1264,6 +1310,15 @@ int libxl__domain_config_setdefault(libxl__gc *gc,
         ret = ERROR_INVAL;
         LOGD(ERROR, domid, "vPMU not supported on this platform");
         goto error_out;
+    }
+
+    for (i = 0; i < d_config->num_virtios; i++) {
+        ret = libxl__virtio_devtype.set_default(gc, domid,
+                                                &d_config->virtios[i], false);
+        if (ret) {
+            LOGD(ERROR, domid, "Unable to set virtio defaults for device %d", i);
+            goto error_out;
+        }
     }
 
     ret = 0;
@@ -1745,30 +1800,39 @@ static void domcreate_launch_dm(libxl__egc *egc, libxl__multidev *multidev,
         libxl__device_console_dispose(&console);
     }
 
-    for (i = 0; i < d_config->num_p9s; i++)
-        libxl__device_add(gc, domid, &libxl__p9_devtype, &d_config->p9s[i]);
-
     for (i = 0; i < d_config->num_pvcallsifs; i++)
         libxl__device_add(gc, domid, &libxl__pvcallsif_devtype,
                           &d_config->pvcallsifs[i]);
+
+    for (i = 0; i < d_config->num_virtios; i++)
+        libxl__device_add(gc, domid, &libxl__virtio_devtype,
+                          &d_config->virtios[i]);
+
+    if (d_config->num_vkbs) {
+        for (i = 0; i < d_config->num_vkbs; i++) {
+            ret = libxl__device_add(gc, domid, &libxl__vkb_devtype,
+                                    &d_config->vkbs[i]);
+            if (ret) goto error_out;
+        }
+    } else if (d_config->c_info.type == LIBXL_DOMAIN_TYPE_HVM &&
+               libxl_defbool_val(d_config->b_info.u.hvm.vkb_device)) {
+        libxl_device_vkb vkb;
+
+        libxl_device_vkb_init(&vkb);
+        libxl__device_add(gc, domid, &libxl__vkb_devtype, &vkb);
+        libxl_device_vkb_dispose(&vkb);
+    }
 
     switch (d_config->c_info.type) {
     case LIBXL_DOMAIN_TYPE_HVM:
     {
         libxl__device_console console;
         libxl__device device;
-        libxl_device_vkb vkb;
 
         init_console_info(gc, &console, 0);
         console.backend_domid = state->console_domid;
         libxl__device_console_add(gc, domid, &console, state, &device);
         libxl__device_console_dispose(&console);
-
-        if (libxl_defbool_val(d_config->b_info.u.hvm.vkb_device)) {
-            libxl_device_vkb_init(&vkb);
-            libxl__device_add(gc, domid, &libxl__vkb_devtype, &vkb);
-            libxl_device_vkb_dispose(&vkb);
-        }
 
         dcs->sdss.dm.guest_domid = domid;
         if (libxl_defbool_val(d_config->b_info.device_model_stubdomain))
@@ -1795,11 +1859,6 @@ static void domcreate_launch_dm(libxl__egc *egc, libxl__multidev *multidev,
         for (i = 0; i < d_config->num_vfbs; i++) {
             libxl__device_add(gc, domid, &libxl__vfb_devtype,
                               &d_config->vfbs[i]);
-        }
-
-        for (i = 0; i < d_config->num_vkbs; i++) {
-            libxl__device_add(gc, domid, &libxl__vkb_devtype,
-                              &d_config->vkbs[i]);
         }
 
         if (d_config->b_info.arch_arm.vuart == LIBXL_VUART_TYPE_SBSA_UART) {
@@ -1879,6 +1938,8 @@ const libxl__device_type *device_type_tbl[] = {
     &libxl__dtdev_devtype,
     &libxl__vdispl_devtype,
     &libxl__vsnd_devtype,
+    &libxl__virtio_devtype,
+    &libxl__p9_devtype,
     NULL
 };
 
@@ -2355,10 +2416,12 @@ int libxl_domain_create_restore(libxl_ctx *ctx, libxl_domain_config *d_config,
 
     /*
      * When restoring (either from a save file or for a migration domain) set
-     * the MSR relaxed mode for compatibility with older Xen versions if the
-     * option is not set as part of the original configuration.
+     * the MSR relaxed mode and HVM PIRQs for compatibility with older Xen
+     * versions if the options are not set as part of the original
+     * configuration.
      */
     libxl_defbool_setdefault(&d_config->b_info.arch_x86.msr_relaxed, true);
+    libxl_defbool_setdefault(&d_config->b_info.u.hvm.pirq, true);
 
     return do_domain_create(ctx, d_config, domid, restore_fd, send_back_fd,
                             params, ao_how, aop_console_how);

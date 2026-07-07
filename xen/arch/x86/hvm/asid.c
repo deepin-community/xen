@@ -1,19 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * asid.c: ASID management
  * Copyright (c) 2007, Advanced Micro Devices, Inc.
  * Copyright (c) 2009, Citrix Systems, Inc.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <xen/init.h>
@@ -54,7 +43,7 @@ struct hvm_asid_data {
    uint64_t core_asid_generation;
    uint32_t next_asid;
    uint32_t max_asid;
-   bool_t disabled;
+   bool disabled;
 };
 
 static DEFINE_PER_CPU(struct hvm_asid_data, hvm_asid_data);
@@ -111,7 +100,7 @@ void hvm_asid_flush_core(void)
     data->disabled = 1;
 }
 
-bool_t hvm_asid_handle_vmenter(struct hvm_vcpu_asid *asid)
+bool hvm_asid_handle_vmenter(struct hvm_vcpu_asid *asid)
 {
     struct hvm_asid_data *data = &this_cpu(hvm_asid_data);
 

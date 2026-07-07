@@ -38,7 +38,7 @@
 #include <asm/mpspec.h>
 #include <asm/processor.h>
 #include <asm/hpet.h> /* for hpet_address */
-#include <mach_apic.h>
+#include <asm/genapic.h>
 
 #define PREFIX			"ACPI: "
 
@@ -99,6 +99,10 @@ acpi_parse_x2apic(struct acpi_subtable_header *header, const unsigned long end)
 		log = true;
 	}
 
+	/* Ignore entries with invalid x2APIC ID */
+	if (processor->local_apic_id == 0xffffffff)
+		return 0;
+
 	/* Record local apic id only when enabled and fitting. */
 	if (processor->local_apic_id >= MAX_APICS ||
 	    processor->uid >= MAX_MADT_ENTRIES) {
@@ -152,6 +156,10 @@ acpi_parse_lapic(struct acpi_subtable_header * header, const unsigned long end)
 	if ((processor->lapic_flags & ACPI_MADT_ENABLED) ||
 	    processor->id != 0xff || opt_cpu_info)
 		acpi_table_print_madt_entry(header);
+
+	/* Ignore entries with invalid APIC ID */
+	if (processor->id == 0xff)
+		return 0;
 
 	/* Record local apic id only when enabled */
 	if (processor->lapic_flags & ACPI_MADT_ENABLED) {
@@ -739,8 +747,6 @@ int __init acpi_boot_init(void)
 	acpi_process_madt();
 
 	acpi_table_parse(ACPI_SIG_HPET, acpi_parse_hpet);
-
-	acpi_mmcfg_init();
 
 	erst_init();
 

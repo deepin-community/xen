@@ -10,8 +10,10 @@
 #include <xen/init.h>
 #include <xen/mm.h>
 #include <xen/param.h>
+#include <xen/sections.h>
 #include <xen/serial.h>
-#include <xen/cache.h>
+
+#include <asm/processor.h>
 
 /* Never drop characters, even if the async transmit buffer fills. */
 /* #define SERIAL_NEVER_DROP_CHARS 1 */
@@ -29,7 +31,7 @@ static struct serial_port com[SERHND_IDX + 1] = {
     }
 };
 
-static bool_t __read_mostly post_irq;
+static bool __read_mostly post_irq;
 
 static inline void serial_start_tx(struct serial_port *port)
 {
@@ -43,7 +45,7 @@ static inline void serial_stop_tx(struct serial_port *port)
         port->driver->stop_tx(port);
 }
 
-void serial_rx_interrupt(struct serial_port *port, struct cpu_user_regs *regs)
+void serial_rx_interrupt(struct serial_port *port)
 {
     char c;
     serial_rx_fn fn = NULL;
@@ -66,10 +68,10 @@ void serial_rx_interrupt(struct serial_port *port, struct cpu_user_regs *regs)
     spin_unlock_irqrestore(&port->rx_lock, flags);
 
     if ( fn != NULL )
-        (*fn)(c & 0x7f, regs);
+        fn(c & 0x7f);
 }
 
-void serial_tx_interrupt(struct serial_port *port, struct cpu_user_regs *regs)
+void serial_tx_interrupt(struct serial_port *port)
 {
     int i, n;
     unsigned long flags;
@@ -194,36 +196,6 @@ static void __serial_putc(struct serial_port *port, char c)
     }
 }
 
-void serial_putc(int handle, char c)
-{
-    struct serial_port *port;
-    unsigned long flags;
-
-    if ( handle == -1 )
-        return;
-
-    port = &com[handle & SERHND_IDX];
-    if ( !port->driver || !port->driver->putc )
-        return;
-
-    spin_lock_irqsave(&port->tx_lock, flags);
-
-    if ( (c == '\n') && (handle & SERHND_COOKED) )
-        __serial_putc(port, '\r' | ((handle & SERHND_HI) ? 0x80 : 0x00));
-
-    if ( handle & SERHND_HI )
-        c |= 0x80;
-    else if ( handle & SERHND_LO )
-        c &= 0x7f;
-
-    __serial_putc(port, c);
-
-    if ( port->driver->flush )
-        port->driver->flush(port);
-
-    spin_unlock_irqrestore(&port->tx_lock, flags);
-}
-
 void serial_puts(int handle, const char *s, size_t nr)
 {
     struct serial_port *port;
@@ -257,48 +229,6 @@ void serial_puts(int handle, const char *s, size_t nr)
         port->driver->flush(port);
 
     spin_unlock_irqrestore(&port->tx_lock, flags);
-}
-
-char serial_getc(int handle)
-{
-    struct serial_port *port;
-    char c;
-    unsigned long flags;
-
-    if ( handle == -1 )
-        return '\0';
-
-    port = &com[handle & SERHND_IDX];
-    if ( !port->driver || !port->driver->getc )
-        return '\0';
-
-    do {
-        for ( ; ; )
-        {
-            spin_lock_irqsave(&port->rx_lock, flags);
-            
-            if ( port->rxbufp != port->rxbufc )
-            {
-                c = port->rxbuf[mask_serial_rxbuf_idx(port->rxbufc++)];
-                spin_unlock_irqrestore(&port->rx_lock, flags);
-                break;
-            }
-            
-            if ( port->driver->getc(port, &c) )
-            {
-                spin_unlock_irqrestore(&port->rx_lock, flags);
-                break;
-            }
-
-            spin_unlock_irqrestore(&port->rx_lock, flags);
-
-            cpu_relax();
-            udelay(100);
-        }
-    } while ( ((handle & SERHND_LO) &&  (c & 0x80)) ||
-              ((handle & SERHND_HI) && !(c & 0x80)) );
-    
-    return c & 0x7f;
 }
 
 int __init serial_parse_handle(const char *conf)

@@ -2,11 +2,17 @@
 #ifndef __XEN_DOMAIN_H__
 #define __XEN_DOMAIN_H__
 
+#include <xen/numa.h>
 #include <xen/types.h>
 
 #include <public/xen.h>
+
+struct guest_area {
+    struct page_info *pg;
+    void *map;
+};
+
 #include <asm/domain.h>
-#include <asm/numa.h>
 
 typedef union {
     struct vcpu_guest_context *nat;
@@ -16,9 +22,10 @@ typedef union {
 struct vcpu *vcpu_create(struct domain *d, unsigned int vcpu_id);
 
 unsigned int dom0_max_vcpus(void);
+int parse_arch_dom0_param(const char *s, const char *e);
 struct vcpu *alloc_dom0_vcpu0(struct domain *dom0);
 
-int vcpu_reset(struct vcpu *);
+int vcpu_reset(struct vcpu *v);
 int vcpu_up(struct vcpu *v);
 
 void setup_system_domains(void);
@@ -34,6 +41,8 @@ void arch_get_domain_info(const struct domain *d,
 #ifdef CONFIG_ARM
 /* Should domain memory be directly mapped? */
 #define CDF_directmap            (1U << 1)
+#else
+#define CDF_directmap            0
 #endif
 /* Is domain memory on static allocation? */
 #ifdef CONFIG_STATIC_MEMORY
@@ -42,6 +51,7 @@ void arch_get_domain_info(const struct domain *d,
 #define CDF_staticmem            0
 #endif
 
+#define is_domain_direct_mapped(d) ((d)->cdf & CDF_directmap)
 #define is_domain_using_staticmem(d) ((d)->cdf & CDF_staticmem)
 
 /*
@@ -58,9 +68,9 @@ void free_vcpu_struct(struct vcpu *v);
 
 /* Allocate/free a PIRQ structure. */
 #ifndef alloc_pirq_struct
-struct pirq *alloc_pirq_struct(struct domain *);
+struct pirq *alloc_pirq_struct(struct domain *d);
 #endif
-void cf_check free_pirq_struct(void *);
+void cf_check free_pirq_struct(void *ptr);
 
 /*
  * Initialise/destroy arch-specific details of a VCPU.
@@ -73,13 +83,19 @@ void cf_check free_pirq_struct(void *);
 int  arch_vcpu_create(struct vcpu *v);
 void arch_vcpu_destroy(struct vcpu *v);
 
-int map_vcpu_info(struct vcpu *v, unsigned long gfn, unsigned int offset);
-void unmap_vcpu_info(struct vcpu *v);
+void vcpu_info_reset(struct vcpu *v);
 
+int map_guest_area(struct vcpu *v, paddr_t gaddr, unsigned int size,
+                   struct guest_area *area,
+                   void (*populate)(void *dst, struct vcpu *v));
+void unmap_guest_area(struct vcpu *v, struct guest_area *area);
+
+struct xen_domctl_createdomain;
 int arch_domain_create(struct domain *d,
                        struct xen_domctl_createdomain *config,
                        unsigned int flags);
 
+int arch_domain_teardown(struct domain *d);
 void arch_domain_destroy(struct domain *d);
 
 void arch_domain_shutdown(struct domain *d);
@@ -92,14 +108,16 @@ void arch_domain_creation_finished(struct domain *d);
 
 void arch_p2m_set_access_required(struct domain *d, bool access_required);
 
-int arch_set_info_guest(struct vcpu *, vcpu_guest_context_u);
-void arch_get_info_guest(struct vcpu *, vcpu_guest_context_u);
+int arch_set_info_guest(struct vcpu *v, vcpu_guest_context_u c);
+void arch_get_info_guest(struct vcpu *v, vcpu_guest_context_u c);
 
 int arch_initialise_vcpu(struct vcpu *v, XEN_GUEST_HANDLE_PARAM(void) arg);
 int default_initialise_vcpu(struct vcpu *v, XEN_GUEST_HANDLE_PARAM(void) arg);
 
 int arch_get_paging_mempool_size(struct domain *d, uint64_t *size /* bytes */);
 int arch_set_paging_mempool_size(struct domain *d, uint64_t size /* bytes */);
+
+bool update_runstate_area(struct vcpu *v);
 
 int domain_relinquish_resources(struct domain *d);
 
@@ -109,9 +127,9 @@ void arch_dump_vcpu_info(struct vcpu *v);
 
 void arch_dump_domain_info(struct domain *d);
 
-int arch_vcpu_reset(struct vcpu *);
+int arch_vcpu_reset(struct vcpu *v);
 
-bool_t domctl_lock_acquire(void);
+bool domctl_lock_acquire(void);
 void domctl_lock_release(void);
 
 /*
@@ -131,7 +149,7 @@ void arch_hypercall_tasklet_result(struct vcpu *v, long res);
 
 extern unsigned int xen_processor_pmbits;
 
-extern bool_t opt_dom0_vcpus_pin;
+extern bool opt_dom0_vcpus_pin;
 extern cpumask_t dom0_cpus;
 extern bool dom0_affinity_relaxed;
 

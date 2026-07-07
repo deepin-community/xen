@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * xen/arch/arm/vgic-v2.c
  *
@@ -5,16 +6,6 @@
  *
  * Ian Campbell <ian.campbell@citrix.com>
  * Copyright (c) 2011 Citrix Systems.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <xen/bitops.h>
@@ -170,7 +161,11 @@ static int vgic_v2_distr_mmio_read(struct vcpu *v, mmio_info_t *info,
 {
     struct hsr_dabt dabt = info->dabt;
     struct vgic_irq_rank *rank;
-    int gicd_reg = (int)(info->gpa - v->domain->arch.vgic.dbase);
+    /*
+     * gpa/dbase are paddr_t which size may be higher than 32-bit. Yet
+     * the difference will always be smaller than 32-bit.
+     */
+    unsigned int gicd_reg = info->gpa - v->domain->arch.vgic.dbase;
     unsigned long flags;
 
     perfc_incr(vgicd_reads);
@@ -315,7 +310,7 @@ static int vgic_v2_distr_mmio_read(struct vcpu *v, mmio_info_t *info,
     case VREG32(GICD_SGIR):
         if ( dabt.size != DABT_WORD ) goto bad_width;
         /* Write only -- read unknown */
-        *r = 0xdeadbeef;
+        *r = 0xdeadbeefU;
         return 1;
 
     case VRANGE32(0xF04, 0xF0C):
@@ -412,7 +407,11 @@ static int vgic_v2_distr_mmio_write(struct vcpu *v, mmio_info_t *info,
 {
     struct hsr_dabt dabt = info->dabt;
     struct vgic_irq_rank *rank;
-    int gicd_reg = (int)(info->gpa - v->domain->arch.vgic.dbase);
+    /*
+     * gpa/dbase are paddr_t which size may be higher than 32-bit. Yet
+     * the difference will always be smaller than 32-bit.
+     */
+    unsigned int gicd_reg = info->gpa - v->domain->arch.vgic.dbase;
     uint32_t tr;
     unsigned long flags;
 
@@ -484,7 +483,7 @@ static int vgic_v2_distr_mmio_write(struct vcpu *v, mmio_info_t *info,
         rank = vgic_rank_offset(v, 1, gicd_reg - GICD_ICPENDR, DABT_WORD);
         if ( rank == NULL ) goto write_ignore;
 
-        vgic_check_inflight_irqs_pending(v->domain, v, rank->index, r);
+        vgic_check_inflight_irqs_pending(v, rank->index, r);
 
         goto write_ignore;
 
@@ -653,10 +652,6 @@ static int vgic_v2_vcpu_init(struct vcpu *v)
 
 static int vgic_v2_domain_init(struct domain *d)
 {
-    int ret;
-    paddr_t csize;
-    paddr_t vbase;
-
     /*
      * The hardware domain and direct-mapped domain both get the hardware
      * address.
@@ -676,8 +671,8 @@ static int vgic_v2_domain_init(struct domain *d)
          * aligned to PAGE_SIZE.
          */
         d->arch.vgic.cbase = vgic_v2_hw.cbase;
-        csize = vgic_v2_hw.csize;
-        vbase = vgic_v2_hw.vbase;
+        d->arch.vgic.csize = vgic_v2_hw.csize;
+        d->arch.vgic.vbase = vgic_v2_hw.vbase;
     }
     else if ( is_domain_direct_mapped(d) )
     {
@@ -692,8 +687,8 @@ static int vgic_v2_domain_init(struct domain *d)
          */
         d->arch.vgic.dbase = vgic_v2_hw.dbase;
         d->arch.vgic.cbase = vgic_v2_hw.cbase;
-        csize = GUEST_GICC_SIZE;
-        vbase = vgic_v2_hw.vbase + vgic_v2_hw.aliased_offset;
+        d->arch.vgic.csize = GUEST_GICC_SIZE;
+        d->arch.vgic.vbase = vgic_v2_hw.vbase + vgic_v2_hw.aliased_offset;
     }
     else
     {
@@ -706,18 +701,11 @@ static int vgic_v2_domain_init(struct domain *d)
          */
         BUILD_BUG_ON(GUEST_GICC_SIZE != SZ_8K);
         d->arch.vgic.cbase = GUEST_GICC_BASE;
-        csize = GUEST_GICC_SIZE;
-        vbase = vgic_v2_hw.vbase + vgic_v2_hw.aliased_offset;
+        d->arch.vgic.csize = GUEST_GICC_SIZE;
+        d->arch.vgic.vbase = vgic_v2_hw.vbase + vgic_v2_hw.aliased_offset;
     }
 
-    /*
-     * Map the gic virtual cpu interface in the gic cpu interface
-     * region of the guest.
-     */
-    ret = map_mmio_regions(d, gaddr_to_gfn(d->arch.vgic.cbase),
-                           csize / PAGE_SIZE, maddr_to_mfn(vbase));
-    if ( ret )
-        return ret;
+    /* Mapping of the virtual CPU interface is deferred until first access */
 
     register_mmio_handler(d, &vgic_v2_distr_mmio_handler, d->arch.vgic.dbase,
                           PAGE_SIZE, NULL);
@@ -751,7 +739,7 @@ static const struct vgic_ops vgic_v2_ops = {
     .lpi_get_priority = vgic_v2_lpi_get_priority,
 };
 
-int vgic_v2_init(struct domain *d, int *mmio_count)
+int vgic_v2_init(struct domain *d, unsigned int *mmio_count)
 {
     if ( !vgic_v2_hw.enabled )
     {

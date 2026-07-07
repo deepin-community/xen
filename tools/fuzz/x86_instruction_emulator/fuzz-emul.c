@@ -899,21 +899,19 @@ int LLVMFuzzerTestOneInput(const uint8_t *data_p, size_t size)
     int rc;
 
     /* Not part of the initializer, for old gcc to cope. */
-    ctxt.cpu_policy = &cp;
+    ctxt.cpu_policy = &cpu_policy;
 
     /* Reset all global state variables */
     memset(&input, 0, sizeof(input));
 
     if ( size <= DATA_OFFSET )
     {
-        printf("Input too small\n");
-        return 1;
+        return -1;
     }
 
     if ( size > FUZZ_CORPUS_SIZE )
     {
-        printf("Input too large\n");
-        return 1;
+        return -1;
     }
 
     memcpy(&input, data_p, size);

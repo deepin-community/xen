@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /******************************************************************************
  * arch/x86/mm/p2m-basic.c
  *
@@ -8,23 +9,12 @@
  * Parts of this code are Copyright (c) 2006-2007 by XenSource Inc.
  * Parts of this code are Copyright (c) 2006 by Michael A Fetterman
  * Parts based on earlier work by Michael A Fetterman, Ian Pratt et al.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <xen/event.h>
 #include <xen/types.h>
+#include <asm/altp2m.h>
+#include <asm/hvm/nestedhvm.h>
 #include <asm/p2m.h>
 #include "mm-locks.h"
 #include "p2m.h"
@@ -50,7 +40,7 @@ static int p2m_initialise(struct domain *d, struct p2m_domain *p2m)
     p2m_pod_init(p2m);
     p2m_nestedp2m_init(p2m);
 
-    if ( hap_enabled(d) && cpu_has_vmx )
+    if ( hap_enabled(d) && using_vmx() )
         ret = ept_p2m_init(p2m);
     else
         p2m_pt_init(p2m);
@@ -82,7 +72,7 @@ struct p2m_domain *p2m_init_one(struct domain *d)
 void p2m_free_one(struct p2m_domain *p2m)
 {
     p2m_free_logdirty(p2m);
-    if ( hap_enabled(p2m->domain) && cpu_has_vmx )
+    if ( hap_enabled(p2m->domain) && using_vmx() )
         ept_p2m_uninit(p2m);
     free_cpumask_var(p2m->dirty_cpumask);
     xfree(p2m);
@@ -138,7 +128,7 @@ int p2m_init(struct domain *d)
         return rc;
     }
 
-    rc = p2m_init_altp2m(d);
+    rc = hvm_altp2m_supported() ? p2m_init_altp2m(d) : 0;
     if ( rc )
     {
         p2m_teardown_hostp2m(d);
@@ -207,16 +197,33 @@ void p2m_final_teardown(struct domain *d)
 {
     if ( is_hvm_domain(d) )
     {
+        if ( hvm_altp2m_supported() )
+            p2m_teardown_altp2m(d);
         /*
-         * We must tear down both of them unconditionally because
-         * we initialise them unconditionally.
+         * We must tear down nestedp2m unconditionally because
+         * we initialise it unconditionally.
          */
-        p2m_teardown_altp2m(d);
         p2m_teardown_nestedp2m(d);
     }
 
     /* Iterate over all p2m tables per domain */
     p2m_teardown_hostp2m(d);
+}
+
+bool arch_acquire_resource_check(const struct domain *d)
+{
+    /*
+     * altp2m is not supported as we would otherwise also need to walk the
+     * altp2m tables and drop any foreign map entries in order to drop the page
+     * reference.
+     *
+     * The same applies to nestedhvm nested p2m tables, as the type from the L0
+     * p2m is replicated into the L1 p2m, and there's no filtering that
+     * prevents foreign mappings from being created in nestedp2m.
+     */
+    return is_pv_domain(d) ||
+           (d->arch.hvm.params[HVM_PARAM_ALTP2M] == XEN_ALTP2M_disabled &&
+            !nestedhvm_enabled(d));
 }
 
 /*

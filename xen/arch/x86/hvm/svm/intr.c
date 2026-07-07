@@ -1,19 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * intr.c: Interrupt handling for SVM.
  * Copyright (c) 2005, AMD Inc.
  * Copyright (c) 2004, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <xen/init.h>
@@ -27,17 +16,16 @@
 #include <asm/paging.h>
 #include <asm/hvm/hvm.h>
 #include <asm/hvm/io.h>
-#include <asm/hvm/support.h>
 #include <asm/hvm/vlapic.h>
 #include <asm/hvm/svm/svm.h>
-#include <asm/hvm/svm/intr.h>
 #include <asm/hvm/nestedhvm.h> /* for nestedhvm_vcpu_in_guestmode */
 #include <asm/vm_event.h>
 #include <xen/event.h>
 #include <xen/kernel.h>
 #include <public/hvm/ioreq.h>
 #include <xen/domain_page.h>
-#include <asm/hvm/trace.h>
+
+#include "nestedhvm.h"
 
 static void svm_inject_nmi(struct vcpu *v)
 {
@@ -47,8 +35,8 @@ static void svm_inject_nmi(struct vcpu *v)
 
     event.raw = 0;
     event.v = true;
-    event.type = X86_EVENTTYPE_NMI;
-    event.vector = TRAP_nmi;
+    event.type = X86_ET_NMI;
+    event.vector = X86_EXC_NMI;
 
     ASSERT(!vmcb->event_inj.v);
     vmcb->event_inj = event;
@@ -68,7 +56,7 @@ static void svm_inject_extint(struct vcpu *v, int vector)
 
     event.raw = 0;
     event.v = true;
-    event.type = X86_EVENTTYPE_EXT_INTR;
+    event.type = X86_ET_EXT_INTR;
     event.vector = vector;
 
     ASSERT(!vmcb->event_inj.v);
@@ -101,8 +89,8 @@ static void svm_enable_intr_window(struct vcpu *v, struct hvm_intack intack)
         }
     }
 
-    HVMTRACE_3D(INTR_WINDOW, intack.vector, intack.source,
-                vmcb->event_inj.v ? vmcb->event_inj.vector : -1);
+    TRACE(TRC_HVM_INTR_WINDOW, intack.vector, intack.source,
+          vmcb->event_inj.v ? vmcb->event_inj.vector : -1);
 
     /*
      * Create a dummy virtual interrupt to intercept as soon as the
@@ -134,7 +122,7 @@ static void svm_enable_intr_window(struct vcpu *v, struct hvm_intack intack)
         vmcb, general1_intercepts | GENERAL1_INTERCEPT_VINTR);
 }
 
-void svm_intr_assist(void)
+void asmlinkage svm_intr_assist(void)
 {
     struct vcpu *v = current;
     struct vmcb_struct *vmcb = v->arch.hvm.svm.vmcb;
@@ -217,7 +205,7 @@ void svm_intr_assist(void)
     }
     else
     {
-        HVMTRACE_2D(INJ_VIRQ, intack.vector, /*fake=*/ 0);
+        TRACE(TRC_HVM_INJ_VIRQ, intack.vector, /*fake=*/ 0);
         svm_inject_extint(v, intack.vector);
         pt_intr_post(v, intack);
     }

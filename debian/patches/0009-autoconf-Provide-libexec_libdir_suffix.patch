@@ -11,7 +11,7 @@ Signed-off-by: Ian Jackson <ian.jackson@citrix.com>
  1 file changed, 8 insertions(+), 1 deletion(-)
 
 diff --git a/m4/paths.m4 b/m4/paths.m4
-index e4104bc..1093c7c 100644
+index 3f94c62..bf52dc0 100644
 --- a/m4/paths.m4
 +++ b/m4/paths.m4
 @@ -86,6 +86,13 @@ XEN_SCRIPT_DIR=$xen_scriptdir_path

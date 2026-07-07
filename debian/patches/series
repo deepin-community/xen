@@ -10,7 +10,6 @@ misc/tools-pygrub-remove-static-solaris-support
 0010-.gitignore-Add-configure-output-which-we-always-dele.patch
 0011-config-Tools.mk.in-Respect-caller-s-CONFIG_PV_SHIM.patch
 0012-shim-Provide-separate-install-shim-target.patch
-0013-docs-man-xen-vbd-interface.7-Provide-properly-format.patch
 0014-t-h-L-vif-common.sh-disable-handle_iptable.patch
 0015-sysconfig.xencommons.in-Strip-and-debianize.patch
 0016-hotplug-common-Do-not-adjust-LD_LIBRARY_PATH.patch
@@ -18,6 +17,4 @@ misc/tools-pygrub-remove-static-solaris-support
 0018-pygrub-Specify-rpath-LIBEXEC_LIB-when-building-fsima.patch
 0019-tools-xl-bash-completion-also-complete-xen.patch
 0020-tools-don-t-build-ship-xenmon.patch
-0021-docs-set-date-to-SOURCE_DATE_EPOCH-if-available.patch
 0022-give-meaningful-error-message-if-qemu-device-model-i.patch
-0023-xen-arch-x86-make-objdump-output-user-locale-agnosti.patch

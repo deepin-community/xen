@@ -39,7 +39,7 @@
 #include <asm/div64.h>
 #include <asm/acpi.h>
 #include <asm/hpet.h>
-#include <io_ports.h>
+#include <asm/io-ports.h>
 #include <asm/setup.h> /* for early_time_init */
 #include <public/arch-x86/cpuid.h>
 
@@ -64,12 +64,12 @@ struct cpu_time {
 };
 
 struct platform_timesource {
-    char *id;
-    char *name;
-    u64 frequency;
+    const char *id;
+    const char *name;
+    uint64_t frequency;
     /* Post-init this hook may only be invoked via the read_counter() wrapper! */
-    u64 (*read_counter)(void);
-    s64 (*init)(struct platform_timesource *);
+    uint64_t (*read_counter)(void);
+    int64_t (*init)(struct platform_timesource *);
     void (*resume)(struct platform_timesource *);
     int counter_bits;
 };
@@ -198,8 +198,7 @@ static void smp_send_timer_broadcast_ipi(void)
     }
 }
 
-static void cf_check timer_interrupt(
-    int irq, void *dev_id, struct cpu_user_regs *regs)
+static void cf_check timer_interrupt(int irq, void *dev_id)
 {
     ASSERT(local_irq_is_enabled());
 
@@ -223,7 +222,7 @@ static void cf_check timer_interrupt(
 
         spin_lock_irq(&pit_lock);
 
-        outb(0x80, PIT_MODE);
+        outb(PIT_LTCH_CH(2), PIT_MODE);
         count  = inb(PIT_CH2);
         count |= inb(PIT_CH2) << 8;
 
@@ -246,7 +245,8 @@ static void preinit_pit(void)
 {
     /* Set PIT channel 0 to HZ Hz. */
 #define LATCH (((CLOCK_TICK_RATE)+(HZ/2))/HZ)
-    outb_p(0x34, PIT_MODE);        /* binary, mode 2, LSB/MSB, ch 0 */
+    outb_p(PIT_TCW_CH(0) | PIT_RW_LSB_MSB | PIT_MODE_RATE_GEN | PIT_BINARY,
+           PIT_MODE);
     outb_p(LATCH & 0xff, PIT_CH0); /* LSB */
     outb(LATCH >> 8, PIT_CH0);     /* MSB */
 #undef LATCH
@@ -294,7 +294,7 @@ static uint32_t __init read_pt_and_tsc(uint64_t *tsc,
                                        const struct platform_timesource *pts)
 {
     uint64_t tsc_prev = *tsc = rdtsc_ordered(), tsc_min = ~0;
-    uint32_t best = best;
+    uint32_t best = ~0;
     unsigned int i;
 
     for ( i = 0; ; ++i )
@@ -357,7 +357,7 @@ static u64 cf_check read_pit_count(void)
 
     spin_lock_irqsave(&pit_lock, flags);
 
-    outb(0x80, PIT_MODE);
+    outb(PIT_LTCH_CH(2), PIT_MODE);
     count16  = inb(PIT_CH2);
     count16 |= inb(PIT_CH2) << 8;
 
@@ -368,7 +368,7 @@ static u64 cf_check read_pit_count(void)
     return count32;
 }
 
-static s64 __init cf_check init_pit(struct platform_timesource *pts)
+static int64_t __init cf_check init_pit(struct platform_timesource *pts)
 {
     u8 portb = inb(0x61);
     u64 start, end;
@@ -384,7 +384,8 @@ static s64 __init cf_check init_pit(struct platform_timesource *pts)
      */
 #define CALIBRATE_LATCH CALIBRATE_VALUE(CLOCK_TICK_RATE)
     BUILD_BUG_ON(CALIBRATE_LATCH >> 16);
-    outb(0xb0, PIT_MODE);                  /* binary, mode 0, LSB/MSB, Ch 2 */
+    outb(PIT_TCW_CH(2) | PIT_RW_LSB_MSB | PIT_MODE_EOC | PIT_BINARY,
+         PIT_MODE);
     outb(CALIBRATE_LATCH & 0xff, PIT_CH2); /* LSB of count */
     outb(CALIBRATE_LATCH >> 8, PIT_CH2);   /* MSB of count */
 #undef CALIBRATE_LATCH
@@ -409,7 +410,8 @@ static s64 __init cf_check init_pit(struct platform_timesource *pts)
 static void cf_check resume_pit(struct platform_timesource *pts)
 {
     /* Set CTC channel 2 to mode 0 again; initial value does not matter. */
-    outb(0xb0, PIT_MODE); /* binary, mode 0, LSB/MSB, Ch 2 */
+    outb(PIT_TCW_CH(2) | PIT_RW_LSB_MSB | PIT_MODE_EOC | PIT_BINARY,
+         PIT_MODE);
     outb(0, PIT_CH2);     /* LSB of count */
     outb(0, PIT_CH2);     /* MSB of count */
 }
@@ -424,6 +426,74 @@ static struct platform_timesource __initdata_cf_clobber plt_pit =
     .init = init_pit,
     .resume = resume_pit,
 };
+
+unsigned int __initdata pit_alias_mask;
+
+static void __init probe_pit_alias(void)
+{
+    unsigned int mask = 0x1c;
+    uint8_t val = 0;
+
+    if ( !opt_probe_port_aliases )
+        return;
+
+    /*
+     * Use channel 2 in mode 0 for probing.  In this mode even a non-initial
+     * count is loaded independent of counting being / becoming enabled.  Thus
+     * we have a 16-bit value fully under our control, to write and then check
+     * whether we can also read it back unaltered.
+     */
+
+    /* Turn off speaker output and disable channel 2 counting. */
+    outb(inb(0x61) & 0x0c, 0x61);
+
+    outb(PIT_TCW_CH(2) | PIT_RW_LSB_MSB | PIT_MODE_EOC | PIT_BINARY,
+         PIT_MODE);
+
+    do {
+        uint8_t val2;
+        unsigned int offs;
+
+        outb(val, PIT_CH2);
+        outb(val ^ 0xff, PIT_CH2);
+
+        /* Wait for the Null Count bit to clear. */
+        do {
+            /* Latch status. */
+            outb(PIT_RDB | PIT_RDB_NO_COUNT | PIT_RDB_CH2, PIT_MODE);
+
+            /* Try to make sure we're actually having a PIT here. */
+            val2 = inb(PIT_CH2);
+            if ( (val2 & ~(PIT_STATUS_OUT_PIN | PIT_STATUS_NULL_COUNT)) !=
+                 (PIT_RW_LSB_MSB | PIT_MODE_EOC | PIT_BINARY) )
+                return;
+        } while ( val2 & PIT_STATUS_NULL_COUNT );
+
+        /*
+         * Try to further make sure we're actually having a PIT here.
+         *
+         * NB: Deliberately |, not ||, as we always want both reads.
+         */
+        val2 = inb(PIT_CH2);
+        if ( (val2 ^ val) | (inb(PIT_CH2) ^ val ^ 0xff) )
+            return;
+
+        for ( offs = ISOLATE_LSB(mask); offs <= mask; offs <<= 1 )
+        {
+            if ( !(mask & offs) )
+                continue;
+            val2 = inb(PIT_CH2 + offs);
+            if ( (val2 ^ val) | (inb(PIT_CH2 + offs) ^ val ^ 0xff) )
+                mask &= ~offs;
+        }
+    } while ( mask && (val += 0x0b) );  /* Arbitrary uneven number. */
+
+    if ( mask )
+    {
+        dprintk(XENLOG_INFO, "PIT aliasing mask: %02x\n", mask);
+        pit_alias_mask = mask;
+    }
+}
 
 /************************************************************
  * PLATFORM TIMER 2: HIGH PRECISION EVENT TIMER (HPET)
@@ -540,7 +610,7 @@ static u64 cf_check read_pmtimer_count(void)
     return inl(pmtmr_ioport);
 }
 
-static s64 __init cf_check init_pmtimer(struct platform_timesource *pts)
+static int64_t __init cf_check init_pmtimer(struct platform_timesource *pts)
 {
     if ( !pmtmr_ioport || (pmtmr_width != 24 && pmtmr_width != 32) )
         return 0;
@@ -585,7 +655,7 @@ static unsigned int __initdata tsc_flags;
  * Called in verify_tsc_reliability() under reliable TSC conditions
  * thus reusing all the checks already performed there.
  */
-static s64 __init cf_check init_tsc(struct platform_timesource *pts)
+static int64_t __init cf_check init_tsc(struct platform_timesource *pts)
 {
     u64 ret = pts->frequency;
 
@@ -716,6 +786,30 @@ static struct platform_timesource __initdata_cf_clobber plt_xen_timer =
     .counter_bits = 63,
 };
 #endif
+
+static unsigned long read_xen_wallclock(void)
+{
+#ifdef CONFIG_XEN_GUEST
+    const struct shared_info *sh_info = XEN_shared_info;
+    uint32_t wc_version;
+    uint64_t wc_sec;
+
+    ASSERT(xen_guest);
+
+    do {
+        wc_version = sh_info->wc_version & ~1;
+        smp_rmb();
+
+        wc_sec  = sh_info->wc_sec;
+        smp_rmb();
+    } while ( wc_version != sh_info->wc_version );
+
+    return wc_sec + read_xen_timer() / 1000000000;
+#else
+    ASSERT_UNREACHABLE();
+    return 0;
+#endif
+}
 
 #ifdef CONFIG_HYPERV_GUEST
 /************************************************************
@@ -876,13 +970,8 @@ static void cf_check plt_overflow(void *unused)
         plt_stamp64 += plt_mask + 1;
     }
     if ( i != 0 )
-    {
-        static bool warned_once;
-
-        if ( !test_and_set_bool(warned_once) )
-            printk("Platform timer appears to have unexpectedly wrapped "
-                   "%u%s times.\n", i, (i == 10) ? " or more" : "");
-    }
+        printk_once("Platform timer appears to have unexpectedly wrapped "
+                    "%u%s times.\n", i, (i == 10) ? " or more" : "");
 
     spin_unlock_irq(&platform_timer_lock);
 
@@ -945,9 +1034,9 @@ static void __init reset_platform_timer(void)
     spin_unlock_irq(&platform_timer_lock);
 }
 
-static s64 __init try_platform_timer(struct platform_timesource *pts)
+static int64_t __init try_platform_timer(struct platform_timesource *pts)
 {
-    s64 rc = pts->init(pts);
+    int64_t rc = pts->init(pts);
 
     if ( rc <= 0 )
         return rc;
@@ -981,7 +1070,7 @@ static u64 __init init_platform_timer(void)
 
     struct platform_timesource *pts = NULL;
     unsigned int i;
-    s64 rc = -1;
+    int64_t rc = -1;
 
     /* clocksource=tsc is initialized via __initcalls (when CPUs are up). */
     if ( (opt_clocksource[0] != '\0') && strcmp(opt_clocksource, "tsc") )
@@ -1024,7 +1113,7 @@ static u64 __init init_platform_timer(void)
 static uint64_t __init read_pt_and_tmcct(uint32_t *tmcct)
 {
     uint32_t tmcct_prev = *tmcct = apic_tmcct_read(), tmcct_min = ~0;
-    uint64_t best = best;
+    uint64_t best = ~0;
     unsigned int i;
 
     for ( i = 0; ; ++i )
@@ -1157,8 +1246,26 @@ struct rtc_time {
     unsigned int year, mon, day, hour, min, sec;
 };
 
-static void __get_cmos_time(struct rtc_time *rtc)
+static bool __get_cmos_time(struct rtc_time *rtc)
 {
+    s_time_t start, t1, t2;
+    unsigned long flags;
+
+    spin_lock_irqsave(&rtc_lock, flags);
+
+    /* read RTC exactly on falling edge of update flag */
+    start = NOW();
+    do { /* may take up to 1 second... */
+        t1 = NOW() - start;
+    } while ( !(CMOS_READ(RTC_FREQ_SELECT) & RTC_UIP) &&
+              t1 <= SECONDS(1) );
+
+    start = NOW();
+    do { /* must try at least 2.228 ms */
+        t2 = NOW() - start;
+    } while ( (CMOS_READ(RTC_FREQ_SELECT) & RTC_UIP) &&
+              t2 < MILLISECS(3) );
+
     rtc->sec  = CMOS_READ(RTC_SECONDS);
     rtc->min  = CMOS_READ(RTC_MINUTES);
     rtc->hour = CMOS_READ(RTC_HOURS);
@@ -1176,66 +1283,46 @@ static void __get_cmos_time(struct rtc_time *rtc)
         BCD_TO_BIN(rtc->year);
     }
 
+    spin_unlock_irqrestore(&rtc_lock, flags);
+
     if ( (rtc->year += 1900) < 1970 )
         rtc->year += 100;
+
+    return t1 <= SECONDS(1) && t2 < MILLISECS(3);
 }
 
-static unsigned long get_cmos_time(void)
+static bool __initdata opt_cmos_rtc_probe;
+boolean_param("cmos-rtc-probe", opt_cmos_rtc_probe);
+
+static bool __init cmos_rtc_probe(void)
 {
-    unsigned long res, flags;
-    struct rtc_time rtc;
     unsigned int seconds = 60;
-    static bool __read_mostly cmos_rtc_probe;
-    boolean_param("cmos-rtc-probe", cmos_rtc_probe);
 
-    if ( efi_enabled(EFI_RS) )
-    {
-        res = efi_get_time();
-        if ( res )
-            return res;
-    }
+    if ( !(acpi_gbl_FADT.boot_flags & ACPI_FADT_NO_CMOS_RTC) )
+        return true;
 
-    if ( likely(!(acpi_gbl_FADT.boot_flags & ACPI_FADT_NO_CMOS_RTC)) )
-        cmos_rtc_probe = false;
-    else if ( system_state < SYS_STATE_smp_boot && !cmos_rtc_probe )
-        panic("System with no CMOS RTC advertised must be booted from EFI"
-              " (or with command line option \"cmos-rtc-probe\")\n");
+    if ( !opt_cmos_rtc_probe )
+        return false;
 
     for ( ; ; )
     {
-        s_time_t start, t1, t2;
+        struct rtc_time rtc;
+        bool success = __get_cmos_time(&rtc);
 
-        spin_lock_irqsave(&rtc_lock, flags);
-
-        /* read RTC exactly on falling edge of update flag */
-        start = NOW();
-        do { /* may take up to 1 second... */
-            t1 = NOW() - start;
-        } while ( !(CMOS_READ(RTC_FREQ_SELECT) & RTC_UIP) &&
-                  t1 <= SECONDS(1) );
-
-        start = NOW();
-        do { /* must try at least 2.228 ms */
-            t2 = NOW() - start;
-        } while ( (CMOS_READ(RTC_FREQ_SELECT) & RTC_UIP) &&
-                  t2 < MILLISECS(3) );
-
-        __get_cmos_time(&rtc);
-
-        spin_unlock_irqrestore(&rtc_lock, flags);
-
-        if ( likely(!cmos_rtc_probe) ||
-             t1 > SECONDS(1) || t2 >= MILLISECS(3) ||
+        if ( !success ||
              rtc.sec >= 60 || rtc.min >= 60 || rtc.hour >= 24 ||
              !rtc.day || rtc.day > 31 ||
              !rtc.mon || rtc.mon > 12 )
-            break;
+            return false;
 
         if ( seconds < 60 )
         {
             if ( rtc.sec != seconds )
-                cmos_rtc_probe = false;
-            break;
+            {
+                acpi_gbl_FADT.boot_flags &= ~ACPI_FADT_NO_CMOS_RTC;
+                return true;
+            }
+            return false;
         }
 
         process_pending_softirqs();
@@ -1243,10 +1330,99 @@ static unsigned long get_cmos_time(void)
         seconds = rtc.sec;
     }
 
-    if ( unlikely(cmos_rtc_probe) )
-        panic("No CMOS RTC found - system must be booted from EFI\n");
+    ASSERT_UNREACHABLE();
+    return false;
+}
+
+
+static unsigned long cmos_rtc_read(void)
+{
+    struct rtc_time rtc;
+
+    __get_cmos_time(&rtc);
 
     return mktime(rtc.year, rtc.mon, rtc.day, rtc.hour, rtc.min, rtc.sec);
+}
+
+static unsigned int __ro_after_init cmos_alias_mask;
+
+static int __init cf_check probe_cmos_alias(void)
+{
+    unsigned int offs;
+
+    if ( (acpi_gbl_FADT.boot_flags & ACPI_FADT_NO_CMOS_RTC) ||
+         !opt_probe_port_aliases )
+        return 0;
+
+    for ( offs = 2; offs < 8; offs <<= 1 )
+    {
+        unsigned int i;
+        bool read = true;
+
+        for ( i = RTC_REG_D + 1; i < 0x80; ++i )
+        {
+            uint8_t normal, alt;
+            unsigned long flags;
+
+            if ( i == acpi_gbl_FADT.century )
+                continue;
+
+            spin_lock_irqsave(&rtc_lock, flags);
+
+            normal = CMOS_READ(i);
+            if ( inb(RTC_PORT(offs)) != i )
+                read = false;
+
+            alt = inb(RTC_PORT(offs + 1));
+
+            spin_unlock_irqrestore(&rtc_lock, flags);
+
+            if ( normal != alt )
+                break;
+
+            process_pending_softirqs();
+        }
+        if ( i == 0x80 )
+        {
+            cmos_alias_mask |= offs;
+            dprintk(XENLOG_INFO, "CMOS aliased at %02x, index %s\n",
+                    RTC_PORT(offs), read ? "r/w" : "w/o");
+        }
+    }
+
+    return 0;
+}
+__initcall(probe_cmos_alias);
+
+bool is_cmos_port(unsigned int port, unsigned int bytes, const struct domain *d)
+{
+    unsigned int offs;
+
+    if ( !is_hardware_domain(d) )
+        return port <= RTC_PORT(1) && port + bytes > RTC_PORT(0);
+
+    /*
+     * While not really CMOS-related, port 0x70 always needs intercepting
+     * to deal with the NMI disable bit.
+     */
+    if ( port <= RTC_PORT(0) && port + bytes > RTC_PORT(0) )
+        return true;
+
+    if ( acpi_gbl_FADT.boot_flags & ACPI_FADT_NO_CMOS_RTC )
+        return false;
+
+    if ( port <= RTC_PORT(1) && port + bytes > RTC_PORT(0) )
+        return true;
+
+    for ( offs = 2; offs <= cmos_alias_mask; offs <<= 1 )
+    {
+        if ( !(offs & cmos_alias_mask) )
+            continue;
+        if ( port <= RTC_PORT(offs | 1) && port + bytes > RTC_PORT(offs) )
+            return true;
+    }
+
+    return false;
 }
 
 /* Helpers for guest accesses to the physical RTC. */
@@ -1256,28 +1432,42 @@ unsigned int rtc_guest_read(unsigned int port)
     unsigned long flags;
     unsigned int data = ~0;
 
-    switch ( port )
+    switch ( port & ~cmos_alias_mask )
     {
     case RTC_PORT(0):
         /*
          * All PV domains (and PVH dom0) are allowed to read the latched value
          * of the first RTC port, as there's no access to the physical IO
-         * ports.
+         * ports.  Note that we return the index value regardless of whether
+         * underlying hardware would permit doing so.
          */
-        data = currd->arch.cmos_idx;
+        data = currd->arch.cmos_idx & (0xff >> (port == RTC_PORT(0)));
+
+        /*
+         * When there's (supposedly) no RTC/CMOS, we don't intercept the other
+         * ports. While reading the index register isn't normally possible,
+         * play safe and return back whatever can be read (just in case a value
+         * written through an alias would be attempted to be read back here).
+         */
+        if ( port == RTC_PORT(0) &&
+             (acpi_gbl_FADT.boot_flags & ACPI_FADT_NO_CMOS_RTC) &&
+             ioports_access_permitted(currd, port, port) )
+            data = inb(port) & 0x7f;
         break;
 
     case RTC_PORT(1):
-        if ( !ioports_access_permitted(currd, RTC_PORT(0), RTC_PORT(1)) )
+        if ( !ioports_access_permitted(currd, port - 1, port) )
             break;
         spin_lock_irqsave(&rtc_lock, flags);
-        outb(currd->arch.cmos_idx & 0x7f, RTC_PORT(0));
-        data = inb(RTC_PORT(1));
+        outb(currd->arch.cmos_idx & (0xff >> (port == RTC_PORT(1))),
+             port - 1);
+        data = inb(port);
         spin_unlock_irqrestore(&rtc_lock, flags);
         break;
 
     default:
         ASSERT_UNREACHABLE();
+        break;
     }
 
     return data;
@@ -1288,9 +1478,10 @@ void rtc_guest_write(unsigned int port, unsigned int data)
     struct domain *currd = current->domain;
     unsigned long flags;
 
-    switch ( port )
+    switch ( port & ~cmos_alias_mask )
     {
         typeof(pv_rtc_handler) hook;
+        unsigned int idx;
 
     case RTC_PORT(0):
         /*
@@ -1298,50 +1489,151 @@ void rtc_guest_write(unsigned int port, unsigned int data)
          * value of the first RTC port, as there's no access to the physical IO
          * ports.
          */
-        currd->arch.cmos_idx = data;
+        currd->arch.cmos_idx = data & (0xff >> (port == RTC_PORT(0)));
+
+        /*
+         * When there's (supposedly) no RTC/CMOS, we don't intercept the other
+         * ports. Therefore the port write, with the NMI disable bit zapped,
+         * needs carrying out right away.
+         */
+        if ( port == RTC_PORT(0) &&
+             (acpi_gbl_FADT.boot_flags & ACPI_FADT_NO_CMOS_RTC) &&
+             ioports_access_permitted(currd, port, port) )
+            outb(data & 0x7f, port);
         break;
 
     case RTC_PORT(1):
-        if ( !ioports_access_permitted(currd, RTC_PORT(0), RTC_PORT(1)) )
+        if ( !ioports_access_permitted(currd, port - 1, port) )
             break;
+
+        idx = currd->arch.cmos_idx & (0xff >> (port == RTC_PORT(1)));
 
         hook = ACCESS_ONCE(pv_rtc_handler);
         if ( hook )
-            hook(currd->arch.cmos_idx & 0x7f, data);
+            hook(idx, data);
 
         spin_lock_irqsave(&rtc_lock, flags);
-        outb(currd->arch.cmos_idx & 0x7f, RTC_PORT(0));
-        outb(data, RTC_PORT(1));
+        outb(idx, port - 1);
+        outb(data, port);
         spin_unlock_irqrestore(&rtc_lock, flags);
         break;
 
     default:
         ASSERT_UNREACHABLE();
+        break;
     }
+}
+
+static enum {
+    WALLCLOCK_UNSET,
+    WALLCLOCK_XEN,
+    WALLCLOCK_CMOS,
+    WALLCLOCK_EFI,
+} wallclock_source __ro_after_init;
+
+static const char *__init wallclock_type_to_string(void)
+{
+    switch ( wallclock_source )
+    {
+    case WALLCLOCK_XEN:
+        return "XEN";
+
+    case WALLCLOCK_CMOS:
+        return "CMOS RTC";
+
+    case WALLCLOCK_EFI:
+        return "EFI";
+
+    case WALLCLOCK_UNSET:
+        return "UNSET";
+    }
+
+    ASSERT_UNREACHABLE();
+    return "";
+}
+
+static int __init cf_check parse_wallclock(const char *arg)
+{
+    wallclock_source = WALLCLOCK_UNSET;
+
+    if ( !arg )
+        return -EINVAL;
+
+    if ( !strcmp("auto", arg) )
+        ASSERT(wallclock_source == WALLCLOCK_UNSET);
+    else if ( !strcmp("xen", arg) )
+    {
+        if ( !xen_guest )
+            return -EINVAL;
+
+        wallclock_source = WALLCLOCK_XEN;
+    }
+    else if ( !strcmp("cmos", arg) )
+        wallclock_source = WALLCLOCK_CMOS;
+    else if ( !strcmp("efi", arg) )
+        /*
+         * Checking if run-time services are available must be done after
+         * command line parsing.
+         */
+        wallclock_source = WALLCLOCK_EFI;
+    else
+        return -EINVAL;
+
+    return 0;
+}
+custom_param("wallclock", parse_wallclock);
+
+static void __init probe_wallclock(void)
+{
+    ASSERT(wallclock_source == WALLCLOCK_UNSET);
+
+    if ( xen_guest )
+    {
+        wallclock_source = WALLCLOCK_XEN;
+        return;
+    }
+    if ( cmos_rtc_probe() )
+    {
+        wallclock_source = WALLCLOCK_CMOS;
+        return;
+    }
+    if ( efi_enabled(EFI_RS) && efi_get_time() )
+    {
+        wallclock_source = WALLCLOCK_EFI;
+        return;
+    }
+
+    panic("No usable wallclock found, probed:%s%s%s\n%s",
+          !opt_cmos_rtc_probe && !efi_enabled(EFI_RS) ? " None" : "",
+          opt_cmos_rtc_probe ? " CMOS" : "",
+          efi_enabled(EFI_RS) ? " EFI" : "",
+          !opt_cmos_rtc_probe
+              ? "Try with command line option \"cmos-rtc-probe\"\n"
+              : !efi_enabled(EFI_RS)
+                  ? "System must be booted from EFI\n"
+                  : "");
 }
 
 static unsigned long get_wallclock_time(void)
 {
-#ifdef CONFIG_XEN_GUEST
-    if ( xen_guest )
+    switch ( wallclock_source )
     {
-        struct shared_info *sh_info = XEN_shared_info;
-        uint32_t wc_version;
-        uint64_t wc_sec;
+    case WALLCLOCK_XEN:
+        return read_xen_wallclock();
 
-        do {
-            wc_version = sh_info->wc_version & ~1;
-            smp_rmb();
+    case WALLCLOCK_CMOS:
+        return cmos_rtc_read();
 
-            wc_sec  = sh_info->wc_sec;
-            smp_rmb();
-        } while ( wc_version != sh_info->wc_version );
+    case WALLCLOCK_EFI:
+        return efi_get_time();
 
-        return wc_sec + read_xen_timer() / 1000000000;
+    case WALLCLOCK_UNSET:
+        /* Unexpected state - handled by the ASSERT_UNREACHABLE() below. */
+        break;
     }
-#endif
 
-    return get_cmos_time();
+    ASSERT_UNREACHABLE();
+    return 0;
 }
 
 /***************************************************************************
@@ -1357,8 +1649,13 @@ s_time_t get_s_time_fixed(u64 at_tsc)
         tsc = at_tsc;
     else
         tsc = rdtsc_ordered();
-    delta = tsc - t->stamp.local_tsc;
-    return t->stamp.local_stime + scale_delta(delta, &t->tsc_scale);
+
+    if ( likely(tsc >= t->stamp.local_tsc) )
+        delta = scale_delta(tsc - t->stamp.local_tsc, &t->tsc_scale);
+    else
+        delta = -scale_delta(t->stamp.local_tsc - tsc, &t->tsc_scale);
+
+    return t->stamp.local_stime + delta;
 }
 
 s_time_t get_s_time(void)
@@ -1373,18 +1670,14 @@ uint64_t tsc_ticks2ns(uint64_t ticks)
     return scale_delta(ticks, &t->tsc_scale);
 }
 
-static void __update_vcpu_system_time(struct vcpu *v, int force)
+static void collect_time_info(const struct vcpu *v,
+                              struct vcpu_time_info *u)
 {
-    const struct cpu_time *t;
-    struct vcpu_time_info *u, _u = {};
-    struct domain *d = v->domain;
+    const struct cpu_time *t = &this_cpu(cpu_time);
+    const struct domain *d = v->domain;
     s_time_t tsc_stamp;
 
-    if ( v->vcpu_info == NULL )
-        return;
-
-    t = &this_cpu(cpu_time);
-    u = &vcpu_info(v, time);
+    memset(u, 0, sizeof(*u));
 
     if ( d->arch.vtsc )
     {
@@ -1392,7 +1685,7 @@ static void __update_vcpu_system_time(struct vcpu *v, int force)
 
         if ( is_hvm_domain(d) )
         {
-            struct pl_time *pl = v->domain->arch.hvm.pl_time;
+            const struct pl_time *pl = d->arch.hvm.pl_time;
 
             stime += pl->stime_offset + v->arch.hvm.stime_offset;
             if ( stime >= 0 )
@@ -1403,27 +1696,27 @@ static void __update_vcpu_system_time(struct vcpu *v, int force)
         else
             tsc_stamp = gtime_to_gtsc(d, stime);
 
-        _u.tsc_to_system_mul = d->arch.vtsc_to_ns.mul_frac;
-        _u.tsc_shift         = d->arch.vtsc_to_ns.shift;
+        u->tsc_to_system_mul = d->arch.vtsc_to_ns.mul_frac;
+        u->tsc_shift         = d->arch.vtsc_to_ns.shift;
     }
     else
     {
         if ( is_hvm_domain(d) && hvm_tsc_scaling_supported )
         {
             tsc_stamp            = hvm_scale_tsc(d, t->stamp.local_tsc);
-            _u.tsc_to_system_mul = d->arch.vtsc_to_ns.mul_frac;
-            _u.tsc_shift         = d->arch.vtsc_to_ns.shift;
+            u->tsc_to_system_mul = d->arch.vtsc_to_ns.mul_frac;
+            u->tsc_shift         = d->arch.vtsc_to_ns.shift;
         }
         else
         {
             tsc_stamp            = t->stamp.local_tsc;
-            _u.tsc_to_system_mul = t->tsc_scale.mul_frac;
-            _u.tsc_shift         = t->tsc_scale.shift;
+            u->tsc_to_system_mul = t->tsc_scale.mul_frac;
+            u->tsc_shift         = t->tsc_scale.shift;
         }
     }
 
-    _u.tsc_timestamp = tsc_stamp;
-    _u.system_time   = t->stamp.local_stime;
+    u->tsc_timestamp = tsc_stamp;
+    u->system_time   = t->stamp.local_stime;
 
     /*
      * It's expected that domains cope with this bit changing on every
@@ -1431,10 +1724,23 @@ static void __update_vcpu_system_time(struct vcpu *v, int force)
      * or if it further requires monotonicity checks with other vcpus.
      */
     if ( clocksource_is_tsc() )
-        _u.flags |= XEN_PVCLOCK_TSC_STABLE_BIT;
+        u->flags |= XEN_PVCLOCK_TSC_STABLE_BIT;
 
     if ( is_hvm_domain(d) )
-        _u.tsc_timestamp += v->arch.hvm.cache_tsc_offset;
+        u->tsc_timestamp += v->arch.hvm.cache_tsc_offset;
+}
+
+static void __update_vcpu_system_time(struct vcpu *v, int force)
+{
+    struct vcpu_time_info *u, _u;
+    const struct domain *d = v->domain;
+
+    if ( !v->vcpu_info_area.map )
+        return;
+
+    u = &vcpu_info(v, time);
+
+    collect_time_info(v, &_u);
 
     /* Don't bother unless timestamp record has changed or we are forced. */
     _u.version = u->version; /* make versions match for memcmp test */
@@ -1455,11 +1761,33 @@ static void __update_vcpu_system_time(struct vcpu *v, int force)
         v->arch.pv.pending_system_time = _u;
 }
 
+static void write_time_guest_area(struct vcpu_time_info *map,
+                                  const struct vcpu_time_info *src)
+{
+    /* 1. Update userspace version. */
+    write_atomic(&map->version, src->version);
+    smp_wmb();
+
+    /* 2. Update all other userspace fields. */
+    *map = *src;
+
+    /* 3. Update userspace version again. */
+    smp_wmb();
+    write_atomic(&map->version, version_update_end(src->version));
+}
+
 bool update_secondary_system_time(struct vcpu *v,
                                   struct vcpu_time_info *u)
 {
     XEN_GUEST_HANDLE(vcpu_time_info_t) user_u = v->arch.time_info_guest;
+    struct vcpu_time_info *map = v->arch.time_guest_area.map;
     struct guest_memory_policy policy = { .nested_guest_mode = false };
+
+    if ( map )
+    {
+        write_time_guest_area(map, u);
+        return true;
+    }
 
     if ( guest_handle_is_null(user_u) )
         return true;
@@ -1493,6 +1821,16 @@ void update_vcpu_system_time(struct vcpu *v)
 void force_update_vcpu_system_time(struct vcpu *v)
 {
     __update_vcpu_system_time(v, 1);
+}
+
+void force_update_secondary_system_time(struct vcpu *v,
+                                        struct vcpu_time_info *map)
+{
+    struct vcpu_time_info u;
+
+    collect_time_info(v, &u);
+    u.version = -1; /* Compensate for version_update_end(). */
+    write_time_guest_area(map, &u);
 }
 
 static void update_domain_rtc(void)
@@ -1621,7 +1959,7 @@ static void cf_check local_time_calibration(void)
      * Weirdness can happen if we lose sync with the platform timer.
      * We could be smarter here: resync platform timer with local timer?
      */
-    if ( ((s64)stime_elapsed64 < (EPOCH / 2)) )
+    if ( ((int64_t)stime_elapsed64 < (EPOCH / 2)) )
         goto out;
 
     /*
@@ -1643,8 +1981,8 @@ static void cf_check local_time_calibration(void)
      * This allows us to binary shift a 32-bit tsc_elapsed such that:
      * stime_elapsed < tsc_elapsed <= 2*stime_elapsed
      */
-    while ( ((u32)stime_elapsed64 != stime_elapsed64) ||
-            ((s32)stime_elapsed64 < 0) )
+    while ( ((uint32_t)stime_elapsed64 != stime_elapsed64) ||
+            ((int32_t)stime_elapsed64 < 0) )
     {
         stime_elapsed64 >>= 1;
         tsc_elapsed64   >>= 1;
@@ -2040,14 +2378,8 @@ void init_percpu_time(void)
         }
         else if ( adj != tsc_adjust[socket] )
         {
-            static bool __read_mostly warned;
-
-            if ( !warned )
-            {
-                warned = true;
-                printk(XENLOG_WARNING
-                       "Differing TSC ADJUST values within socket(s) - fixing all\n");
-            }
+            printk_once(XENLOG_WARNING
+                        "Differing TSC ADJUST values within socket(s) - fixing all\n");
             wrmsrl(MSR_IA32_TSC_ADJUST, tsc_adjust[socket]);
         }
     }
@@ -2102,7 +2434,7 @@ static void __init tsc_check_writability(void)
 
         write_tsc(tsc | (1ULL << 32));
         tmp = rdtsc();
-        if ( ABS((s64)tmp - (s64)tmp2) < (1LL << 31) )
+        if ( ABS((int64_t)tmp - (int64_t)tmp2) < (1LL << 31) )
             what = "only partially";
     }
     else
@@ -2231,6 +2563,18 @@ int __init init_xen_time(void)
 
     open_softirq(TIME_CALIBRATE_SOFTIRQ, local_time_calibration);
 
+    /*
+     * EFI run time services can be disabled from the command line, hence the
+     * check for them cannot be done as part of the wallclock option parsing.
+     */
+    if ( wallclock_source == WALLCLOCK_EFI && !efi_enabled(EFI_RS) )
+        wallclock_source = WALLCLOCK_UNSET;
+
+    if ( wallclock_source == WALLCLOCK_UNSET )
+        probe_wallclock();
+
+    printk(XENLOG_INFO "Wallclock source: %s\n", wallclock_type_to_string());
+
     /* NB. get_wallclock_time() can take over one second to execute. */
     do_settime(get_wallclock_time(), 0, NOW());
 
@@ -2274,6 +2618,8 @@ void __init early_time_init(void)
     }
 
     preinit_pit();
+    probe_pit_alias();
+
     tmp = init_platform_timer();
     plt_tsc.frequency = tmp;
 
@@ -2288,7 +2634,7 @@ void __init early_time_init(void)
 }
 
 /* keep pit enabled for pit_broadcast working while cpuidle enabled */
-static int _disable_pit_irq(void(*hpet_broadcast_setup)(void))
+static int _disable_pit_irq(bool init)
 {
     int ret = 1;
 
@@ -2303,13 +2649,13 @@ static int _disable_pit_irq(void(*hpet_broadcast_setup)(void))
      */
     if ( cpuidle_using_deep_cstate() && !boot_cpu_has(X86_FEATURE_ARAT) )
     {
-        hpet_broadcast_setup();
+        init ? hpet_broadcast_init() : hpet_broadcast_resume();
         if ( !hpet_broadcast_is_available() )
         {
             if ( xen_cpuidle > 0 )
             {
-                printk("%ps() failed, turning to PIT broadcast\n",
-                       hpet_broadcast_setup);
+                printk("hpet_broadcast_%s() failed, turning to PIT broadcast\n",
+                       init ? "init" : "resume");
                 return -1;
             }
             ret = 0;
@@ -2317,7 +2663,8 @@ static int _disable_pit_irq(void(*hpet_broadcast_setup)(void))
     }
 
     /* Disable PIT CH0 timer interrupt. */
-    outb_p(0x30, PIT_MODE);
+    outb_p(PIT_TCW_CH(0) | PIT_RW_LSB_MSB | PIT_MODE_EOC | PIT_BINARY,
+           PIT_MODE);
     outb_p(0, PIT_CH0);
     outb_p(0, PIT_CH0);
 
@@ -2326,12 +2673,14 @@ static int _disable_pit_irq(void(*hpet_broadcast_setup)(void))
 
 static int __init cf_check disable_pit_irq(void)
 {
-    if ( !_disable_pit_irq(hpet_broadcast_init) )
+    if ( !_disable_pit_irq(true) )
     {
         xen_cpuidle = 0;
         printk("CPUIDLE: disabled due to no HPET. "
                "Force enable with 'cpuidle'.\n");
     }
+
+    hpet_broadcast_late_init();
 
     return 0;
 }
@@ -2365,7 +2714,9 @@ static long cmos_utc_offset; /* in seconds */
 
 int time_suspend(void)
 {
-    if ( smp_processor_id() == 0 )
+    unsigned int cpu = smp_processor_id();
+
+    if ( cpu == 0 )
     {
         cmos_utc_offset = -get_wallclock_time();
         cmos_utc_offset += get_sec();
@@ -2376,7 +2727,7 @@ int time_suspend(void)
     }
 
     /* Better to cancel calibration timer for accuracy. */
-    clear_bit(TIME_CALIBRATE_SOFTIRQ, &softirq_pending(smp_processor_id()));
+    clear_bit(TIME_CALIBRATE_SOFTIRQ, &softirq_pending(cpu));
 
     return 0;
 }
@@ -2387,7 +2738,7 @@ int time_resume(void)
 
     resume_platform_timer();
 
-    if ( !_disable_pit_irq(hpet_broadcast_resume) )
+    if ( !_disable_pit_irq(false) )
         BUG();
 
     init_percpu_time();
@@ -2421,17 +2772,18 @@ int hwdom_pit_access(struct ioreq *ioreq)
     case PIT_MODE:
         if ( ioreq->dir == IOREQ_READ )
             return 0; /* urk! */
-        switch ( ioreq->data & 0xc0 )
+        switch ( ioreq->data & PIT_TCW_CH(3) )
         {
-        case 0xc0: /* Read Back */
-            if ( ioreq->data & 0x08 )    /* Select Channel 2? */
-                outb(ioreq->data & 0xf8, PIT_MODE);
-            if ( !(ioreq->data & 0x06) ) /* Select Channel 0/1? */
+        case PIT_RDB: /* Read Back */
+            if ( ioreq->data & PIT_RDB_CH2 )
+                outb(ioreq->data & ~(PIT_RDB_CH1 | PIT_RDB_CH0 | PIT_RDB_RSVD),
+                     PIT_MODE);
+            if ( !(ioreq->data & (PIT_RDB_CH0 | PIT_RDB_CH1)) )
                 return 1; /* no - we're done */
             /* Filter Channel 2 and reserved bit 0. */
-            ioreq->data &= ~0x09;
+            ioreq->data &= ~(PIT_RDB_CH2 | PIT_RDB_RSVD);
             return 0; /* emulate ch0/1 readback */
-        case 0x80: /* Select Counter 2 */
+        case PIT_TCW_CH(2):
             outb(ioreq->data, PIT_MODE);
             return 1;
         }
@@ -2476,7 +2828,7 @@ static int __init cf_check tsc_parse(const char *s)
 }
 custom_param("tsc", tsc_parse);
 
-u64 gtime_to_gtsc(struct domain *d, u64 time)
+uint64_t gtime_to_gtsc(const struct domain *d, uint64_t time)
 {
     if ( !is_hvm_domain(d) )
     {
@@ -2488,7 +2840,7 @@ u64 gtime_to_gtsc(struct domain *d, u64 time)
     return scale_delta(time, &d->arch.ns_to_vtsc);
 }
 
-u64 gtsc_to_gtime(struct domain *d, u64 tsc)
+uint64_t gtsc_to_gtime(const struct domain *d, uint64_t tsc)
 {
     u64 time = scale_delta(tsc, &d->arch.vtsc_to_ns);
 
@@ -2538,13 +2890,13 @@ void tsc_get_info(struct domain *d, uint32_t *tsc_mode,
     {
         uint64_t tsc;
 
-    case TSC_MODE_NEVER_EMULATE:
+    case XEN_CPUID_TSC_MODE_NEVER_EMULATE:
         *elapsed_nsec = *gtsc_khz = 0;
         break;
-    case TSC_MODE_DEFAULT:
+    case XEN_CPUID_TSC_MODE_DEFAULT:
         if ( d->arch.vtsc )
         {
-    case TSC_MODE_ALWAYS_EMULATE:
+    case XEN_CPUID_TSC_MODE_ALWAYS_EMULATE:
             *elapsed_nsec = get_s_time() - d->arch.vtsc_offset;
             *gtsc_khz = d->arch.tsc_khz;
             break;
@@ -2581,8 +2933,8 @@ int tsc_set_info(struct domain *d,
 
     switch ( tsc_mode )
     {
-    case TSC_MODE_DEFAULT:
-    case TSC_MODE_ALWAYS_EMULATE:
+    case XEN_CPUID_TSC_MODE_DEFAULT:
+    case XEN_CPUID_TSC_MODE_ALWAYS_EMULATE:
         d->arch.vtsc_offset = get_s_time() - elapsed_nsec;
         d->arch.tsc_khz = gtsc_khz ?: cpu_khz;
         set_time_scale(&d->arch.vtsc_to_ns, d->arch.tsc_khz * 1000UL);
@@ -2594,12 +2946,12 @@ int tsc_set_info(struct domain *d,
          * When a guest is created, gtsc_khz is passed in as zero, making
          * d->arch.tsc_khz == cpu_khz. Thus no need to check incarnation.
          */
-        if ( tsc_mode == TSC_MODE_DEFAULT && host_tsc_is_safe() &&
+        if ( tsc_mode == XEN_CPUID_TSC_MODE_DEFAULT && host_tsc_is_safe() &&
              (d->arch.tsc_khz == cpu_khz ||
               (is_hvm_domain(d) &&
                hvm_get_tsc_scaling_ratio(d->arch.tsc_khz))) )
         {
-    case TSC_MODE_NEVER_EMULATE:
+    case XEN_CPUID_TSC_MODE_NEVER_EMULATE:
             d->arch.vtsc = 0;
             break;
         }
@@ -2667,7 +3019,8 @@ static void cf_check dump_softtsc(unsigned char key)
 
     for_each_domain ( d )
     {
-        if ( is_hardware_domain(d) && d->arch.tsc_mode == TSC_MODE_DEFAULT )
+        if ( is_hardware_domain(d) &&
+             d->arch.tsc_mode == XEN_CPUID_TSC_MODE_DEFAULT )
             continue;
         printk("dom%u%s: mode=%d",d->domain_id,
                 is_hvm_domain(d) ? "(hvm)" : "", d->arch.tsc_mode);

@@ -52,7 +52,8 @@ out:
 }
 
 int libxl_console_exec(libxl_ctx *ctx, uint32_t domid, int cons_num,
-                       libxl_console_type type, int notify_fd)
+                       libxl_console_type type, int notify_fd,
+                       char* escape_character)
 {
     GC_INIT(ctx);
     char *p = GCSPRINTF("%s/xenconsole", libxl__private_bindir_path());
@@ -75,14 +76,25 @@ int libxl_console_exec(libxl_ctx *ctx, uint32_t domid, int cons_num,
         goto out;
     }
 
+    char *args[] = {
+        p, domid_s, "--num", cons_num_s, "--type", cons_type_s,
+        NULL, NULL, NULL, NULL, /* start-notify-fd, escape */
+        NULL, /* list terminator - do not use */
+    };
+    char **args_extra = args + 6;
+
     if (notify_fd != -1) {
         notify_fd_s = GCSPRINTF("%d", notify_fd);
-        execl(p, p, domid_s, "--num", cons_num_s, "--type", cons_type_s,
-              "--start-notify-fd", notify_fd_s, (void *)NULL);
-    } else {
-        execl(p, p, domid_s, "--num", cons_num_s, "--type", cons_type_s,
-              (void *)NULL);
+        *args_extra++ = "--start-notify-fd";
+        *args_extra++ = notify_fd_s;
     }
+
+    if (escape_character) {
+        *args_extra++ = "--escape";
+        *args_extra++ = escape_character;
+    }
+
+    execv(p, args);
 
 out:
     GC_FREE;
@@ -156,7 +168,8 @@ out:
     return rc;
 }
 
-int libxl_primary_console_exec(libxl_ctx *ctx, uint32_t domid_vm, int notify_fd)
+int libxl_primary_console_exec(libxl_ctx *ctx, uint32_t domid_vm, int notify_fd,
+                               char* escape_character)
 {
     uint32_t domid;
     int cons_num;
@@ -165,7 +178,8 @@ int libxl_primary_console_exec(libxl_ctx *ctx, uint32_t domid_vm, int notify_fd)
 
     rc = libxl__primary_console_find(ctx, domid_vm, &domid, &cons_num, &type);
     if ( rc ) return rc;
-    return libxl_console_exec(ctx, domid, cons_num, type, notify_fd);
+    return libxl_console_exec(ctx, domid, cons_num, type, notify_fd,
+                              escape_character);
 }
 
 int libxl_primary_console_get_tty(libxl_ctx *ctx, uint32_t domid_vm,
@@ -337,13 +351,35 @@ int libxl__device_console_add(libxl__gc *gc, uint32_t domid,
         flexarray_append(front, "protocol");
         flexarray_append(front, LIBXL_XENCONSOLE_PROTOCOL);
     }
-    libxl__device_generic_add(gc, XBT_NULL, device,
-                              libxl__xs_kvs_of_flexarray(gc, back),
-                              libxl__xs_kvs_of_flexarray(gc, front),
-                              libxl__xs_kvs_of_flexarray(gc, ro_front));
-    rc = 0;
+    rc = libxl__device_generic_add(gc, XBT_NULL, device,
+                                   libxl__xs_kvs_of_flexarray(gc, back),
+                                   libxl__xs_kvs_of_flexarray(gc, front),
+                                   libxl__xs_kvs_of_flexarray(gc, ro_front));
 out:
     return rc;
+}
+
+int libxl_console_add_xenstore(libxl_ctx *ctx, uint32_t domid, uint32_t backend,
+                               unsigned int evtch, unsigned long gfn,
+                               const libxl_asyncop_how *ao_how)
+{
+    AO_CREATE(ctx, domid, ao_how);
+    int rc;
+    libxl__device_console console = { .backend_domid = backend,
+                                      .output = "pty",
+                                      .consback = LIBXL__CONSOLE_BACKEND_XENCONSOLED,
+                                    };
+    libxl__domain_build_state state = { .console_port = evtch,
+                                        .console_mfn = gfn,
+                                      };
+    libxl__device device = { };
+
+    rc = libxl__device_console_add(gc, domid, &console, &state, &device);
+    if (rc < 0)
+        LOGED(ERROR, domid, "Adding console Xenstore entries");
+
+    libxl__ao_complete(egc, ao, rc);
+    return AO_INPROGRESS;
 }
 
 int libxl__device_vuart_add(libxl__gc *gc, uint32_t domid,
@@ -628,6 +664,8 @@ int libxl_device_channel_getinfo(libxl_ctx *ctx, uint32_t domid,
               */
              if (!val) val = "/NO-SUCH-PATH";
              channelinfo->u.pty.path = strdup(val);
+             if (channelinfo->u.pty.path == NULL)
+                 abort();
              break;
          default:
              break;
@@ -736,12 +774,17 @@ libxl_xen_console_reader *
 {
     GC_INIT(ctx);
     libxl_xen_console_reader *cr;
-    unsigned int size = 16384;
+    /*
+     * We want xen to fill the buffer in as few hypercalls as
+     * possible, but xen will not nul-terminate it.  The default size
+     * of Xen's console buffer is 16384.  Leave one byte at the end
+     * for the null character.
+     */
+    unsigned int size = 16384 + 1;
 
     cr = libxl__zalloc(NOGC, sizeof(libxl_xen_console_reader));
-    cr->buffer = libxl__zalloc(NOGC, size);
+    cr->buffer = libxl__malloc(NOGC, size);
     cr->size = size;
-    cr->count = size;
     cr->clear = clear;
     cr->incremental = 1;
 
@@ -749,23 +792,35 @@ libxl_xen_console_reader *
     return cr;
 }
 
-/* return values:                                          *line_r
- *   1          success, whole line obtained from buffer    non-0
- *   0          no more lines available right now           0
- *   negative   error code ERROR_*                          0
- * On success *line_r is updated to point to a nul-terminated
- * string which is valid until the next call on the same console
- * reader.  The libxl caller may overwrite parts of the string
- * if it wishes. */
+/*
+ * Copy part of the console ring into a buffer
+ *
+ * Return values:
+ *   1: Success, *buff points to the string
+ *   0: No more lines available right now
+ *   -ERROR_* on error
+ *
+ * Despite its name, libxl_xen_console_read_line() does not
+ * necessarily read a complete line.  It attempts to fill the buffer
+ * with as many characters as it can accommodate.  The buffer pointed
+ * to by *buff is updated to contain a nul-terminated string.  This
+ * string remains valid until the next call to
+ * libxl_xen_console_read_line() on the same console reader.
+ */
 int libxl_xen_console_read_line(libxl_ctx *ctx,
                                 libxl_xen_console_reader *cr,
-                                char **line_r)
+                                char **buff)
 {
     int ret;
+    /*
+     * Number of chars to copy into the buffer.  xc_readconsolering()
+     * does not add a null character at the end, so leave a space for
+     * us to add it.
+     */
+    unsigned int nr_chars = cr->size - 1;
     GC_INIT(ctx);
 
-    memset(cr->buffer, 0, cr->size);
-    ret = xc_readconsolering(ctx->xch, cr->buffer, &cr->count,
+    ret = xc_readconsolering(ctx->xch, cr->buffer, &nr_chars,
                              cr->clear, cr->incremental, &cr->index);
     if (ret < 0) {
         LOGE(ERROR, "reading console ring buffer");
@@ -773,11 +828,12 @@ int libxl_xen_console_read_line(libxl_ctx *ctx,
         return ERROR_FAIL;
     }
     if (!ret) {
-        if (cr->count) {
-            *line_r = cr->buffer;
+        if (nr_chars) {
+            cr->buffer[nr_chars] = '\0';
+            *buff = cr->buffer;
             ret = 1;
         } else {
-            *line_r = NULL;
+            *buff = NULL;
             ret = 0;
         }
     }

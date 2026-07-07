@@ -1,19 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * include/asm-x86/hvm/monitor.h
  *
  * Arch-specific hardware virtual machine monitor abstractions.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef __ASM_X86_HVM_MONITOR_H__
@@ -36,7 +25,7 @@ bool hvm_monitor_cr(unsigned int index, unsigned long value,
                     unsigned long old);
 #define hvm_monitor_crX(cr, new, old) \
                         hvm_monitor_cr(VM_EVENT_X86_##cr, new, old)
-bool hvm_monitor_msr(unsigned int msr, uint64_t value, uint64_t old_value);
+bool hvm_monitor_msr(unsigned int msr, uint64_t new_value, uint64_t old_value);
 void hvm_monitor_descriptor_access(uint64_t exit_info,
                                    uint64_t vmx_exit_qualification,
                                    uint8_t descriptor, bool is_write);
@@ -53,6 +42,9 @@ bool hvm_monitor_check_p2m(unsigned long gla, gfn_t gfn, uint32_t pfec,
                            uint16_t kind);
 int hvm_monitor_vmexit(unsigned long exit_reason,
                        unsigned long exit_qualification);
+
+int hvm_monitor_io(unsigned int port, unsigned int bytes,
+                   bool in, bool str);
 
 #endif /* __ASM_X86_HVM_MONITOR_H__ */
 

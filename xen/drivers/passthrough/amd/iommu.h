@@ -16,8 +16,8 @@
  * You should have received a copy of the GNU General Public License
  * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
-#ifndef AMD_IOMMU_H
-#define AMD_IOMMU_H
+#ifndef DRIVERS__PASSTHROUGH__AMD__IOMMU_H
+#define DRIVERS__PASSTHROUGH__AMD__IOMMU_H
 
 #include <xen/init.h>
 #include <xen/types.h>
@@ -138,63 +138,14 @@ struct ivrs_mappings {
 extern unsigned int ivrs_bdf_entries;
 extern u8 ivhd_type;
 
-struct ivrs_mappings *get_ivrs_mappings(u16 seg);
-int iterate_ivrs_mappings(int (*)(u16 seg, struct ivrs_mappings *));
-int iterate_ivrs_entries(int (*)(const struct amd_iommu *,
-                                 struct ivrs_mappings *, uint16_t));
+struct ivrs_mappings *get_ivrs_mappings(uint16_t seg);
+int iterate_ivrs_mappings(int (*handler)(uint16_t seg,
+                                         struct ivrs_mappings *map));
+int iterate_ivrs_entries(int (*handler)(const struct amd_iommu *iommu,
+                                        struct ivrs_mappings *map,
+                                        uint16_t bdf));
 
-/* iommu tables in guest space */
-struct mmio_reg {
-    uint32_t    lo;
-    uint32_t    hi;
-};
-
-struct guest_dev_table {
-    struct mmio_reg         reg_base;
-    uint32_t                size;
-};
-
-struct guest_buffer {
-    struct mmio_reg         reg_base;
-    struct mmio_reg         reg_tail;
-    struct mmio_reg         reg_head;
-    uint32_t                size;
-};
-
-struct guest_iommu_msi {
-    uint8_t                 vector;
-    uint8_t                 dest;
-    uint8_t                 dest_mode;
-    uint8_t                 delivery_mode;
-    uint8_t                 trig_mode;
-};
-
-/* virtual IOMMU structure */
-struct guest_iommu {
-
-    struct domain          *domain;
-    spinlock_t              lock;
-    bool_t                  enabled;
-
-    struct guest_dev_table  dev_table;
-    struct guest_buffer     cmd_buffer;
-    struct guest_buffer     event_log;
-    struct guest_buffer     ppr_log;
-
-    struct tasklet          cmd_buffer_tasklet;
-
-    uint64_t                mmio_base;             /* MMIO base address */
-
-    /* MMIO regs */
-    union amd_iommu_control reg_ctrl;              /* MMIO offset 0018h */
-    struct mmio_reg         reg_status;            /* MMIO offset 2020h */
-    union amd_iommu_ext_features reg_ext_feature;  /* MMIO offset 0030h */
-
-    /* guest interrupt settings */
-    struct guest_iommu_msi  msi;
-};
-
-extern bool_t iommuv2_enabled;
+extern bool iommuv2_enabled;
 
 struct acpi_ivrs_hardware;
 
@@ -226,7 +177,7 @@ struct acpi_ivrs_hardware;
 /* amd-iommu-detect functions */
 int amd_iommu_get_ivrs_dev_entries(void);
 int amd_iommu_get_supported_ivhd_type(void);
-int amd_iommu_detect_one_acpi(const struct acpi_ivrs_hardware *);
+int amd_iommu_detect_one_acpi(const struct acpi_ivrs_hardware *ivhd_block);
 int amd_iommu_detect_acpi(void);
 void get_iommu_features(struct amd_iommu *iommu);
 
@@ -248,7 +199,7 @@ int __must_check cf_check amd_iommu_unmap_page(
     struct domain *d, dfn_t dfn, unsigned int order,
     unsigned int *flush_flags);
 int __must_check amd_iommu_alloc_root(struct domain *d);
-int amd_iommu_reserve_domain_unity_map(struct domain *domain,
+int amd_iommu_reserve_domain_unity_map(struct domain *d,
                                        const struct ivrs_unity_map *map,
                                        unsigned int flag);
 int amd_iommu_reserve_domain_unity_unmap(struct domain *d,
@@ -282,7 +233,7 @@ void amd_iommu_flush_all_pages(struct domain *d);
 void amd_iommu_flush_pages(struct domain *d, unsigned long dfn,
                            unsigned int order);
 void amd_iommu_flush_iotlb(u8 devfn, const struct pci_dev *pdev,
-                           uint64_t gaddr, unsigned int order);
+                           daddr_t daddr, unsigned int order);
 void amd_iommu_flush_device(struct amd_iommu *iommu, uint16_t bdf,
                             domid_t domid);
 void amd_iommu_flush_intremap(struct amd_iommu *iommu, uint16_t bdf);
@@ -295,9 +246,10 @@ struct amd_iommu *find_iommu_for_device(int seg, int bdf);
 bool cf_check iov_supports_xt(void);
 int amd_iommu_setup_ioapic_remapping(void);
 void *amd_iommu_alloc_intremap_table(
-    const struct amd_iommu *, unsigned long **, unsigned int nr);
+    const struct amd_iommu *iommu, unsigned long **inuse_map, unsigned int nr);
 int cf_check amd_iommu_free_intremap_table(
-    const struct amd_iommu *, struct ivrs_mappings *, uint16_t);
+    const struct amd_iommu *iommu, struct ivrs_mappings *ivrs_mapping,
+    uint16_t bdf);
 unsigned int amd_iommu_intremap_table_order(
     const void *irt, const struct amd_iommu *iommu);
 void cf_check amd_iommu_ioapic_update_ire(
@@ -340,18 +292,7 @@ extern unsigned long *shared_intremap_inuse;
 void cf_check amd_iommu_resume(void);
 int __must_check cf_check amd_iommu_suspend(void);
 void cf_check amd_iommu_crash_shutdown(void);
-
-/* guest iommu support */
-#ifdef CONFIG_HVM
-void amd_iommu_send_guest_cmd(struct amd_iommu *iommu, u32 cmd[]);
-void guest_iommu_add_ppr_log(struct domain *d, u32 entry[]);
-void guest_iommu_add_event_log(struct domain *d, u32 entry[]);
-int guest_iommu_init(struct domain* d);
-void guest_iommu_destroy(struct domain *d);
-int guest_iommu_set_base(struct domain *d, uint64_t base);
-#else
-static inline void guest_iommu_add_ppr_log(struct domain *d, uint32_t entry[]) {}
-#endif
+void cf_check amd_iommu_quiesce(void);
 
 static inline u32 get_field_from_reg_u32(u32 reg_value, u32 mask, u32 shift)
 {
@@ -401,9 +342,9 @@ static inline void __free_amd_iommu_tables(void *table, unsigned int order)
     free_xenheap_pages(table, order);
 }
 
-static inline int iommu_has_cap(struct amd_iommu *iommu, uint32_t bit)
+static inline bool iommu_has_cap(const struct amd_iommu *iommu, unsigned int bit)
 {
-    return !!(iommu->cap.header & (1u << bit));
+    return iommu->cap.header & (1u << bit);
 }
 
 /* access device id field from iommu cmd */
@@ -432,4 +373,4 @@ static inline void iommu_set_addr_hi_to_reg(uint32_t *reg, uint32_t addr)
                          IOMMU_REG_BASE_ADDR_HIGH_SHIFT, reg);
 }
 
-#endif /* AMD_IOMMU_H */
+#endif /* DRIVERS__PASSTHROUGH__AMD__IOMMU_H */

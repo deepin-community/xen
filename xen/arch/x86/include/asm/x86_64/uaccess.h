@@ -9,9 +9,9 @@
  * a secondary mapping installed, which needs to be used for such accesses in
  * the PV case, and will also be used for HVM to avoid extra conditionals.
  */
-#define COMPAT_ARG_XLAT_VIRT_BASE ((void *)ARG_XLAT_START(current) + \
-                                   (PERDOMAIN_ALT_VIRT_START - \
-                                    PERDOMAIN_VIRT_START))
+#define COMPAT_ARG_XLAT_VIRT_BASE ((void *)ARG_XLAT_START(current) - \
+                                   PERDOMAIN_VIRT_START + \
+                                   PERDOMAIN_ALT_VIRT_START)
 #define COMPAT_ARG_XLAT_SIZE      (2*PAGE_SIZE)
 struct vcpu;
 int setup_compat_arg_xlat(struct vcpu *v);
@@ -26,15 +26,16 @@ void free_compat_arg_xlat(struct vcpu *v);
 #define xlat_page_start ((unsigned long)COMPAT_ARG_XLAT_VIRT_BASE)
 #define xlat_page_size  COMPAT_ARG_XLAT_SIZE
 #define xlat_page_left_size(xlat_page_current) \
-    (xlat_page_start + xlat_page_size - xlat_page_current)
+    (xlat_page_start + xlat_page_size - (xlat_page_current))
 
 #define xlat_malloc_init(xlat_page_current)    do { \
-    xlat_page_current = xlat_page_start; \
+    (xlat_page_current) = xlat_page_start; \
 } while (0)
 
 extern void *xlat_malloc(unsigned long *xlat_page_current, size_t size);
 
-#define xlat_malloc_array(_p, _t, _c) ((_t *) xlat_malloc(&_p, sizeof(_t) * _c))
+#define xlat_malloc_array(_p, _t, _c) ((_t *) xlat_malloc(&(_p), \
+                                                          sizeof(_t) * (_c)))
 
 /*
  * Valid if in +ve half of 48-bit address space, or above Xen-reserved area.

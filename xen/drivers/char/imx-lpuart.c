@@ -30,15 +30,13 @@
 #define imx_lpuart_write(uart, off, val) writel((val), (uart)->regs + (off))
 
 static struct imx_lpuart {
-    uint32_t baud, clock_hz, data_bits, parity, stop_bits, fifo_size;
     uint32_t irq;
     char __iomem *regs;
     struct irqaction irqaction;
     struct vuart_info vuart;
 } imx8_com;
 
-static void imx_lpuart_interrupt(int irq, void *data,
-                                 struct cpu_user_regs *regs)
+static void imx_lpuart_interrupt(int irq, void *data)
 {
     struct serial_port *port = data;
     struct imx_lpuart *uart = port->uart;
@@ -48,10 +46,10 @@ static void imx_lpuart_interrupt(int irq, void *data,
     rxcnt = imx_lpuart_read(uart, UARTWATER) >> UARTWATER_RXCNT_OFF;
 
     if ( (sts & UARTSTAT_RDRF) || (rxcnt > 0) )
-	    serial_rx_interrupt(port, regs);
+	    serial_rx_interrupt(port);
 
     if ( sts & UARTSTAT_TDRE )
-	    serial_tx_interrupt(port, regs);
+	    serial_tx_interrupt(port);
 
     imx_lpuart_write(uart, UARTSTAT, sts);
 }
@@ -100,16 +98,6 @@ static void __init imx_lpuart_init_postirq(struct serial_port *port)
     temp |= (UARTCTRL_RIE | UARTCTRL_TIE);
     temp |= UARTCTRL_ILIE;
     imx_lpuart_write(uart, UARTCTRL, temp);
-}
-
-static void imx_lpuart_suspend(struct serial_port *port)
-{
-    BUG();
-}
-
-static void imx_lpuart_resume(struct serial_port *port)
-{
-    BUG();
 }
 
 static int imx_lpuart_tx_ready(struct serial_port *port)
@@ -186,9 +174,6 @@ static void imx_lpuart_stop_tx(struct serial_port *port)
 static struct uart_driver __read_mostly imx_lpuart_driver = {
     .init_preirq = imx_lpuart_init_preirq,
     .init_postirq = imx_lpuart_init_postirq,
-    .endboot = NULL,
-    .suspend = imx_lpuart_suspend,
-    .resume = imx_lpuart_resume,
     .tx_ready = imx_lpuart_tx_ready,
     .putc = imx_lpuart_putc,
     .getc = imx_lpuart_getc,
@@ -204,19 +189,14 @@ static int __init imx_lpuart_init(struct dt_device_node *dev,
     const char *config = data;
     struct imx_lpuart *uart;
     int res;
-    u64 addr, size;
+    paddr_t addr, size;
 
     if ( strcmp(config, "") )
         printk("WARNING: UART configuration is not supported\n");
 
     uart = &imx8_com;
 
-    uart->baud = 115200;
-    uart->data_bits = 8;
-    uart->parity = 0;
-    uart->stop_bits = 1;
-
-    res = dt_device_get_address(dev, 0, &addr, &size);
+    res = dt_device_get_paddr(dev, 0, &addr, &size);
     if ( res )
     {
         printk("imx8-lpuart: Unable to retrieve the base"
@@ -256,7 +236,7 @@ static int __init imx_lpuart_init(struct dt_device_node *dev,
 
 static const struct dt_device_match imx_lpuart_dt_compat[] __initconst =
 {
-    DT_MATCH_COMPATIBLE("fsl,imx8qm-lpuart"),
+    DT_MATCH_COMPATIBLE("fsl,imx8qxp-lpuart"),
     { /* sentinel */ },
 };
 

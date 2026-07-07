@@ -37,7 +37,7 @@
  */
 
 #define MSI_ADDR_BASE_HI            0
-#define MSI_ADDR_BASE_LO            0xfee00000
+#define MSI_ADDR_BASE_LO            0xfee00000U
 #define MSI_ADDR_BASE_MASK          (~0xfffff)
 #define MSI_ADDR_HEADER             MSI_ADDR_BASE_LO
 
@@ -66,63 +66,65 @@ struct msi_info {
 };
 
 struct msi_msg {
-	union {
-		u64	address; /* message address */
-		struct {
-			u32	address_lo; /* message address low 32 bits */
-			u32	address_hi; /* message address high 32 bits */
-		};
-	};
-	u32	data;		/* 16 bits of msi message data */
-	u32	dest32;		/* used when Interrupt Remapping with EIM is enabled */
+    union {
+        uint64_t address; /* message address */
+        struct {
+            uint32_t address_lo; /* message address low 32 bits */
+            uint32_t address_hi; /* message address high 32 bits */
+        };
+    };
+    uint32_t data;        /* 16 bits of msi message data */
+    uint32_t dest32;      /* used when Interrupt Remapping is enabled */
 };
 
 struct irq_desc;
 struct hw_interrupt_type;
 struct msi_desc;
 /* Helper functions */
-extern int pci_enable_msi(struct msi_info *msi, struct msi_desc **desc);
-extern void pci_disable_msi(struct msi_desc *desc);
+extern int pci_enable_msi(struct pci_dev *pdev, struct msi_info *msi,
+                          struct msi_desc **desc);
+extern void pci_disable_msi(struct msi_desc *msi_desc);
 extern int pci_prepare_msix(u16 seg, u8 bus, u8 devfn, bool off);
 extern void pci_cleanup_msi(struct pci_dev *pdev);
-extern int setup_msi_irq(struct irq_desc *, struct msi_desc *);
-extern int __setup_msi_irq(struct irq_desc *, struct msi_desc *,
-                           const struct hw_interrupt_type *);
+extern void pci_disable_msi_all(void);
+extern int setup_msi_irq(struct irq_desc *desc, struct msi_desc *msidesc);
+extern int __setup_msi_irq(struct irq_desc *desc, struct msi_desc *msidesc,
+                           hw_irq_controller *handler);
 extern void teardown_msi_irq(int irq);
 extern int msi_free_vector(struct msi_desc *entry);
 extern int pci_restore_msi_state(struct pci_dev *pdev);
 extern int pci_reset_msix_state(struct pci_dev *pdev);
 
 struct msi_desc {
-	struct msi_attrib {
-		__u8	type;		/* {0: unused, 5h:MSI, 11h:MSI-X} */
-		__u8	pos;		/* Location of the MSI capability */
-		__u8	maskbit	: 1;	/* mask/pending bit supported ?   */
-		__u8	is_64	: 1;	/* Address size: 0=32bit 1=64bit  */
-		__u8	host_masked : 1;
-		__u8	guest_masked : 1;
-		__u16	entry_nr;	/* specific enabled entry 	  */
-	} msi_attrib;
+    struct msi_attrib {
+        uint8_t type;        /* {0: unused, 5h:MSI, 11h:MSI-X} */
+        uint8_t pos;         /* Location of the MSI capability */
+        bool maskbit      : 1; /* mask/pending bit supported ?   */
+        bool is_64        : 1; /* Address size: 0=32bit 1=64bit  */
+        bool host_masked  : 1;
+        bool guest_masked : 1;
+        uint16_t entry_nr;   /* specific enabled entry */
+    } msi_attrib;
 
-	bool irte_initialized;
-	uint8_t gvec;			/* guest vector. valid when pi_desc isn't NULL */
-	const struct pi_desc *pi_desc;	/* pointer to posted descriptor */
+    bool irte_initialized;
+    uint8_t gvec;            /* guest vector. valid when pi_desc isn't NULL */
+    const struct pi_desc *pi_desc; /* pointer to posted descriptor */
 
-	struct list_head list;
+    struct list_head list;
 
-	union {
-		void __iomem *mask_base;/* va for the entry in mask table */
-		struct {
-			unsigned int nvec;/* number of vectors            */
-			unsigned int mpos;/* location of mask register    */
-		} msi;
-		unsigned int hpet_id;   /* HPET (dev is NULL)             */
-	};
-	struct pci_dev *dev;
-	int irq;
-	int remap_index;		/* index in interrupt remapping table */
+    union {
+        void __iomem *mask_base; /* va for the entry in mask table */
+        struct {
+            unsigned int nvec; /* number of vectors */
+            unsigned int mpos; /* location of mask register */
+        } msi;
+        unsigned int hpet_id; /* HPET (dev is NULL) */
+    };
+    struct pci_dev *dev;
+    int irq;
+    int remap_index;         /* index in interrupt remapping table */
 
-	struct msi_msg msg;		/* Last set MSI message */
+    struct msi_msg msg;      /* Last set MSI message (untranslated) */
 };
 
 /*
@@ -133,7 +135,7 @@ struct msi_desc {
 #define MSI_TYPE_HPET    1
 #define MSI_TYPE_IOMMU   2
 
-int msi_maskable_irq(const struct msi_desc *);
+int msi_maskable_irq(const struct msi_desc *entry);
 int msi_free_irq(struct msi_desc *entry);
 
 /*
@@ -146,88 +148,69 @@ int msi_free_irq(struct msi_desc *entry);
  */
 #define NR_HP_RESERVED_VECTORS 	20
 
-#define msi_control_reg(base)		(base + PCI_MSI_FLAGS)
-#define msi_lower_address_reg(base)	(base + PCI_MSI_ADDRESS_LO)
-#define msi_upper_address_reg(base)	(base + PCI_MSI_ADDRESS_HI)
+#define msi_control_reg(base)		((base) + PCI_MSI_FLAGS)
+#define msi_lower_address_reg(base)	((base) + PCI_MSI_ADDRESS_LO)
+#define msi_upper_address_reg(base)	((base) + PCI_MSI_ADDRESS_HI)
 #define msi_data_reg(base, is64bit)	\
-	( (is64bit == 1) ? base+PCI_MSI_DATA_64 : base+PCI_MSI_DATA_32 )
+	((base) + ((is64bit) ? PCI_MSI_DATA_64 : PCI_MSI_DATA_32))
 #define msi_mask_bits_reg(base, is64bit) \
-	( (is64bit == 1) ? base+PCI_MSI_MASK_BIT : base+PCI_MSI_MASK_BIT-4)
+	((base) + PCI_MSI_MASK_BIT - ((is64bit) ? 0 : 4))
 #define msi_pending_bits_reg(base, is64bit) \
 	((base) + PCI_MSI_MASK_BIT + ((is64bit) ? 4 : 0))
-#define msi_disable(control)		control &= ~PCI_MSI_FLAGS_ENABLE
 #define multi_msi_capable(control) \
-	(1 << ((control & PCI_MSI_FLAGS_QMASK) >> 1))
+	(1U << MASK_EXTR(control, PCI_MSI_FLAGS_QMASK))
 #define multi_msi_enable(control, num) \
-	control |= (((fls(num) - 1) << 4) & PCI_MSI_FLAGS_QSIZE);
-#define is_64bit_address(control)	(!!(control & PCI_MSI_FLAGS_64BIT))
-#define is_mask_bit_support(control)	(!!(control & PCI_MSI_FLAGS_MASKBIT))
-#define msi_enable(control, num) multi_msi_enable(control, num); \
-	control |= PCI_MSI_FLAGS_ENABLE
+	((control) |= MASK_INSR(fls(num) - 1, PCI_MSI_FLAGS_QSIZE))
+#define is_64bit_address(control)	(!!((control) & PCI_MSI_FLAGS_64BIT))
+#define is_mask_bit_support(control)	(!!((control) & PCI_MSI_FLAGS_MASKBIT))
 
-#define msix_control_reg(base)		(base + PCI_MSIX_FLAGS)
-#define msix_table_offset_reg(base)	(base + PCI_MSIX_TABLE)
-#define msix_pba_offset_reg(base)	(base + PCI_MSIX_PBA)
-#define msix_enable(control)	 	control |= PCI_MSIX_FLAGS_ENABLE
-#define msix_disable(control)	 	control &= ~PCI_MSIX_FLAGS_ENABLE
-#define msix_table_size(control) 	((control & PCI_MSIX_FLAGS_QSIZE)+1)
-#define msix_unmask(address)	 	(address & ~PCI_MSIX_VECTOR_BITMASK)
-#define msix_mask(address)		(address | PCI_MSIX_VECTOR_BITMASK)
+#define msix_control_reg(base)		((base) + PCI_MSIX_FLAGS)
+#define msix_table_offset_reg(base)	((base) + PCI_MSIX_TABLE)
+#define msix_pba_offset_reg(base)	((base) + PCI_MSIX_PBA)
+#define msix_table_size(control) 	(((control) & PCI_MSIX_FLAGS_QSIZE) + 1)
 
 /*
  * MSI Defined Data Structures
  */
 
-struct __packed msg_data {
-#if defined(__LITTLE_ENDIAN_BITFIELD)
-	__u32	vector		:  8;
-	__u32	delivery_mode	:  3;	/* 000b: FIXED | 001b: lowest prior */
-	__u32	reserved_1	:  3;
-	__u32	level		:  1;	/* 0: deassert | 1: assert */
-	__u32	trigger		:  1;	/* 0: edge | 1: level */
-	__u32	reserved_2	: 16;
-#elif defined(__BIG_ENDIAN_BITFIELD)
-	__u32	reserved_2	: 16;
-	__u32	trigger		:  1;	/* 0: edge | 1: level */
-	__u32	level		:  1;	/* 0: deassert | 1: assert */
-	__u32	reserved_1	:  3;
-	__u32	delivery_mode	:  3;	/* 000b: FIXED | 001b: lowest prior */
-	__u32	vector		:  8;
-#else
-#error "Bitfield endianness not defined! Check your byteorder.h"
-#endif
+struct msg_data {
+    uint32_t vector        :  8;
+    uint32_t delivery_mode :  3;    /* 000b: FIXED | 001b: lowest prior */
+    uint32_t               :  3;
+    bool level             :  1;    /* 0: deassert | 1: assert */
+    bool trigger           :  1;    /* 0: edge | 1: level */
+    uint32_t               : 16;
 };
 
-struct __packed msg_address {
-	union {
-		struct {
-#if defined(__LITTLE_ENDIAN_BITFIELD)
-			__u32	reserved_1	:  2;
-			__u32	dest_mode	:  1;	/*0:physic | 1:logic */
-			__u32	redirection_hint:  1;  	/*0: dedicated CPU
-							  1: lowest priority */
-			__u32	reserved_2	:  4;
- 			__u32	dest_id		: 24;	/* Destination ID */
-#elif defined(__BIG_ENDIAN_BITFIELD)
- 			__u32	dest_id		: 24;	/* Destination ID */
-			__u32	reserved_2	:  4;
-			__u32	redirection_hint:  1;  	/*0: dedicated CPU
-							  1: lowest priority */
-			__u32	dest_mode	:  1;	/*0:physic | 1:logic */
-			__u32	reserved_1	:  2;
-#else
-#error "Bitfield endianness not defined! Check your byteorder.h"
-#endif
-      		}u;
-       		__u32  value;
-	}lo_address;
-	__u32 	hi_address;
+struct msg_address {
+    union {
+        struct {
+            uint32_t              :  2;
+            bool dest_mode        :  1; /* 0:phys | 1:logic */
+            bool redirection_hint :  1; /* 0: dedicated CPU
+                                           1: lowest priority */
+            uint32_t              :  4;
+            uint32_t dest_id      : 24; /* Destination ID */
+        } u;
+        uint32_t value;
+    } lo_address;
+    uint32_t hi_address;
 };
 
 #define MAX_MSIX_TABLE_ENTRIES  (PCI_MSIX_FLAGS_QSIZE + 1)
 #define MAX_MSIX_TABLE_PAGES    PFN_UP(MAX_MSIX_TABLE_ENTRIES * \
                                        PCI_MSIX_ENTRY_SIZE + \
                                        (~PCI_MSIX_BIRMASK & (PAGE_SIZE - 1)))
+
+#define MSIX_CHECK_WARN(msix, domid, which)                             \
+    ({                                                                  \
+        if ( (msix)->warned_domid != (domid) )                          \
+        {                                                               \
+            (msix)->warned_domid = (domid);                             \
+            (msix)->warned_kind.all = 0;                                \
+        }                                                               \
+        (msix)->warned_kind.which ? false : ((msix)->warned_kind.which = true); \
+    })
 
 struct arch_msix {
     unsigned int nr_entries, used_entries;
@@ -236,19 +219,30 @@ struct arch_msix {
     } table, pba;
     int table_refcnt[MAX_MSIX_TABLE_PAGES];
     int table_idx[MAX_MSIX_TABLE_PAGES];
+#define ADJ_IDX_FIRST 0
+#define ADJ_IDX_LAST  1
+    unsigned int adj_access_idx[2];
     spinlock_t table_lock;
     bool host_maskall, guest_maskall;
-    domid_t warned;
+    domid_t warned_domid;
+    union {
+        uint8_t all;
+        struct {
+            bool maskall                   : 1;
+            bool adjacent_not_initialized  : 1;
+            bool adjacent_pba              : 1;
+        };
+    } warned_kind;
 };
 
 void early_msi_init(void);
-void msi_compose_msg(unsigned vector, const cpumask_t *mask,
+void msi_compose_msg(unsigned vector, const cpumask_t *cpu_mask,
                      struct msi_msg *msg);
 void __msi_set_enable(u16 seg, u8 bus, u8 slot, u8 func, int pos, int enable);
-void cf_check mask_msi_irq(struct irq_desc *);
-void cf_check unmask_msi_irq(struct irq_desc *);
-void guest_mask_msi_irq(struct irq_desc *, bool mask);
-void cf_check ack_nonmaskable_msi_irq(struct irq_desc *);
-void cf_check set_msi_affinity(struct irq_desc *, const cpumask_t *);
+void cf_check mask_msi_irq(struct irq_desc *desc);
+void cf_check unmask_msi_irq(struct irq_desc *desc);
+void guest_mask_msi_irq(struct irq_desc *desc, bool mask);
+void cf_check ack_nonmaskable_msi_irq(struct irq_desc *desc);
+void cf_check set_msi_affinity(struct irq_desc *desc, const cpumask_t *mask);
 
 #endif /* __ASM_MSI_H */

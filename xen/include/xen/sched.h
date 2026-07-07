@@ -21,6 +21,7 @@
 #include <xen/smp.h>
 #include <xen/perfc.h>
 #include <asm/atomic.h>
+#include <asm/current.h>
 #include <xen/vpci.h>
 #include <xen/wait.h>
 #include <public/xen.h>
@@ -175,7 +176,7 @@ struct vcpu
 
     int              processor;
 
-    vcpu_info_t     *vcpu_info;
+    struct guest_area vcpu_info_area;
 
     struct domain   *domain;
 
@@ -202,6 +203,7 @@ struct vcpu
         XEN_GUEST_HANDLE(vcpu_runstate_info_compat_t) compat;
     } runstate_guest; /* guest address */
 #endif
+    struct guest_area runstate_guest_area;
     unsigned int     new_state;
 
     /* Has the FPU been initialised? */
@@ -230,6 +232,8 @@ struct vcpu
 #ifdef CONFIG_COMPAT
     /* A hypercall is using the compat ABI? */
     bool             hcall_compat;
+    /* Physical runstate area registered via compat ABI? */
+    bool             runstate_guest_area_compat;
 #endif
 
 #ifdef CONFIG_IOREQ_SERVER
@@ -284,9 +288,6 @@ struct vcpu
     struct mc_state  mc_state;
 
     struct waitqueue_vcpu *waitqueue_vcpu;
-
-    /* Guest-specified relocation of vcpu_info. */
-    mfn_t            vcpu_info_mfn;
 
     struct evtchn_fifo_vcpu *evtchn_fifo;
 
@@ -357,8 +358,8 @@ struct sched_unit {
           (v) = (v)->next_in_list )
 
 /* Per-domain lock can be recursively acquired in fault handlers. */
-#define domain_lock(d) spin_lock_recursive(&(d)->domain_lock)
-#define domain_unlock(d) spin_unlock_recursive(&(d)->domain_lock)
+#define domain_lock(d) rspin_lock(&(d)->domain_lock)
+#define domain_unlock(d) rspin_unlock(&(d)->domain_lock)
 
 struct evtchn_port_ops;
 
@@ -369,15 +370,18 @@ struct domain
     domid_t          domain_id;
 
     unsigned int     max_vcpus;
+
+    uint64_t         unique_id;       /* Unique domain identifier */
+
     struct vcpu    **vcpu;
 
     shared_info_t   *shared_info;     /* shared data area */
 
     rcu_read_lock_t  rcu_lock;
 
-    spinlock_t       domain_lock;
+    rspinlock_t      domain_lock;
 
-    spinlock_t       page_alloc_lock; /* protects all the following fields  */
+    rspinlock_t      page_alloc_lock; /* protects all the following fields  */
     struct page_list_head page_list;  /* linked list */
     struct page_list_head extra_page_list; /* linked list (size extra_pages) */
     struct page_list_head xenpage_list; /* linked list (size xenheap_pages) */
@@ -392,7 +396,8 @@ struct domain
     unsigned int     tot_pages;
 
     unsigned int     xenheap_pages;     /* pages allocated from Xen heap */
-    unsigned int     outstanding_pages; /* pages claimed but not possessed */
+    /* Pages claimed but not possessed, protected by global heap_lock. */
+    unsigned int     outstanding_pages;
     unsigned int     max_pages;         /* maximum value for domain_tot_pages() */
     unsigned int     extra_pages;       /* pages not included in domain_tot_pages() */
 
@@ -438,12 +443,14 @@ struct domain
 
     struct grant_table *grant_table;
 
+#ifdef CONFIG_HAS_PIRQ
     /*
      * Interrupt to event-channel mappings and other per-guest-pirq data.
      * Protected by the domain's event-channel spinlock.
      */
     struct radix_tree_root pirq_tree;
     unsigned int     nr_pirqs;
+#endif
 
     unsigned int     options;         /* copy of createdomain flags */
 
@@ -460,7 +467,38 @@ struct domain
 
 #ifdef CONFIG_HAS_PCI
     struct list_head pdev_list;
-#endif
+    /*
+     * pci_lock protects access to pdev_list. pci_lock also protects pdev->vpci
+     * structure from being removed.
+     *
+     * Any user *reading* from pdev_list, or from devices stored in pdev_list,
+     * should hold either pcidevs_lock() or pci_lock in read mode. Optionally,
+     * both locks may be held for reads as long as the locking order is
+     * observed.
+     *
+     * Any user *writing* to pdev_list, or to devices stored in pdev_list,
+     * should hold both pcidevs_lock() and pci_lock in write mode, and observe
+     * the locking order.
+     *
+     * The locking order is:
+     * 1. pcidevs_lock()
+     * 2. d->pci_lock
+     *
+     * Additionally, users of both pci_lock and vpci->lock should observe the
+     * following locking order:
+     * 1. d->pci_lock
+     * 2. pdev->vpci->lock
+     */
+    rwlock_t pci_lock;
+#ifdef CONFIG_HAS_VPCI_GUEST_SUPPORT
+    /*
+     * The bitmap which shows which device numbers are already used by the
+     * virtual PCI bus topology and is used to assign a unique SBDF to the
+     * next passed through virtual PCI device.
+     */
+    DECLARE_BITMAP(vpci_dev_assigned_map, VPCI_MAX_VIRT_DEV);
+#endif /* CONFIG_HAS_VPCI_GUEST_SUPPORT */
+#endif /* CONFIG_HAS_PCI */
 
 #ifdef CONFIG_HAS_PASSTHROUGH
     struct domain_iommu iommu;
@@ -589,19 +627,30 @@ struct domain
      */
     struct {
         unsigned int val;
+        unsigned int arch_val;
         struct vcpu *vcpu;
     } teardown;
 
 #ifdef CONFIG_IOREQ_SERVER
     /* Lock protects all other values in the sub-struct */
     struct {
-        spinlock_t              lock;
+        rspinlock_t             lock;
         struct ioreq_server     *server[MAX_NR_IOREQ_SERVERS];
     } ioreq_server;
 #endif
 
     /* Holding CDF_* constant. Internal flags for domain creation. */
     unsigned int cdf;
+
+#ifdef CONFIG_LLC_COLORING
+    unsigned int num_llc_colors;
+    const unsigned int *llc_colors;
+#endif
+
+    /* Pointer to allocated domheap page that possibly needs scrubbing. */
+    struct page_info *pending_scrub;
+    unsigned int pending_scrub_order;
+    unsigned int pending_scrub_index;
 };
 
 static inline struct page_list_head *page_to_list(
@@ -693,6 +742,11 @@ struct domain *domain_create(domid_t domid,
                              struct xen_domctl_createdomain *config,
                              unsigned int flags);
 
+#ifndef arch_init_idle_domain
+/* Optional, if there's any construction necessary for DOMID_IDLE */
+static inline void arch_init_idle_domain(struct domain *d) {}
+#endif
+
 /*
  * rcu_lock_domain_by_id() is more efficient than get_domain_by_id().
  * This is the preferred function if the returned domain reference
@@ -737,7 +791,11 @@ static inline struct domain *rcu_lock_current_domain(void)
     return /*rcu_lock_domain*/(current->domain);
 }
 
+/* Get struct domain AND increase ref-count of domain. */
 struct domain *get_domain_by_id(domid_t dom);
+
+/* Get struct domain known to have reference held or being RCU-locked. */
+struct domain *knownalive_domain_from_domid(domid_t dom);
 
 struct domain *get_pg_owner(domid_t domid);
 
@@ -762,10 +820,15 @@ void vcpu_end_shutdown_deferral(struct vcpu *v);
  * from any processor.
  */
 void __domain_crash(struct domain *d);
-#define domain_crash(d) do {                                              \
-    printk("domain_crash called from %s:%d\n", __FILE__, __LINE__);       \
-    __domain_crash(d);                                                    \
-} while (0)
+#define domain_crash(d, ...)                                        \
+    do {                                                            \
+        if ( count_args(__VA_ARGS__) == 0 )                         \
+            printk(XENLOG_ERR "domain_crash called from %s:%d\n",   \
+                   __FILE__, __LINE__);                             \
+        else                                                        \
+            printk(XENLOG_ERR __VA_ARGS__);                         \
+        __domain_crash(d);                                          \
+    } while ( 0 )
 
 /*
  * Called from assembly code, with an optional address to help indicate why
@@ -779,9 +842,9 @@ int  sched_init_vcpu(struct vcpu *v);
 void sched_destroy_vcpu(struct vcpu *v);
 int  sched_init_domain(struct domain *d, unsigned int poolid);
 void sched_destroy_domain(struct domain *d);
-long sched_adjust(struct domain *, struct xen_domctl_scheduler_op *);
-long sched_adjust_global(struct xen_sysctl_scheduler_op *);
-int  sched_id(void);
+long sched_adjust(struct domain *d, struct xen_domctl_scheduler_op *op);
+long sched_adjust_global(struct xen_sysctl_scheduler_op *op);
+int  scheduler_id(void);
 
 /*
  * sched_get_id_by_name - retrieves a scheduler id given a scheduler name
@@ -821,11 +884,11 @@ void context_switch(
 
 /*
  * As described above, context_switch() must call this function when the
- * local CPU is no longer running in @prev's context, and @prev's context is
+ * local CPU is no longer running in @vprev's context, and @vprev's context is
  * saved to memory. Alternatively, if implementing lazy context switching,
- * ensure that invoking sync_vcpu_execstate() will switch and commit @prev.
+ * ensure that invoking sync_vcpu_execstate() will switch and commit @vprev.
  */
-void sched_context_switched(struct vcpu *prev, struct vcpu *vnext);
+void sched_context_switched(struct vcpu *vprev, struct vcpu *vnext);
 
 /* Called by the scheduler to continue running the current VCPU. */
 void continue_running(
@@ -1153,6 +1216,12 @@ static always_inline bool is_iommu_enabled(const struct domain *d)
 {
     return evaluate_nospec(d->options & XEN_DOMCTL_CDF_iommu);
 }
+
+#ifdef CONFIG_MEM_PAGING
+# define mem_paging_enabled(d) vm_event_check_ring((d)->vm_event_paging)
+#else
+# define mem_paging_enabled(d) false
+#endif
 
 extern bool sched_smt_power_savings;
 extern bool sched_disable_smt_switching;

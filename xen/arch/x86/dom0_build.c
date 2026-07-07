@@ -16,6 +16,8 @@
 #include <asm/dom0_build.h>
 #include <asm/guest.h>
 #include <asm/hpet.h>
+#include <asm/hvm/emulate.h>
+#include <asm/io-ports.h>
 #include <asm/io_apic.h>
 #include <asm/p2m.h>
 #include <asm/setup.h>
@@ -266,42 +268,34 @@ bool __initdata opt_dom0_pvh = !IS_ENABLED(CONFIG_PV);
 bool __initdata opt_dom0_verbose = IS_ENABLED(CONFIG_VERBOSE_DEBUG);
 bool __initdata opt_dom0_msr_relaxed;
 
-static int __init cf_check parse_dom0_param(const char *s)
+int __init parse_arch_dom0_param(const char *s, const char *e)
 {
-    const char *ss;
-    int rc = 0;
+    int val;
 
-    do {
-        int val;
-
-        ss = strchr(s, ',');
-        if ( !ss )
-            ss = strchr(s, '\0');
-
-        if ( IS_ENABLED(CONFIG_PV) && !cmdline_strcmp(s, "pv") )
-            opt_dom0_pvh = false;
-        else if ( IS_ENABLED(CONFIG_HVM) && !cmdline_strcmp(s, "pvh") )
-            opt_dom0_pvh = true;
+    if ( IS_ENABLED(CONFIG_PV) && !cmdline_strcmp(s, "pv") )
+        opt_dom0_pvh = false;
+    else if ( IS_ENABLED(CONFIG_HVM) && !cmdline_strcmp(s, "pvh") )
+        opt_dom0_pvh = true;
 #ifdef CONFIG_SHADOW_PAGING
-        else if ( (val = parse_boolean("shadow", s, ss)) >= 0 )
-            opt_dom0_shadow = val;
+    else if ( (val = parse_boolean("shadow", s, e)) >= 0 )
+        opt_dom0_shadow = val;
 #endif
-        else if ( (val = parse_boolean("verbose", s, ss)) >= 0 )
-            opt_dom0_verbose = val;
-        else if ( IS_ENABLED(CONFIG_PV) &&
-                  (val = parse_boolean("cpuid-faulting", s, ss)) >= 0 )
-            opt_dom0_cpuid_faulting = val;
-        else if ( (val = parse_boolean("msr-relaxed", s, ss)) >= 0 )
-            opt_dom0_msr_relaxed = val;
-        else
-            rc = -EINVAL;
+    else if ( (val = parse_boolean("verbose", s, e)) >= 0 )
+        opt_dom0_verbose = val;
+    else if ( IS_ENABLED(CONFIG_PV) &&
+              (val = parse_boolean("cpuid-faulting", s, e)) >= 0 )
+        opt_dom0_cpuid_faulting = val;
+    else if ( (val = parse_boolean("msr-relaxed", s, e)) >= 0 )
+        opt_dom0_msr_relaxed = val;
+#ifdef CONFIG_HVM
+    else if ( (val = parse_boolean("pf-fixup", s, e)) >= 0 )
+        opt_dom0_pf_fixup = val;
+#endif
+    else
+        return -EINVAL;
 
-        s = ss + 1;
-    } while ( *ss );
-
-    return rc;
+    return 0;
 }
-custom_param("dom0", parse_dom0_param);
 
 static char __initdata opt_dom0_ioports_disable[200] = "";
 string_param("dom0_ioports_disable", opt_dom0_ioports_disable);
@@ -479,7 +473,7 @@ static void __init process_dom0_ioports_disable(struct domain *dom0)
 int __init dom0_setup_permissions(struct domain *d)
 {
     unsigned long mfn;
-    unsigned int i;
+    unsigned int i, offs;
     int rc;
 
     if ( pv_shim )
@@ -487,27 +481,61 @@ int __init dom0_setup_permissions(struct domain *d)
 
     /* The hardware domain is initially permitted full I/O capabilities. */
     rc = ioports_permit_access(d, 0, 0xFFFF);
-    rc |= iomem_permit_access(d, 0UL, (1UL << (paddr_bits - PAGE_SHIFT)) - 1);
+    rc |= iomem_permit_access(d, 0UL,
+                              PFN_DOWN(1UL << domain_max_paddr_bits(d)) - 1);
     rc |= irqs_permit_access(d, 1, nr_irqs_gsi - 1);
 
     /* Modify I/O port access permissions. */
 
-    /* Master Interrupt Controller (PIC). */
-    rc |= ioports_deny_access(d, 0x20, 0x21);
-    /* Slave Interrupt Controller (PIC). */
-    rc |= ioports_deny_access(d, 0xA0, 0xA1);
+    for ( offs = 0, i = ISOLATE_LSB(i8259A_alias_mask) ?: 2;
+          offs <= i8259A_alias_mask; offs += i )
+    {
+        if ( offs & ~i8259A_alias_mask )
+            continue;
+        /* Master Interrupt Controller (PIC). */
+        rc |= ioports_deny_access(d, 0x20 + offs, 0x21 + offs);
+        /* Slave Interrupt Controller (PIC). */
+        rc |= ioports_deny_access(d, 0xA0 + offs, 0xA1 + offs);
+    }
+
+    /* ELCR of both PICs. */
+    rc |= ioports_deny_access(d, 0x4D0, 0x4D1);
+
     /* Interval Timer (PIT). */
-    rc |= ioports_deny_access(d, 0x40, 0x43);
+    for ( offs = 0, i = ISOLATE_LSB(pit_alias_mask) ?: 4;
+          offs <= pit_alias_mask; offs += i )
+        if ( !(offs & ~pit_alias_mask) )
+            rc |= ioports_deny_access(d, PIT_CH0 + offs, PIT_MODE + offs);
+
     /* PIT Channel 2 / PC Speaker Control. */
     rc |= ioports_deny_access(d, 0x61, 0x61);
+
+    /* INIT# and alternative A20M# control. */
+    rc |= ioports_deny_access(d, 0x92, 0x92);
+
+    /* IGNNE# control. */
+    rc |= ioports_deny_access(d, 0xF0, 0xF0);
+
     /* ACPI PM Timer. */
     if ( pmtmr_ioport )
         rc |= ioports_deny_access(d, pmtmr_ioport, pmtmr_ioport + 3);
-    /* PCI configuration space (NB. 0xcf8 has special treatment). */
-    rc |= ioports_deny_access(d, 0xcfc, 0xcff);
+
+    /* Reset control. */
+    rc |= ioports_deny_access(d, 0xCF9, 0xCF9);
+
+    /* PCI configuration space (NB. 0xCF8 has special treatment). */
+    rc |= ioports_deny_access(d, 0xCFC, 0xCFF);
+
 #ifdef CONFIG_HVM
     if ( is_hvm_domain(d) )
     {
+        /* ISA DMA controller, channels 0-3 (incl possible aliases). */
+        rc |= ioports_deny_access(d, 0x00, 0x1F);
+        /* ISA DMA controller, page registers (incl various reserved ones). */
+        rc |= ioports_deny_access(d, 0x80 + !!hvm_port80_allowed, 0x8F);
+        /* ISA DMA controller, channels 4-7 (incl usual aliases). */
+        rc |= ioports_deny_access(d, 0xC0, 0xDF);
+
         /* HVM debug console IO port. */
         rc |= ioports_deny_access(d, XEN_HVM_DEBUGCONS_IOPORT,
                                   XEN_HVM_DEBUGCONS_IOPORT);
@@ -526,17 +554,22 @@ int __init dom0_setup_permissions(struct domain *d)
         mfn = paddr_to_pfn(mp_lapic_addr);
         rc |= iomem_deny_access(d, mfn, mfn);
     }
+    /* If using an emulated local APIC make sure its MMIO is unpopulated. */
+    if ( has_vlapic(d) )
+    {
+        /* Xen doesn't allow changing the local APIC MMIO window position. */
+        mfn = paddr_to_pfn(APIC_DEFAULT_PHYS_BASE);
+        rc |= iomem_deny_access(d, mfn, mfn);
+    }
     /* I/O APICs. */
     for ( i = 0; i < nr_ioapics; i++ )
     {
         mfn = paddr_to_pfn(mp_ioapics[i].mpc_apicaddr);
-        if ( !rangeset_contains_singleton(mmio_ro_ranges, mfn) )
+        /* If emulating IO-APIC(s) make sure the base address is unmapped. */
+        if ( has_vioapic(d) ||
+             !rangeset_contains_singleton(mmio_ro_ranges, mfn) )
             rc |= iomem_deny_access(d, mfn, mfn);
     }
-    /* MSI range. */
-    rc |= iomem_deny_access(d, paddr_to_pfn(MSI_ADDR_BASE_LO),
-                            paddr_to_pfn(MSI_ADDR_BASE_LO +
-                                         MSI_ADDR_DEST_ID_MASK));
     /* HyperTransport range. */
     if ( boot_cpu_data.x86_vendor & (X86_VENDOR_AMD | X86_VENDOR_HYGON) )
     {
@@ -549,7 +582,7 @@ int __init dom0_setup_permissions(struct domain *d)
     for ( i = 0; i < e820.nr_map; i++ )
     {
         unsigned long sfn, efn;
-        sfn = max_t(unsigned long, paddr_to_pfn(e820.map[i].addr), 0x100ul);
+        sfn = max_t(unsigned long, paddr_to_pfn(e820.map[i].addr), 0x100UL);
         efn = paddr_to_pfn(e820.map[i].addr + e820.map[i].size - 1);
         if ( (e820.map[i].type == E820_UNUSABLE) &&
              (e820.map[i].size != 0) &&
@@ -571,12 +604,17 @@ int __init dom0_setup_permissions(struct domain *d)
             rc |= rangeset_add_singleton(mmio_ro_ranges, mfn);
     }
 
+    if ( has_vpci(d) )
+        /*
+         * TODO: runtime added MMCFG regions are not checked to make sure they
+         * don't overlap with already mapped regions, thus preventing trapping.
+         */
+        rc |= vpci_mmcfg_deny_access(d);
+
     return rc;
 }
 
-int __init construct_dom0(struct domain *d, const module_t *image,
-                          unsigned long image_headroom, module_t *initrd,
-                          char *cmdline)
+int __init construct_dom0(struct boot_info *bi, struct domain *d)
 {
     int rc;
 
@@ -588,9 +626,9 @@ int __init construct_dom0(struct domain *d, const module_t *image,
     process_pending_softirqs();
 
     if ( is_hvm_domain(d) )
-        rc = dom0_construct_pvh(d, image, image_headroom, initrd, cmdline);
+        rc = dom0_construct_pvh(bi, d);
     else if ( is_pv_domain(d) )
-        rc = dom0_construct_pv(d, image, image_headroom, initrd, cmdline);
+        rc = dom0_construct_pv(bi, d);
     else
         panic("Cannot construct Dom0. No guest interface available\n");
 

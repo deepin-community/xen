@@ -41,7 +41,7 @@
 #define HPET_TN_ROUTE		0x3e00
 #define HPET_TN_FSB		0x4000
 #define HPET_TN_FSB_CAP		0x8000
-#define HPET_TN_RESERVED	0xffff0081
+#define HPET_TN_RESERVED	0xffff0081U
 #define HPET_TN_INT_ROUTE_CAP	(0xffffffffULL << 32)
 
 
@@ -60,7 +60,7 @@ extern int8_t opt_hpet_legacy_replacement;
  * Return value is zero if HPET is unavailable.
  */
 u64 hpet_setup(void);
-void hpet_resume(u32 *);
+void hpet_resume(uint32_t *boot_cfg);
 
 /*
  * Disable HPET hardware: restore it to boot time state.
@@ -89,8 +89,9 @@ void hpet_disable_legacy_replacement_mode(void);
  * Temporarily use an HPET event counter for timer interrupt handling,
  * rather than using the LAPIC timer. Used for Cx state entry.
  */
-void cf_check hpet_broadcast_init(void);
-void cf_check hpet_broadcast_resume(void);
+void hpet_broadcast_init(void);
+void hpet_broadcast_late_init(void);
+void hpet_broadcast_resume(void);
 void cf_check hpet_broadcast_enter(void);
 void cf_check hpet_broadcast_exit(void);
 int hpet_broadcast_is_available(void);

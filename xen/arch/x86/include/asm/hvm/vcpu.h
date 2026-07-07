@@ -1,19 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * vcpu.h: HVM per vcpu definitions
  *
  * Copyright (c) 2005, International Business Machines Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef __ASM_X86_HVM_VCPU_H__
@@ -33,17 +22,6 @@ struct hvm_vcpu_asid {
     uint32_t asid;
 };
 
-/*
- * We may read or write up to m512 as a number of device-model
- * transactions.
- */
-struct hvm_mmio_cache {
-    unsigned long gla;
-    unsigned int size;
-    uint8_t dir;
-    uint8_t buffer[64] __aligned(sizeof(long));
-};
-
 struct hvm_vcpu_io {
     /*
      * HVM emulation:
@@ -59,7 +37,7 @@ struct hvm_vcpu_io {
      * We may need to handle up to 3 distinct memory accesses per
      * instruction.
      */
-    struct hvm_mmio_cache mmio_cache[3];
+    struct hvm_mmio_cache *mmio_cache[3];
     unsigned int mmio_cache_count;
 
     /* For retries we shouldn't re-fetch the instruction. */
@@ -71,7 +49,7 @@ struct hvm_vcpu_io {
      * For string instruction emulation we need to be able to signal a
      * necessary retry through other than function return codes.
      */
-    bool_t mmio_retry;
+    bool mmio_retry;
 
     unsigned long msix_unmask_address;
     unsigned long msix_snoop_address;
@@ -81,7 +59,7 @@ struct hvm_vcpu_io {
 };
 
 struct nestedvcpu {
-    bool_t nv_guestmode; /* vcpu in guestmode? */
+    bool nv_guestmode; /* vcpu in guestmode? */
     void *nv_vvmcx; /* l1 guest virtual VMCB/VMCS */
     void *nv_n1vmcx; /* VMCB/VMCS used to run l1 guest */
     void *nv_n2vmcx; /* shadow VMCB/VMCS used to run l2 guest */
@@ -96,22 +74,22 @@ struct nestedvcpu {
         struct nestedvmx nvmx;
     } u;
 
-    bool_t nv_flushp2m; /* True, when p2m table must be flushed */
+    bool nv_flushp2m; /* True, when p2m table must be flushed */
     struct p2m_domain *nv_p2m; /* used p2m table for this vcpu */
     bool stale_np2m; /* True when p2m_base in VMCx02 is no longer valid */
     uint64_t np2m_generation;
 
     struct hvm_vcpu_asid nv_n2asid;
 
-    bool_t nv_vmentry_pending;
-    bool_t nv_vmexit_pending;
-    bool_t nv_vmswitch_in_progress; /* true during vmentry/vmexit emulation */
+    bool nv_vmentry_pending;
+    bool nv_vmexit_pending;
+    bool nv_vmswitch_in_progress; /* true during vmentry/vmexit emulation */
 
     /* Does l1 guest intercept io ports 0x80 and/or 0xED ?
      * Useful to optimize io permission handling.
      */
-    bool_t nv_ioport80;
-    bool_t nv_ioportED;
+    bool nv_ioport80;
+    bool nv_ioportED;
 
     /* L2's control-resgister, just as the L2 sees them. */
     unsigned long       guest_cr[5];
@@ -145,8 +123,8 @@ struct hvm_vcpu {
     unsigned long       hw_cr[5];
 
     struct vlapic       vlapic;
-    s64                 cache_tsc_offset;
-    u64                 guest_time;
+    int64_t             cache_tsc_offset;
+    uint64_t            guest_time;
 
     /* Lock and list for virtual platform timers. */
     spinlock_t          tm_lock;

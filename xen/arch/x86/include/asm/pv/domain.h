@@ -1,21 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * pv/domain.h
  *
  * PV guest interface definitions
  *
  * Copyright (C) 2017 Wei Liu <wei.liu2@citrix.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms and conditions of the GNU General Public
- * License, version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public
- * License along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef __X86_PV_DOMAIN_H__
@@ -104,7 +93,7 @@ static inline int pv_vcpu_initialise(struct vcpu *v) { return -EOPNOTSUPP; }
 static inline void pv_domain_destroy(struct domain *d) {}
 static inline int pv_domain_initialise(struct domain *d) { return -EOPNOTSUPP; }
 
-static inline unsigned long pv_make_cr4(const struct vcpu *v) { return ~0ul; }
+static inline unsigned long pv_make_cr4(const struct vcpu *v) { return ~0UL; }
 
 static inline uint64_t pv_get_reg(struct vcpu *v, unsigned int reg)
 {

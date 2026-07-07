@@ -9,44 +9,31 @@
 #define PAGE_ORDER_1G       18
 
 #ifndef __ASSEMBLY__
-# include <asm/types.h>
+# include <xen/types.h>
 # include <xen/lib.h>
 #endif
 
 #include <asm/x86_64/page.h>
 
 /* Read a pte atomically from memory. */
-#define l1e_read_atomic(l1ep) \
-    l1e_from_intpte(pte_read_atomic(&l1e_get_intpte(*(l1ep))))
-#define l2e_read_atomic(l2ep) \
-    l2e_from_intpte(pte_read_atomic(&l2e_get_intpte(*(l2ep))))
-#define l3e_read_atomic(l3ep) \
-    l3e_from_intpte(pte_read_atomic(&l3e_get_intpte(*(l3ep))))
-#define l4e_read_atomic(l4ep) \
-    l4e_from_intpte(pte_read_atomic(&l4e_get_intpte(*(l4ep))))
+#define l1e_read(l1ep) \
+    l1e_from_intpte(read_atomic(&l1e_get_intpte(*(l1ep))))
+#define l2e_read(l2ep) \
+    l2e_from_intpte(read_atomic(&l2e_get_intpte(*(l2ep))))
+#define l3e_read(l3ep) \
+    l3e_from_intpte(read_atomic(&l3e_get_intpte(*(l3ep))))
+#define l4e_read(l4ep) \
+    l4e_from_intpte(read_atomic(&l4e_get_intpte(*(l4ep))))
 
 /* Write a pte atomically to memory. */
-#define l1e_write_atomic(l1ep, l1e) \
-    pte_write_atomic(&l1e_get_intpte(*(l1ep)), l1e_get_intpte(l1e))
-#define l2e_write_atomic(l2ep, l2e) \
-    pte_write_atomic(&l2e_get_intpte(*(l2ep)), l2e_get_intpte(l2e))
-#define l3e_write_atomic(l3ep, l3e) \
-    pte_write_atomic(&l3e_get_intpte(*(l3ep)), l3e_get_intpte(l3e))
-#define l4e_write_atomic(l4ep, l4e) \
-    pte_write_atomic(&l4e_get_intpte(*(l4ep)), l4e_get_intpte(l4e))
-
-/*
- * Write a pte safely but non-atomically to memory.
- * The PTE may become temporarily not-present during the update.
- */
 #define l1e_write(l1ep, l1e) \
-    pte_write(&l1e_get_intpte(*(l1ep)), l1e_get_intpte(l1e))
+    write_atomic(&l1e_get_intpte(*(l1ep)), l1e_get_intpte(l1e))
 #define l2e_write(l2ep, l2e) \
-    pte_write(&l2e_get_intpte(*(l2ep)), l2e_get_intpte(l2e))
+    write_atomic(&l2e_get_intpte(*(l2ep)), l2e_get_intpte(l2e))
 #define l3e_write(l3ep, l3e) \
-    pte_write(&l3e_get_intpte(*(l3ep)), l3e_get_intpte(l3e))
+    write_atomic(&l3e_get_intpte(*(l3ep)), l3e_get_intpte(l3e))
 #define l4e_write(l4ep, l4e) \
-    pte_write(&l4e_get_intpte(*(l4ep)), l4e_get_intpte(l4e))
+    write_atomic(&l4e_get_intpte(*(l4ep)), l4e_get_intpte(l4e))
 
 /* Get direct integer representation of a pte's contents (intpte_t). */
 #define l1e_get_intpte(x)          ((x).l1)
@@ -232,8 +219,8 @@ typedef struct { u64 pfn; } pagetable_t;
 #define pagetable_from_paddr(p) pagetable_from_pfn((p)>>PAGE_SHIFT)
 #define pagetable_null()        pagetable_from_pfn(0)
 
-void clear_page_sse2(void *);
-void copy_page_sse2(void *, const void *);
+void clear_page_sse2(void *pg);
+void copy_page_sse2(void *to, const void *from);
 
 #define clear_page(_p)      clear_page_sse2(_p)
 #define copy_page(_t, _f)   copy_page_sse2(_t, _f)
@@ -269,8 +256,6 @@ void copy_page_sse2(void *, const void *);
 #define mfn_valid(mfn)      __mfn_valid(mfn_x(mfn))
 #define virt_to_mfn(va)     __virt_to_mfn(va)
 #define mfn_to_virt(mfn)    __mfn_to_virt(mfn)
-#define virt_to_maddr(va)   __virt_to_maddr((unsigned long)(va))
-#define maddr_to_virt(ma)   __maddr_to_virt((unsigned long)(ma))
 #define maddr_to_page(ma)   __maddr_to_page(ma)
 #define page_to_maddr(pg)   __page_to_maddr(pg)
 #define virt_to_page(va)    __virt_to_page(va)
@@ -303,7 +288,7 @@ extern l3_pgentry_t l3_bootmap[L3_PAGETABLE_ENTRIES];
 extern l2_pgentry_t l2_directmap[4*L2_PAGETABLE_ENTRIES];
 extern l1_pgentry_t l1_fixmap[L1_PAGETABLE_ENTRIES];
 void paging_init(void);
-void efi_update_l4_pgtable(unsigned int l4idx, l4_pgentry_t);
+void efi_update_l4_pgtable(unsigned int l4idx, l4_pgentry_t l4e);
 #endif /* !defined(__ASSEMBLY__) */
 
 #define _PAGE_NONE     _AC(0x000,U)
@@ -378,7 +363,7 @@ static inline unsigned int cacheattr_to_pte_flags(unsigned int cacheattr)
 }
 
 /* return true if permission increased */
-static inline bool_t
+static inline bool
 perms_strictly_increased(uint32_t old_flags, uint32_t new_flags)
 /* Given the flags of two entries, are the new flags a strict
  * increase in rights over the old ones? */
@@ -403,8 +388,6 @@ static inline void invalidate_icache(void)
 }
 
 #endif /* !__ASSEMBLY__ */
-
-#define PAGE_ALIGN(x) (((x) + PAGE_SIZE - 1) & PAGE_MASK)
 
 #endif /* __X86_PAGE_H__ */
 

@@ -104,11 +104,12 @@ static void vgic_mmio_write_sgir(struct vcpu *source_vcpu,
     case GICD_SGI_TARGET_SELF:                    /* this very vCPU only */
         targets = (1U << source_vcpu->vcpu_id);
         break;
-    case 0x3:                                     /* reserved */
+
+    default:
         return;
     }
 
-    for_each_set_bit( vcpu_id, &targets, 8 )
+    bitmap_for_each ( vcpu_id, &targets, 8 )
     {
         struct vcpu *vcpu = d->vcpu[vcpu_id];
         struct vgic_irq *irq = vgic_get_irq(d, vcpu, intid);

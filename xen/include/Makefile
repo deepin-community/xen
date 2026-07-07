@@ -41,8 +41,8 @@ cppflags-$(CONFIG_X86)    += -m32
 
 endif
 
-public-$(CONFIG_X86) := $(wildcard $(srcdir)/public/arch-x86/*.h $(srcdir)/public/arch-x86/*/*.h)
-public-$(CONFIG_ARM) := $(wildcard $(srcdir)/public/arch-arm/*.h $(srcdir)/public/arch-arm/*/*.h)
+public-$(CONFIG_X86) := $(sort $(wildcard $(srcdir)/public/arch-x86/*.h $(srcdir)/public/arch-x86/*/*.h))
+public-$(CONFIG_ARM) := $(sort $(wildcard $(srcdir)/public/arch-arm/*.h $(srcdir)/public/arch-arm/*/*.h))
 
 .PHONY: all
 all: $(addprefix $(obj)/,$(headers-y) $(headers-n))
@@ -53,7 +53,7 @@ cmd_compat_h = \
     mv -f $@.new $@
 
 quiet_cmd_stub_h = GEN     $@
-cmd_stub_h = echo '/* empty */' >$@
+cmd_stub_h = echo '/* SAF-9-safe empty header */' >$@
 
 quiet_cmd_compat_i = CPP     $@
 cmd_compat_i = $(CPP) $(filter-out -Wa$(comma)% -include %/include/xen/config.h,$(XEN_CFLAGS)) $(cppflags-y) -o $@ $<
@@ -65,9 +65,7 @@ cmd_compat_c = \
 
 quiet_cmd_xlat_headers = GEN     $@
 cmd_xlat_headers = \
-    while read what name; do \
-        $(SHELL) $(srctree)/tools/get-fields.sh "$$what" compat_$$name $< || exit $$?; \
-    done <$(patsubst $(obj)/compat/%,$(obj)/compat/.xlat/%,$(basename $<)).lst >$@.new; \
+    $(PYTHON) $(srctree)/tools/compat-xlat-header.py $< $(patsubst $(obj)/compat/%,$(obj)/compat/.xlat/%,$(basename $<)).lst > $@.new; \
     mv -f $@.new $@
 
 targets += $(headers-y)
@@ -92,18 +90,16 @@ $(obj)/compat/%.c: $(src)/public/%.h $(srcdir)/xlat.lst $(srctree)/tools/compat-
 	$(call if_changed,compat_c)
 
 targets += $(patsubst compat/%, compat/.xlat/%, $(headers-y))
-$(obj)/compat/.xlat/%.h: $(obj)/compat/%.h $(obj)/compat/.xlat/%.lst $(srctree)/tools/get-fields.sh FORCE
+$(obj)/compat/.xlat/%.h: $(obj)/compat/%.h $(obj)/compat/.xlat/%.lst $(srctree)/tools/compat-xlat-header.py FORCE
 	$(call if_changed,xlat_headers)
 
-quiet_cmd_xlat_lst = GEN     $@
-cmd_xlat_lst = \
-	grep -v '^[[:blank:]]*$(pound)' $< | sed -ne 's,@arch@,$(compat-arch-y),g' -re 's,[[:blank:]]+$*\.h[[:blank:]]*$$,,p' >$@.new; \
-	$(call move-if-changed,$@.new,$@)
+filechk_xlat_lst = \
+	sed -ne '/^[[:blank:]]*$(pound)/d' -e 's,@arch@,$(compat-arch-y),g' -re 's,[[:blank:]]+$*\.h[[:blank:]]*$$,,p' $<
 
 .PRECIOUS: $(obj)/compat/.xlat/%.lst
 targets += $(patsubst compat/%.h, compat/.xlat/%.lst, $(headers-y))
 $(obj)/compat/.xlat/%.lst: $(srcdir)/xlat.lst FORCE
-	$(call if_changed,xlat_lst)
+	$(call filechk,xlat_lst)
 
 xlat-y := $(shell sed -ne 's,@arch@,$(compat-arch-y),g' -re 's,^[?!][[:blank:]]+[^[:blank:]]+[[:blank:]]+,,p' $(srcdir)/xlat.lst | uniq)
 xlat-y := $(filter $(patsubst compat/%,%,$(headers-y)),$(xlat-y))
@@ -134,7 +130,7 @@ all: $(obj)/headers.chk $(obj)/headers99.chk $(obj)/headers++.chk
 
 public-hdrs-path := $(srcdir)/public
 
-public-list-headers = $(wildcard $1/*.h $1/*/*.h)
+public-list-headers = $(sort $(wildcard $1/*.h $1/*/*.h))
 public-filter-headers = $(filter-out $(addprefix $(public-hdrs-path)/, $($1-filter)), $($1))
 
 public-headers := $(call public-list-headers, $(public-hdrs-path)) $(public-y)
@@ -231,7 +227,7 @@ ifeq ($(XEN_TARGET_ARCH),x86_64)
 .PHONY: lib-x86-all
 lib-x86-all:
 	@mkdir -p $(obj)/xen/lib/x86
-	$(MAKE) -C $(obj)/xen/lib/x86 -f $(abs_srctree)/$(src)/xen/lib/x86/Makefile all
+	$(Q)$(MAKE) -C $(obj)/xen/lib/x86 -f $(abs_srctree)/$(src)/xen/lib/x86/Makefile all
 
 all: lib-x86-all
 endif

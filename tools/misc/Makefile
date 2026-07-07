@@ -12,7 +12,6 @@ CFLAGS += $(CFLAGS_libxenstore)
 # Everything to be installed in regular bin/
 INSTALL_BIN-$(CONFIG_X86)      += xen-cpuid
 INSTALL_BIN-$(CONFIG_X86)      += xen-detect
-INSTALL_BIN                    += xencons
 INSTALL_BIN                    += xencov_split
 INSTALL_BIN += $(INSTALL_BIN-y)
 
@@ -37,16 +36,11 @@ INSTALL_SBIN                   += xen-livepatch
 INSTALL_SBIN                   += xen-diag
 INSTALL_SBIN += $(INSTALL_SBIN-y)
 
-# Everything to be installed in a private bin/
-INSTALL_PRIVBIN                += xenpvnetboot
-
 # Everything to be installed
-TARGETS_ALL := $(INSTALL_BIN) $(INSTALL_SBIN) $(INSTALL_PRIVBIN)
+TARGETS_ALL := $(INSTALL_BIN) $(INSTALL_SBIN)
 
 # Everything which only needs copying to install
-TARGETS_COPY += xencons
 TARGETS_COPY += xencov_split
-TARGETS_COPY += xenpvnetboot
 
 # Everything which needs to be built
 TARGETS := $(filter-out $(TARGETS_COPY),$(TARGETS_ALL))
@@ -61,11 +55,9 @@ install: all
 	$(INSTALL_DIR) $(DESTDIR)$(LIBEXEC_BIN)
 	$(INSTALL_PYTHON_PROG) $(INSTALL_BIN) $(DESTDIR)$(bindir)
 	$(INSTALL_PYTHON_PROG) $(INSTALL_SBIN) $(DESTDIR)$(sbindir)
-	$(INSTALL_PYTHON_PROG) $(INSTALL_PRIVBIN) $(DESTDIR)$(LIBEXEC_BIN)
 
 .PHONY: uninstall
 uninstall:
-	rm -f $(addprefix $(DESTDIR)$(LIBEXEC_BIN)/, $(INSTALL_PRIVBIN))
 	rm -f $(addprefix $(DESTDIR)$(sbindir)/, $(INSTALL_SBIN))
 	rm -f $(addprefix $(DESTDIR)$(bindir)/, $(INSTALL_BIN))
 
@@ -89,7 +81,7 @@ xen-hvmctx: xen-hvmctx.o
 	$(CC) $(LDFLAGS) -o $@ $< $(LDLIBS_libxenctrl) $(APPEND_LDFLAGS)
 
 xen-hvmcrash: xen-hvmcrash.o
-	$(CC) $(LDFLAGS) -o $@ $< $(LDLIBS_libxenctrl) $(APPEND_LDFLAGS)
+	$(CC) $(LDFLAGS) -o $@ $< $(LDLIBS_libxenctrl) $(LDLIBS_libxendevicemodel) $(APPEND_LDFLAGS)
 
 xen-memshare: xen-memshare.o
 	$(CC) $(LDFLAGS) -o $@ $< $(LDLIBS_libxenctrl) $(APPEND_LDFLAGS)

@@ -39,8 +39,9 @@ static struct pl011 {
     /* /\* UART with no IRQ line: periodically-polled I/O. *\/ */
     /* struct timer timer; */
     /* unsigned int timeout_ms; */
-    /* bool_t probing, intr_works; */
+    /* bool probing, intr_works; */
     bool sbsa;  /* ARM SBSA generic interface */
+    bool mmio32; /* 32-bit only MMIO */
 } pl011_com = {0};
 
 /* These parity settings can be ORed directly into the LCR. */
@@ -50,9 +51,30 @@ static struct pl011 {
 #define PARITY_MARK  (PEN|SPS)
 #define PARITY_SPACE (PEN|EPS|SPS)
 
-/* SBSA v2.x document requires, all reads/writes must be 32-bit accesses */
-#define pl011_read(uart, off)           readl((uart)->regs + (off))
-#define pl011_write(uart, off,val)      writel((val), (uart)->regs + (off))
+/*
+ * By default, PL011 accesses shall be done using 8/16-bit accessors to
+ * support legacy devices that cannot cope with 32-bit. On the other hand,
+ * there are implementations of PL011 that can only handle 32-bit MMIO. Also,
+ * SBSA v2.x requires 32-bit accesses. Note that for default case, we use
+ * largest-common accessors (i.e. 16-bit) not to end up using different ones
+ * depending on the actual register size.
+ */
+static inline void
+pl011_write(struct pl011 *uart, unsigned int offset, unsigned int val)
+{
+    if ( uart->mmio32 )
+        writel(val, uart->regs + offset);
+    else
+        writew(val, uart->regs + offset);
+}
+
+static inline unsigned int pl011_read(struct pl011 *uart, unsigned int offset)
+{
+    if ( uart->mmio32 )
+        return readl(uart->regs + offset);
+
+    return readw(uart->regs + offset);
+}
 
 static unsigned int pl011_intr_status(struct pl011 *uart)
 {
@@ -60,7 +82,7 @@ static unsigned int pl011_intr_status(struct pl011 *uart)
     return (pl011_read(uart, RIS) & pl011_read(uart, IMSC));
 }
 
-static void pl011_interrupt(int irq, void *data, struct cpu_user_regs *regs)
+static void pl011_interrupt(int irq, void *data)
 {
     struct serial_port *port = data;
     struct pl011 *uart = port->uart;
@@ -73,7 +95,7 @@ static void pl011_interrupt(int irq, void *data, struct cpu_user_regs *regs)
             pl011_write(uart, ICR, status & ~(TXI|RTI|RXI));
 
             if ( status & (RTI|RXI) )
-                serial_rx_interrupt(port, regs);
+                serial_rx_interrupt(port);
 
             /* TODO
                 if ( status & (DSRMI|DCDMI|CTSMI|RIMI) )
@@ -81,7 +103,7 @@ static void pl011_interrupt(int irq, void *data, struct cpu_user_regs *regs)
             */
 
             if ( status & (TXI) )
-                serial_tx_interrupt(port, regs);
+                serial_tx_interrupt(port);
 
             status = pl011_intr_status(uart);
         } while (status != 0);
@@ -144,16 +166,6 @@ static void __init pl011_init_postirq(struct serial_port *port)
     pl011_write(uart, IMSC, RTI|OEI|BEI|PEI|FEI|TXI|RXI);
 }
 
-static void pl011_suspend(struct serial_port *port)
-{
-    BUG(); // XXX
-}
-
-static void pl011_resume(struct serial_port *port)
-{
-    BUG(); // XXX
-}
-
 static int pl011_tx_ready(struct serial_port *port)
 {
     struct pl011 *uart = port->uart;
@@ -210,9 +222,6 @@ static void pl011_tx_start(struct serial_port *port)
 static struct uart_driver __read_mostly pl011_driver = {
     .init_preirq  = pl011_init_preirq,
     .init_postirq = pl011_init_postirq,
-    .endboot      = NULL,
-    .suspend      = pl011_suspend,
-    .resume       = pl011_resume,
     .tx_ready     = pl011_tx_ready,
     .putc         = pl011_putc,
     .getc         = pl011_getc,
@@ -222,7 +231,8 @@ static struct uart_driver __read_mostly pl011_driver = {
     .vuart_info   = pl011_vuart,
 };
 
-static int __init pl011_uart_init(int irq, u64 addr, u64 size, bool sbsa)
+static int __init
+pl011_uart_init(int irq, paddr_t addr, paddr_t size, bool sbsa, bool mmio32)
 {
     struct pl011 *uart;
 
@@ -232,6 +242,9 @@ static int __init pl011_uart_init(int irq, u64 addr, u64 size, bool sbsa)
     uart->parity    = PARITY_NONE;
     uart->stop_bits = 1;
     uart->sbsa      = sbsa;
+
+    /* Set 32-bit MMIO also for SBSA since v2.x requires it */
+    uart->mmio32 = (mmio32 || sbsa);
 
     uart->regs = ioremap_nocache(addr, size);
     if ( !uart->regs )
@@ -258,14 +271,16 @@ static int __init pl011_dt_uart_init(struct dt_device_node *dev,
 {
     const char *config = data;
     int res;
-    u64 addr, size;
+    paddr_t addr, size;
+    uint32_t io_width;
+    bool mmio32 = false, sbsa;
 
     if ( strcmp(config, "") )
     {
         printk("WARNING: UART configuration is not supported\n");
     }
 
-    res = dt_device_get_address(dev, 0, &addr, &size);
+    res = dt_device_get_paddr(dev, 0, &addr, &size);
     if ( res )
     {
         printk("pl011: Unable to retrieve the base"
@@ -280,7 +295,21 @@ static int __init pl011_dt_uart_init(struct dt_device_node *dev,
         return -EINVAL;
     }
 
-    res = pl011_uart_init(res, addr, size, false);
+    /* See linux Documentation/devicetree/bindings/serial/pl011.yaml */
+    if ( dt_property_read_u32(dev, "reg-io-width", &io_width) )
+    {
+        if ( io_width == 4 )
+            mmio32 = true;
+        else if ( io_width != 1 )
+        {
+            printk("pl011: Unsupported reg-io-width (%"PRIu32")\n", io_width);
+            return -EINVAL;
+        }
+    }
+
+    sbsa = dt_device_is_compatible(dev, "arm,sbsa-uart");
+
+    res = pl011_uart_init(res, addr, size, sbsa, mmio32);
     if ( res < 0 )
     {
         printk("pl011: Unable to initialize\n");
@@ -295,6 +324,8 @@ static int __init pl011_dt_uart_init(struct dt_device_node *dev,
 static const struct dt_device_match pl011_dt_match[] __initconst =
 {
     DT_MATCH_COMPATIBLE("arm,pl011"),
+    /* No need for a separate struct as SBSA UART is a subset of PL011 */
+    DT_MATCH_COMPATIBLE("arm,sbsa-uart"),
     { /* sentinel */ },
 };
 
@@ -328,8 +359,9 @@ static int __init pl011_acpi_uart_init(const void *data)
     /* trigger/polarity information is not available in spcr */
     irq_set_type(spcr->interrupt, IRQ_TYPE_LEVEL_HIGH);
 
+    /* TODO - mmio32 proper handling (for now set to true) */
     res = pl011_uart_init(spcr->interrupt, spcr->serial_port.address,
-                          PAGE_SIZE, sbsa);
+                          PAGE_SIZE, sbsa, true);
     if ( res < 0 )
     {
         printk("pl011: Unable to initialize\n");

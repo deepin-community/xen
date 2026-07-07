@@ -1,21 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /******************************************************************************
  * irq.h
  * 
  * Interrupt distribution and delivery logic.
  * 
  * Copyright (c) 2006, K A Fraser, XenSource Inc.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef __ASM_X86_HVM_IRQ_H__
@@ -147,7 +136,7 @@ struct hvm_girq_dpci_mapping {
 
 #define NR_ISAIRQS  16
 #define NR_LINK     4
-#define NR_HVM_DOMU_IRQS ARRAY_SIZE(((struct hvm_hw_vioapic *)0)->redirtbl)
+#define NR_HVM_DOMU_IRQS ARRAY_SIZE(((struct hvm_hw_vioapic *)NULL)->redirtbl)
 
 /* Protected by domain's event_lock */
 struct hvm_irq_dpci {
@@ -171,17 +160,17 @@ struct hvm_pirq_dpci {
     struct list_head softirq_list;
 };
 
-void pt_pirq_init(struct domain *, struct hvm_pirq_dpci *);
-bool pt_pirq_cleanup_check(struct hvm_pirq_dpci *);
+void pt_pirq_init(struct domain *d, struct hvm_pirq_dpci *dpci);
+bool pt_pirq_cleanup_check(struct hvm_pirq_dpci *dpci);
 int pt_pirq_iterate(struct domain *d,
-                    int (*cb)(struct domain *,
-                              struct hvm_pirq_dpci *, void *arg),
+                    int (*cb)(struct domain *d,
+                              struct hvm_pirq_dpci *dpci, void *arg),
                     void *arg);
 
 #ifdef CONFIG_HVM
-bool pt_pirq_softirq_active(struct hvm_pirq_dpci *);
+bool pt_pirq_softirq_active(struct hvm_pirq_dpci *pirq_dpci);
 #else
-static inline bool pt_pirq_softirq_active(struct hvm_pirq_dpci *dpci)
+static inline bool pt_pirq_softirq_active(struct hvm_pirq_dpci *pirq_dpci)
 {
     return false;
 }
@@ -222,6 +211,6 @@ void hvm_assert_evtchn_irq(struct vcpu *v);
 void hvm_set_callback_via(struct domain *d, uint64_t via);
 
 struct pirq;
-bool hvm_domain_use_pirq(const struct domain *, const struct pirq *);
+bool hvm_domain_use_pirq(const struct domain *d, const struct pirq *pirq);
 
 #endif /* __ASM_X86_HVM_IRQ_H__ */

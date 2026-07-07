@@ -126,6 +126,7 @@
 #include <xen/errno.h>
 #include <xen/types.h>
 #include <xen/lib.h>
+#include <asm/atomic.h>
 #include <asm/system.h>
 
 #if defined(CONFIG_ARM_32)
@@ -265,23 +266,24 @@ static inline int clean_and_invalidate_dcache_va_range
             : : "r" (_p), "m" (*_p));                                   \
 } while (0)
 
+/*
+ * Write a pagetable entry.
+ *
+ * It is the responsibility of the caller to issue an ISB (if a new entry)
+ * or a TLB flush (if modified or removed) after write_pte().
+ */
+static inline void write_pte(lpae_t *p, lpae_t pte)
+{
+    /* Ensure any writes have completed with the old mappings. */
+    dsb(sy);
+    /* Safely write the entry. This should always be an atomic write. */
+    write_atomic(p, pte);
+    dsb(sy);
+}
+
+
 /* Flush the dcache for an entire page. */
 void flush_page_to_ram(unsigned long mfn, bool sync_icache);
-
-/*
- * Print a walk of a page table or p2m
- *
- * ttbr is the base address register (TTBR0_EL2 or VTTBR_EL2)
- * addr is the PA or IPA to translate
- * root_level is the starting level of the page table
- *   (e.g. TCR_EL2.SL0 or VTCR_EL2.SL0 )
- * nr_root_tables is the number of concatenated tables at the root.
- *   this can only be != 1 for P2M walks starting at the first or
- *   subsequent level.
- */
-void dump_pt_walk(paddr_t ttbr, paddr_t addr,
-                  unsigned int root_level,
-                  unsigned int nr_root_tables);
 
 /* Print a walk of the hypervisor's page tables for a virtual addr. */
 extern void dump_hyp_walk(vaddr_t addr);
@@ -313,8 +315,6 @@ static inline int gva_to_ipa(vaddr_t va, paddr_t *paddr, unsigned int flags)
 #define PAR_FAULT 0x1
 
 #endif /* __ASSEMBLY__ */
-
-#define PAGE_ALIGN(x) (((x) + PAGE_SIZE - 1) & PAGE_MASK)
 
 #endif /* __ARM_PAGE_H__ */
 

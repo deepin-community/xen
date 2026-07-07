@@ -64,10 +64,8 @@ struct mctelem_ent {
 
 #define MC_NENT (MC_URGENT_NENT + MC_NONURGENT_NENT)
 
-#define	MC_NCLASSES		(MC_NONURGENT + 1)
-
-#define	COOKIE2MCTE(c)		((struct mctelem_ent *)(c))
-#define	MCTE2COOKIE(tep)	((mctelem_cookie_t)(tep))
+#define	COOKIE2MCTE(c)		(c)
+#define	MCTE2COOKIE(tep)	(tep)
 
 static struct mc_telem_ctl {
 	/* Linked lists that thread the array members together.
@@ -170,28 +168,28 @@ static void mctelem_xchg_head(struct mctelem_ent **headp,
 void mctelem_defer(mctelem_cookie_t cookie, bool lmce)
 {
 	struct mctelem_ent *tep = COOKIE2MCTE(cookie);
-	struct mc_telem_cpu_ctl *mctctl = &this_cpu(mctctl);
+	struct mc_telem_cpu_ctl *ctl = &this_cpu(mctctl);
 
-	ASSERT(mctctl->pending == NULL || mctctl->lmce_pending == NULL);
+	ASSERT(ctl->pending == NULL || ctl->lmce_pending == NULL);
 
-	if (mctctl->pending)
-		mctelem_xchg_head(&mctctl->pending, &tep->mcte_next, tep);
+	if (ctl->pending)
+		mctelem_xchg_head(&ctl->pending, &tep->mcte_next, tep);
 	else if (lmce)
-		mctelem_xchg_head(&mctctl->lmce_pending, &tep->mcte_next, tep);
+		mctelem_xchg_head(&ctl->lmce_pending, &tep->mcte_next, tep);
 	else {
 		/*
 		 * LMCE is supported on Skylake-server and later CPUs, on
 		 * which mce_broadcast is always true. Therefore, non-empty
-		 * mctctl->lmce_pending in this branch implies a broadcasting
+		 * ctl->lmce_pending in this branch implies a broadcasting
 		 * MC# is being handled, every CPU is in the exception
-		 * context, and no one is consuming mctctl->pending at this
+		 * context, and no one is consuming ctl->pending at this
 		 * moment. As a result, the following two exchanges together
 		 * can be treated as atomic.
 		 */
-		if (mctctl->lmce_pending)
-			mctelem_xchg_head(&mctctl->lmce_pending,
-					  &mctctl->pending, NULL);
-		mctelem_xchg_head(&mctctl->pending, &tep->mcte_next, tep);
+		if (ctl->lmce_pending)
+			mctelem_xchg_head(&ctl->lmce_pending,
+					  &ctl->pending, NULL);
+		mctelem_xchg_head(&ctl->pending, &tep->mcte_next, tep);
 	}
 }
 
@@ -210,12 +208,12 @@ void mctelem_defer(mctelem_cookie_t cookie, bool lmce)
  *  @lmce: indicate which pending list on @cpu is handled
  */
 void mctelem_process_deferred(unsigned int cpu,
-			      int (*fn)(mctelem_cookie_t),
+			      int (*fn)(mctelem_cookie_t mctc),
 			      bool lmce)
 {
 	struct mctelem_ent *tep;
 	struct mctelem_ent *head, *prev;
-	struct mc_telem_cpu_ctl *mctctl = &per_cpu(mctctl, cpu);
+	struct mc_telem_cpu_ctl *ctl = &per_cpu(mctctl, cpu);
 	int ret;
 
 	/*
@@ -234,7 +232,7 @@ void mctelem_process_deferred(unsigned int cpu,
 	 * Any MC# occurring after the following atomic exchange will be
 	 * handled by another round of MCE softirq.
 	 */
-	mctelem_xchg_head(lmce ? &mctctl->lmce_pending : &mctctl->pending,
+	mctelem_xchg_head(lmce ? &ctl->lmce_pending : &ctl->pending,
 			  &this_cpu(mctctl.processing), NULL);
 
 	head = this_cpu(mctctl.processing);
